@@ -1,9 +1,11 @@
 import { useMemo } from 'react'
 import { formatDate } from '@/lib/date'
+import type { PlotlyTrace } from '@/types/plotly'
 
+/** A row of a bucketed series: a `time` (or legacy `ts`) plus numeric metric keys. */
 export interface TimeseriesDataPoint {
-  time: string
-  [key: string]: any
+  time?: string | null
+  ts?: string | null
 }
 
 export interface TraceConfig {
@@ -24,11 +26,11 @@ export interface TraceConfig {
  * Returns Plotly traces based on the provided configuration.
  */
 export function useTimeseriesToTraces(
-  data: TimeseriesDataPoint[] | undefined,
+  data: readonly TimeseriesDataPoint[] | undefined,
   configs: TraceConfig[],
   timezone?: string
-) {
-  return useMemo(() => {
+): PlotlyTrace[] {
+  return useMemo((): PlotlyTrace[] => {
     if (!data || data.length === 0) return []
 
     // Ensure times are sorted for Plotly (though the backend should do this)
@@ -41,12 +43,12 @@ export function useTimeseriesToTraces(
       })
 
     const xValues = sortedData.map(d => {
-      const t = d.time || d.ts
+      const t = d.time || d.ts || ''
       return timezone ? formatDate(t, timezone, "yyyy-MM-dd HH:mm:ss") : t
     })
 
     return configs.map(config => {
-      const yValues = sortedData.map(d => Number(d[config.key]) || 0)
+      const yValues = sortedData.map(d => Number((d as Record<string, unknown>)[config.key]) || 0)
       const isBar = config.type === 'bar'
 
       // Build trace WITHOUT explicit `undefined` properties — Plotly's
@@ -55,7 +57,7 @@ export function useTimeseriesToTraces(
       // chart, leaving the canvas empty with no console error. This is
       // why the Origin Latency chart "stopped working" even though the
       // data was fully present.
-      const trace: Record<string, any> = {
+      const trace: PlotlyTrace = {
         x: xValues,
         y: yValues,
         name: config.name,

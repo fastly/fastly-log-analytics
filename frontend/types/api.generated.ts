@@ -6519,40 +6519,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** ActiveClientItem */
+        /**
+         * ActiveClientItem
+         * @description Field order mirrors ``GET_ACTIVE_PROXY_CLIENTS`` (``asn`` is swapped for a
+         *     trailing ``asn_name`` by the repository).
+         */
         ActiveClientItem: {
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
-                [key: string]: unknown;
-            }[];
-            /** Debug Postgres */
-            _debug_postgres?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Is Cached
-             * @default false
-             */
-            _is_cached: boolean;
-            /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
             /** Ip */
             ip: string;
-            /** Risk Level */
-            risk_level: string;
-            /** Asn Name */
-            asn_name?: string | null;
-            /**
-             * Impossible Distance
-             * @default false
-             */
-            impossible_distance: boolean;
             /** Rtt Min Ms */
             rtt_min_ms?: number | null;
             /** Tcp Rtt Ms */
@@ -6569,10 +6543,21 @@ export interface components {
             pop_lat?: number | null;
             /** Pop Lon */
             pop_lon?: number | null;
+            /**
+             * Impossible Distance
+             * @default false
+             */
+            impossible_distance: boolean;
+            /** Risk Level */
+            risk_level: string;
             /** Country */
             country?: string | null;
             /** City */
             city?: string | null;
+            /** Asn Name */
+            asn_name?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ActiveQueryRow
@@ -7553,6 +7538,21 @@ export interface components {
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
+        };
+        /**
+         * BucketCountRow
+         * @description Histogram bucket. Repository paths key the bucket as ``bucket``; the
+         *     high-scale path keys it as ``label``.
+         */
+        BucketCountRow: {
+            /** Bucket */
+            bucket?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * BundleResponse
@@ -10365,6 +10365,22 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * Ipv6AdoptionRow
+         * @description Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``.
+         */
+        Ipv6AdoptionRow: {
+            /** Time */
+            time?: string | null;
+            /** Pct */
+            pct?: number | null;
+            /** Version */
+            version?: string | null;
+            /** Count */
+            count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * LakeInfoRequest
          * @description Body for ``POST /api/provision/lake-info`` — credentials + optional
          *     Iceberg-metadata pointer used to read an Iceberg table's range without
@@ -11183,16 +11199,12 @@ export interface components {
              * Heatmap
              * @default []
              */
-            heatmap: {
-                [key: string]: unknown;
-            }[];
+            heatmap: components["schemas"]["NetworkHeatmapRow"][];
             /**
              * Map Buckets
              * @default []
              */
-            map_buckets: {
-                [key: string]: unknown;
-            }[];
+            map_buckets: components["schemas"]["NetworkMapBucket"][];
             /**
              * Cities
              * @default []
@@ -11202,16 +11214,12 @@ export interface components {
              * Leaderboard
              * @default []
              */
-            leaderboard: {
-                [key: string]: unknown;
-            }[];
+            leaderboard: components["schemas"]["NetworkLeaderboardRow"][];
             /**
              * Metro Leaderboard
              * @default []
              */
-            metro_leaderboard: {
-                [key: string]: unknown;
-            }[];
+            metro_leaderboard: components["schemas"]["NetworkMetroRow"][];
             summary?: components["schemas"]["NetworkHealthSummary"] | null;
             /**
              * Countries
@@ -11236,6 +11244,124 @@ export interface components {
             worst_asn?: components["schemas"]["NetworkWorstEntry"] | null;
             worst_country?: components["schemas"]["NetworkWorstEntry"] | null;
         };
+        /**
+         * NetworkHeatmapCell
+         * @description One (ASN, time bucket) health cell. ``throughput_bps`` is always ``None`` on the
+         *     high-scale path (no throughput column in ClickHouse).
+         */
+        NetworkHeatmapCell: {
+            /** Bucket Idx */
+            bucket_idx: number;
+            /** Bucket */
+            bucket: string;
+            /** Throughput Bps */
+            throughput_bps?: number | null;
+            /** Rtt Med Us */
+            rtt_med_us?: number | null;
+            /** Rtt Baseline Us */
+            rtt_baseline_us?: number | null;
+            /** Rtt Congestion Us */
+            rtt_congestion_us?: number | null;
+            /** Avg Ploss */
+            avg_ploss?: number | null;
+            /** Rtt Jitter Us */
+            rtt_jitter_us?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+            /** Health Score */
+            health_score: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkHeatmapRow */
+        NetworkHeatmapRow: {
+            /** Asn */
+            asn: number;
+            /** Label */
+            label: string;
+            /** Total Reqs */
+            total_reqs: number;
+            /**
+             * Buckets
+             * @default []
+             */
+            buckets: components["schemas"]["NetworkHeatmapCell"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkLeaderboardRow */
+        NetworkLeaderboardRow: {
+            /** Asn */
+            asn: number;
+            /** Label */
+            label: string;
+            /** Health Score Now */
+            health_score_now?: number | null;
+            /** Health Score 1H Ago */
+            health_score_1h_ago?: number | null;
+            /** Health Score 1W Ago */
+            health_score_1w_ago?: number | null;
+            /**
+             * Trend
+             * @enum {string}
+             */
+            trend: "stable" | "degrading" | "improving";
+            /** Total Reqs */
+            total_reqs: number;
+            /**
+             * C Speed Mix
+             * @default {}
+             */
+            c_speed_mix: {
+                [key: string]: number;
+            };
+            /** P95 Rtt Us */
+            p95_rtt_us?: number | null;
+            /** P99 Rtt Us */
+            p99_rtt_us?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkMapBucket */
+        NetworkMapBucket: {
+            /** Bucket Idx */
+            bucket_idx: number;
+            /** Bucket */
+            bucket: string;
+            /**
+             * Cities
+             * @default []
+             */
+            cities: components["schemas"]["NetworkMapCity"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * NetworkMapCity
+         * @description One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``.
+         */
+        NetworkMapCity: {
+            /** Country */
+            country?: string | null;
+            /** City Idx */
+            city_idx: number;
+            /** Metro Code */
+            metro_code?: number | null;
+            /** Rtt Med Us */
+            rtt_med_us?: number | null;
+            /** Avg Ploss */
+            avg_ploss?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+            /** Health Score */
+            health_score: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** NetworkMetrics */
         NetworkMetrics: {
             /** Http3 Pct */
@@ -11253,6 +11379,36 @@ export interface components {
              * @default []
              */
             protocol_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+        };
+        /** NetworkMetroRow */
+        NetworkMetroRow: {
+            /** Country */
+            country?: string | null;
+            /** Region */
+            region: string;
+            /** Raw City */
+            raw_city: string;
+            /** City */
+            city: string;
+            /** Total Reqs */
+            total_reqs: number;
+            /** Health Score */
+            health_score?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkQualityBarRow */
+        NetworkQualityBarRow: {
+            /** Value */
+            value: string;
+            /** Label */
+            label: string;
+            /** Rtt Ms */
+            rtt_ms: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
         };
         /** NetworkQualityRequest */
         NetworkQualityRequest: {
@@ -11302,44 +11458,45 @@ export interface components {
              * By Country
              * @default []
              */
-            by_country: {
-                [key: string]: unknown;
-            }[];
+            by_country: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * By Asn
              * @default []
              */
-            by_asn: {
-                [key: string]: unknown;
-            }[];
+            by_asn: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * By Region
              * @default []
              */
-            by_region: {
-                [key: string]: unknown;
-            }[];
+            by_region: components["schemas"]["NetworkQualityBarRow"][];
             /** Region Country */
             region_country?: string | null;
             /**
              * By Pop
              * @default []
              */
-            by_pop: {
-                [key: string]: unknown;
-            }[];
+            by_pop: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * Scatter
              * @default []
              */
-            scatter: {
-                [key: string]: unknown;
-            }[];
+            scatter: components["schemas"]["NetworkQualityScatterPoint"][];
             /**
              * Countries
              * @default []
              */
             countries: string[];
+        };
+        /** NetworkQualityScatterPoint */
+        NetworkQualityScatterPoint: {
+            /** Rtt Ms */
+            rtt_ms: number;
+            /** Ttfb Ms */
+            ttfb_ms: number;
+            /** Cache */
+            cache: string;
+        } & {
+            [key: string]: unknown;
         };
         /** NetworkWorstEntry */
         NetworkWorstEntry: {
@@ -11388,6 +11545,30 @@ export interface components {
             stats: {
                 [key: string]: unknown;
             };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafVerifiedBotRow */
+        NgwafVerifiedBotRow: {
+            /** Bot Name */
+            bot_name?: string | null;
+            /** Wellknown Bot Name */
+            wellknown_bot_name?: string | null;
+            /** Category */
+            category?: string | null;
+            /** Request Count */
+            request_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafVerifiedBotsTsRow */
+        NgwafVerifiedBotsTsRow: {
+            /** Time */
+            time: string;
+            /** Bot Name */
+            bot_name?: string | null;
+            /** Count */
+            count: number;
         } & {
             [key: string]: unknown;
         };
@@ -11601,55 +11782,13 @@ export interface components {
              * @default 0
              */
             total: number;
-            /**
-             * Summary
-             * @default {}
-             */
-            summary: {
-                [key: string]: unknown;
-            };
-            /**
-             * Timeseries
-             * @default {}
-             */
-            timeseries: {
-                [key: string]: unknown;
-            };
-            /**
-             * Slow Urls
-             * @default {}
-             */
-            slow_urls: {
-                [key: string]: unknown;
-            };
-            /**
-             * Status Codes
-             * @default {}
-             */
-            status_codes: {
-                [key: string]: unknown;
-            };
-            /**
-             * Path Breakdown
-             * @default {}
-             */
-            path_breakdown: {
-                [key: string]: unknown;
-            };
-            /**
-             * Pop Latency
-             * @default {}
-             */
-            pop_latency: {
-                [key: string]: unknown;
-            };
-            /**
-             * Ip Health
-             * @default {}
-             */
-            ip_health: {
-                [key: string]: unknown;
-            };
+            summary?: components["schemas"]["OriginSummarySection"];
+            timeseries?: components["schemas"]["OriginTimeseriesSection"];
+            slow_urls?: components["schemas"]["OriginSlowUrlsSection"];
+            status_codes?: components["schemas"]["OriginStatusCodesSection"];
+            path_breakdown?: components["schemas"]["OriginPathBreakdownSection"];
+            pop_latency?: components["schemas"]["OriginPopLatencySection"];
+            ip_health?: components["schemas"]["OriginIpHealthSection"];
         };
         /** OriginDrilldownRequest */
         OriginDrilldownRequest: {
@@ -11718,9 +11857,26 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginDrilldownRow"][];
+        };
+        /** OriginDrilldownRow */
+        OriginDrilldownRow: {
+            /** Key */
+            key: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** P99 Ms */
+            p99_ms?: number | null;
+            /** Error Rate */
+            error_rate: number;
+            /** Bytes */
+            bytes?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginIpHealthRequest */
         OriginIpHealthRequest: {
@@ -11778,9 +11934,39 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginIpHealthRow"][];
+        };
+        /** OriginIpHealthRow */
+        OriginIpHealthRow: {
+            /** Oip */
+            oip: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginIpHealthSection */
+        OriginIpHealthSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginIpHealthRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginPathBreakdownResponse */
         OriginPathBreakdownResponse: {
@@ -11824,9 +12010,42 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginPathRow"][];
+        };
+        /** OriginPathBreakdownSection */
+        OriginPathBreakdownSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Shielding Detected
+             * @default false
+             */
+            shielding_detected: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginPathRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginPathRow */
+        OriginPathRow: {
+            /** Edge */
+            edge?: boolean | null;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginPopLatencyRequest */
         OriginPopLatencyRequest: {
@@ -11891,9 +12110,46 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginPopLatencyRow"][];
+        };
+        /** OriginPopLatencyRow */
+        OriginPopLatencyRow: {
+            /** Pop */
+            pop: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** Elevated */
+            elevated: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginPopLatencySection */
+        OriginPopLatencySection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Requires Group C
+             * @default false
+             */
+            requires_group_c: boolean;
+            /** Median P95 Ms */
+            median_p95_ms?: number | null;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginPopLatencyRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginRequest */
         OriginRequest: {
@@ -11975,9 +12231,7 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["ShieldingRow"][];
             /** Total Routes */
             total_routes?: number | null;
             /** Truncated */
@@ -11987,6 +12241,21 @@ export interface components {
              * @default false
              */
             error: boolean;
+        };
+        /** OriginSlowUrlRow */
+        OriginSlowUrlRow: {
+            /** Url */
+            url: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** P99 Ms */
+            p99_ms?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginSlowUrlsRequest */
         OriginSlowUrlsRequest: {
@@ -12049,9 +12318,38 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginSlowUrlRow"][];
+        };
+        /** OriginSlowUrlsSection */
+        OriginSlowUrlsSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginSlowUrlRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OriginStatusCodeRow
+         * @description ``status == -1`` buckets any origin status outside 100-599.
+         */
+        OriginStatusCodeRow: {
+            /** Status */
+            status: number;
+            /** Count */
+            count: number;
+            /** Pct */
+            pct?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginStatusCodesResponse */
         OriginStatusCodesResponse: {
@@ -12090,9 +12388,24 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginStatusCodeRow"][];
+        };
+        /** OriginStatusCodesSection */
+        OriginStatusCodesSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginStatusCodeRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginSummaryResponse */
         OriginSummaryResponse: {
@@ -12149,6 +12462,56 @@ export interface components {
             origin_error_rate?: number | null;
             /** Obytes P50 */
             obytes_p50?: number | null;
+        };
+        /** OriginSummarySection */
+        OriginSummarySection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /** Total Misses */
+            total_misses?: number | null;
+            /** Total Passes */
+            total_passes?: number | null;
+            /** Ottfb P50 Ms */
+            ottfb_p50_ms?: number | null;
+            /** Ottfb P75 Ms */
+            ottfb_p75_ms?: number | null;
+            /** Ottfb P95 Ms */
+            ottfb_p95_ms?: number | null;
+            /** Ottfb P99 Ms */
+            ottfb_p99_ms?: number | null;
+            /** Ottlb P50 Ms */
+            ottlb_p50_ms?: number | null;
+            /** Ottlb P95 Ms */
+            ottlb_p95_ms?: number | null;
+            /** Cdn Overhead P50 Ms */
+            cdn_overhead_p50_ms?: number | null;
+            /** Origin Error Rate */
+            origin_error_rate?: number | null;
+            /** Obytes P50 */
+            obytes_p50?: number | null;
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OriginTimeseriesPoint
+         * @description ``edge`` is only present when the series is split by leg.
+         */
+        OriginTimeseriesPoint: {
+            /** Time */
+            time: string;
+            /** Miss Count */
+            miss_count: number;
+            /** Value */
+            value?: number | null;
+            /** Edge */
+            edge?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginTimeseriesRequest */
         OriginTimeseriesRequest: {
@@ -12223,9 +12586,24 @@ export interface components {
              * Series
              * @default []
              */
-            series: {
-                [key: string]: unknown;
-            }[];
+            series: components["schemas"]["OriginTimeseriesPoint"][];
+        };
+        /** OriginTimeseriesSection */
+        OriginTimeseriesSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Series
+             * @default []
+             */
+            series: components["schemas"]["OriginTimeseriesPoint"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OverviewMetrics */
         OverviewMetrics: {
@@ -13209,6 +13587,15 @@ export interface components {
             service_name?: string | null;
             token_info?: components["schemas"]["ProvisionTokenInfo"] | null;
             defaults?: components["schemas"]["ProvisionDefaults"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProxyDistRow */
+        ProxyDistRow: {
+            /** Type */
+            type?: string | null;
+            /** Count */
+            count: number;
         } & {
             [key: string]: unknown;
         };
@@ -15148,9 +15535,7 @@ export interface components {
              * Tls Fingerprints
              * @default []
              */
-            tls_fingerprints: {
-                [key: string]: unknown;
-            }[];
+            tls_fingerprints: components["schemas"]["TlsFingerprintRow"][];
             /**
              * Fingerprint Coverage
              * @default {}
@@ -15162,44 +15547,32 @@ export interface components {
              * Req Size Dist
              * @default []
              */
-            req_size_dist: {
-                [key: string]: unknown;
-            }[];
+            req_size_dist: components["schemas"]["BucketCountRow"][];
             /**
              * Top Ips Header
              * @default []
              */
-            top_ips_header: {
-                [key: string]: unknown;
-            }[];
+            top_ips_header: components["schemas"]["TopIpHeaderRow"][];
             /**
              * Ipv6 Adoption
              * @default []
              */
-            ipv6_adoption: {
-                [key: string]: unknown;
-            }[];
+            ipv6_adoption: components["schemas"]["Ipv6AdoptionRow"][];
             /**
              * Proxy Dist
              * @default []
              */
-            proxy_dist: {
-                [key: string]: unknown;
-            }[];
+            proxy_dist: components["schemas"]["ProxyDistRow"][];
             /**
              * Conn Reuse Dist
              * @default []
              */
-            conn_reuse_dist: {
-                [key: string]: unknown;
-            }[];
+            conn_reuse_dist: components["schemas"]["BucketCountRow"][];
             /**
              * Verified Bots Ts
              * @default []
              */
-            verified_bots_ts: {
-                [key: string]: unknown;
-            }[];
+            verified_bots_ts: components["schemas"]["VerifiedBotsTsRow"][];
             /**
              * Ngwaf Configured
              * @default false
@@ -15209,37 +15582,27 @@ export interface components {
              * Ngwaf Verified Bots
              * @default []
              */
-            ngwaf_verified_bots: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_verified_bots: components["schemas"]["NgwafVerifiedBotRow"][];
             /**
              * Ngwaf Verified Bots Ts
              * @default []
              */
-            ngwaf_verified_bots_ts: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_verified_bots_ts: components["schemas"]["NgwafVerifiedBotsTsRow"][];
             /**
              * Wellknown Bots
              * @default []
              */
-            wellknown_bots: {
-                [key: string]: unknown;
-            }[];
+            wellknown_bots: components["schemas"]["WellknownBotRow"][];
             /**
              * Bots
              * @default []
              */
-            bots: {
-                [key: string]: unknown;
-            }[];
+            bots: components["schemas"]["SecurityBotRow"][];
             /**
              * Ngwaf Bots
              * @default []
              */
-            ngwaf_bots: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_bots: components["schemas"]["SecurityBotRow"][];
             /**
              * Active Proxies Count
              * @default 0
@@ -15259,16 +15622,12 @@ export interface components {
              * Traffic Quality
              * @default []
              */
-            traffic_quality: {
-                [key: string]: unknown;
-            }[];
+            traffic_quality: components["schemas"]["TrafficQualityRow"][];
             /**
              * Suspicious Isps
              * @default []
              */
-            suspicious_isps: {
-                [key: string]: unknown;
-            }[];
+            suspicious_isps: components["schemas"]["SuspiciousIspRow"][];
             /**
              * Active Clients
              * @default []
@@ -16228,20 +16587,20 @@ export interface components {
             /** Efficiency Ratio */
             efficiency_ratio?: number | null;
             /**
-             * Anomaly Static
+             * Low Sample
              * @default false
              */
-            anomaly_static: boolean;
+            low_sample: boolean;
             /**
              * Anomaly Eligible
              * @default false
              */
             anomaly_eligible: boolean;
             /**
-             * Low Sample
+             * Anomaly Static
              * @default false
              */
-            low_sample: boolean;
+            anomaly_static: boolean;
             /** Edge Lat */
             edge_lat?: number | null;
             /** Edge Lon */
@@ -16332,6 +16691,17 @@ export interface components {
             };
             /** Longest Ms */
             longest_ms: number;
+        };
+        /** SuspiciousIspRow */
+        SuspiciousIspRow: {
+            /** Isp */
+            isp: string;
+            /** Asn */
+            asn?: number | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /** SustainedLossAlert */
         SustainedLossAlert: {
@@ -16506,6 +16876,34 @@ export interface components {
             data: components["schemas"]["ThreatIntelItem"][];
         };
         /**
+         * TlsFingerprintRow
+         * @description Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;
+         *     the high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``.
+         */
+        TlsFingerprintRow: {
+            /** Fingerprint */
+            fingerprint?: string | null;
+            /** Ip Count */
+            ip_count?: number | null;
+            /** Request Count */
+            request_count?: number | null;
+            /** Count */
+            count?: number | null;
+            /** Ips */
+            ips?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TopIpHeaderRow */
+        TopIpHeaderRow: {
+            /** Ip */
+            ip?: string | null;
+            /** Max Header */
+            max_header?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * TosAckPayload
          * @description Body for ``POST /api/share/acknowledge`` — the TOS version the analyst
          *     is acknowledging. Server compares against the latest stored version and
@@ -16521,6 +16919,15 @@ export interface components {
             version: string;
             /** Text */
             text: string;
+        };
+        /** TrafficQualityRow */
+        TrafficQualityRow: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: number;
+        } & {
+            [key: string]: unknown;
         };
         /** TransportMetrics */
         TransportMetrics: {
@@ -17123,6 +17530,17 @@ export interface components {
              */
             format_length_limit: number;
         };
+        /** VerifiedBotsTsRow */
+        VerifiedBotsTsRow: {
+            /** Time */
+            time: string;
+            /** Bot Type */
+            bot_type?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ViewSaveResponse
          * @description Ack from ``POST /api/views/`` — id of the created row.
@@ -17162,6 +17580,33 @@ export interface components {
             navigation_type?: string | null;
             /** Delta */
             delta?: number | null;
+        };
+        /**
+         * WellknownBotRow
+         * @description UA-matched bot with FCrDNS verification counters (``verification_coverage`` is
+         *     annotated last, after the counters).
+         */
+        WellknownBotRow: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Category */
+            category: string;
+            /** Request Count */
+            request_count: number;
+            /** Verified Count */
+            verified_count: number;
+            /** Impersonator Count */
+            impersonator_count: number;
+            /** Unverified Count */
+            unverified_count: number;
+            /** Pending Count */
+            pending_count: number;
+            /** Verification Coverage */
+            verification_coverage: number;
+        } & {
+            [key: string]: unknown;
         };
         /** WizardStateResponse */
         WizardStateResponse: {

@@ -7,13 +7,13 @@ def test_security_proxies_response_validation():
         "tunnel_requests_count": 9800,
         "distance_mismatches_count": 5,
         "traffic_quality": [
-            {"type": "Direct Connection", "count": 8000},
-            {"type": "WiFi / Mobile", "count": 1500},
-            {"type": "Active Tunnel / Proxy", "count": 300},
+            {"label": "Direct Connection", "value": 81.6},
+            {"label": "WiFi / Mobile", "value": 15.3},
+            {"label": "Active Tunnel / Proxy", "value": 3.1},
         ],
         "suspicious_isps": [
-            {"asn_name": "DigitalOcean, LLC", "count": 120},
-            {"asn_name": "Linode, LLC", "count": 80},
+            {"isp": "DigitalOcean, LLC", "asn": 14061, "count": 120},
+            {"isp": "Linode, LLC", "asn": 63949, "count": 80},
         ],
         "active_clients": [
             {

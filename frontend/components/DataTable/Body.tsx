@@ -1,13 +1,13 @@
 'use client'
 
 import * as React from 'react'
-import { flexRender, VisibilityState } from '@tanstack/react-table'
+import { flexRender, type Cell, type ColumnDef, type Row, type VisibilityState } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 
 import { TableCell, TableRow } from '@/components/ui/table'
 
 // Standard Cell Component (Cells don't need to be draggable, only headers do to set column order)
-const StandardTableCell = ({ cell }: { cell: any }) => {
+const StandardTableCell = <TData,>({ cell }: { cell: Cell<TData, unknown> }) => {
   const isActions = cell.column.id === 'actions'
 
   return (
@@ -36,7 +36,7 @@ const StandardTableCell = ({ cell }: { cell: any }) => {
 // had row-level styling; DataTable cells can carry colour but the whole-
 // row tint was lost in the move). Pass via DataTable's ``getRowClassName``
 // prop.
-export const MemoizedTableRow = React.memo(({
+function TableRowImpl<TData, TValue>({
   row,
   onRowClick,
   rowClassName,
@@ -44,23 +44,24 @@ export const MemoizedTableRow = React.memo(({
   columnVisibility: _columnVisibility,
   columnSizing: _columnSizing,
 }: {
-  row: any,
-  onRowClick?: (data: any) => void
+  row: Row<TData>
+  onRowClick?: (data: TData) => void
   rowClassName?: string
-  columns: any[]
+  columns: ColumnDef<TData, TValue>[]
   columnVisibility?: VisibilityState
   columnSizing?: Record<string, number>
-}) => {
+}) {
   return (
     <TableRow
       data-state={row.getIsSelected() && "selected"}
       className={cn(onRowClick && "cursor-pointer hover:bg-muted/50", rowClassName)}
       onClick={() => onRowClick && onRowClick(row.original)}
     >
-      {row.getVisibleCells().map((cell: any) => (
+      {row.getVisibleCells().map((cell) => (
         <StandardTableCell key={cell.id} cell={cell} />
       ))}
     </TableRow>
   )
-})
-MemoizedTableRow.displayName = 'MemoizedTableRow'
+}
+export const MemoizedTableRow = React.memo(TableRowImpl) as typeof TableRowImpl
+;(MemoizedTableRow as React.FunctionComponent).displayName = 'MemoizedTableRow'

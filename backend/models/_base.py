@@ -26,8 +26,13 @@ class WireSafeModel(PassthroughModel):
     @model_serializer(mode="wrap")
     def _drop_unset(self, handler):
         data = handler(self)
-        for name in type(self).model_fields.keys() - self.model_fields_set:
+        fields = type(self).model_fields
+        for name in fields.keys() - self.model_fields_set:
             data.pop(name, None)
+            info = fields[name]
+            for alias in (info.alias, info.serialization_alias):
+                if alias:
+                    data.pop(alias, None)
         return data
 
 

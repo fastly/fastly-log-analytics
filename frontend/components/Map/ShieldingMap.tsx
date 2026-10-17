@@ -17,10 +17,12 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { ShieldingRowInput } from '@/app/network/shielding-rows'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
+import { keyByOccurrence } from '@/lib/utils'
 interface ShieldingMapProps {
-  rows: any[]
+  rows: ShieldingRowInput[]
   isLoading?: boolean
   edgeOnly?: boolean
   /** Backend computed the analysis but the handler errored (M2 sentinel). */
@@ -38,7 +40,7 @@ interface ShieldingMapProps {
 interface TooltipInfo {
   clientX: number
   clientY: number
-  props: Record<string, any>
+  props: Record<string, unknown>
 }
 
 /**
@@ -46,7 +48,7 @@ interface TooltipInfo {
  * Wrapping MapLibre `mousemove` handlers caps the per-frame re-render
  * cost to display refresh rate while preserving the latest position.
  */
-export function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+export function rafThrottle<TArgs extends unknown[]>(fn: (...args: TArgs) => void) {
   let queued = false
   let lastArgs: TArgs | null = null
   return (...args: TArgs) => {
@@ -106,7 +108,7 @@ export function greatCirclePoints(
   return pts
 }
 
-export function efficiencyColor(ratio: number | null): string {
+export function efficiencyColor(ratio: number | null | undefined): string {
   // A negative ratio (transit delta < 0 — possible on sparse routes or with
   // clock skew) is "no meaningful efficiency", NOT "excellent": treat it like
   // null/indigo rather than letting `ratio < 1.5` paint it green. (L5)
@@ -141,8 +143,8 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
       className="bg-popover text-popover-foreground border border-border rounded-lg shadow-xl px-3 py-2.5 font-sans min-w-[180px]"
     >
       <div className="font-semibold text-xs leading-tight">
-        <PopLabel code={props.edge_pop} /> <span className="text-muted-foreground">→</span>{' '}
-        <PopLabel code={props.shield_pop} className="text-purple-500" />
+        <PopLabel code={String(props.edge_pop ?? '')} /> <span className="text-muted-foreground">→</span>{' '}
+        <PopLabel code={String(props.shield_pop ?? '')} className="text-purple-500" />
       </div>
       <div className="mt-2 space-y-1">
         {/* These percentiles are the edge→shield transit delta (E→S), NOT a
@@ -215,7 +217,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
 
 // ── GeoJSON builders ──────────────────────────────────────────────────────────
 
-export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildArcFeatures(rows: readonly ShieldingRowInput[]): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
     if (
@@ -249,14 +251,14 @@ export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
         // as a red "problem". The route stays on the map for visibility; it
         // just isn't colour-graded or anomaly-flagged. (low-sample gating)
         color: row.low_sample ? CHART_COLORS.neutral : efficiencyColor(row.efficiency_ratio),
-        line_width: lineWidth(row.requests),
+        line_width: lineWidth(row.requests ?? 0),
       },
     })
   }
   return { type: 'FeatureCollection', features }
 }
 
-export function buildDotFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildDotFeatures(rows: readonly ShieldingRowInput[]): GeoJSON.FeatureCollection {
   const seen = new Set<string>()
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
@@ -294,10 +296,6 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const isDarkRef = useRef(false)
-  // rowsRef always holds the latest rows so the load callback never reads stale data
-  const rowsRef = useRef<any[]>(rows)
-  rowsRef.current = rows
-
   const [mapReady, setMapReady] = useState(false)
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null)
   // Fullscreen "expand" dialog — a bigger interactive globe of the same arcs.
@@ -434,12 +432,12 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         map.current.on('mouseenter', 'arc-lines', (e) => {
           if (!e.features?.length || !map.current) return
           map.current.getCanvas().style.cursor = 'pointer'
-          const props = e.features[0].properties as Record<string, any>
+          const props: Record<string, unknown> = e.features[0].properties ?? {}
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         })
         map.current.on('mousemove', 'arc-lines', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
-          const props = e.features[0].properties as Record<string, any>
+          const props: Record<string, unknown> = e.features[0].properties ?? {}
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         }))
         map.current.on('mouseleave', 'arc-lines', () => {
@@ -675,8 +673,8 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           </tr>
         </thead>
         <tbody>
-          {a11yRows.map((r, i) => (
-            <tr key={`${r.edge_pop}-${r.shield_pop}-${i}`}>
+          {keyByOccurrence(a11yRows, (row) => `${row.edge_pop}-${row.shield_pop}`).map(({ key, item: r }) => (
+            <tr key={key}>
               <td><PopLabel code={r.edge_pop} /></td>
               <td><PopLabel code={r.shield_pop} /></td>
               <td>{formatCount(r.requests ?? 0)}{r.low_sample ? ' (low sample)' : ''}</td>

@@ -36,3 +36,18 @@ export function downloadAsCsv(rows: Record<string, unknown>[], columns: string[]
   ].join('\n')
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), filename)
 }
+
+/**
+ * Pair each item with a React key built from its own label plus the number of earlier items
+ * that share it. For positional data with no natural id (table cells, repeated labels) this
+ * keeps keys stable and unique without keying on the array index.
+ */
+export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => string): { key: string; item: T }[] {
+  const seen = new Map<string, number>()
+  return items.map((item) => {
+    const base = label(item)
+    const n = seen.get(base) ?? 0
+    seen.set(base, n + 1)
+    return { key: n === 0 ? base : `${base}#${n}`, item }
+  })
+}

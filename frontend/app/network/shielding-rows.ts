@@ -1,3 +1,5 @@
+import type { components } from '@/types/api.generated'
+
 // Re-derive a shielding route's low-sample / anomaly treatment for a
 // user-chosen minimum-requests floor, entirely client-side.
 //
@@ -13,19 +15,16 @@
 // reproduces exactly what the backend already computed. ``minRequests <= 0``
 // means "no floor": nothing is low-sample and every eligible route is flagged.
 
-export interface ShieldingRowLike {
-  requests?: number | null
-  anomaly_eligible?: boolean | null
-  low_sample?: boolean
-  anomaly_static?: boolean
-  // Other fields (pops, percentiles, coords, efficiency_ratio…) pass through.
-  [key: string]: unknown
-}
+/** One edge→shield route as served by the API. */
+export type ShieldingRow = components['schemas']['ShieldingRow']
+
+/** A route as the map and table consume it: derived flags may be absent until adjusted. */
+export type ShieldingRowInput = Partial<ShieldingRow>
 
 export function adjustShieldingRows(
-  rows: ShieldingRowLike[] | null | undefined,
+  rows: readonly ShieldingRowInput[] | null | undefined,
   minRequests: number,
-): ShieldingRowLike[] {
+): ShieldingRowInput[] {
   if (!Array.isArray(rows)) return []
   return rows.map((row) => {
     const lowSample = minRequests > 0 && (row.requests ?? 0) < minRequests

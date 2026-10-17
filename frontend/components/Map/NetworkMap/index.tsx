@@ -8,11 +8,11 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { PlaybackControls } from './controls'
-import { MapTooltip, type TooltipInfo } from './OverlayLayer'
-import { formatBucket, useMapInit, useMapData } from './MapLayer'
+import { MapTooltip, type CityTooltipData, type TooltipInfo } from './OverlayLayer'
+import { formatBucket, useMapInit, useMapData, type NetworkMapData } from './MapLayer'
 
 interface NetworkMapProps {
-  data: any
+  data: NetworkMapData | null | undefined
   isLoading?: boolean
   error?: unknown
   className?: string
@@ -39,12 +39,11 @@ export function NetworkMap({
   asnOptions,
 }: NetworkMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
-  const map = useRef<maplibregl.Map | null>(null)
   // Refs so stable map event handlers can read current React state without stale closures
   const metricRef = useRef(metric)
   const isDarkRef = useRef(false)
   // DMA city data for the current bucket, keyed by metro_code — used by the dma-fill hover handler
-  const dmaDataRef = useRef<Record<number, any>>({})
+  const dmaDataRef = useRef<Record<number, CityTooltipData>>({})
 
   const { theme } = useTheme()
   const { timezone } = useTimezoneStore()
@@ -67,22 +66,26 @@ export function NetworkMap({
 
   // Auto-play animation
   useEffect(() => {
-    if (!playing || !data?.buckets?.length) return
+    const bucketCount = data?.buckets?.length ?? 0
+    if (!playing || !bucketCount) return
     const id = setInterval(() => {
-      setBucketIdx(i => (i + 1) % data.buckets.length)
+      setBucketIdx(i => (i + 1) % bucketCount)
     }, playInterval)
     return () => clearInterval(id)
   }, [playing, data?.buckets?.length, playInterval])
 
-  // Reset idx on new data
-  useEffect(() => {
-    if (data?.buckets) {
-      setBucketIdx(data.buckets.length > 0 ? data.buckets.length - 1 : 0)
-    }
+  // Reset idx on new data (adjusted during render, not in an effect: the previous buckets array
+  // is kept in state and compared by identity). Starting from `undefined` also makes the first
+  // render with data land on the latest bucket.
+  const buckets = data?.buckets
+  const [seenBuckets, setSeenBuckets] = useState<typeof buckets>(undefined)
+  if (buckets !== seenBuckets) {
+    setSeenBuckets(buckets)
+    if (buckets) setBucketIdx(buckets.length > 0 ? buckets.length - 1 : 0)
     setPlaying(false)
-  }, [data?.buckets])
+  }
 
-  useMapInit({ mapContainer, map, isDark, isDarkRef, dmaDataRef, setTooltip, onMapError: () => setMapError(true) })
+  const map = useMapInit({ mapContainer, isDark, isDarkRef, dmaDataRef, setTooltip, onMapError: () => setMapError(true) })
   useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, setTooltip })
 
   const currentBucketLabel = formatBucket(data?.buckets?.[bucketIdx] || '', timezone)
@@ -94,13 +97,17 @@ export function NetworkMap({
   // top metros. The visible Playback control already carries semantic
   // metric / time-range info, so the aria-label scopes to "what's painted".
   const currentBucketRows = React.useMemo(() => {
-    const idx = data?.buckets?.[bucketIdx]
-    if (!idx) return []
-    const dmaMetrics = data?.dma_metrics?.[idx]
-    if (!dmaMetrics) return []
-    return Object.entries(dmaMetrics)
-      .map(([code, m]: [string, any]) => ({ code, ...(m as object) }))
-      .sort((a: any, b: any) => (b[metric] ?? 0) - (a[metric] ?? 0))
+    const bucket = data?.map_buckets?.[bucketIdx]
+    if (!bucket) return []
+    const cityEntries = data?.cities ?? []
+    return bucket.cities
+      .filter((c) => c.metro_code != null)
+      .map((c) => ({
+        code: String(c.metro_code),
+        city: cityEntries[c.city_idx]?.name ?? '',
+        value: (c as Record<string, unknown>)[metric],
+      }))
+      .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
       .slice(0, 50)
   }, [data, bucketIdx, metric])
   const a11yLabel = currentBucketRows.length > 0
@@ -138,11 +145,11 @@ export function NetworkMap({
             </tr>
           </thead>
           <tbody>
-            {currentBucketRows.map((r: any, i) => (
+            {currentBucketRows.map((r, i) => (
               <tr key={r.code}>
                 <td>{i + 1}</td>
                 <td>{r.code}</td>
-                <td>{r[metric] != null ? (typeof r[metric] === 'number' ? r[metric].toFixed(2) : String(r[metric])) : 'n/a'}</td>
+                <td>{r.value != null ? (typeof r.value === 'number' ? r.value.toFixed(2) : String(r.value)) : 'n/a'}</td>
               </tr>
             ))}
           </tbody>
@@ -169,7 +176,7 @@ export function NetworkMap({
             setPlaying={setPlaying}
             bucketIdx={bucketIdx}
             setBucketIdx={setBucketIdx}
-            bucketsLength={data.buckets.length}
+            bucketsLength={data.buckets?.length ?? 0}
             firstBucketLabel={firstBucketLabel}
             currentBucketLabel={currentBucketLabel}
             lastBucketLabel={lastBucketLabel}

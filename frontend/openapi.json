@@ -52446,72 +52446,9 @@
     "schemas": {
       "ActiveClientItem": {
         "properties": {
-          "_debug_queries": {
-            "items": {
-              "$ref": "#/components/schemas/DebugQuery"
-            },
-            "type": "array",
-            "title": "Debug Queries"
-          },
-          "_debug_calls": {
-            "items": {
-              "$ref": "#/components/schemas/DebugCall"
-            },
-            "type": "array",
-            "title": "Debug Calls"
-          },
-          "_debug_sqlite": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Sqlite"
-          },
-          "_debug_postgres": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Postgres"
-          },
-          "_is_cached": {
-            "type": "boolean",
-            "title": "Is Cached",
-            "default": false
-          },
-          "_section_timings": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Section Timings"
-          },
           "ip": {
             "type": "string",
             "title": "Ip"
-          },
-          "risk_level": {
-            "type": "string",
-            "title": "Risk Level"
-          },
-          "asn_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Asn Name"
-          },
-          "impossible_distance": {
-            "type": "boolean",
-            "title": "Impossible Distance",
-            "default": false
           },
           "rtt_min_ms": {
             "anyOf": [
@@ -52601,6 +52538,15 @@
             ],
             "title": "Pop Lon"
           },
+          "impossible_distance": {
+            "type": "boolean",
+            "title": "Impossible Distance",
+            "default": false
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
           "country": {
             "anyOf": [
               {
@@ -52622,14 +52568,27 @@
               }
             ],
             "title": "City"
+          },
+          "asn_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asn Name"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "ip",
           "risk_level"
         ],
-        "title": "ActiveClientItem"
+        "title": "ActiveClientItem",
+        "description": "Field order mirrors ``GET_ACTIVE_PROXY_CLIENTS`` (``asn`` is swapped for a\ntrailing ``asn_name`` by the repository)."
       },
       "ActiveQueryRow": {
         "properties": {
@@ -55418,6 +55377,43 @@
           "rdns"
         ],
         "title": "BotSourcesResponse"
+      },
+      "BucketCountRow": {
+        "properties": {
+          "bucket": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bucket"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "BucketCountRow",
+        "description": "Histogram bucket. Repository paths key the bucket as ``bucket``; the\nhigh-scale path keys it as ``label``."
       },
       "BundleResponse": {
         "properties": {
@@ -62612,6 +62608,58 @@
         "title": "InviteRecord",
         "description": "One remote-invite row (``SELECT *`` + derived fields). The stored\npasscode hash rides through ``extra`` untouched \u2014 intentionally NOT\ndeclared here so the OpenAPI surface doesn't advertise it; the schema\nitself may grow columns via share_db migrations, which ``extra`` also\nabsorbs. ``last_login_at`` is attached by ``build_share_status`` only."
       },
+      "Ipv6AdoptionRow": {
+        "properties": {
+          "time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          },
+          "pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "Ipv6AdoptionRow",
+        "description": "Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``."
+      },
       "LakeInfoRequest": {
         "properties": {
           "bucket": {
@@ -64841,8 +64889,7 @@
           },
           "heatmap": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkHeatmapRow"
             },
             "type": "array",
             "title": "Heatmap",
@@ -64850,8 +64897,7 @@
           },
           "map_buckets": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkMapBucket"
             },
             "type": "array",
             "title": "Map Buckets",
@@ -64867,8 +64913,7 @@
           },
           "leaderboard": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkLeaderboardRow"
             },
             "type": "array",
             "title": "Leaderboard",
@@ -64876,8 +64921,7 @@
           },
           "metro_leaderboard": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkMetroRow"
             },
             "type": "array",
             "title": "Metro Leaderboard",
@@ -64926,11 +64970,25 @@
       "NetworkHealthSummary": {
         "properties": {
           "global_health_score": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
             "title": "Global Health Score"
           },
           "avg_rtt_ms": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
             "title": "Avg Rtt Ms"
           },
           "total_reqs": {
@@ -64965,6 +65023,349 @@
           "total_reqs"
         ],
         "title": "NetworkHealthSummary"
+      },
+      "NetworkHeatmapCell": {
+        "properties": {
+          "bucket_idx": {
+            "type": "integer",
+            "title": "Bucket Idx"
+          },
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "throughput_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Throughput Bps"
+          },
+          "rtt_med_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Med Us"
+          },
+          "rtt_baseline_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Baseline Us"
+          },
+          "rtt_congestion_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Congestion Us"
+          },
+          "avg_ploss": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Ploss"
+          },
+          "rtt_jitter_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Jitter Us"
+          },
+          "error_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Pct"
+          },
+          "health_score": {
+            "type": "number",
+            "title": "Health Score"
+          },
+          "reqs": {
+            "type": "integer",
+            "title": "Reqs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket_idx",
+          "bucket",
+          "health_score",
+          "reqs"
+        ],
+        "title": "NetworkHeatmapCell",
+        "description": "One (ASN, time bucket) health cell. ``throughput_bps`` is always ``None`` on the\nhigh-scale path (no throughput column in ClickHouse)."
+      },
+      "NetworkHeatmapRow": {
+        "properties": {
+          "asn": {
+            "type": "integer",
+            "title": "Asn"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "total_reqs": {
+            "type": "integer",
+            "title": "Total Reqs"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkHeatmapCell"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "asn",
+          "label",
+          "total_reqs"
+        ],
+        "title": "NetworkHeatmapRow"
+      },
+      "NetworkLeaderboardRow": {
+        "properties": {
+          "asn": {
+            "type": "integer",
+            "title": "Asn"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "health_score_now": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Score Now"
+          },
+          "health_score_1h_ago": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Score 1H Ago"
+          },
+          "health_score_1w_ago": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Score 1W Ago"
+          },
+          "trend": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "degrading",
+              "improving"
+            ],
+            "title": "Trend"
+          },
+          "total_reqs": {
+            "type": "integer",
+            "title": "Total Reqs"
+          },
+          "c_speed_mix": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "C Speed Mix",
+            "default": {}
+          },
+          "p95_rtt_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Rtt Us"
+          },
+          "p99_rtt_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Rtt Us"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "asn",
+          "label",
+          "trend",
+          "total_reqs"
+        ],
+        "title": "NetworkLeaderboardRow"
+      },
+      "NetworkMapBucket": {
+        "properties": {
+          "bucket_idx": {
+            "type": "integer",
+            "title": "Bucket Idx"
+          },
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "cities": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkMapCity"
+            },
+            "type": "array",
+            "title": "Cities",
+            "default": []
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket_idx",
+          "bucket"
+        ],
+        "title": "NetworkMapBucket"
+      },
+      "NetworkMapCity": {
+        "properties": {
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "city_idx": {
+            "type": "integer",
+            "title": "City Idx"
+          },
+          "metro_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metro Code"
+          },
+          "rtt_med_us": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Med Us"
+          },
+          "avg_ploss": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Ploss"
+          },
+          "error_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Pct"
+          },
+          "health_score": {
+            "type": "number",
+            "title": "Health Score"
+          },
+          "reqs": {
+            "type": "integer",
+            "title": "Reqs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "city_idx",
+          "health_score",
+          "reqs"
+        ],
+        "title": "NetworkMapCity",
+        "description": "One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``."
       },
       "NetworkMetrics": {
         "properties": {
@@ -65034,6 +65435,86 @@
         },
         "type": "object",
         "title": "NetworkMetrics"
+      },
+      "NetworkMetroRow": {
+        "properties": {
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "raw_city": {
+            "type": "string",
+            "title": "Raw City"
+          },
+          "city": {
+            "type": "string",
+            "title": "City"
+          },
+          "total_reqs": {
+            "type": "integer",
+            "title": "Total Reqs"
+          },
+          "health_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Score"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "region",
+          "raw_city",
+          "city",
+          "total_reqs"
+        ],
+        "title": "NetworkMetroRow"
+      },
+      "NetworkQualityBarRow": {
+        "properties": {
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "rtt_ms": {
+            "type": "number",
+            "title": "Rtt Ms"
+          },
+          "reqs": {
+            "type": "integer",
+            "title": "Reqs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "value",
+          "label",
+          "rtt_ms",
+          "reqs"
+        ],
+        "title": "NetworkQualityBarRow"
       },
       "NetworkQualityRequest": {
         "properties": {
@@ -65127,8 +65608,7 @@
           },
           "by_country": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkQualityBarRow"
             },
             "type": "array",
             "title": "By Country",
@@ -65136,8 +65616,7 @@
           },
           "by_asn": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkQualityBarRow"
             },
             "type": "array",
             "title": "By Asn",
@@ -65145,8 +65624,7 @@
           },
           "by_region": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkQualityBarRow"
             },
             "type": "array",
             "title": "By Region",
@@ -65165,8 +65643,7 @@
           },
           "by_pop": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkQualityBarRow"
             },
             "type": "array",
             "title": "By Pop",
@@ -65174,8 +65651,7 @@
           },
           "scatter": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NetworkQualityScatterPoint"
             },
             "type": "array",
             "title": "Scatter",
@@ -65195,6 +65671,30 @@
           "available"
         ],
         "title": "NetworkQualityResponse"
+      },
+      "NetworkQualityScatterPoint": {
+        "properties": {
+          "rtt_ms": {
+            "type": "number",
+            "title": "Rtt Ms"
+          },
+          "ttfb_ms": {
+            "type": "number",
+            "title": "Ttfb Ms"
+          },
+          "cache": {
+            "type": "string",
+            "title": "Cache"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "rtt_ms",
+          "ttfb_ms",
+          "cache"
+        ],
+        "title": "NetworkQualityScatterPoint"
       },
       "NetworkWorstEntry": {
         "properties": {
@@ -65333,6 +65833,83 @@
         ],
         "title": "NgwafSyncResponse",
         "description": "``POST /admin/ngwaf/sync/{service_id}``."
+      },
+      "NgwafVerifiedBotRow": {
+        "properties": {
+          "bot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Name"
+          },
+          "wellknown_bot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wellknown Bot Name"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "request_count"
+        ],
+        "title": "NgwafVerifiedBotRow"
+      },
+      "NgwafVerifiedBotsTsRow": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "bot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Name"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "time",
+          "count"
+        ],
+        "title": "NgwafVerifiedBotsTsRow"
       },
       "NgwafWorkspace": {
         "properties": {
@@ -65800,46 +66377,25 @@
             "default": 0
           },
           "summary": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Summary",
-            "default": {}
+            "$ref": "#/components/schemas/OriginSummarySection"
           },
           "timeseries": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Timeseries",
-            "default": {}
+            "$ref": "#/components/schemas/OriginTimeseriesSection"
           },
           "slow_urls": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Slow Urls",
-            "default": {}
+            "$ref": "#/components/schemas/OriginSlowUrlsSection"
           },
           "status_codes": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Status Codes",
-            "default": {}
+            "$ref": "#/components/schemas/OriginStatusCodesSection"
           },
           "path_breakdown": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Path Breakdown",
-            "default": {}
+            "$ref": "#/components/schemas/OriginPathBreakdownSection"
           },
           "pop_latency": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Pop Latency",
-            "default": {}
+            "$ref": "#/components/schemas/OriginPopLatencySection"
           },
           "ip_health": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Ip Health",
-            "default": {}
+            "$ref": "#/components/schemas/OriginIpHealthSection"
           }
         },
         "type": "object",
@@ -65962,8 +66518,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginDrilldownRow"
             },
             "type": "array",
             "title": "Rows",
@@ -65972,6 +66527,74 @@
         },
         "type": "object",
         "title": "OriginDrilldownResponse"
+      },
+      "OriginDrilldownRow": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Ms"
+          },
+          "error_rate": {
+            "type": "number",
+            "title": "Error Rate"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "key",
+          "requests",
+          "error_rate"
+        ],
+        "title": "OriginDrilldownRow"
       },
       "OriginIpHealthRequest": {
         "properties": {
@@ -66071,8 +66694,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginIpHealthRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66081,6 +66703,89 @@
         },
         "type": "object",
         "title": "OriginIpHealthResponse"
+      },
+      "OriginIpHealthRow": {
+        "properties": {
+          "oip": {
+            "type": "string",
+            "title": "Oip"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "error_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Pct"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "oip",
+          "requests"
+        ],
+        "title": "OriginIpHealthRow"
+      },
+      "OriginIpHealthSection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OriginIpHealthRow"
+            },
+            "type": "array",
+            "title": "Rows",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginIpHealthSection"
       },
       "OriginPathBreakdownResponse": {
         "properties": {
@@ -66144,8 +66849,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginPathRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66154,6 +66858,89 @@
         },
         "type": "object",
         "title": "OriginPathBreakdownResponse"
+      },
+      "OriginPathBreakdownSection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "shielding_detected": {
+            "type": "boolean",
+            "title": "Shielding Detected",
+            "default": false
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OriginPathRow"
+            },
+            "type": "array",
+            "title": "Rows",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginPathBreakdownSection"
+      },
+      "OriginPathRow": {
+        "properties": {
+          "edge": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "requests"
+        ],
+        "title": "OriginPathRow"
       },
       "OriginPopLatencyRequest": {
         "properties": {
@@ -66262,6 +67049,9 @@
                 "type": "number"
               },
               {
+                "type": "integer"
+              },
+              {
                 "type": "null"
               }
             ],
@@ -66269,8 +67059,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginPopLatencyRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66279,6 +67068,102 @@
         },
         "type": "object",
         "title": "OriginPopLatencyResponse"
+      },
+      "OriginPopLatencyRow": {
+        "properties": {
+          "pop": {
+            "type": "string",
+            "title": "Pop"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "elevated": {
+            "type": "boolean",
+            "title": "Elevated"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "pop",
+          "requests",
+          "elevated"
+        ],
+        "title": "OriginPopLatencyRow"
+      },
+      "OriginPopLatencySection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "requires_group_c": {
+            "type": "boolean",
+            "title": "Requires Group C",
+            "default": false
+          },
+          "median_p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median P95 Ms"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OriginPopLatencyRow"
+            },
+            "type": "array",
+            "title": "Rows",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginPopLatencySection"
       },
       "OriginRequest": {
         "properties": {
@@ -66427,8 +67312,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/ShieldingRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66464,6 +67348,58 @@
         },
         "type": "object",
         "title": "OriginShieldingAnalysisResponse"
+      },
+      "OriginSlowUrlRow": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Ms"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "url",
+          "requests"
+        ],
+        "title": "OriginSlowUrlRow"
       },
       "OriginSlowUrlsRequest": {
         "properties": {
@@ -66568,8 +67504,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginSlowUrlRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66578,6 +67513,68 @@
         },
         "type": "object",
         "title": "OriginSlowUrlsResponse"
+      },
+      "OriginSlowUrlsSection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OriginSlowUrlRow"
+            },
+            "type": "array",
+            "title": "Rows",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginSlowUrlsSection"
+      },
+      "OriginStatusCodeRow": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "status",
+          "count"
+        ],
+        "title": "OriginStatusCodeRow",
+        "description": "``status == -1`` buckets any origin status outside 100-599."
       },
       "OriginStatusCodesResponse": {
         "properties": {
@@ -66636,8 +67633,7 @@
           },
           "rows": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginStatusCodeRow"
             },
             "type": "array",
             "title": "Rows",
@@ -66646,6 +67642,37 @@
         },
         "type": "object",
         "title": "OriginStatusCodesResponse"
+      },
+      "OriginStatusCodesSection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OriginStatusCodeRow"
+            },
+            "type": "array",
+            "title": "Rows",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginStatusCodesSection"
       },
       "OriginSummaryResponse": {
         "properties": {
@@ -66827,6 +67854,192 @@
         "type": "object",
         "title": "OriginSummaryResponse"
       },
+      "OriginSummarySection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "total_misses": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Misses"
+          },
+          "total_passes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Passes"
+          },
+          "ottfb_p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottfb P50 Ms"
+          },
+          "ottfb_p75_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottfb P75 Ms"
+          },
+          "ottfb_p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottfb P95 Ms"
+          },
+          "ottfb_p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottfb P99 Ms"
+          },
+          "ottlb_p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottlb P50 Ms"
+          },
+          "ottlb_p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ottlb P95 Ms"
+          },
+          "cdn_overhead_p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Overhead P50 Ms"
+          },
+          "origin_error_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Error Rate"
+          },
+          "obytes_p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obytes P50"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginSummarySection"
+      },
+      "OriginTimeseriesPoint": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "miss_count": {
+            "type": "integer",
+            "title": "Miss Count"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "edge": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "time",
+          "miss_count"
+        ],
+        "title": "OriginTimeseriesPoint",
+        "description": "``edge`` is only present when the series is split by leg."
+      },
       "OriginTimeseriesRequest": {
         "properties": {
           "start_time": {
@@ -66949,8 +68162,7 @@
           },
           "series": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/OriginTimeseriesPoint"
             },
             "type": "array",
             "title": "Series",
@@ -66959,6 +68171,37 @@
         },
         "type": "object",
         "title": "OriginTimeseriesResponse"
+      },
+      "OriginTimeseriesSection": {
+        "properties": {
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": false
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/OriginTimeseriesPoint"
+            },
+            "type": "array",
+            "title": "Series",
+            "default": []
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OriginTimeseriesSection"
       },
       "OverviewMetrics": {
         "properties": {
@@ -69628,6 +70871,31 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ProvisionValidateResponse"
+      },
+      "ProxyDistRow": {
+        "properties": {
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "ProxyDistRow"
       },
       "QuarantineEvidenceItem": {
         "properties": {
@@ -75633,8 +76901,7 @@
           },
           "tls_fingerprints": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/TlsFingerprintRow"
             },
             "type": "array",
             "title": "Tls Fingerprints",
@@ -75650,8 +76917,7 @@
           },
           "req_size_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/BucketCountRow"
             },
             "type": "array",
             "title": "Req Size Dist",
@@ -75659,8 +76925,7 @@
           },
           "top_ips_header": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/TopIpHeaderRow"
             },
             "type": "array",
             "title": "Top Ips Header",
@@ -75668,8 +76933,7 @@
           },
           "ipv6_adoption": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/Ipv6AdoptionRow"
             },
             "type": "array",
             "title": "Ipv6 Adoption",
@@ -75677,8 +76941,7 @@
           },
           "proxy_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/ProxyDistRow"
             },
             "type": "array",
             "title": "Proxy Dist",
@@ -75686,8 +76949,7 @@
           },
           "conn_reuse_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/BucketCountRow"
             },
             "type": "array",
             "title": "Conn Reuse Dist",
@@ -75695,8 +76957,7 @@
           },
           "verified_bots_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/VerifiedBotsTsRow"
             },
             "type": "array",
             "title": "Verified Bots Ts",
@@ -75709,8 +76970,7 @@
           },
           "ngwaf_verified_bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NgwafVerifiedBotRow"
             },
             "type": "array",
             "title": "Ngwaf Verified Bots",
@@ -75718,8 +76978,7 @@
           },
           "ngwaf_verified_bots_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/NgwafVerifiedBotsTsRow"
             },
             "type": "array",
             "title": "Ngwaf Verified Bots Ts",
@@ -75727,8 +76986,7 @@
           },
           "wellknown_bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/WellknownBotRow"
             },
             "type": "array",
             "title": "Wellknown Bots",
@@ -75736,8 +76994,7 @@
           },
           "bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SecurityBotRow"
             },
             "type": "array",
             "title": "Bots",
@@ -75745,8 +77002,7 @@
           },
           "ngwaf_bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SecurityBotRow"
             },
             "type": "array",
             "title": "Ngwaf Bots",
@@ -75769,8 +77025,7 @@
           },
           "traffic_quality": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/TrafficQualityRow"
             },
             "type": "array",
             "title": "Traffic Quality",
@@ -75778,8 +77033,7 @@
           },
           "suspicious_isps": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SuspiciousIspRow"
             },
             "type": "array",
             "title": "Suspicious Isps",
@@ -78605,9 +79859,9 @@
             ],
             "title": "Efficiency Ratio"
           },
-          "anomaly_static": {
+          "low_sample": {
             "type": "boolean",
-            "title": "Anomaly Static",
+            "title": "Low Sample",
             "default": false
           },
           "anomaly_eligible": {
@@ -78615,9 +79869,9 @@
             "title": "Anomaly Eligible",
             "default": false
           },
-          "low_sample": {
+          "anomaly_static": {
             "type": "boolean",
-            "title": "Low Sample",
+            "title": "Anomaly Static",
             "default": false
           },
           "edge_lat": {
@@ -78863,6 +80117,36 @@
         ],
         "title": "SummaryResponse",
         "description": "Cheap counts that power the live-monitor tab badge."
+      },
+      "SuspiciousIspRow": {
+        "properties": {
+          "isp": {
+            "type": "string",
+            "title": "Isp"
+          },
+          "asn": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asn"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "isp",
+          "count"
+        ],
+        "title": "SuspiciousIspRow"
       },
       "SustainedLossAlert": {
         "properties": {
@@ -79360,6 +80644,98 @@
         ],
         "title": "ThreatIntelListResponse"
       },
+      "TlsFingerprintRow": {
+        "properties": {
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "ip_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Count"
+          },
+          "request_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Count"
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          },
+          "ips": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ips"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "TlsFingerprintRow",
+        "description": "Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;\nthe high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``."
+      },
+      "TopIpHeaderRow": {
+        "properties": {
+          "ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip"
+          },
+          "max_header": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Header"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "TopIpHeaderRow"
+      },
       "TosAckPayload": {
         "properties": {
           "version": {
@@ -79391,6 +80767,25 @@
           "text"
         ],
         "title": "TosDocument"
+      },
+      "TrafficQualityRow": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "label",
+          "value"
+        ],
+        "title": "TrafficQualityRow"
       },
       "TransportMetrics": {
         "properties": {
@@ -81088,6 +82483,36 @@
         ],
         "title": "VclLintResponse"
       },
+      "VerifiedBotsTsRow": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "bot_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Type"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "time",
+          "count"
+        ],
+        "title": "VerifiedBotsTsRow"
+      },
       "ViewSaveResponse": {
         "properties": {
           "id": {
@@ -81184,6 +82609,61 @@
         ],
         "title": "WebVitalsPayload",
         "description": "Mirrors the web-vitals SDK metric shape (v5 API).\n\nField names match the JS Metric object so the frontend can pass it\nthrough without reshape. ``rating`` is computed by the SDK against\nGoogle's good/needs-improvement/poor thresholds."
+      },
+      "WellknownBotRow": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          },
+          "verified_count": {
+            "type": "integer",
+            "title": "Verified Count"
+          },
+          "impersonator_count": {
+            "type": "integer",
+            "title": "Impersonator Count"
+          },
+          "unverified_count": {
+            "type": "integer",
+            "title": "Unverified Count"
+          },
+          "pending_count": {
+            "type": "integer",
+            "title": "Pending Count"
+          },
+          "verification_coverage": {
+            "type": "number",
+            "title": "Verification Coverage"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "category",
+          "request_count",
+          "verified_count",
+          "impersonator_count",
+          "unverified_count",
+          "pending_count",
+          "verification_coverage"
+        ],
+        "title": "WellknownBotRow",
+        "description": "UA-matched bot with FCrDNS verification counters (``verification_coverage`` is\nannotated last, after the counters)."
       },
       "WizardStateResponse": {
         "properties": {

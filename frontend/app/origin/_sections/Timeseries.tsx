@@ -10,6 +10,30 @@ import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { makeTimeXAxis } from '@/lib/chart-helpers'
 import { TRENDS } from '@/lib/constants'
+import type { ReportConfiguration } from '@/hooks/useReportConfig'
+import type { PlotlyTrace } from '@/types/plotly'
+import type { OriginStatusCodes, OriginTimeseries, SectionQuery } from './types'
+
+type OriginMetric = 'ttfb' | 'ttlb'
+type OriginPercentile = 'p50' | 'p95' | 'p99'
+
+interface TimeseriesProps {
+  originTs: SectionQuery<OriginTimeseries>
+  originTsChartData: PlotlyTrace[]
+  statusCodes: SectionQuery<OriginStatusCodes>
+  statusData: PlotlyTrace[]
+  originMetric: OriginMetric
+  setOriginMetric: (metric: OriginMetric) => void
+  originPercentile: OriginPercentile
+  setOriginPercentile: (percentile: OriginPercentile) => void
+  trend: string
+  setTrend: (trend: string) => void
+  config: ReportConfiguration
+  intervalButtons: React.ReactNode
+  startTime: string | null
+  endTime: string | null
+  timezone: string
+}
 
 export function Timeseries({
   originTs,
@@ -27,7 +51,7 @@ export function Timeseries({
   startTime,
   endTime,
   timezone,
-}: any) {
+}: TimeseriesProps) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
       <AnalyticsCard

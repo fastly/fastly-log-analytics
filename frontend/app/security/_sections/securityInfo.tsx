@@ -1,13 +1,6 @@
 import React from 'react'
 import { Shield, Fingerprint, Scale, Globe, Network, Repeat, Bot, CheckCircle2, AlertTriangle, Clock, HelpCircle } from 'lucide-react'
 
-export type NgwafVerifiedBot = {
-  bot_name?: string
-  category?: string
-  request_count?: number
-  [key: string]: any
-}
-
 export const FINGERPRINT_COLUMN_IDS = ['fingerprint', 'ip_count', 'request_count']
 export const TOP_IP_COLUMN_IDS = ['ip', 'max_header']
 export const BOT_COLUMN_IDS = ['name', 'category', 'request_count', 'verified_count', 'impersonator_count', 'unverified_count', 'pending_count']
@@ -22,7 +15,7 @@ export const SECURITY_INFO = {
         <ul className="space-y-3 list-none pl-0">
           <li className="flex gap-3">
             <CheckCircle2 className="h-5 w-5 shrink-0 text-green-500" />
-            <span><strong>Verified:</strong> The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot's known domains.</span>
+            <span><strong>Verified:</strong> The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot&apos;s known domains.</span>
           </li>
           <li className="flex gap-3">
             <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
@@ -100,11 +93,11 @@ export const SECURITY_INFO = {
     title: 'Proxy/Anonymizer Breakdown',
     body: (
       <div className="space-y-4 text-sm text-muted-foreground">
-        <p>Categorizes traffic by the underlying network type, using Fastly's geolocation intelligence.</p>
+        <p>Categorizes traffic by the underlying network type, using Fastly&apos;s geolocation intelligence.</p>
         <ul className="space-y-3 list-none pl-0">
           <li className="flex gap-3">
             <Network className="h-5 w-5 shrink-0 text-yellow-500" />
-            <span><strong>Traffic Quality:</strong> A high percentage of traffic from 'hosting' or 'tor' categories is a strong indicator of non-human traffic, scraping, or evasion attempts.</span>
+            <span><strong>Traffic Quality:</strong> A high percentage of traffic from &apos;hosting&apos; or &apos;tor&apos; categories is a strong indicator of non-human traffic, scraping, or evasion attempts.</span>
           </li>
         </ul>
       </div>
@@ -118,7 +111,7 @@ export const SECURITY_INFO = {
         <ul className="space-y-3 list-none pl-0">
           <li className="flex gap-3">
             <Repeat className="h-5 w-5 shrink-0 text-blue-500" />
-            <span><strong>Efficiency:</strong> High reuse (10+ requests per connection) is highly efficient and typical for browsers loading a webpage. A spike in '1' (no reuse) means connections are constantly being torn down, which is typical of basic scraping tools or misconfigured API clients.</span>
+            <span><strong>Efficiency:</strong> High reuse (10+ requests per connection) is highly efficient and typical for browsers loading a webpage. A spike in &apos;1&apos; (no reuse) means connections are constantly being torn down, which is typical of basic scraping tools or misconfigured API clients.</span>
           </li>
         </ul>
       </div>
@@ -128,11 +121,11 @@ export const SECURITY_INFO = {
     title: 'Verified Bots (NGWAF)',
     body: (
       <div className="space-y-4 text-sm text-muted-foreground">
-        <p>Shows named bots identified by Fastly NGWAF. By definition, all traffic matching these signals has been verified by Fastly's Signal Sciences engine.</p>
+        <p>Shows named bots identified by Fastly NGWAF. By definition, all traffic matching these signals has been verified by Fastly&apos;s Signal Sciences engine.</p>
         <ul className="space-y-3 list-none pl-0">
           <li className="flex gap-3">
             <Bot className="h-5 w-5 shrink-0 text-blue-500" />
-            <span><strong>Bot Name:</strong> The verified bot name extracted from the NGWAF VERIFIED-BOT signal (e.g. "OpenAI SearchBot").</span>
+            <span><strong>Bot Name:</strong> The verified bot name extracted from the NGWAF VERIFIED-BOT signal (e.g. &quot;OpenAI SearchBot&quot;).</span>
           </li>
         </ul>
       </div>

@@ -1,24 +1,27 @@
 import React from 'react'
 import { Bot, Fingerprint, CheckCircle2, AlertTriangle, Clock, HelpCircle, Info } from 'lucide-react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { formatDate } from '@/lib/date'
-import { formatCount } from '@/lib/format'
+import { formatCount, formatCountMaybe } from '@/lib/format'
 import {
   SECURITY_INFO,
   NGWAF_BOT_COLUMN_IDS,
   BOT_COLUMN_IDS,
   FINGERPRINT_COLUMN_IDS,
-  NgwafVerifiedBot,
 } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
+type WellknownBot = components['schemas']['WellknownBotRow']
+type NgwafVerifiedBot = components['schemas']['NgwafVerifiedBotRow']
+type TlsFingerprint = components['schemas']['TlsFingerprintRow']
 
 type Props = {
   data: SecurityData | undefined
@@ -28,7 +31,7 @@ type Props = {
   intervalButtons: React.ReactNode
   bucketSeconds: number
   timezone: string
-  commonTimeLayout: any
+  commonTimeLayout: PlotlyLayout
   getFieldLabel: (id: string) => string
   ngwafBotVisibility: VisibilityState
   setNgwafBotVisibility: Dispatch<SetStateAction<VisibilityState>>
@@ -104,11 +107,7 @@ export function BotsSection({
   )
 
   const ngwafBotsData = React.useMemo(() => {
-    // The generated schema types this as `{ [key: string]: unknown }[]`
-    // (FastAPI emits opaque shapes for ad-hoc dicts). Re-narrow to the
-    // 3-field row shape this aggregator actually emits.
-    type BotsTsRow = { time: string; bot_name: string; count: number }
-    const timeseries = data?.ngwaf_verified_bots_ts as BotsTsRow[] | undefined
+    const timeseries = data?.ngwaf_verified_bots_ts
     if (!timeseries?.length) return []
     const byName: Record<string, { x: string[], y: number[] }> = {}
 
@@ -118,7 +117,7 @@ export function BotsSection({
     })
     const allTimes = Array.from(allTimesSet).sort()
 
-    const names = Array.from(new Set(timeseries.map((d) => d.bot_name)))
+    const names = Array.from(new Set(timeseries.map((d) => d.bot_name ?? '')))
     for (const n of names) {
       byName[n] = { x: [...allTimes], y: new Array(allTimes.length).fill(0) }
     }
@@ -127,11 +126,11 @@ export function BotsSection({
       const t = formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss")
       const idx = allTimes.indexOf(t)
       if (idx !== -1) {
-        byName[d.bot_name].y[idx] = d.count
+        byName[d.bot_name ?? ''].y[idx] = d.count
       }
     }
 
-    return Object.entries(byName).map(([name, d], i) => ({
+    return Object.entries(byName).map(([name, d], i): PlotlyTrace => ({
       x: d.x,
       y: d.y.map(val => val === 0 ? null : val),
       type: 'bar',
@@ -142,106 +141,100 @@ export function BotsSection({
     }))
   }, [data, timezone, bucketSeconds])
 
-  const botColumns = [
+  const botColumns: ColumnDef<WellknownBot>[] = [
     {
       accessorKey: 'name',
       header: 'Bot',
-      cell: (info: any) => {
-        const row = info.row.original
-        return (
-          <FilterValueCell
-            filters={[{ column: '_wellknown_bot_id', value: row.id }]}
-            display={row.name}
-            className="font-medium"
-            containerClassName="max-w-[200px]"
-          />
-        )
-      }
+      cell: ({ row }) => (
+        <FilterValueCell
+          filters={[{ column: '_wellknown_bot_id', value: row.original.id }]}
+          display={row.original.name}
+          className="font-medium"
+          containerClassName="max-w-[200px]"
+        />
+      )
     },
     {
       accessorKey: 'category',
       header: 'Category',
-      cell: (info: any) => <span className="capitalize">{info.getValue()?.replace(/-/g, ' ')}</span>
+      cell: ({ row }) => <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span>
     },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
+    { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCount(row.original.request_count) },
     {
       accessorKey: 'verified_count',
       header: 'Verified',
-      cell: (info: any) => info.getValue() > 0 ? (
+      cell: ({ row }) => row.original.verified_count > 0 ? (
         <span className="flex items-center gap-1 text-green-500">
-          <CheckCircle2 className="h-3 w-3" />{formatCount(info.getValue())}
+          <CheckCircle2 className="h-3 w-3" />{formatCount(row.original.verified_count)}
         </span>
       ) : '—'
     },
     {
       accessorKey: 'impersonator_count',
       header: 'Spoofed',
-      cell: (info: any) => info.getValue() > 0 ? (
+      cell: ({ row }) => row.original.impersonator_count > 0 ? (
         <span className="flex items-center gap-1 text-red-500">
-          <AlertTriangle className="h-3 w-3" />{formatCount(info.getValue())}
+          <AlertTriangle className="h-3 w-3" />{formatCount(row.original.impersonator_count)}
         </span>
       ) : '—'
     },
     {
       accessorKey: 'unverified_count',
       header: 'Unverified',
-      cell: (info: any) => info.getValue() > 0 ? (
+      cell: ({ row }) => row.original.unverified_count > 0 ? (
         <span className="flex items-center gap-1 text-muted-foreground" title="Unverifiable (no IPs/domains in source)">
-          <HelpCircle className="h-3 w-3" />{formatCount(info.getValue())}
+          <HelpCircle className="h-3 w-3" />{formatCount(row.original.unverified_count)}
         </span>
       ) : '—'
     },
     {
       accessorKey: 'pending_count',
       header: 'Pending',
-      cell: (info: any) => info.getValue() > 0 ? (
+      cell: ({ row }) => row.original.pending_count > 0 ? (
         <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup">
-          <Clock className="h-3 w-3" />{formatCount(info.getValue())}
+          <Clock className="h-3 w-3" />{formatCount(row.original.pending_count)}
         </span>
       ) : '—'
     }
   ]
 
-  const ngwafBotColumns = [
+  const ngwafBotColumns: ColumnDef<NgwafVerifiedBot>[] = [
     {
       accessorKey: 'bot_name',
       header: 'Bot Name',
-      cell: (info: any) => {
-        const row = info.row.original as NgwafVerifiedBot
-        return (
-          <FilterValueCell
-            filters={[{ column: '_ngwaf_bot_name', value: row.bot_name || '' }]}
-            display={row.bot_name}
-            className="font-medium"
-            containerClassName="max-w-[200px]"
-          />
-        )
-      }
+      cell: ({ row }) => (
+        <FilterValueCell
+          filters={[{ column: '_ngwaf_bot_name', value: row.original.bot_name || '' }]}
+          display={row.original.bot_name ?? undefined}
+          className="font-medium"
+          containerClassName="max-w-[200px]"
+        />
+      )
     },
     {
       accessorKey: 'category',
       header: 'Category',
-      cell: (info: any) => info.getValue()
-        ? <span className="capitalize">{info.getValue().replace(/-/g, ' ')}</span>
+      cell: ({ row }) => row.original.category
+        ? <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span>
         : <span className="text-muted-foreground">—</span>
     },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
+    { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCount(row.original.request_count) },
   ]
 
-  const fingerprintColumns = [
+  const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
     {
       accessorKey: 'fingerprint',
       header: 'Cipher Fingerprint (SHA)',
-      cell: (info: any) => (
+      cell: ({ row }) => (
         <FilterValueCell
-          filters={[{ column: 'tls_client_hello', value: info.getValue() }]}
+          filters={[{ column: 'tls_client_hello', value: row.original.fingerprint ?? '' }]}
           className="font-mono text-[10px]"
           containerClassName="max-w-[200px]"
         />
       )
     },
-    { accessorKey: 'ip_count', header: 'Unique IPs', cell: (info: any) => formatCount(info.getValue()) },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
+    { accessorKey: 'ip_count', header: 'Unique IPs', cell: ({ row }) => formatCountMaybe(row.original.ip_count) ?? '—' },
+    { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCountMaybe(row.original.request_count) ?? '—' },
   ]
 
   return (
@@ -269,7 +262,7 @@ export function BotsSection({
               </div>
             ) : (
               <PlotlyChart
-                data={ngwafBotsData as any[]}
+                data={ngwafBotsData}
                 layout={{
                   ...commonTimeLayout,
                   barmode: 'stack',

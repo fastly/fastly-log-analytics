@@ -4,9 +4,10 @@ import React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { cn } from '@/lib/utils'
 import { ApproxBadge } from './ApproxBadge'
+import type { OriginSummary, SectionQuery } from './types'
 
 import { formatCount } from '@/lib/format'
-export function Aggregates({ summary }: { summary: any }) {
+export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }) {
   const error = summary.error as AnalyticsCardError | null
   // Backend sets ``_approx: true`` on long-window panels (>= 48h) that
   // are served from the per-hour origin_summary rollup — percentiles are

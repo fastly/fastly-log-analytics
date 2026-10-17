@@ -183,14 +183,12 @@ function useMapInitHarness(opts: {
 }) {
   const containerEl = document.createElement('div')
   const mapContainer = useRef<HTMLDivElement | null>(containerEl)
-  const map = useRef<any>(null)
   const isDarkRef = useRef(opts.isDark)
   const dmaDataRef = useRef<Record<number, any>>({})
   const setTooltip = opts.setTooltip ?? (() => {})
 
-  useMapInit({
+  const map = useMapInit({
     mapContainer,
-    map,
     isDark: opts.isDark,
     isDarkRef,
     dmaDataRef,

@@ -1,7 +1,7 @@
 'use client'
 
 import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, HealthBadge, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
-import React, { useState } from 'react'
+import React, { useState, type Dispatch, type SetStateAction } from 'react'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { TransportSection } from './_sections/TransportSection'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
@@ -43,7 +43,7 @@ const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then(
 })
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
+import { resolveRangeWire, type RangeWireArgs } from '@/lib/range-wire'
 import { useFilterStore } from '@/stores/filterStore'
 import { LazyMount } from '@/components/LazyMount'
 import { StatCard } from '@/components/ui/stat-card'
@@ -51,7 +51,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, Download, Info } from 'lucide-react'
-import { ReportLayout } from '@/components/ReportLayout'
+import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { adjustShieldingRows, SHIELDING_MIN_REQUESTS_OPTIONS, SHIELDING_MIN_REQUESTS_DEFAULT } from './shielding-rows'
@@ -59,21 +60,22 @@ import { adjustShieldingRows, SHIELDING_MIN_REQUESTS_OPTIONS, SHIELDING_MIN_REQU
 // Static — module-level keeps the reference stable across renders without
 // adding a hook call (we can't safely add hooks after the render-prop's
 // early-return at `data.available === false`).
-const HEATMAP_LAYOUT = { xaxis: { tickangle: -45 } }
+const HEATMAP_LAYOUT: PlotlyLayout = { xaxis: { tickangle: -45 } }
 
 // RTT-vs-TTFB scatter axis titles. Module-scope for stable PlotlyChart identity.
-const QUALITY_SCATTER_LAYOUT = {
+const QUALITY_SCATTER_LAYOUT: PlotlyLayout = {
   xaxis: { title: { text: 'TCP RTT (ms)' } },
   yaxis: { title: { text: 'TTFB (ms)' } },
 }
 
-type QualityBarRow = { value?: string; label: string; rtt_ms: number; reqs: number }
+type QualityBarRow = components['schemas']['NetworkQualityBarRow']
+type ColumnVisibilityTuple = ReturnType<typeof useColumnVisibility>
 
 // Horizontal RTT bar list — a lightweight alternative to a Plotly bar trace for
 // the four Network Quality breakdowns (by country / ASN / region / POP). Bars
 // are scaled to the largest RTT in the set. When `filterColumn` is given each
 // row label becomes a click-to-filter cell, matching the ASN leaderboard.
-function RttBarList({ rows, filterColumn }: { rows: QualityBarRow[]; filterColumn?: string }) {
+function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; filterColumn?: string }) {
   if (!rows?.length) {
     return <div className="p-6 text-center text-sm text-muted-foreground">No data in this range</div>
   }
@@ -163,14 +165,72 @@ export default function NetworkPage() {
       description="Analysis of TCP performance, packet loss, and jitter by ASN and geography."
       icon={NetworkIcon}
     >
-      {({
-        startTime,
-        endTime,
-        activeServiceId,
-        filterPayload,
-        bucketSeconds: chartBucketSeconds,
-        intervalButtons,
-      }) => {
+      {(ctx) => (
+        <NetworkBody
+          {...ctx}
+          metric={metric}
+          setMetric={setMetric}
+          mapAsn={mapAsn}
+          setMapAsn={setMapAsn}
+          animBucketSeconds={animBucketSeconds}
+          setAnimBucketSeconds={setAnimBucketSeconds}
+          regionCountry={regionCountry}
+          setRegionCountry={setRegionCountry}
+          shieldingVisibility={shieldingVisibility}
+          setShieldingVisibility={setShieldingVisibility}
+          onShieldingVisChange={onShieldingVisChange}
+          minRequests={minRequests}
+          setMinRequests={setMinRequests}
+          relativeRange={relativeRange}
+          isAutoRange={isAutoRange}
+          anchor={anchor}
+        />
+      )}
+    </ReportLayout>
+  )
+}
+
+type NetworkBodyProps = ReportLayoutRenderProps &
+  Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> & {
+    metric: string
+    setMetric: Dispatch<SetStateAction<string>>
+    mapAsn: string
+    setMapAsn: Dispatch<SetStateAction<string>>
+    animBucketSeconds: number
+    setAnimBucketSeconds: Dispatch<SetStateAction<number>>
+    regionCountry: string
+    setRegionCountry: Dispatch<SetStateAction<string>>
+    shieldingVisibility: ColumnVisibilityTuple[0]
+    setShieldingVisibility: ColumnVisibilityTuple[1]
+    onShieldingVisChange: ColumnVisibilityTuple[2]
+    minRequests: number
+    setMinRequests: Dispatch<SetStateAction<number>>
+  }
+
+// Lifted out of the ReportLayout render-prop so every hook below lives at the top of a
+// STABLE component (rules-of-hooks: the render-prop callback is not a component).
+function NetworkBody({
+  startTime,
+  endTime,
+  activeServiceId,
+  filterPayload,
+  metric,
+  setMetric,
+  mapAsn,
+  setMapAsn,
+  animBucketSeconds,
+  setAnimBucketSeconds,
+  regionCountry,
+  setRegionCountry,
+  shieldingVisibility,
+  setShieldingVisibility,
+  onShieldingVisChange,
+  minRequests,
+  setMinRequests,
+  relativeRange,
+  isAutoRange,
+  anchor,
+}: NetworkBodyProps) {
 
   // Distinguish "field group not enabled" from "enabled but no data in this
   // window yet" so a low-traffic/fresh service doesn't read as misconfigured.
@@ -279,7 +339,7 @@ export default function NetworkPage() {
   const isShieldingLoadingInitial = shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
   const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
 
-  const shieldingData = shieldingQuery.data?.shielding_analysis as any
+  const shieldingData = shieldingQuery.data?.shielding_analysis
   // Apply the user-chosen min-requests floor to greying/flagging without a
   // refetch. Feeds the map, the table, and the CSV export so all three agree.
   const adjustedShieldingRows = React.useMemo(
@@ -287,8 +347,8 @@ export default function NetworkPage() {
     [shieldingData?.rows, minRequests],
   )
 
-  const qualityScatterTrace = React.useMemo(() => {
-    const pts = (qualityData?.scatter ?? []) as Array<{ rtt_ms: number; ttfb_ms: number }>
+  const qualityScatterTrace = React.useMemo((): PlotlyTrace[] => {
+    const pts = qualityData?.scatter ?? []
     if (!pts.length) return []
     return [{
       type: 'scattergl',
@@ -302,7 +362,7 @@ export default function NetworkPage() {
 
   const asnOptions = React.useMemo(() => {
     if (!data?.leaderboard) return []
-    return data.leaderboard.map((a: Record<string, unknown>) => ({ value: String(a.asn), label: String(a.label) }))
+    return data.leaderboard.map((a) => ({ value: String(a.asn), label: a.label }))
   }, [data?.leaderboard])
 
   // Pre-memoise the ASN leaderboard rows so toggling the metric / mapAsn
@@ -310,7 +370,7 @@ export default function NetworkPage() {
   // 30-row × 7-column subtree every time. Row identity is keyed on
   // `data?.leaderboard` so a real data refetch still re-renders.
   const asnLeaderboardRows = React.useMemo(() => {
-    return (data?.leaderboard ?? []).map((asn: any) => {
+    return (data?.leaderboard ?? []).map((asn) => {
       const delta = (asn.health_score_now ?? 0) - (asn.health_score_1h_ago ?? 0)
       return (
         <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
@@ -321,7 +381,7 @@ export default function NetworkPage() {
             />
           </td>
           <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(asn.total_reqs ?? 0)}</td>
-          <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now} /></td>
+          <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now ?? null} /></td>
           <td className="px-4 py-3 text-right font-mono text-xs">
             {asn.p95_rtt_us != null ? `${(asn.p95_rtt_us / 1000).toFixed(1)}ms` : '—'}
           </td>
@@ -348,12 +408,12 @@ export default function NetworkPage() {
 
   const heatmapData = React.useMemo(() => {
     if (!mapData?.heatmap?.length || !mapData.buckets?.length) return null
-    const yLabels = mapData.heatmap.map((d: any) => d.label)
+    const yLabels = mapData.heatmap.map((d) => d.label)
     const xBuckets = mapData.buckets
-    const z = mapData.heatmap.map((row: any) => {
+    const z = mapData.heatmap.map((row) => {
       const byBucket: Record<string, number | null> = {}
-      row.buckets?.forEach((b: any) => { byBucket[b.bucket] = b.health_score })
-      return xBuckets.map((bk: string) => byBucket[bk] ?? null)
+      row.buckets?.forEach((b) => { byBucket[b.bucket] = b.health_score })
+      return xBuckets.map((bk) => byBucket[bk] ?? null)
     })
     return { x: xBuckets, y: yLabels, z }
   }, [mapData?.heatmap, mapData?.buckets])
@@ -361,7 +421,7 @@ export default function NetworkPage() {
   // Stable ref so PlotlyChart's React.memo treats unrelated parent re-renders
   // as no-ops. Must live ABOVE the `data.available === false` early-return so
   // the hook order is identical on every render.
-  const heatmapTrace = React.useMemo(() => (
+  const heatmapTrace = React.useMemo((): PlotlyTrace[] => (
     heatmapData ? [{
       type: 'heatmap',
       x: heatmapData.x,
@@ -385,17 +445,7 @@ export default function NetworkPage() {
           )
         }
 
-        // `summary` is an untyped object (`{}`) in the generated schema, so
-        // narrow it here at the opaque boundary. Top-level response keys
-        // (summary/leaderboard/by_*/available/…) are now type-checked since the
-        // queries dropped their `return data as any` — a backend rename of those
-        // keys is a compile error.
-        const summary = (data?.summary ?? {}) as {
-          global_health_score?: number
-          avg_rtt_ms?: number
-          worst_asn?: { label?: string; score?: number }
-          worst_country?: { label?: string; score?: number }
-        }
+        const summary = data?.summary
 
   // heatmapTrace + HEATMAP_LAYOUT defined above the early-return / at
   // module scope — keeps hook order stable and gives PlotlyChart stable
@@ -435,7 +485,7 @@ export default function NetworkPage() {
           icon={Activity}
           loading={isCoreLoadingInitial}
           loadingMessage="Compiling ASN health matrix..."
-          value={<>{summary.global_health_score ?? '--'}/100</>}
+          value={<>{summary?.global_health_score ?? '--'}/100</>}
           sub="Average across top ASNs"
           helpTitle="Global Health Score"
           helpContent={<GlobalHealthHelp />}
@@ -446,7 +496,7 @@ export default function NetworkPage() {
           icon={Zap}
           loading={isCoreLoadingInitial}
           loadingMessage="Analyzing TCP round-trip times..."
-          value={<>{summary.avg_rtt_ms ?? '--'}ms</>}
+          value={<>{summary?.avg_rtt_ms ?? '--'}ms</>}
           sub="Across all regions"
           helpTitle="Average RTT"
           helpContent={<AvgRttHelp />}
@@ -458,8 +508,8 @@ export default function NetworkPage() {
           iconClassName="text-red-500"
           loading={isCoreLoadingInitial}
           loadingMessage="Scanning ASN degradation..."
-          value={<span className="text-sm truncate block">{summary.worst_asn?.label ?? '--'}</span>}
-          sub={<span className="text-red-500 font-medium">Score: {summary.worst_asn?.score ?? '--'}</span>}
+          value={<span className="text-sm truncate block">{summary?.worst_asn?.label ?? '--'}</span>}
+          sub={<span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score ?? '--'}</span>}
           helpTitle="Worst-Performing ASN"
           helpContent={<WorstAsnHelp />}
           className="min-h-[110px]"
@@ -469,8 +519,8 @@ export default function NetworkPage() {
           icon={Globe}
           loading={isCoreLoadingInitial}
           loadingMessage="Evaluating regional latency..."
-          value={<span className="text-sm truncate block">{summary.worst_country?.label ?? '--'}</span>}
-          sub={<span className="text-red-500 font-medium">Score: {summary.worst_country?.score ?? '--'}</span>}
+          value={<span className="text-sm truncate block">{summary?.worst_country?.label ?? '--'}</span>}
+          sub={<span className="text-red-500 font-medium">Score: {summary?.worst_country?.score ?? '--'}</span>}
           helpTitle="Worst-Performing Region"
           helpContent={<WorstRegionHelp />}
           className="min-h-[110px]"
@@ -501,7 +551,7 @@ export default function NetworkPage() {
           error={mapQuery.error as AnalyticsCardError | null}
           className="[contain-intrinsic-size:380px] [content-visibility:auto]"
         >
-          <PlotlyChart data={heatmapTrace as any[]} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
+          <PlotlyChart data={heatmapTrace} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
         </AnalyticsCard>
       )}
 
@@ -525,8 +575,8 @@ export default function NetworkPage() {
               <ShieldingMap
                 rows={adjustedShieldingRows}
                 isLoading={isShieldingLoadingInitial}
-                edgeOnly={Boolean((shieldingData as { edge_only?: boolean } | undefined)?.edge_only) && !isFieldActive('prid')}
-                errored={Boolean((shieldingData as { error?: boolean } | undefined)?.error)}
+                edgeOnly={Boolean(shieldingData?.edge_only) && !isFieldActive('prid')}
+                errored={Boolean(shieldingData?.error)}
                 expandable
               />
             </LazyMount>
@@ -622,7 +672,7 @@ export default function NetworkPage() {
                   {/* M1: the backend returns a (top-by-volume ∪ top-by-overhead)
                       subset when there are more routes than the cap, so a
                       buried anomaly still surfaces — say so instead of implying
-                      the table is complete. (shieldingData is already `any`.) */}
+                      the table is complete. */}
                   {shieldingData?.truncated && (
                     <p className="px-4 py-2 text-[11px] text-muted-foreground border-t bg-muted/20">
                       Showing {formatCount(shieldingData?.rows?.length ?? 0)} of {formatCount(Number(shieldingData.total_routes ?? 0))} routes — top by request volume and by transit overhead.
@@ -641,13 +691,13 @@ export default function NetworkPage() {
                       <p className="text-sm text-destructive font-medium">Shielding analysis unavailable</p>
                       <p className="text-xs text-muted-foreground max-w-sm">The analysis failed to compute for this window (server-side error, not an absence of data). Try again or narrow the time range.</p>
                     </>
-                  ) : ((shieldingData as any)?.edge_only && !isFieldActive('prid')) ? (
+                  ) : (shieldingData?.edge_only && !isFieldActive('prid')) ? (
                     <>
                       <p className="text-sm text-muted-foreground font-medium">Edge-only logging detected</p>
                       <p className="text-xs text-muted-foreground max-w-sm">Edge-to-shield transit analysis requires log lines from both edge and shield POPs. Your service is currently logging edge requests only — enable full (non-edge-only) logging to use this analysis.</p>
                     </>
-                  ) : (shieldingData as any)?.requires_fields ? (
-                    <p className="text-sm text-muted-foreground italic">Required fields missing: {(shieldingData as any).requires_fields.join(', ')}</p>
+                  ) : shieldingData?.requires_fields ? (
+                    <p className="text-sm text-muted-foreground italic">Required fields missing: {shieldingData.requires_fields.join(', ')}</p>
                   ) : (
                     <p className="text-sm text-muted-foreground italic">No shielding data detected in this time range.</p>
                   )}
@@ -739,7 +789,7 @@ export default function NetworkPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(data?.metro_leaderboard ?? []).map((m: any) => (
+                    {(data?.metro_leaderboard ?? []).map((m) => (
                       <tr key={`${m.city}-${m.region}-${m.country}`} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
                         <td className="px-4 py-3 font-medium">
                           {m.raw_city ? (
@@ -756,7 +806,7 @@ export default function NetworkPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(m.total_reqs ?? 0)}</td>
-                        <td className="px-4 py-3 text-right"><HealthBadge score={m.health_score} /></td>
+                        <td className="px-4 py-3 text-right"><HealthBadge score={m.health_score ?? null} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -788,7 +838,7 @@ export default function NetworkPage() {
                   loadingMessage="Analyzing RTT by country..."
                   className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
-                  <RttBarList rows={(qualityData?.by_country ?? []) as QualityBarRow[]} filterColumn="country" />
+                  <RttBarList rows={qualityData?.by_country ?? []} filterColumn="country" />
                 </AnalyticsCard>
 
                 <AnalyticsCard
@@ -801,7 +851,7 @@ export default function NetworkPage() {
                   loadingMessage="Analyzing RTT by ASN..."
                   className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
-                  <RttBarList rows={(qualityData?.by_asn ?? []) as QualityBarRow[]} filterColumn="asn" />
+                  <RttBarList rows={qualityData?.by_asn ?? []} filterColumn="asn" />
                 </AnalyticsCard>
 
                 <AnalyticsCard
@@ -823,13 +873,13 @@ export default function NetworkPage() {
                       {(qualityData?.countries ?? []).length === 0 && (
                         <option value={regionCountry}>{regionCountry}</option>
                       )}
-                      {(qualityData?.countries ?? []).map((c: string) => (
+                      {(qualityData?.countries ?? []).map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
                   }
                 >
-                  <RttBarList rows={(qualityData?.by_region ?? []) as QualityBarRow[]} filterColumn="region" />
+                  <RttBarList rows={qualityData?.by_region ?? []} filterColumn="region" />
                 </AnalyticsCard>
 
                 <AnalyticsCard
@@ -842,7 +892,7 @@ export default function NetworkPage() {
                   loadingMessage="Analyzing RTT by POP..."
                   className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
-                  <RttBarList rows={(qualityData?.by_pop ?? []) as QualityBarRow[]} filterColumn="pop" />
+                  <RttBarList rows={qualityData?.by_pop ?? []} filterColumn="pop" />
                 </AnalyticsCard>
               </div>
 
@@ -856,7 +906,7 @@ export default function NetworkPage() {
                   loadingMessage="Plotting RTT vs TTFB correlation..."
                   className="[contain-intrinsic-size:380px] [content-visibility:auto]"
                 >
-                  <PlotlyChart data={qualityScatterTrace as any[]} layout={QUALITY_SCATTER_LAYOUT} height={360} />
+                  <PlotlyChart data={qualityScatterTrace} layout={QUALITY_SCATTER_LAYOUT} height={360} />
                 </AnalyticsCard>
               )}
             </>
@@ -865,7 +915,4 @@ export default function NetworkPage() {
       )}
       </>
         )
-      }}
-    </ReportLayout>
-  )
 }

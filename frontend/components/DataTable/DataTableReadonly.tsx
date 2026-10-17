@@ -11,6 +11,7 @@ import {
   getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
+  type Table as TableInstance,
 } from '@tanstack/react-table'
 
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -60,7 +61,7 @@ interface DataTableReadonlyProps<TData, TValue> {
   title?: React.ReactNode
   compactToolbar?: boolean
   extraToolbarContent?: React.ReactNode
-  renderToolbar?: (table: any) => React.ReactNode
+  renderToolbar?: (table: TableInstance<TData>) => React.ReactNode
   hideToolbar?: boolean
   columnVisibility?: VisibilityState
   onColumnVisibilityChange?: (visibility: VisibilityState) => void

@@ -1,9 +1,16 @@
 'use client'
 
-import { useEffect, MutableRefObject } from 'react'
+import { useEffect, useRef, MutableRefObject } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import countryMapData from '@/lib/country-codes.json'
-import type { TooltipInfo } from './OverlayLayer'
+import type { components } from '@/types/api.generated'
+import type { CityTooltipData, TooltipInfo } from './OverlayLayer'
+
+type NetworkHealth = components['schemas']['NetworkHealthResponse']
+
+/** The slice of the network-health response the map renders. */
+export type NetworkMapData = Partial<Pick<NetworkHealth, 'buckets' | 'map_buckets' | 'cities'>>
+type MapCity = components['schemas']['NetworkMapCity']
 
 const A2_TO_A3: Record<string, string> = countryMapData
 
@@ -22,6 +29,14 @@ export function formatBucket(iso: string, tz: string): string {
     hour12: true,
   }).format(d)
 }
+
+/** One city's value for a metric id (``health_score``, ``rtt_med_us`` …); ``null`` when absent. */
+function cityMetric(c: MapCity, metric: string): number | null {
+  const v = (c as Record<string, unknown>)[metric]
+  return typeof v === 'number' ? v : null
+}
+
+const asCityString = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 export function getScoreColor(val: number | null, metric: string): string {
   if (val == null) return 'transparent'
@@ -64,10 +79,9 @@ export function getScoreColor(val: number | null, metric: string): string {
 
 interface UseMapInitArgs {
   mapContainer: MutableRefObject<HTMLDivElement | null>
-  map: MutableRefObject<maplibregl.Map | null>
   isDark: boolean
   isDarkRef: MutableRefObject<boolean>
-  dmaDataRef: MutableRefObject<Record<number, any>>
+  dmaDataRef: MutableRefObject<Record<number, CityTooltipData>>
   setTooltip: (t: TooltipInfo | null) => void
   // Called when MapLibre's constructor throws (WebGL unavailable — headless /
   // locked-down browser). Lets the caller degrade to a placeholder instead of
@@ -90,18 +104,19 @@ interface UseMapInitArgs {
  */
 import { rafThrottle } from '@/components/Map/ShieldingMap'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer, createBaseMap } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, type MapFillColor } from '@/components/Map/baseLayers'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 export function useMapInit({
   mapContainer,
-  map,
   isDark,
   isDarkRef,
   dmaDataRef,
   setTooltip,
   onMapError,
-}: UseMapInitArgs) {
+}: UseMapInitArgs): MutableRefObject<maplibregl.Map | null> {
+  // The hook owns the map instance; consumers read it (useMapData) but never assign it.
+  const map = useRef<maplibregl.Map | null>(null)
   useEffect(() => {
     if (!mapContainer.current) return
     let resizeObserver: ResizeObserver | null = null
@@ -162,24 +177,24 @@ export function useMapInit({
         map.current.on('mouseenter', 'city-scatter', (e) => {
           if (!e.features?.length || !map.current) return
           map.current.getCanvas().style.cursor = 'pointer'
-          const props = e.features[0].properties as Record<string, any>
+          const props: CityTooltipData = e.features[0].properties ?? {}
           setTooltip({
             clientX: e.originalEvent.clientX,
             clientY: e.originalEvent.clientY,
-            city: props.city || '',
-            country: props.country || undefined,
+            city: asCityString(props.city),
+            country: asCityString(props.country) || undefined,
             cityData: props,
           })
         })
 
         map.current.on('mousemove', 'city-scatter', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
-          const props = e.features[0].properties as Record<string, any>
+          const props: CityTooltipData = e.features[0].properties ?? {}
           setTooltip({
             clientX: e.originalEvent.clientX,
             clientY: e.originalEvent.clientY,
-            city: props.city || '',
-            country: props.country || undefined,
+            city: asCityString(props.city),
+            country: asCityString(props.country) || undefined,
             cityData: props,
           })
         }))
@@ -200,8 +215,8 @@ export function useMapInit({
           setTooltip({
             clientX: e.originalEvent.clientX,
             clientY: e.originalEvent.clientY,
-            city: cityData.city || '',
-            country: cityData.country || undefined,
+            city: asCityString(cityData.city),
+            country: asCityString(cityData.country) || undefined,
             cityData,
           })
         })
@@ -214,8 +229,8 @@ export function useMapInit({
           setTooltip({
             clientX: e.originalEvent.clientX,
             clientY: e.originalEvent.clientY,
-            city: cityData.city || '',
-            country: cityData.country || undefined,
+            city: asCityString(cityData.city),
+            country: asCityString(cityData.country) || undefined,
             cityData,
           })
         }))
@@ -240,12 +255,13 @@ export function useMapInit({
       map.current = null
     }
   }, [isDark])
+  return map
 }
 
 interface UseMapDataArgs {
   map: MutableRefObject<maplibregl.Map | null>
-  dmaDataRef: MutableRefObject<Record<number, any>>
-  data: any
+  dmaDataRef: MutableRefObject<Record<number, CityTooltipData>>
+  data: NetworkMapData | null | undefined
   bucketIdx: number
   metric: string
   isDark: boolean
@@ -268,6 +284,8 @@ export function useMapData({
 }: UseMapDataArgs) {
   useEffect(() => {
     if (!map.current || !data?.map_buckets) return
+    const mapBuckets = data.map_buckets
+    const cityEntries = data.cities ?? []
 
     const updateMap = () => {
       if (!map.current) return
@@ -285,37 +303,22 @@ export function useMapData({
 
       setTooltip(null)
 
-      const bucketData = data.map_buckets[bucketIdx]
+      const bucketData = mapBuckets[bucketIdx]
       if (!bucketData || !bucketData.cities) return
 
       type CityRec = { name: string; lat: number | null; lon: number | null }
-      const cityEntries: any[] = (data as any).cities ?? []
-      const resolveCity = (c: any): CityRec => {
-        if (typeof c?.city === 'string') {
-          return { name: c.city, lat: c?.lat ?? null, lon: c?.lon ?? null }
-        }
-        const idx = c?.city_idx
-        if (typeof idx === 'number' && idx >= 0 && idx < cityEntries.length) {
-          const entry = cityEntries[idx]
-          if (typeof entry === 'string') {
-            return { name: entry, lat: c?.lat ?? null, lon: c?.lon ?? null }
-          }
-          return {
-            name: entry?.name ?? '',
-            lat: entry?.lat ?? c?.lat ?? null,
-            lon: entry?.lon ?? c?.lon ?? null,
-          }
-        }
-        return { name: '', lat: c?.lat ?? null, lon: c?.lon ?? null }
+      const resolveCity = (c: MapCity): CityRec => {
+        const entry = c.city_idx >= 0 && c.city_idx < cityEntries.length ? cityEntries[c.city_idx] : undefined
+        return { name: entry?.name ?? '', lat: entry?.lat ?? null, lon: entry?.lon ?? null }
       }
 
-      const features: any[] = []
+      const features: GeoJSON.Feature[] = []
       const dmaColors: Record<number, string> = {}
       const countryScores: Record<string, { sum: number, count: number }> = {}
-      const nextDmaData: Record<number, any> = {}
+      const nextDmaData: Record<number, CityTooltipData> = {}
 
-    bucketData.cities.forEach((c: any) => {
-      const val = metric === 'health_score' ? c.health_score : c[metric]
+    bucketData.cities.forEach((c) => {
+      const val = cityMetric(c, metric)
       const reqs = c.reqs
       const color = getScoreColor(val, metric)
       const city = resolveCity(c)
@@ -350,7 +353,6 @@ export function useMapData({
             rtt_med_us: c.rtt_med_us,
             avg_ploss: c.avg_ploss,
             error_pct: c.error_pct,
-            throughput_bps: c.throughput_bps,
           }
         })
       }
@@ -358,20 +360,18 @@ export function useMapData({
 
     dmaDataRef.current = nextDmaData
 
-    const matchCountry: any[] = ['match', ['to-string', ['id']]]
+    const matchCountry: unknown[] = ['match', ['to-string', ['id']]]
     Object.entries(countryScores).forEach(([a3, stats]) => {
       matchCountry.push(a3)
       matchCountry.push(getScoreColor(stats.sum / stats.count, metric))
     })
     matchCountry.push(countryFill(isDark))
 
-    /* eslint-disable @typescript-eslint/no-explicit-any */
     map.current.setPaintProperty(
       'countries',
       'fill-color',
-      (Object.keys(countryScores).length > 0 ? matchCountry : countryFill(isDark)) as any
+      (Object.keys(countryScores).length > 0 ? matchCountry : countryFill(isDark)) as MapFillColor
     )
-    /* eslint-enable @typescript-eslint/no-explicit-any */
 
     const source = map.current.getSource('heatmap') as maplibregl.GeoJSONSource
     source?.setData({ type: 'FeatureCollection', features })
@@ -379,11 +379,10 @@ export function useMapData({
       if (map.current.getLayer('dma-fill')) {
         const dmaEntries = Object.entries(dmaColors)
         if (dmaEntries.length > 0) {
-          const matchDma: any[] = ['match', ['get', 'dma_code']]
+          const matchDma: unknown[] = ['match', ['get', 'dma_code']]
           dmaEntries.forEach(([code, color]) => { matchDma.push(Number(code)); matchDma.push(color) })
           matchDma.push('transparent')
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          map.current.setPaintProperty('dma-fill', 'fill-color', matchDma as any)
+          map.current.setPaintProperty('dma-fill', 'fill-color', matchDma as MapFillColor)
         } else {
           map.current.setPaintProperty('dma-fill', 'fill-color', 'transparent')
         }

@@ -12,6 +12,21 @@ import { ReportShell } from '@/components/ReportShell'
 import { INTERVAL_SECONDS, type ChartInterval } from '@/lib/constants'
 import { ChartIntervalButtons } from '@/components/ChartIntervalButtons'
 import { type LucideIcon } from 'lucide-react'
+import type { FiltersPayload } from '@/types/filters'
+
+export interface ReportLayoutRenderProps {
+  config: ReportConfiguration
+  setChartInterval: (interval: ChartInterval) => void
+  trend: string
+  setTrend: (trend: string) => void
+  intervalButtons: React.ReactNode
+  bucketSeconds: number
+  startTime: string | null
+  endTime: string | null
+  timezone: string
+  activeServiceId: string | null
+  filterPayload: FiltersPayload
+}
 
 interface ReportLayoutProps {
   title: string
@@ -21,20 +36,7 @@ interface ReportLayoutProps {
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
   serviceId?: string | null
-  children: (props: {
-    config: ReportConfiguration
-    setChartInterval: (interval: ChartInterval) => void
-    trend: string
-    setTrend: (trend: string) => void
-    intervalButtons: React.ReactNode
-    bucketSeconds: number
-    startTime: string | null
-    endTime: string | null
-    timezone: string
-    activeServiceId: string | null
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    filterPayload: any
-  }) => React.ReactNode
+  children: (props: ReportLayoutRenderProps) => React.ReactNode
 }
 
 export function ReportLayout({

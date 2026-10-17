@@ -1,26 +1,27 @@
 'use client'
 
 import * as React from 'react'
+import type { Table } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 
 import { Input } from '@/components/ui/input'
 import { ColumnPicker } from './ColumnPicker'
 
-interface DataTableToolbarProps {
-  table: any
+interface DataTableToolbarProps<TData> {
+  table: Table<TData>
   title?: React.ReactNode
   searchKey?: string
   compactToolbar?: boolean
   extraToolbarContent?: React.ReactNode
 }
 
-export const DataTableToolbar = ({
+export const DataTableToolbar = <TData,>({
   table,
   title,
   searchKey,
   compactToolbar = false,
   extraToolbarContent,
-}: DataTableToolbarProps) => {
+}: DataTableToolbarProps<TData>) => {
   return (
     <div className={cn("flex items-center gap-4", compactToolbar ? "mb-2" : "py-4 px-4")}>
       {title && (

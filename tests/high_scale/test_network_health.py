@@ -148,17 +148,16 @@ def test_network_health_builds_full_clickhouse_payload():
     # Per-ASN NESTED heatmap (not the flat stub shape).
     assert resp.heatmap
     first = resp.heatmap[0]
-    assert set(first.keys()) >= {"asn", "label", "total_reqs", "buckets"}
-    assert isinstance(first["buckets"], list) and first["buckets"]
-    assert first["asn"] == 7922  # ordered by total_reqs desc
+    assert first.buckets
+    assert first.asn == 7922  # ordered by total_reqs desc
 
     # Leaderboard carries real per-ASN health + trend + percentiles + speed mix.
     assert resp.leaderboard
-    lead = {row["asn"]: row for row in resp.leaderboard}
-    assert lead[7922]["health_score_now"] is not None
-    assert lead[15169]["health_score_now"] < lead[7922]["health_score_now"]
-    assert lead[7922]["p95_rtt_us"] == 40000.0
-    assert lead[7922]["c_speed_mix"]
+    lead = {row.asn: row for row in resp.leaderboard}
+    assert lead[7922].health_score_now is not None
+    assert lead[15169].health_score_now < lead[7922].health_score_now
+    assert lead[7922].p95_rtt_us == 40000.0
+    assert lead[7922].c_speed_mix
 
     # World map + interned cities.
     assert resp.map_buckets
@@ -179,4 +178,4 @@ def test_network_quality_populates_by_region():
     resp = network_quality(_service(), _Req(), _Req.start_time, _Req.end_time)
     assert resp.by_region
     assert resp.by_country
-    assert resp.by_region[0]["rtt_ms"] > 0
+    assert resp.by_region[0].rtt_ms > 0

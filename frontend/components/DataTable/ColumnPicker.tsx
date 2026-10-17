@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import type { Table } from '@tanstack/react-table'
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -12,12 +13,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
-interface ColumnPickerProps {
-  table: any
+interface ColumnPickerProps<TData> {
+  table: Table<TData>
   compact?: boolean
 }
 
-export const ColumnPicker = ({ table, compact = false }: ColumnPickerProps) => {
+export const ColumnPicker = <TData,>({ table, compact = false }: ColumnPickerProps<TData>) => {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -30,8 +31,8 @@ export const ColumnPicker = ({ table, compact = false }: ColumnPickerProps) => {
       <DropdownMenuContent align="end" className="w-auto min-w-[200px]">
         {table
           .getAllColumns()
-          .filter((column: any) => column.getCanHide())
-          .map((column: any) => {
+          .filter((column) => column.getCanHide())
+          .map((column) => {
             return (
               <DropdownMenuCheckboxItem
                 key={column.id}
@@ -41,7 +42,7 @@ export const ColumnPicker = ({ table, compact = false }: ColumnPickerProps) => {
                   column.toggleVisibility(!!value)
                 }
               >
-                {(column.columnDef.meta as any)?.label ?? (typeof column.columnDef.header === 'string' ? column.columnDef.header : column.id)}
+                {column.columnDef.meta?.label ?? (typeof column.columnDef.header === 'string' ? column.columnDef.header : column.id)}
               </DropdownMenuCheckboxItem>
             )
           })}

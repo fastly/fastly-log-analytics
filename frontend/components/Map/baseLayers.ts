@@ -29,6 +29,11 @@ import type { GeometryCollection, Topology } from 'topojson-specification'
 
 import { countryFill, countryOutline } from './colors'
 
+declare const sampleMap: MapLibreMap
+
+/** What `Map.setPaintProperty` accepts for a fill colour: a colour string or a style expression. */
+export type MapFillColor = Parameters<typeof sampleMap.setPaintProperty<'fill-color'>>[2]
+
 export const WORLD_SOURCE_ID = 'world'
 export const COUNTRIES_LAYER_ID = 'countries'
 export const WORLD_TOPOJSON_URL = '/geo/world.topo.json'

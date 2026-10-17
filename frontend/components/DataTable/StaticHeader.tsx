@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { flexRender } from '@tanstack/react-table'
+import { flexRender, type Header } from '@tanstack/react-table'
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 
 import { TableHead } from '@/components/ui/table'
@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 // to support column resizing in readonly tables. Sortable columns still
 // expose the toggle button + ArrowUp/Down/UpDown icon; non-sortable columns
 // render the label without a focusable target.
-export const StaticTableHeader = ({ header }: { header: any }) => {
+export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
   const ariaSort: 'ascending' | 'descending' | 'none' | undefined =
     header.column.getCanSort()
       ? header.column.getIsSorted() === 'asc' ? 'ascending'

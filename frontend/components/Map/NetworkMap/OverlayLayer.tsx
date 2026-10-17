@@ -4,13 +4,18 @@ import React from 'react'
 import { METRIC_OPTIONS } from './controls'
 
 import { formatCount } from '@/lib/format'
+/** Per-city values behind a tooltip: the map-bucket cell fields, or a GeoJSON feature's properties. */
+export type CityTooltipData = Record<string, unknown>
+
 export interface TooltipInfo {
   clientX: number
   clientY: number
   city: string
   country?: string
-  cityData: Record<string, any>
+  cityData: CityTooltipData
 }
+
+const numberOrNull = (v: unknown): number | null => (typeof v === 'number' ? v : null)
 
 export function formatMetricValue(val: number | null | undefined, metric: string): string {
   if (val == null) return '—'
@@ -29,8 +34,8 @@ export function formatMetricValue(val: number | null | undefined, metric: string
 
 export function MapTooltip({ info, metric }: { info: TooltipInfo; metric: string }) {
   const metricLabel = METRIC_OPTIONS.find(m => m.value === metric)?.label ?? metric
-  const metricVal = metric === 'health_score' ? info.cityData.health_score : info.cityData[metric]
-  const reqs: number = info.cityData.reqs ?? 0
+  const metricVal = numberOrNull(metric === 'health_score' ? info.cityData.health_score : info.cityData[metric])
+  const reqs = numberOrNull(info.cityData.reqs) ?? 0
 
   // Flip to left side when cursor is in the right 30% of the viewport
   const flipLeft = info.clientX > window.innerWidth * 0.7
@@ -54,7 +59,7 @@ export function MapTooltip({ info, metric }: { info: TooltipInfo; metric: string
           <span className="text-[11px] text-muted-foreground">{metricLabel}</span>
           <span className="text-[11px] font-semibold tabular-nums">{formatMetricValue(metricVal, metric)}</span>
         </div>
-        {metric !== 'health_score' && info.cityData.health_score != null && (
+        {metric !== 'health_score' && numberOrNull(info.cityData.health_score) != null && (
           <div className="flex justify-between gap-4">
             <span className="text-[11px] text-muted-foreground">Health Score</span>
             <span className="text-[11px] font-semibold tabular-nums">{Number(info.cityData.health_score).toFixed(0)}/100</span>

@@ -12,7 +12,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { quantizeAnchor } from '@/lib/time-window'
 import { ReportLayout } from '@/components/ReportLayout'
 import { Skeleton } from '@/components/ui/skeleton'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Shield } from 'lucide-react'
 import { BotsSection } from './BotsSection'
 import { ProxyWatchdogSection } from './ProxyWatchdogSection'
@@ -161,8 +161,7 @@ function SecurityBody({
         },
       })
       if (error) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((error as any)?.detail || (error as any)?.message || "Failed to fetch security aggregates")
+        throw new Error(extractApiError(error))
       }
       return data
     },
@@ -227,7 +226,7 @@ function SecurityBody({
 
       <TabsContent value="proxy-watchdog">
         <ProxyWatchdogSection
-          data={securityQuery.data as any}
+          data={securityQuery.data}
           isLoading={securityQuery.isLoading}
           error={securityQuery.error ?? null}
           startTime={startTime}

@@ -50,7 +50,7 @@ describe('NetworkMap failure + empty states', () => {
   // response had no `buckets`. The empty state must render without throwing.
   test('UX-8: renders the empty state without throwing when buckets are absent', () => {
     expect(() =>
-      render(<NetworkMap data={{ available: true }} error={null} {...baseProps} />),
+      render(<NetworkMap data={{}} error={null} {...baseProps} />),
     ).not.toThrow()
     expect(screen.getByText('No map data available')).toBeInTheDocument()
   })
