@@ -40,6 +40,15 @@ def _rum_app() -> FastAPI:
     return app
 
 
+@pytest.fixture(autouse=True)
+def _reset_debug_visibility_settings():
+    """Share settings persist in the (per-worker) metadata DB; restore the defaults so a test that
+    opens the debug envelope cannot leak it into whatever test runs next on the same worker."""
+    yield
+    share_db.set_setting("query_debug_visibility", "disabled")
+    share_db.set_setting("api_call_debug_visibility", "disabled")
+
+
 @pytest.fixture
 def analyst_client():
     with TestClient(_rum_app()) as c:

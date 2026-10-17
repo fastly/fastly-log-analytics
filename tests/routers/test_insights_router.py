@@ -32,6 +32,7 @@ def _stub_insights() -> dict:
                         "baseline_label": "baseline",
                         "unit": "req",
                         "severity": "medium",
+                        "meta": {"spike_ratio": 6.0, "filters": {}},
                     }
                 ],
                 "category": "traffic",

@@ -16,6 +16,11 @@ with patch.dict(sys.modules, {"validate_credentials": Mock(name="operator_creden
 
 @pytest.fixture
 def report(monkeypatch):
+    # The report server memoizes live bootstrap/error/credential responses at module level;
+    # without a reset the first test's response is served from cache to every later one.
+    monkeypatch.setattr(report_server, "_BOOTSTRAP_CACHE", {})
+    monkeypatch.setattr(report_server, "_CRED_CACHE", None)
+    monkeypatch.setattr(report_server, "_MONITORED_ERRORS_CACHE", None)
     origins = []
     requests = []
     monkeypatch.setattr(
