@@ -514,3 +514,15 @@ def test_cleanup_skips_summary_recompute_when_nothing_trimmed():
     summary = metadata_db.get_ingested_files_status_summary(sid)
     assert summary["file_count"] == 42
     assert summary["total_rows"] == 4242
+
+
+def test_storage_stats_report_postgres_relation_sizes_for_every_table():
+    sid = "svc-stats-bytes"
+    _seed_usage_log(sid, 2)
+    _seed_cron_run(sid, 1)
+    stats = reconciliation.get_metadata_storage_stats(sid, force=True)
+    for table in ("usage_log", "cron_runs", "ingested_files"):
+        size = stats["tables"][table]["bytes"]
+        assert isinstance(size, int) and size >= 0, f"{table} bytes should be a pg_total_relation_size int"
+    assert stats["tables"]["cron_runs"]["bytes"] > 0
+    assert stats["db_bytes"] is None
