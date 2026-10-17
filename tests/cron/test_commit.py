@@ -397,3 +397,24 @@ def test_high_scale_failure_records_error_row_without_log_output(
     assert kwargs["error_message"] == "merge broke"
     assert kwargs["log_output"] is None
     assert kwargs["run_id"] == 33
+
+
+def test_high_scale_previous_commit_lookup_is_scoped_to_the_service(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: None)
+    monkeypatch.setattr("backend.core.ingest.finalize_committed_raw", lambda sid: {"delete_after": False, "deleted": 0})
+    meta_con = MagicMock()
+    meta_con.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=None)),
+        MagicMock(fetchone=MagicMock(return_value=(4,))),
+    ]
+    monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    sql, params = meta_con.execute.call_args_list[0].args
+    assert "service_id = ? AND task = 'commit'" in sql
+    assert params == ("svc-1",)
+    assert stub_cron_envelope["log"].call_args.kwargs["files_downloaded"] == 4
