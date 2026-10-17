@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
-
 from tests.conftest import MOCK_SERVICE_ID
 
 
@@ -26,18 +24,22 @@ def test_schema_response_serializes_schema_alias():
     assert SchemaResponse.model_validate(payload).model_dump(mode="json", by_alias=True) == payload
 
 
-def test_audit_logs_entries_encode_like_jsonable_encoder():
+def test_audit_logs_entries_keep_the_producer_row_shape():
     from backend.models.status_reads import AuditLogsResponse
 
-    payload = {
-        "total": 1,
-        "page": 1,
-        "per_page": 50,
-        "entries": [{"timestamp": dt.datetime(2026, 1, 1, tzinfo=dt.UTC), "event_type": "x"}],
-        "_debug_calls": [],
+    # ``metadata.get_audit_logs`` stringifies timestamps and json-decodes ``details``.
+    entry = {
+        "id": 7,
+        "timestamp": "2026-01-01 00:00:00+00:00",
+        "event_type": "provision",
+        "details": {"bucket": "b", "log_fields": {"groups": ["A"]}},
+        "actor": "ui",
+        "source": "local",
     }
+    payload = {"total": 1, "page": 1, "per_page": 50, "entries": [entry], "_debug_calls": []}
     dumped = AuditLogsResponse.model_validate(payload).model_dump(mode="json")
-    assert dumped["entries"] == [{"timestamp": "2026-01-01T00:00:00+00:00", "event_type": "x"}]
+    assert dumped["entries"] == [entry]
+    assert list(dumped["entries"][0]) == list(entry)
     assert dumped["_debug_calls"] == []
 
 

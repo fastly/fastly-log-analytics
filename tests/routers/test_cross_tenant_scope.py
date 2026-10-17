@@ -147,10 +147,22 @@ def test_views_list_allows_in_scope(app_with_session):
 
 
 def test_views_list_admin_unrestricted(app_with_session):
-    with patch("backend.repositories.views.get_views", return_value=[{"id": "v1"}]):
+    row = {
+        "id": "v1",
+        "service_id": "svc-anything",
+        "name": "My view",
+        "filters_json": "[]",
+        "time_range_type": None,
+        "start_time": None,
+        "end_time": None,
+        "page": None,
+        "created_at": "2026-01-01 00:00:00",
+    }
+    with patch("backend.repositories.views.get_views", return_value=[row]):
         with TestClient(app_with_session) as c:
             r = c.get("/api/views/svc-anything")
     assert r.status_code == 200
+    assert r.json() == [row]
 
 
 def test_views_create_rejects_unauthorized_analyst(app_with_session):

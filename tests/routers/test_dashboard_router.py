@@ -61,7 +61,7 @@ def test_dashboard_stays_ducklake_when_clickhouse_enabled(
     assert args["fields_filter"] == ["country"]
     if endpoint == "bundle" and sections is None:
         stub_top_bots.assert_called_once()
-        assert resp.json()["top_bots"]["bots"] == [{"name": "Googlebot", "count": 42}]
+        assert resp.json()["top_bots"]["bots"] == [{"name": "Googlebot", "request_count": 42}]
     else:
         stub_top_bots.assert_not_called()
 
@@ -166,7 +166,7 @@ def stub_aggregates(monkeypatch):
 def stub_top_bots(monkeypatch):
     stub = MagicMock(
         return_value={
-            "bots": [{"name": "Googlebot", "count": 42}],
+            "bots": [{"name": "Googlebot", "request_count": 42}],
             "ngwaf_bots": [],
             "section_timings": [{"section": "bots:query", "time_ms": 3.0}],
             "debug_queries": [{"sql": "SELECT bot", "time_ms": 0.5, "rows": 1, "caller": "bots_caller"}],
@@ -557,7 +557,7 @@ def test_bundle_bots_only_skips_aggregates_branch(client, stub_aggregates, stub_
     stub_top_bots.assert_called_once()
     stub_aggregates.assert_not_called()
     assert body.get("aggregates") is None
-    assert body["top_bots"]["bots"] == [{"name": "Googlebot", "count": 42}]
+    assert body["top_bots"]["bots"] == [{"name": "Googlebot", "request_count": 42}]
 
 
 def test_bundle_multi_section_core_plus_bots_fires_both(client, stub_aggregates, stub_top_bots):
