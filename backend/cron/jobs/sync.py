@@ -24,6 +24,7 @@ from datetime import UTC
 from typing import Any
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
     _check_disk_space,
     _claim_heavy_refresh,
@@ -1302,7 +1303,7 @@ def _run_gap_heal(
         logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — gap_heal refused.", service_id)
         return
 
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
     from backend.utils.active_requests import should_defer_cron
 
     src = get_source_for_service(service_id)
@@ -1312,145 +1313,101 @@ def _run_gap_heal(
     if not force and should_defer_cron("gap_heal", service_id):
         return
 
-    try:
-        if run_id is None:
-            run_id = start_cron_run(src, "gap_heal")
-    except RuntimeError as e:
-        logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: skipping — %s", service_id, e)
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="gap_heal")
     _display = _display_label(src, service_id)
 
-    start_time_exec = time.time()
-    try:
-        from fastapi import HTTPException
-
-        from backend.routers.admin import compute_log_accounting
-
+    with cron_run(
+        service_id,
+        "gap_heal",
+        source=src,
+        run_id=run_id,
+        error_summary="Gap-heal evaluation crashed",
+        skip_log_prefix="gap_heal",
+        finalize_duration=True,
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
         try:
-            result = compute_log_accounting(src, hours=24, by="hour")
-        except HTTPException as exc:
-            if "fastly_stats_failed" in str(exc.detail):
-                summary = "Fastly stats unavailable for service (skipped)"
-                log_cron_run(
-                    src,
-                    "gap_heal",
-                    time.time() - start_time_exec,
-                    "success",
-                    summary=summary,
-                    run_id=run_id,
-                    log_output=_extract_log_text(run_id),
-                )
+            from fastapi import HTTPException
+
+            from backend.routers.admin import compute_log_accounting
+
+            try:
+                result = compute_log_accounting(src, hours=24, by="hour")
+            except HTTPException as exc:
+                if "fastly_stats_failed" in str(exc.detail):
+                    summary = "Fastly stats unavailable for service (skipped)"
+                    run.success(summary)
+                    _log_and_add_progress(
+                        run_id,
+                        service_id,
+                        job_name="gap_heal",
+                        event={"type": "done", "message": summary},
+                    )
+                    logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: %s", service_id, summary)
+                    return
+                raise
+
+            sustained = result.get("sustained_loss")
+            if sustained is None:
+                run.success("No sustained loss detected")
                 _log_and_add_progress(
                     run_id,
                     service_id,
                     job_name="gap_heal",
-                    event={"type": "done", "message": summary},
+                    event={"type": "done", "message": "No sustained loss detected"},
                 )
-                logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: %s", service_id, summary)
                 return
-            raise
 
-        sustained = result.get("sustained_loss")
-        if sustained is None:
-            log_cron_run(
-                src,
-                "gap_heal",
-                time.time() - start_time_exec,
-                "success",
-                summary="No sustained loss detected",
-                run_id=run_id,
-                log_output=_extract_log_text(run_id),
+            # Sustained loss observed — apply severity-scaled throttle to the
+            # actual heal trigger. Worse loss = shorter throttle + bigger sweep
+            # budget. See ``_gap_heal_severity`` for the bands.
+            band = _gap_heal_severity(sustained.max_gap_pct, sustained.total_lost_lines)
+            # Module-global lookup at call time so patches on
+            # ``backend.cron.jobs.sync._last_successful_gap_heal_trigger``
+            # intercept the call.
+            last_heal = _last_successful_gap_heal_trigger(service_id)
+            if not force and band.throttle_hours > 0 and last_heal is not None:
+                elapsed_hours = (time.time() - last_heal) / 3600.0
+                if elapsed_hours < band.throttle_hours:
+                    msg = (
+                        f"Sustained loss detected ({sustained.n_buckets} bucket(s), "
+                        f"max gap {sustained.max_gap_pct:.1%}, "
+                        f"{sustained.total_lost_lines} lost line(s), severity={band.name}) "
+                        f"— throttled, last heal {elapsed_hours:.1f}h ago "
+                        f"(< {band.throttle_hours:g}h)"
+                    )
+                    run.warn(msg)
+                    _log_and_add_progress(
+                        run_id, service_id, job_name="gap_heal", event={"type": "done", "message": msg}
+                    )
+                    return
+
+            msg = (
+                f"Sustained loss detected ({sustained.n_buckets} bucket(s) "
+                f"from {sustained.started_at}, max gap {sustained.max_gap_pct:.1%}, "
+                f"{sustained.total_lost_lines} lost line(s), severity={band.name}) — "
+                f"triggering full_sweep (max_files={band.sweep_max_files}, "
+                f"max_seconds={band.sweep_max_seconds})"
             )
-            _log_and_add_progress(
-                run_id,
+            logger.warning("🩹 \x1b[33m[gap_heal]\x1b[0m %s: %s", _display, msg)
+            _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "status", "message": msg})
+            run.warn(msg)
+            # Mark heal trigger BEFORE invoking the sweep so a long-running sweep
+            # doesn't itself trip a second gap_heal tick into re-triggering. Both
+            # resolve from module globals at call time so patches at
+            # ``backend.cron.jobs.sync._mark_gap_heal_triggered`` /
+            # ``backend.cron.jobs.sync._run_full_sweep`` keep intercepting.
+            _mark_gap_heal_triggered(service_id)
+            _run_full_sweep(
                 service_id,
-                job_name="gap_heal",
-                event={"type": "done", "message": "No sustained loss detected"},
+                max_files=band.sweep_max_files,
+                max_seconds=band.sweep_max_seconds,
+                force=force,
             )
-            return
-
-        # Sustained loss observed — apply severity-scaled throttle to the
-        # actual heal trigger. Worse loss = shorter throttle + bigger sweep
-        # budget. See ``_gap_heal_severity`` for the bands.
-        band = _gap_heal_severity(sustained.max_gap_pct, sustained.total_lost_lines)
-        # Module-global lookup at call time so patches on
-        # ``backend.cron.jobs.sync._last_successful_gap_heal_trigger``
-        # intercept the call.
-        last_heal = _last_successful_gap_heal_trigger(service_id)
-        if not force and band.throttle_hours > 0 and last_heal is not None:
-            elapsed_hours = (time.time() - last_heal) / 3600.0
-            if elapsed_hours < band.throttle_hours:
-                msg = (
-                    f"Sustained loss detected ({sustained.n_buckets} bucket(s), "
-                    f"max gap {sustained.max_gap_pct:.1%}, "
-                    f"{sustained.total_lost_lines} lost line(s), severity={band.name}) "
-                    f"— throttled, last heal {elapsed_hours:.1f}h ago "
-                    f"(< {band.throttle_hours:g}h)"
-                )
-                log_cron_run(
-                    src,
-                    "gap_heal",
-                    time.time() - start_time_exec,
-                    "warning",
-                    summary=msg,
-                    run_id=run_id,
-                    log_output=_extract_log_text(run_id),
-                )
-                _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "done", "message": msg})
-                return
-
-        msg = (
-            f"Sustained loss detected ({sustained.n_buckets} bucket(s) "
-            f"from {sustained.started_at}, max gap {sustained.max_gap_pct:.1%}, "
-            f"{sustained.total_lost_lines} lost line(s), severity={band.name}) — "
-            f"triggering full_sweep (max_files={band.sweep_max_files}, "
-            f"max_seconds={band.sweep_max_seconds})"
-        )
-        logger.warning("🩹 \x1b[33m[gap_heal]\x1b[0m %s: %s", _display, msg)
-        _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "status", "message": msg})
-        log_cron_run(
-            src,
-            "gap_heal",
-            time.time() - start_time_exec,
-            "warning",
-            summary=msg,
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        # Mark heal trigger BEFORE invoking the sweep so a long-running sweep
-        # doesn't itself trip a second gap_heal tick into re-triggering. Both
-        # resolve from module globals at call time so patches at
-        # ``backend.cron.jobs.sync._mark_gap_heal_triggered`` /
-        # ``backend.cron.jobs.sync._run_full_sweep`` keep intercepting.
-        _mark_gap_heal_triggered(service_id)
-        _run_full_sweep(
-            service_id,
-            max_files=band.sweep_max_files,
-            max_seconds=band.sweep_max_seconds,
-            force=force,
-        )
-    except Exception as e:
-        log_cron_run(
-            src,
-            "gap_heal",
-            time.time() - start_time_exec,
-            "error",
-            error_message=str(e),
-            summary="Gap-heal evaluation crashed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        logger.exception("[gap_heal] %s: unexpected error", service_id)
-    finally:
-        end_progress(run_id)
-        from backend.cron.jobs._common import finalize_cron_duration
-
-        finalize_cron_duration(src, run_id, start_time_exec)
+        except Exception as e:
+            run.fail("Gap-heal evaluation crashed", error_message=str(e))
+            logger.exception("[gap_heal] %s: unexpected error", service_id)
 
 
 # Re-export for backward compatibility
