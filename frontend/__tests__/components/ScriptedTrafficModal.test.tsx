@@ -7,6 +7,7 @@
  *     hands the callback a ScriptedTrafficData object mapped from item.meta.
  *   - ScriptedTrafficModal surfaces the regularity evidence.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
@@ -17,11 +18,7 @@ import type { ScriptedTrafficData } from '@/components/Insights/types'
 import type { InsightCardData } from '@/types/api'
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 afterEach(() => cleanup())

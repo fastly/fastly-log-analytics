@@ -13,6 +13,7 @@
  * resolve with a deterministic SessionDetailResponse shape and wait for
  * the timeline to render.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
@@ -63,11 +64,7 @@ vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
 // --- helpers ------------------------------------------------------------
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 afterEach(() => {

@@ -15,6 +15,7 @@
  * Focus: filter-chip rendering and store interactions. The date-picker
  * + compare-mode flows are out of scope (covered by Playwright E2E).
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, cleanup, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
@@ -71,11 +72,7 @@ vi.mock('@/components/FilterBar/ViewSelector', () => ({
 }))
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 afterEach(() => cleanup())

@@ -33,7 +33,7 @@ if (typeof window !== 'undefined') {
   // already handles gracefully in non-browser environments.
   window.HTMLCanvasElement.prototype.getContext = function () {
     return null
-  } as unknown as HTMLCanvasElement['getContext']
+  }
 }
 
 // jsdom can't perform real navigation, so any code path that calls
@@ -64,7 +64,7 @@ if (typeof window !== 'undefined') {
       configurable: true,
       get: () => realLocation[key],
       // href assignment navigates; swallow it. Other components stay live.
-      set: key === 'href' ? () => {} : (v: string) => { (realLocation as unknown as Record<string, string>)[key] = v },
+      set: key === 'href' ? () => {} : (v: string) => { Reflect.set(realLocation, key, v) },
     })
   }
   Object.defineProperty(window, 'location', { configurable: true, writable: true, value: locationStub })

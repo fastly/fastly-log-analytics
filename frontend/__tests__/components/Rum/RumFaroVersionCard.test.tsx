@@ -12,6 +12,7 @@
  *   - completing an upgrade (via the SSE stream) invalidates the versions
  *     query so the card reflects the new pin without a manual reload
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, afterEach, beforeEach, beforeAll, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -25,11 +26,7 @@ import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard'
 
 beforeAll(() => {
   // Radix/base-ui Select needs these jsdom shims to open + select an option.
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
   window.HTMLElement.prototype.hasPointerCapture = vi.fn() as never
   window.HTMLElement.prototype.releasePointerCapture = vi.fn() as never
   window.HTMLElement.prototype.scrollIntoView = vi.fn() as never

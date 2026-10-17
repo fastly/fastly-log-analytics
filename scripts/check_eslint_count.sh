@@ -93,32 +93,45 @@ CEILING=0
 SCOPE=(app components hooks lib stores)
 
 # ESLint exits non-zero when it reports errors; capture the JSON anyway.
-ESLINT_JSON="$(npx --no-install eslint "${SCOPE[@]}" -f json 2>/dev/null || true)"
+# Test-side ceiling: same gate over the test/e2e dirs. Ratchet to 0.
+TEST_CEILING=398
+TEST_SCOPE=(__tests__ tests e2e vitest.setup.ts)
 
-if [[ -z "$ESLINT_JSON" ]]; then
-    echo "ERROR: eslint produced no JSON output (is the frontend dependency tree installed?)" >&2
-    exit 2
-fi
+count_errors() {
+    local json
+    json="$(npx --no-install eslint "$@" -f json 2>/dev/null || true)"
+    if [[ -z "$json" ]]; then
+        echo "ERROR: eslint produced no JSON output (is the frontend dependency tree installed?)" >&2
+        exit 2
+    fi
+    local n
+    n="$(printf '%s' "$json" | node -e \
+        'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(a.reduce((n,f)=>n+(f.errorCount||0),0))}catch(e){process.exit(3)}})')"
+    if [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: could not parse eslint error count" >&2
+        exit 2
+    fi
+    echo "$n"
+}
 
-COUNT="$(printf '%s' "$ESLINT_JSON" | node -e \
-    'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(a.reduce((n,f)=>n+(f.errorCount||0),0))}catch(e){process.exit(3)}})')"
+check_scope() {
+    local label="$1" ceiling="$2"
+    shift 2
+    local count
+    count="$(count_errors "$@")"
+    echo "eslint errors ($label: $*): $count (ceiling: $ceiling)"
+    if (( count > ceiling )); then
+        echo "FAIL: eslint error count rose above the ceiling — new lint violation(s) introduced." >&2
+        echo "Fix the new violation(s). To see them: cd frontend && npx eslint $*" >&2
+        echo "(Do NOT raise the ceiling to pass. Lower it when you remove violations.)" >&2
+        exit 1
+    fi
+    if (( count < ceiling )); then
+        echo "NOTE: count ($count) is below the ceiling ($ceiling) — ratchet it down to $count in this PR." >&2
+    fi
+}
 
-if [[ -z "$COUNT" || ! "$COUNT" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: could not parse eslint error count" >&2
-    exit 2
-fi
-
-echo "eslint errors (${SCOPE[*]}): $COUNT (ceiling: $CEILING)"
-
-if (( COUNT > CEILING )); then
-    echo "FAIL: eslint error count rose above the ceiling — new lint violation(s) introduced." >&2
-    echo "Fix the new violation(s). To see them: cd frontend && npx eslint ${SCOPE[*]}" >&2
-    echo "(Do NOT raise CEILING to pass. Lower it when you remove violations.)" >&2
-    exit 1
-fi
-
-if (( COUNT < CEILING )); then
-    echo "NOTE: count ($COUNT) is below the ceiling ($CEILING) — ratchet CEILING down to $COUNT in this PR." >&2
-fi
+check_scope production "$CEILING" "${SCOPE[@]}"
+check_scope tests "$TEST_CEILING" "${TEST_SCOPE[@]}"
 
 echo "OK"

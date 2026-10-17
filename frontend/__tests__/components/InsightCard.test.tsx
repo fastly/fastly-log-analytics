@@ -12,6 +12,7 @@
  * Mocks: the modal children (Help, Data, ImpossibleDistance) are stubbed
  * because their internals (maplibre, fetch hooks) aren't relevant here.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
@@ -21,11 +22,7 @@ import { InsightCard } from '@/components/Insights/InsightCard'
 import type { InsightCardData } from '@/types/api'
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 // Project's vitest setup doesn't auto-cleanup between tests, so do it manually.
