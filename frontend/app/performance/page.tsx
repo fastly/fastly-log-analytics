@@ -23,13 +23,11 @@ import PerformanceClient from './_sections/PerformanceClient'
 // the WRONG entry whenever they differ, and the client's own fetch (for the
 // URL's real service) then silently replaces that wrong seed's data with no
 // loading state (keepPreviousData) — a visible wrong-service data flash.
-// rangeToken='24h', anchor=quantizeAnchor(snapped-end ?? now) on
-// the 60s grid — snapped to bootstrap.log_extents when the service's latest log
-// is >15min stale (lib/log-extents-snap.ts), otherwise just `now` — filterPayload
+// rangeToken='24h', anchor=quantizeAnchor(now) on the 60s grid (the stale-latest-log
+// snap to bootstrap.log_extents was removed) — filterPayload
 // ={}, sort='p99' (the literal default the page hard-codes). The performance keys
-// carry NO bucket element. Divergence: the rare minute-boundary straddle, plus a
-// rare 15-minute-staleness-boundary straddle — both self-heal via one client
-// refetch, never a leak/crash.
+// carry NO bucket element. Divergence: the rare minute-boundary straddle, which
+// self-heals via one client refetch, never a leak/crash.
 //
 // force-dynamic because the fetchers read cookies + the Caddy marker via
 // next/headers. Failure path: fetchPerformanceServerSide returns null (any

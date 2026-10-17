@@ -21,15 +21,10 @@
 // x-axis range agree — the old 'auto' resolved to 30d for mature services and
 // squashed the bars), anchor=quantizeAnchor(now) on the 60s grid, filterPayload={},
 // bucketSeconds=3600 (default 24h span → "1 hour" → INTERVAL_SECONDS['1 hour']).
-// anchor=quantizeAnchor(snapped-end ?? now): when bootstrap.log_extents shows
-// the service's latest log is >15min stale, this snaps to the same
-// [latest-24h, latest] window FilterBar's client-side autoSetRange would land
-// on (lib/log-extents-snap.ts — shared with FilterBar so both sides make the
-// identical decision); otherwise it's just `now`, unchanged from before.
-// Divergence cases: the rare minute-boundary straddle (unchanged), plus a new
-// rare 15-minute-staleness-boundary straddle where SSR and the client
-// disagree on stale-vs-fresh — both self-heal via one client refetch, never a
-// leak/crash (identical risk class to origin/insights).
+// anchor=quantizeAnchor(now): it no longer snaps to bootstrap.log_extents (the
+// stale-latest-log snap was removed with lib/log-extents-snap.ts). The only
+// divergence is the rare minute-boundary straddle, which self-heals via one
+// client refetch, never a leak/crash (identical risk class to origin/insights).
 
 import { quantizeAnchor } from '@/lib/time-window'
 

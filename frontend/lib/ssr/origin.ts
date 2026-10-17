@@ -29,14 +29,9 @@
 // degrades to the status-quo cold fetch for that one load; it never leaks and
 // never crashes — identical risk class to insights' band-boundary race.
 //
-// anchor also snaps to bootstrap.log_extents when the service's latest log is
-// >15min stale (lib/log-extents-snap.ts — shared with FilterBar's client-side
-// autoSetRange decision, so both sides land on the identical [latest-24h,
-// latest] window instead of the naive `now` window); otherwise unchanged. This
-// adds a second, analogous rare divergence: SSR and client disagreeing on
-// stale-vs-fresh right at the 15-minute boundary — same self-healing, one-
-// refetch, never-a-leak-or-crash characterization as the minute-boundary race
-// above.
+// anchor = quantizeAnchor(now): it no longer snaps to bootstrap.log_extents (the
+// stale-latest-log snap and lib/log-extents-snap.ts were removed), so the only
+// SSR/client divergence is the minute-boundary race above.
 //
 // The body mirrors OriginReportContent's client POST EXACTLY (the section list,
 // limits, bucket, metric/percentile defaults) so the backend produces the same

@@ -38,12 +38,10 @@ import OriginClient from './_sections/OriginClient'
 //                       seed's data with no loading state (keepPreviousData)
 //                       — a visible wrong-service data flash.
 //   - rangeToken      = '24h'  (no ?range= → filterStore.relativeRange is null)
-//   - anchor          = quantizeAnchor(snapped-end ?? now) on the 60s grid — snaps
-//                       to bootstrap.log_extents when the service's latest log is
-//                       >15min stale (lib/log-extents-snap.ts); otherwise `now`.
-//                       Divergence: the rare minute-boundary straddle, plus a rare
-//                       15-minute-staleness-boundary straddle — both self-heal via
-//                       one client refetch, never a leak/crash.
+//   - anchor          = quantizeAnchor(now) on the 60s grid (the stale-latest-log
+//                       snap to bootstrap.log_extents was removed). Divergence: the
+//                       rare minute-boundary straddle, which self-heals via one
+//                       client refetch, never a leak/crash.
 //   - filterPayload   = {}      (no filters on a cold load)
 //   - bucketMinutes   = 60      (the default 24h display span → "1 hour")
 //   - originMetric    = 'ttfb', originPercentile = 'p95'  (useState defaults)
