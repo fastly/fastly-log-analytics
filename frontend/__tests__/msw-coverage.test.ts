@@ -61,8 +61,6 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/assets/aggregates',
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
-  // Backend-only high-scale sizing endpoint; no frontend caller yet.
-  'GET /api/admin/high-scale/retention-recommendation',
 
   // High-Scale request-facts aliases of POST /api/high-scale/services/:service_id/request-facts
   // (which has a handler); the page hook only calls the service-scoped path.
