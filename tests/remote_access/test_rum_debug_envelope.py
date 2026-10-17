@@ -112,11 +112,24 @@ _HS_ANALYTICS = {
     "pageview_count": 3,
     "interaction_count": 0,
     "error_count": 0,
-    "vitals": {},
+    "vitals": {
+        "lcp": {"p75": 2.1, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
+        "cls": {"p75": 0.05, "distribution": {"good": 90, "needs_improvement": 8, "poor": 2}},
+        "inp": {"p75": 180, "distribution": {"good": 85, "needs_improvement": 10, "poor": 5}},
+        "fid": {"p75": 12.0, "fcp": 1.1, "ttfb": 0.4},
+    },
     "worst_pages": [],
     "errors": [],
-    "trends": {},
-    "environments": {},
+    "trends": {
+        "timestamps": ["2026-10-17T00:00:00Z"],
+        "lcp": [2.1],
+        "cls": [0.05],
+        "error_rate": [0.0],
+        "pageviews": [3],
+        "interactions": [0],
+        "errors": [0],
+    },
+    "environments": {"browsers": {}, "os": {}, "devices": {}},
 }
 
 
