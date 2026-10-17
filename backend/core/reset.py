@@ -348,6 +348,33 @@ def reset_service_logs(
             pass
 
 
+def _pause_rum_flags(cfg: dict) -> tuple[bool | None, bool] | None:
+    """Disable RUM in ``cfg`` for the duration of a reset; return what to restore, or None if already off.
+
+    Returns ``(original rum.enabled or None when the key was absent, original root rum_enabled)``.
+    """
+    rum_cfg = cfg.setdefault("rum", {})
+    original_rum = rum_cfg.get("enabled")
+    original_root = bool(cfg.get("rum_enabled", False))
+    if not (original_rum or original_root):
+        return None
+    rum_cfg["enabled"] = False
+    cfg["rum_enabled"] = False
+    return original_rum, original_root
+
+
+def _restore_rum_flags(cfg: dict, paused: tuple[bool | None, bool]) -> None:
+    """Undo :func:`_pause_rum_flags`. An absent ``rum.enabled`` is removed again, never written as False:
+    ``is_rum_enabled`` gives that key precedence over the root flag, so a fabricated False disables RUM."""
+    original_rum, original_root = paused
+    rum_cfg = cfg.setdefault("rum", {})
+    if original_rum is None:
+        rum_cfg.pop("enabled", None)
+    else:
+        rum_cfg["enabled"] = original_rum
+    cfg["rum_enabled"] = original_root
+
+
 def reset_service_rum(
     service_id: str,
     *,
@@ -381,8 +408,7 @@ def reset_service_rum(
         raise RuntimeError("Another operation is in progress for this service. Please wait and try again.")
 
     paused_cron = False
-    original_rum_enabled = False
-    original_rum_enabled_root = False
+    paused_flags: tuple[bool | None, bool] | None = None
 
     try:
         if metadata_db.cron_busy(service_id):
@@ -393,13 +419,8 @@ def reset_service_rum(
         # Pause background RUM sync/commit ticks
         yield {"type": "status", "message": "Pausing background RUM sync for this service..."}
         cfg = svcconfig.load_config(service_id) or {}
-        rum_cfg = cfg.setdefault("rum", {})
-        original_rum_enabled = rum_cfg.get("enabled", False)
-        original_rum_enabled_root = cfg.get("rum_enabled", False)
-
-        if original_rum_enabled or original_rum_enabled_root:
-            rum_cfg["enabled"] = False
-            cfg["rum_enabled"] = False
+        paused_flags = _pause_rum_flags(cfg)
+        if paused_flags is not None:
             svcconfig.save_config(service_id, cfg)
             paused_cron = True
             if reload_scheduler:
@@ -512,9 +533,8 @@ def reset_service_rum(
         if paused_cron:
             try:
                 cfg = svcconfig.load_config(service_id) or {}
-                rum_cfg = cfg.setdefault("rum", {})
-                rum_cfg["enabled"] = original_rum_enabled
-                cfg["rum_enabled"] = original_rum_enabled_root
+                if paused_flags is not None:
+                    _restore_rum_flags(cfg, paused_flags)
                 svcconfig.save_config(service_id, cfg)
                 if reload_scheduler:
                     reload_scheduler()

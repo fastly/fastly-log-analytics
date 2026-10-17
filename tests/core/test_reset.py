@@ -342,3 +342,41 @@ def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_pa
         "Removed 4 local cache files so far...",
     ]
     assert not os.path.exists(tmp_path)
+
+
+def test_rum_pause_and_restore_flags_round_trip_without_inventing_rum_enabled():
+    """Restoring after a RUM reset must not create ``rum.enabled=False`` when the key never existed:
+    ``is_rum_enabled`` gives ``rum.enabled`` precedence, so a fabricated False silently disables RUM."""
+    from backend.config import is_rum_enabled
+    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
+
+    cfg = {"rum_enabled": True, "rum": {"faro_version": "1.2.3"}}
+    assert is_rum_enabled(cfg)
+
+    paused = _pause_rum_flags(cfg)
+    assert paused is not None
+    assert not is_rum_enabled(cfg)
+
+    _restore_rum_flags(cfg, paused)
+    assert "enabled" not in cfg["rum"]
+    assert cfg["rum_enabled"] is True
+    assert is_rum_enabled(cfg)
+
+
+def test_rum_pause_restore_keeps_an_explicit_rum_enabled_value():
+    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
+
+    cfg = {"rum_enabled": False, "rum": {"enabled": True}}
+    paused = _pause_rum_flags(cfg)
+    assert paused is not None
+    _restore_rum_flags(cfg, paused)
+    assert cfg["rum"]["enabled"] is True
+    assert cfg["rum_enabled"] is False
+
+
+def test_rum_pause_is_a_no_op_when_rum_is_not_enabled():
+    from backend.core.reset import _pause_rum_flags
+
+    cfg: dict = {"rum": {}}
+    assert _pause_rum_flags(cfg) is None
+    assert cfg == {"rum": {}}
