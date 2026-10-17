@@ -187,6 +187,8 @@ class HealthSnapshotResponse(BaseModel):
     # SRE-03: services+tasks whose latest terminal cron run errored — the
     # cross-service glance the ADR-09 §2.3 runbook assumes exists.
     recent_cron_failures: list[HealthCronFailure] = Field(default_factory=list)
+    # True once this process ran a config write without the cross-process flock (read-only FS / no fcntl).
+    config_lock_degraded: bool = False
     # SRE-20: effective log/exporter mode so an incident grep is informed.
     observability: HealthObservability | None = None
     # SRE-11: freshness of the off-VM service-config backup (None = no marker).

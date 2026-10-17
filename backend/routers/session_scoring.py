@@ -437,11 +437,9 @@ def scoring_enable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring_cfg = cfg.get("scoring") or {}
-    scoring_cfg["enabled"] = True
-    cfg["scoring"] = scoring_cfg
-    svcconfig.save_config(service_id, cfg)
+    svcconfig.mutate_config(
+        service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
+    )
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_scoring
     from backend.provision.orchestrator import run_with_events
@@ -522,10 +520,11 @@ def scoring_disable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    if "scoring" in cfg:
-        cfg["scoring"]["enabled"] = False
-    svcconfig.save_config(service_id, cfg)
+    def _disable(c: dict) -> None:
+        if "scoring" in c:
+            c["scoring"]["enabled"] = False
+
+    svcconfig.mutate_config(service_id, _disable)
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_scoring
     from backend.provision.orchestrator import run_with_events

@@ -35,6 +35,11 @@ Each package's `__init__.py` re-exports the full public surface for backward com
 ### The Unified Logs View
 To provide real-time query speed without waiting for a commit, the DuckDB `logs` view dynamically stitches the committed DuckLake table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
 
+### Service Config Locking & the cid Salt
+Service configs are plain JSON files under the configs volume. Every read-modify-write goes through `backend.config.mutate_config` (fresh read, mutate in place, atomic save), which holds a per-service `flock` sidecar lock so uvicorn workers, Celery workers and pods sharing the volume serialize. Lock acquisition is non-blocking with bounded backoff (5 s, then `ConfigLockTimeout`), re-entrant per thread (a `mutate` callback may call `save_config`/`mutate_config` for the same service; the outer save lands last), and `delete_config` takes the same lock. If the lock cannot be taken at all (read-only filesystem, no `fcntl`) writes proceed unlocked, an error is logged once per process, and `/api/admin/health` reports `config_lock_degraded: true`.
+
+The pseudonymous-client-id (`cid`) salt is **write-once**. `save_config` re-adopts the persisted salt on every write, so a stale writer or a hand-edited payload cannot re-key every cid. If the config file exists but cannot be read, the save is aborted (`CidSaltReadError`) rather than minting a new salt. Rotation is therefore intentionally impossible through `save_config`; it requires the explicit, audited admin helper `backend.core.duckdb.rotate_cid_salt(service_id)`, which writes a `cid_salt_rotated` audit entry and is not exposed as a route. Rotating changes every cid hash from that point on (historical rows keep the old hashes), so treat it as a deliberate privacy reset.
+
 ---
 
 ## 2. Ingest Pipeline & Atomic Guarantees

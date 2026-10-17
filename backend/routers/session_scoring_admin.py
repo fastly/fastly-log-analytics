@@ -1245,11 +1245,9 @@ def scoring_matrix_versions_restore(
         logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
 
     # Update cfg.scoring.matrix_version so /scoring/status reflects the rollback.
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        scoring = cfg.setdefault("scoring", {})
-        scoring["matrix_version"] = version
-        svcconfig.save_config(service_id, cfg)
+    cfg = svcconfig.mutate_config(
+        service_id, lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", version)
+    )
 
     # Push the FOS-restored matrix into the scoring_matrix KV Store so the live
     # scorer rolls back too. _write_matrix_to_kv resolves via the FOS chain

@@ -1699,7 +1699,16 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
         },
     }
     saved: dict = {}
-    monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
+
+    def _fake_mutate(sid, mutate, **kwargs):
+        cfg = with_config.get(sid)
+        if cfg is None:
+            return None
+        mutate(cfg)
+        saved.update(sid=sid, cfg=cfg)
+        return cfg
+
+    monkeypatch.setattr("backend.config.mutate_config", _fake_mutate)
 
     # Create a real on-disk tenant matrix so we can verify it gets
     # unlinked. The endpoint derives matrix_<sid>.json from _MATRIX_PATH

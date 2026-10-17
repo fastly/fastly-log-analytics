@@ -70,8 +70,17 @@ def config_store(monkeypatch):
     def fake_save(service_id, new_cfg):
         store[service_id] = copy.deepcopy(new_cfg)
 
+    def fake_mutate(service_id, mutate, **kwargs):
+        cfg = fake_load(service_id)
+        if cfg is None:
+            return None
+        mutate(cfg)
+        fake_save(service_id, cfg)
+        return cfg
+
     monkeypatch.setattr("backend.config.load_config", fake_load)
     monkeypatch.setattr("backend.config.save_config", fake_save)
+    monkeypatch.setattr("backend.config.mutate_config", fake_mutate)
     return store
 
 

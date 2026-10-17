@@ -163,9 +163,9 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
                 # reporting drift forever after this self-heal, even though
                 # it just successfully reconciled. Mirrors the refresh
                 # upgrade_faro_version does after its own activation.
-                cfg = svcconfig.load_config(service_id) or cfg
-                cfg["rum_vcl_sha"] = rum_vcl_fingerprint(service_id, cfg)
-                svcconfig.save_config(service_id, cfg)
+                svcconfig.mutate_config(
+                    service_id, lambda c: c.__setitem__("rum_vcl_sha", rum_vcl_fingerprint(service_id, c))
+                )
             except Exception:
                 logger.warning(
                     "Faro default-version VCL reconcile failed for %s "
@@ -214,11 +214,10 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
                 # Write the attempt timestamp even on failure — otherwise a
                 # persistently failing upstream turns into a per-tick
                 # download storm instead of once per window.
-                cfg = svcconfig.load_config(service_id) or cfg
-                rum_cfg = dict(cfg.get("rum") or {})
-                rum_cfg["faro_last_upstream_check"] = now
-                cfg["rum"] = rum_cfg
-                svcconfig.save_config(service_id, cfg)
+                svcconfig.mutate_config(
+                    service_id,
+                    lambda c: c.__setitem__("rum", {**(c.get("rum") or {}), "faro_last_upstream_check": now}),
+                )
 
             if drift:
                 report(f"Faro upstream drift detected for v{pinned_version}, re-syncing")

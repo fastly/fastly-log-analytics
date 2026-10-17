@@ -9543,6 +9543,11 @@ export interface components {
             scheduler_last_tick_age_s?: number | null;
             /** Recent Cron Failures */
             recent_cron_failures?: components["schemas"]["HealthCronFailure"][];
+            /**
+             * Config Lock Degraded
+             * @default false
+             */
+            config_lock_degraded: boolean;
             observability?: components["schemas"]["HealthObservability"] | null;
             config_backup?: components["schemas"]["HealthConfigBackup"] | null;
             /** Fos */

@@ -73,14 +73,18 @@ def cmcd_enable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    cfg["cmcd"] = {
-        "enabled": True,
-        "mode": mode,
-        "version": version,
-        "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-    }
-    svcconfig.save_config(service_id, cfg)
+    svcconfig.mutate_config(
+        service_id,
+        lambda c: c.__setitem__(
+            "cmcd",
+            {
+                "enabled": True,
+                "mode": mode,
+                "version": version,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            },
+        ),
+    )
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_cmcd
     from backend.provision.orchestrator import run_with_events
@@ -124,10 +128,11 @@ def cmcd_disable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    if "cmcd" in cfg:
-        cfg["cmcd"]["enabled"] = False
-    svcconfig.save_config(service_id, cfg)
+    def _disable(c: dict) -> None:
+        if "cmcd" in c:
+            c["cmcd"]["enabled"] = False
+
+    svcconfig.mutate_config(service_id, _disable)
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_cmcd
     from backend.provision.orchestrator import run_with_events

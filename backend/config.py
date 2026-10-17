@@ -360,30 +360,104 @@ def _atomic_write_json(path, data: dict) -> None:
         raise
 
 
+class ConfigLockTimeout(TimeoutError):
+    """The per-service config lock could not be acquired within ``_LOCK_TIMEOUT_S``."""
+
+
+class CidSaltReadError(RuntimeError):
+    """The persisted config exists but could not be read, so the cid salt cannot be verified."""
+
+
+_LOCK_TIMEOUT_S = 5.0
+_LOCK_BACKOFF_START_S = 0.005
+_LOCK_BACKOFF_MAX_S = 0.1
+
+_lock_state = threading.local()
+_lock_degraded = False
+_lock_degraded_lock = threading.Lock()
+
+
+def config_lock_degraded() -> bool:
+    """True once this process has had to run a config write without the cross-process lock."""
+    return _lock_degraded
+
+
+def _mark_lock_degraded(service_id: str, err: BaseException) -> None:
+    global _lock_degraded
+    with _lock_degraded_lock:
+        first = not _lock_degraded
+        _lock_degraded = True
+    if first:
+        logger.error(
+            "config_lock_degraded service_id=%s: cross-process config locking is unavailable (%s); config "
+            "read-modify-write is NOT serialized across processes until this is fixed",
+            service_id,
+            err,
+        )
+
+
+def _acquire_flock(fd: int, service_id: str) -> None:
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    delay = _LOCK_BACKOFF_START_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise ConfigLockTimeout(
+                    f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+                ) from None
+            time.sleep(delay)
+            delay = min(delay * 2, _LOCK_BACKOFF_MAX_S)
+
+
 @contextlib.contextmanager
 def config_lock(service_id: str):
     """Cross-process exclusive lock for read-modify-write of one service config.
 
     ``flock`` on a sidecar file works across uvicorn workers, celery workers and
     separate pods sharing the configs volume; a threading lock only covers one
-    process. Degrades to unlocked (with a warning) where the lock file cannot be
-    opened (read-only FS) or ``fcntl`` is unavailable.
+    process. Acquisition is non-blocking with bounded backoff (``ConfigLockTimeout`` after 5s).
+    Re-entrant per thread: a nested acquire for the same service reuses the held lock
+    (a second ``flock`` on a new fd in the same process would otherwise self-deadlock).
+    Where the lock file cannot be opened (read-only FS) or ``fcntl`` is unavailable it
+    degrades to unlocked, logs at error level once per process and sets the
+    ``config_lock_degraded`` health flag.
     """
     _ensure_dirs()
-    lock_path = CONFIGS_DIR / f".{_validate_service_id(service_id)}.lock"
+    sid = _validate_service_id(service_id)
+    held: dict[str, int] = _lock_state.__dict__.setdefault("held", {})
+    if held.get(sid, 0) > 0:
+        held[sid] += 1
+        try:
+            yield
+        finally:
+            held[sid] -= 1
+        return
+
+    lock_path = CONFIGS_DIR / f".{sid}.lock"
     fd = None
-    if fcntl is not None:
+    if fcntl is None:
+        _mark_lock_degraded(service_id, RuntimeError("fcntl unavailable"))
+    else:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _acquire_flock(fd, service_id)
+        except ConfigLockTimeout:
+            if fd is not None:
+                os.close(fd)
+            raise
         except OSError as e:
-            logger.warning("config_lock_unavailable service_id=%s: %s", service_id, e)
+            _mark_lock_degraded(service_id, e)
             if fd is not None:
                 os.close(fd)
                 fd = None
+    held[sid] = 1
     try:
         yield
     finally:
+        held.pop(sid, None)
         if fd is not None:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
@@ -401,14 +475,17 @@ def _read_config_fresh(service_id: str) -> dict | None:
 def _disk_cid_salt(service_id: str) -> str | None:
     try:
         disk = _read_config_fresh(service_id)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if config_path(service_id).exists():
+            # A transient read failure must not look like "no salt yet": minting one would silently re-key every cid.
+            raise CidSaltReadError(f"cannot read existing config for {service_id}; refusing to save: {e}") from e
         return None
     rum = disk.get("rum") if disk else None
     salt = rum.get("cid_salt") if isinstance(rum, dict) else None
     return salt if isinstance(salt, str) and salt else None
 
 
-def _save_config_unlocked(service_id: str, cfg: dict):
+def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: bool = False):
     global _cdn_service_id_map
     _ensure_dirs()
     if "created_at" not in cfg or not cfg["created_at"]:
@@ -418,7 +495,7 @@ def _save_config_unlocked(service_id: str, cfg: dict):
     # The cid salt is write-once: pseudonymous cids are keyed on it, so a stale
     # writer replacing cfg["rum"] wholesale (or a racing first-save) must never
     # re-key them. Adopt the persisted salt; mint one only when none exists yet.
-    existing_salt = _disk_cid_salt(service_id)
+    existing_salt = None if allow_cid_salt_change else _disk_cid_salt(service_id)
     rum = cfg.get("rum")
     if existing_salt:
         if not isinstance(rum, dict):
@@ -461,32 +538,35 @@ def save_config(service_id: str, cfg: dict):
         _save_config_unlocked(service_id, cfg)
 
 
-def mutate_config(service_id: str, mutate: Callable[[dict], None]) -> dict | None:
+def mutate_config(
+    service_id: str, mutate: Callable[[dict], None], *, allow_cid_salt_change: bool = False
+) -> dict | None:
     """Locked read-modify-write: fresh-load, apply ``mutate`` in place, save.
 
     Returns the saved config, or ``None`` when the service has no config.
     Use for partial edits so a concurrent writer's changes are not clobbered.
+    ``allow_cid_salt_change`` is reserved for ``backend.core.duckdb.rotate_cid_salt``; every other
+    writer has the persisted cid salt re-adopted.
     """
     with config_lock(service_id):
         cfg = _read_config_fresh(service_id)
         if cfg is None:
             return None
         mutate(cfg)
-        _save_config_unlocked(service_id, cfg)
+        _save_config_unlocked(service_id, cfg, allow_cid_salt_change=allow_cid_salt_change)
         return cfg
 
 
 def update_status(service_id: str, status: dict):
     """Partially update the 'status' section of a service config."""
-    cfg = load_config(service_id)
-    if not cfg:
-        return
 
-    current_status = cfg.get("status", {})
-    current_status.update(status)
-    current_status["updated_at"] = time.time()
-    cfg["status"] = current_status
-    save_config(service_id, cfg)
+    def _apply(cfg: dict) -> None:
+        current_status = cfg.get("status", {})
+        current_status.update(status)
+        current_status["updated_at"] = time.time()
+        cfg["status"] = current_status
+
+    mutate_config(service_id, _apply)
 
 
 def get_status(service_id: str) -> dict:
@@ -501,8 +581,8 @@ def delete_config(service_id: str):
     """Remove a service config file."""
     global _cdn_service_id_map
     path = config_path(service_id)
-    if path.exists():
-        path.unlink()
+    with config_lock(service_id):
+        path.unlink(missing_ok=True)
     _cdn_service_id_map = None
     with _config_cache_lock:
         _config_cache.pop(service_id, None)

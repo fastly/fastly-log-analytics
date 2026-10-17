@@ -60439,6 +60439,11 @@
             "type": "array",
             "title": "Recent Cron Failures"
           },
+          "config_lock_degraded": {
+            "type": "boolean",
+            "title": "Config Lock Degraded",
+            "default": false
+          },
           "observability": {
             "anyOf": [
               {

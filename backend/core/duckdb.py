@@ -1649,3 +1649,35 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         # Config vanished between read and lock; nothing to persist into.
         return get_or_generate_cid_salt(service_id)
     return saved["rum"]["cid_salt"]
+
+
+def rotate_cid_salt(service_id: str, *, actor: str = "admin") -> str:
+    """Replace a service's cid salt. Every pseudonymous cid hash changes from this point on.
+
+    ``save_config`` deliberately re-adopts the persisted salt, so rotation must go through this explicit,
+    audited path. Not exposed as a route. Returns the new salt (callers must not log it).
+    """
+    import secrets
+
+    from backend.config import mutate_config
+    from backend.core import metadata as metadata_db
+    from backend.utils.error_redaction import register_salt
+
+    new_salt = secrets.token_hex(32)
+    old: dict[str, str | None] = {"salt": None}
+
+    def _set(c: dict) -> None:
+        existing = c.get("rum")
+        rum: dict = existing if isinstance(existing, dict) else {}
+        old["salt"] = rum.get("cid_salt")
+        rum["cid_salt"] = new_salt
+        c["rum"] = rum
+
+    saved = mutate_config(service_id, _set, allow_cid_salt_change=True)
+    if saved is None:
+        raise LookupError(f"no config for service {service_id}")
+    register_salt(old["salt"])
+    register_salt(new_salt)
+    metadata_db.record_audit(service_id, "cid_salt_rotated", {"had_previous_salt": bool(old["salt"])}, actor=actor)
+    logger.warning("cid_salt_rotated service_id=%s actor=%s", service_id, actor)
+    return new_salt

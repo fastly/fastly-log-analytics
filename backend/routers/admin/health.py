@@ -203,6 +203,10 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     except Exception:
         out["recent_cron_failures"] = []
 
+    from backend.config import config_lock_degraded
+
+    out["config_lock_degraded"] = config_lock_degraded()
+
     # ── Effective observability mode (SRE-20) ────────────────────────
     # The runtime truth (vs. the ADR's aspirational wiring): prod runs
     # ConsoleRenderer with OTEL off, so an incident `jq`/`grep` needs to
