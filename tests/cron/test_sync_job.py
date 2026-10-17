@@ -1565,3 +1565,119 @@ def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
         "clear_in_flight must run after insert_ingested_files; leftover "
         "rows here would cause double-ingest on next restart."
     )
+
+
+# ── cron_run lifecycle (log_discovery) ──────────────────────────────────────
+
+
+def _lifecycle_env(monkeypatch, events, *, log_text="LOGTEXT"):
+    from backend.cron.jobs import sync as sync_mod  # noqa: F401
+
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    start = MagicMock(return_value=42)
+    log_cron = MagicMock()
+    order: list[str] = []
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.duckdb.finalize_cron_run_if_running",
+        lambda *a, **k: order.append(("backstop", a, k)) or True,
+    )
+    monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: order.append(("end_progress", rid)))
+    monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: log_text)
+    monkeypatch.setattr("backend.core.ingest.ingest", _make_ingest_events(events))
+    return start, log_cron, order
+
+
+def test_lifecycle_lease_held_skips_without_ingest_or_row(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    start, log_cron, order = _lifecycle_env(monkeypatch, [])
+    start.side_effect = RuntimeError("held")
+    ingest = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    ingest.assert_not_called()
+    log_cron.assert_not_called()
+    assert order == []
+
+
+def test_lifecycle_backstop_gets_context_and_runs_before_end_progress(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, _, order = _lifecycle_env(monkeypatch, [{"type": "done", "new_files": 0, "rows_inserted": 0}])
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    assert [o[0] for o in order] == ["backstop", "end_progress"]
+    _, args, kwargs = order[0]
+    assert args[1:] == ("log_discovery", 42)
+    assert kwargs["summary"] == "Sync exited without recording a terminal status"
+    assert kwargs["error_message"] == "orphaned run auto-finalized (no terminal ingest event)"
+    assert isinstance(kwargs["duration_s"], float)
+    assert order[1] == ("end_progress", 42)
+
+
+def test_lifecycle_error_event_row_shape(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    events = [
+        {"type": "file_done", "current": 3, "total_inserted": 50, "total_corrupt": 1},
+        {"type": "error", "message": "s3 timeout"},
+    ]
+    _, log_cron, _ = _lifecycle_env(monkeypatch, events)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    errors = [c for c in log_cron.call_args_list if c.args[3] == "error"]
+    assert len(errors) == 1
+    kwargs = errors[0].kwargs
+    assert kwargs["summary"] == "Ingestion failed after processing 3 files (50 rows)"
+    assert kwargs["error_message"] == "s3 timeout"
+    assert (kwargs["files_downloaded"], kwargs["rows_ingested"], kwargs["corrupt_rows"]) == (3, 50, 1)
+    assert kwargs["log_output"] == "LOGTEXT"
+    assert kwargs["run_id"] == 42
+
+
+def test_lifecycle_disk_failure_row_has_no_log_output(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, log_cron, order = _lifecycle_env(monkeypatch, [])
+    monkeypatch.setattr(sync_mod, "_check_disk_space", lambda cache_dir, sid, name: (False, "disk full"))
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Sync aborted: disk full"
+    assert kwargs["error_message"] == "disk full"
+    assert kwargs["log_output"] is None
+    assert [o[0] for o in order] == ["backstop", "end_progress"]
+
+
+def test_lifecycle_high_scale_missing_broker_row_has_no_log_output(monkeypatch, stub_load_config, stub_progress):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, log_cron, _ = _lifecycle_env(monkeypatch, [])
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Celery ingest misconfigured: no broker URL"
+    assert kwargs["error_message"] == "DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL"
+    assert kwargs["log_output"] is None

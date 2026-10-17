@@ -203,13 +203,7 @@ def _run_log_discovery_cron(
         return
 
     from backend import config as svcconfig
-    from backend.core.duckdb import (
-        finalize_cron_run_if_running,
-        get_source_for_service,
-        log_cron_run,
-        refresh_config_status,
-        start_cron_run,
-    )
+    from backend.core.duckdb import get_source_for_service, refresh_config_status
     from backend.core.ingest import _new_object_outcome, ingest
 
     # No start-of-tick active-request gate here: a deferred tick waits a full
@@ -270,402 +264,338 @@ def _run_log_discovery_cron(
                 src["time_range"] = None
                 logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
 
-        try:
-            if run_id is None:
-                run_id = start_cron_run(src, "log_discovery")
-        except RuntimeError as e:
-            logger.info("[scheduler] %s: skipping sync — %s", service_id, str(e))
-            return
-
-        if svcconfig.is_high_scale_mode(src):
-            # Celery/ledger data plane: run discovery INLINE (this job already
-            # executes on a worker via RedBeat in external mode) so the
-            # cron_runs row carries the real outcome — files discovered, real
-            # duration, real errors — instead of a fake instant "dispatched"
-            # success that blinds recent_cron_failures and deep health.
-            # Only per-file convert work fans out to q.ingest.
-            from datetime import datetime, timedelta
-
-            from backend.core.ingest import discover_prefix
-            from backend.provision.log_paths import minute_list_prefix
-
-            if not svcconfig.CELERY_BROKER_URL:
-                log_cron_run(
-                    src,
-                    "log_discovery",
-                    0.0,
-                    "error",
-                    run_id=run_id,
-                    error_message="DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL",
-                    summary="Celery ingest misconfigured: no broker URL",
-                )
+        with cron_run(
+            service_id,
+            "log_discovery",
+            source=src,
+            run_id=run_id,
+            error_summary="Log discovery failed",
+            skip_log_prefix="log_discovery",
+            finalize_running_backstop=True,
+            backstop_summary="Sync exited without recording a terminal status",
+            backstop_error_message="orphaned run auto-finalized (no terminal ingest event)",
+        ) as run:
+            if not run.ok:
                 return
+            run_id = run.run_id
 
-            discovery_started = time.time()
-            try:
-                discovered = 0
-                adaptive = sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual
-                poll_started = time.monotonic()
-                for poll_index in range(3):
-                    if poll_index:
-                        if not adaptive or poll_index > 2 or time.monotonic() - poll_started + 3 > 20:
+            if svcconfig.is_high_scale_mode(src):
+                # Celery/ledger data plane: run discovery INLINE (this job already
+                # executes on a worker via RedBeat in external mode) so the
+                # cron_runs row carries the real outcome — files discovered, real
+                # duration, real errors — instead of a fake instant "dispatched"
+                # success that blinds recent_cron_failures and deep health.
+                # Only per-file convert work fans out to q.ingest.
+                from datetime import datetime, timedelta
+
+                from backend.core.ingest import discover_prefix
+                from backend.provision.log_paths import minute_list_prefix
+
+                run.include_log_output = False
+                if not svcconfig.CELERY_BROKER_URL:
+                    run.fail(
+                        "Celery ingest misconfigured: no broker URL",
+                        error_message="DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL",
+                    )
+                    return
+
+                try:
+                    discovered = 0
+                    adaptive = sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual
+                    poll_started = time.monotonic()
+                    for poll_index in range(3):
+                        if poll_index:
+                            if not adaptive or poll_index > 2 or time.monotonic() - poll_started + 3 > 20:
+                                break
+                            time.sleep(3)
+                        now = datetime.now(UTC)
+                        pass_discovered = 0
+                        for i in range(5):
+                            prefix = minute_list_prefix(now - timedelta(minutes=i))
+                            pass_discovered += discover_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
+                        discovered += pass_discovered
+                        if pass_discovered == 0:
                             break
-                        time.sleep(3)
-                    now = datetime.now(UTC)
-                    pass_discovered = 0
-                    for i in range(5):
-                        prefix = minute_list_prefix(now - timedelta(minutes=i))
-                        pass_discovered += discover_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
-                    discovered += pass_discovered
-                    if pass_discovered == 0:
-                        break
-                log_cron_run(
-                    src,
-                    "log_discovery",
-                    time.time() - discovery_started,
-                    "success",
-                    run_id=run_id,
-                    files_downloaded=discovered,
-                    summary=(
+                    run.success(
                         f"Discovered {discovered} new file(s); dispatched to ingest workers"
                         if discovered
-                        else "No new files"
-                    ),
-                )
-                # NOTE: deliberately NOT calling refresh_config_status here —
-                # it opens the per-service .duckdb file, and a worker-side
-                # open fights the backend's readers for the single-writer
-                # file lock. Freshness for SSR comes from read-time overlays
-                # instead: compute_sync_status_cached overlays dedicated file
-                # timestamps from the committed ledger. Request-event extents
-                # cannot be inferred from object names; those cached metrics
-                # refresh on backend restart / on-demand
-                # /api/sync-status calls.
-            except Exception as e:
-                log_cron_run(
-                    src,
-                    "log_discovery",
-                    time.time() - discovery_started,
-                    "error",
-                    run_id=run_id,
-                    error_message=str(e),
-                    summary="Log discovery failed",
-                )
-                logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
-            return
+                        else "No new files",
+                        files_downloaded=discovered,
+                    )
+                    # NOTE: deliberately NOT calling refresh_config_status here —
+                    # it opens the per-service .duckdb file, and a worker-side
+                    # open fights the backend's readers for the single-writer
+                    # file lock. Freshness for SSR comes from read-time overlays
+                    # instead: compute_sync_status_cached overlays dedicated file
+                    # timestamps from the committed ledger. Request-event extents
+                    # cannot be inferred from object names; those cached metrics
+                    # refresh on backend restart / on-demand
+                    # /api/sync-status calls.
+                except Exception as e:
+                    run.fail("Log discovery failed", error_message=str(e))
+                    logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
+                return
 
-        # Disk pre-check: refuse to start if free space is below the floor.
-        # Avoids the "pull from FOS, write fails, repeat next tick" cost loop.
-        from backend.core.duckdb import _cache_dir
+            # Disk pre-check: refuse to start if free space is below the floor.
+            # Avoids the "pull from FOS, write fails, repeat next tick" cost loop.
+            from backend.core.duckdb import _cache_dir
 
-        ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "log_discovery")
-        if not ok:
-            log_cron_run(
-                src,
-                "log_discovery",
-                0.0,
-                "error",
-                run_id=run_id,
-                error_message=disk_msg,
-                summary=f"Sync aborted: {disk_msg}",
+            ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "log_discovery")
+            if not ok:
+                run.include_log_output = False
+                run.fail(f"Sync aborted: {disk_msg}", error_message=disk_msg)
+                return
+
+            logger.info("▶️  \x1b[94m[log_discovery]\x1b[0m %s: Log Discovery job started.", _display)
+
+            start_time_exec = time.time()
+
+            def elapsed() -> str:
+                return _elapsed_since(start_time_exec)
+
+            msg = "Starting log discovery..."
+            if start_time or end_time:
+                msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
+            _log_and_add_progress(
+                run_id, service_id, job_name="log_discovery", event={"type": "status", "message": f"{elapsed()} {msg}"}
             )
-            return
 
-        from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+            done_event: dict = {}
+            ingest_outcomes = _new_object_outcome(processed=0)
+            processed_files = 0
+            inserted_rows = 0
+            corrupt_rows = 0
 
-        cleanup_progress_and_reap()
-        start_progress(run_id, service_id=service_id, task="log_discovery")
-        logger.info("▶️  \x1b[94m[log_discovery]\x1b[0m %s: Log Discovery job started.", _display)
+            # Max files per pass: 250 on incremental ticks to bound pass latency to <= 5s,
+            # allowing adaptive re-poll passes and scheduler ticks to stay responsive without starving.
+            max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
+            pass_max_files = max_incremental_files if not is_manual else 5000
+            pass_max_seconds = 20 if not is_manual else 240
+            published_pass_rows = 0
 
-        start_time_exec = time.time()
+            def _publish_pass_rows() -> None:
+                nonlocal published_pass_rows
+                from backend.cron.jobs._common import refresh_view_and_warm_pool
 
-        def elapsed() -> str:
-            return _elapsed_since(start_time_exec)
+                def _progress(ev: dict) -> None:
+                    _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
 
-        msg = "Starting log discovery..."
-        if start_time or end_time:
-            msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
-        _log_and_add_progress(
-            run_id, service_id, job_name="log_discovery", event={"type": "status", "message": f"{elapsed()} {msg}"}
-        )
+                refresh_view_and_warm_pool(
+                    src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress
+                )
+                try:
+                    from backend.sync_status_publisher import publisher as _pub
+                    from backend.sync_status_snapshot import compute_sync_status_cached as _snap
 
-        done_event: dict = {}
-        ingest_outcomes = _new_object_outcome(processed=0)
-        processed_files = 0
-        inserted_rows = 0
-        corrupt_rows = 0
+                    snapshot = _snap(service_id)
+                    if snapshot is not None:
+                        _pub.publish(service_id, snapshot)
+                except Exception:
+                    logger.exception("[scheduler] %s: adaptive-pass status publish failed", service_id)
+                published_pass_rows = inserted_rows
 
-        # Max files per pass: 250 on incremental ticks to bound pass latency to <= 5s,
-        # allowing adaptive re-poll passes and scheduler ticks to stay responsive without starving.
-        max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
-        pass_max_files = max_incremental_files if not is_manual else 5000
-        pass_max_seconds = 20 if not is_manual else 240
-        published_pass_rows = 0
-
-        def _publish_pass_rows() -> None:
-            nonlocal published_pass_rows
-            from backend.cron.jobs._common import refresh_view_and_warm_pool
-
-            def _progress(ev: dict) -> None:
-                _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
-
-            refresh_view_and_warm_pool(src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress)
             try:
-                from backend.sync_status_publisher import publisher as _pub
-                from backend.sync_status_snapshot import compute_sync_status_cached as _snap
+                for event in _ingest_with_adaptive_followups(
+                    ingest,
+                    adaptive=sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual,
+                    after_pass=_publish_pass_rows,
+                    source=src,
+                    delete_after=delete_after,
+                    max_files=pass_max_files,
+                    max_seconds=pass_max_seconds,
+                    start_time=start_time,
+                    end_time=end_time,
+                    incremental_only=not is_manual,
+                ):
+                    _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=event)
 
-                snapshot = _snap(service_id)
-                if snapshot is not None:
-                    _pub.publish(service_id, snapshot)
-            except Exception:
-                logger.exception("[scheduler] %s: adaptive-pass status publish failed", service_id)
-            published_pass_rows = inserted_rows
-
-        try:
-            for event in _ingest_with_adaptive_followups(
-                ingest,
-                adaptive=sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual,
-                after_pass=_publish_pass_rows,
-                source=src,
-                delete_after=delete_after,
-                max_files=pass_max_files,
-                max_seconds=pass_max_seconds,
-                start_time=start_time,
-                end_time=end_time,
-                incremental_only=not is_manual,
-            ):
-                _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=event)
-
-                if event.get("type") == "file_done":
-                    processed_files = event.get("current", processed_files)
-                    inserted_rows = event.get("total_inserted", inserted_rows)
-                    corrupt_rows = event.get("total_corrupt", corrupt_rows)
-                elif event.get("type") == "done":
-                    done_event = event
-                    ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
-                elif event.get("type") == "error":
-                    summary = "Ingestion failed"
-                    if processed_files > 0:
-                        summary += f" after processing {processed_files} files ({inserted_rows} rows)"
-                    log_text = _extract_log_text(run_id)
-                    log_cron_run(
-                        src,
-                        "log_discovery",
-                        time.time() - start_time_exec,
-                        "error",
-                        run_id=run_id,
-                        error_message=event.get("message"),
-                        summary=summary,
-                        files_downloaded=processed_files,
-                        rows_ingested=inserted_rows,
-                        corrupt_rows=corrupt_rows,
-                        outcome_counters=ingest_outcomes,
-                        log_output=log_text,
-                    )
-                    _log_and_add_progress(
-                        run_id,
-                        service_id,
-                        job_name="log_discovery",
-                        event={"type": "error", "message": event.get("message")},
-                    )
-                    break
-            else:
-                if done_event:
-                    log_text = _extract_log_text(run_id)
-                    if done_event.get("new_files", 0) == 0:
-                        # The reconcile can reclaim strands (raw files left by an
-                        # interrupted prior run) on an otherwise-idle tick — surface
-                        # that count + message so the self-heal is visible in history.
-                        reclaimed = done_event.get("deleted_files", 0)
-                        if reclaimed:
-                            summary = (
-                                f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
-                            )
-                            done_msg = f"{elapsed()} {summary}."
-                        else:
-                            summary = "No new log files found in bucket"
-                            done_msg = f"{elapsed()} No new log files found in bucket."
-                        log_cron_run(
-                            src,
-                            "log_discovery",
-                            time.time() - start_time_exec,
-                            "success",
-                            summary=summary,
-                            files_deleted_fos=reclaimed,
-                            run_id=run_id,
-                            log_output=log_text,
-                            outcome_counters=done_event.get("outcome_counters"),
+                    if event.get("type") == "file_done":
+                        processed_files = event.get("current", processed_files)
+                        inserted_rows = event.get("total_inserted", inserted_rows)
+                        corrupt_rows = event.get("total_corrupt", corrupt_rows)
+                    elif event.get("type") == "done":
+                        done_event = event
+                        ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
+                    elif event.get("type") == "error":
+                        summary = "Ingestion failed"
+                        if processed_files > 0:
+                            summary += f" after processing {processed_files} files ({inserted_rows} rows)"
+                        run.fail(
+                            summary,
+                            error_message=event.get("message"),
+                            files_downloaded=processed_files,
+                            rows_ingested=inserted_rows,
+                            corrupt_rows=corrupt_rows,
+                            outcome_counters=ingest_outcomes,
                         )
                         _log_and_add_progress(
                             run_id,
                             service_id,
                             job_name="log_discovery",
-                            event={"type": "done", "message": done_msg},
+                            event={"type": "error", "message": event.get("message")},
                         )
-                    else:
-                        summary = (
-                            f"Ingested {done_event.get('new_files', 0)} files, "
-                            f"{done_event.get('rows_inserted', 0)} rows."
-                        )
-                        if done_event.get("corrupt_rows"):
-                            summary += f" Skipped {done_event.get('corrupt_rows')} corrupted/invalid lines."
-                        if done_event.get("quarantined_files"):
-                            summary += f" Quarantined {done_event.get('quarantined_files')} files with errors."
-                        if done_event.get("deleted_files"):
-                            summary += f" Deleted {done_event.get('deleted_files')} raw files."
-                        corrupt_details = done_event.get("corrupt_details", [])
-                        corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
-                        outcome_counters = done_event.get("outcome_counters")
-                        has_ingest_errors = bool(
-                            outcome_counters
-                            and any(
-                                outcome_counters.get(key, 0)
-                                for key in (
-                                    "malformed_records",
-                                    "corrupt_containers",
-                                    "quarantine_capture_failures",
-                                    "source_delete_failures",
-                                    "objects_failed",
+                        break
+                else:
+                    if done_event:
+                        if done_event.get("new_files", 0) == 0:
+                            # The reconcile can reclaim strands (raw files left by an
+                            # interrupted prior run) on an otherwise-idle tick — surface
+                            # that count + message so the self-heal is visible in history.
+                            reclaimed = done_event.get("deleted_files", 0)
+                            if reclaimed:
+                                summary = (
+                                    f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
                                 )
+                                done_msg = f"{elapsed()} {summary}."
+                            else:
+                                summary = "No new log files found in bucket"
+                                done_msg = f"{elapsed()} No new log files found in bucket."
+                            run.success(
+                                summary,
+                                files_deleted_fos=reclaimed,
+                                outcome_counters=done_event.get("outcome_counters"),
                             )
-                        )
-
-                        log_cron_run(
-                            src,
-                            "log_discovery",
-                            time.time() - start_time_exec,
-                            "error" if has_ingest_errors else "success",
-                            files_downloaded=done_event.get("new_files", 0),
-                            files_deleted_fos=done_event.get("deleted_files", 0),
-                            rows_ingested=done_event.get("rows_inserted", 0),
-                            corrupt_rows=done_event.get("corrupt_rows", 0),
-                            summary=summary,
-                            error_message=corrupt_message,
-                            run_id=run_id,
-                            log_output=log_text,
-                            outcome_counters=outcome_counters,
-                        )
-
-                        # Republish the persistent DuckDB view so dashboard reads pick
-                        # up the buffer parquets we just wrote. Dashboard reads use
-                        # read_only=True + skip_view_update=True (commit 19dfffc) and
-                        # never refresh the view themselves. The only other writer-side
-                        # update_iceberg_view caller is metadata_sync, which runs right
-                        # after commit_buffer drains the buffer — so without this hop,
-                        # the view is always republished buffer-less and dashboard lag
-                        # is bounded by commit_interval_mins instead of the sync
-                        # cadence. CREATE OR REPLACE VIEW is metadata-only (no cloud
-                        # reads), so this is cheap.
-                        already_published = bool(
-                            published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
-                        )
-                        if done_event.get("rows_inserted", 0) > 0 and not already_published:
-                            from backend.cron.jobs._common import refresh_view_and_warm_pool
-                            from backend.utils.active_requests import yield_to_api
-
-                            # Cooperative yield before each post-ingest CPU stage
-                            # so a concurrent dashboard query gets a chance to
-                            # finish. Each stage (view refresh, rollup recompute,
-                            # bot rollup) is CPU-bound and would otherwise pile
-                            # straight onto whatever sync just spent in ingest.
-                            yield_to_api()
-
-                            refresh_view_and_warm_pool(
-                                src,
-                                service_id,
-                                log_prefix=f"{elapsed()} ",
-                                progress_log=lambda ev: _log_and_add_progress(
-                                    run_id, service_id, job_name="log_discovery", event=ev
-                                ),
-                            )
-
-                        if done_event.get("new_files", 0) > 1:
-                            import threading as _t
-
-                            def _compact_and_refresh():
-                                try:
-                                    from backend.core import local_compaction as _lc
-
-                                    # Compact active hour since new files just landed there
-                                    res = _lc.compact_local_partitions(src, compact_active_hour=True)
-                                    if res.get("files_merged", 0) > 0:
-                                        refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
-                                except Exception as e:
-                                    logger.warning(
-                                        "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
-                                    )
-
-                            _t.Thread(
-                                target=_compact_and_refresh,
-                                name=f"local-compact-on-sync:{service_id}",
-                                daemon=True,
-                            ).start()
-
-                        touched_hours = done_event.get("touched_hours", [])
-                        if touched_hours:
-                            # Off-thread: closed-hour rollups take minutes on a
-                            # busy service, and holding this max_instances=1
-                            # job that long backs up FOS discovery (request lag).
-                            schedule_post_ingest_rollups(service_id, src, set(touched_hours))
                             _log_and_add_progress(
                                 run_id,
                                 service_id,
                                 job_name="log_discovery",
-                                event={
-                                    "type": "status",
-                                    "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
-                                },
+                                event={"type": "done", "message": done_msg},
+                            )
+                        else:
+                            summary = (
+                                f"Ingested {done_event.get('new_files', 0)} files, "
+                                f"{done_event.get('rows_inserted', 0)} rows."
+                            )
+                            if done_event.get("corrupt_rows"):
+                                summary += f" Skipped {done_event.get('corrupt_rows')} corrupted/invalid lines."
+                            if done_event.get("quarantined_files"):
+                                summary += f" Quarantined {done_event.get('quarantined_files')} files with errors."
+                            if done_event.get("deleted_files"):
+                                summary += f" Deleted {done_event.get('deleted_files')} raw files."
+                            corrupt_details = done_event.get("corrupt_details", [])
+                            corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
+                            outcome_counters = done_event.get("outcome_counters")
+                            has_ingest_errors = bool(
+                                outcome_counters
+                                and any(
+                                    outcome_counters.get(key, 0)
+                                    for key in (
+                                        "malformed_records",
+                                        "corrupt_containers",
+                                        "quarantine_capture_failures",
+                                        "source_delete_failures",
+                                        "objects_failed",
+                                    )
+                                )
                             )
 
-        except Exception as e:
-            log_text = _extract_log_text(run_id)
-            summary = "Ingestion crashed"
-            if processed_files > 0:
-                summary += f" after processing {processed_files} files ({inserted_rows} rows)"
-                _log_and_add_progress(
-                    run_id,
-                    service_id,
-                    job_name="log_discovery",
-                    event={
-                        "type": "status",
-                        "message": f"Crash occurred. Successfully ingested {processed_files} files so far.",
-                    },
+                            run.record(
+                                "error" if has_ingest_errors else "success",
+                                summary=summary,
+                                error_message=corrupt_message,
+                                files_downloaded=done_event.get("new_files", 0),
+                                files_deleted_fos=done_event.get("deleted_files", 0),
+                                rows_ingested=done_event.get("rows_inserted", 0),
+                                corrupt_rows=done_event.get("corrupt_rows", 0),
+                                outcome_counters=outcome_counters,
+                            )
+
+                            # Republish the persistent DuckDB view so dashboard reads pick
+                            # up the buffer parquets we just wrote. Dashboard reads use
+                            # read_only=True + skip_view_update=True (commit 19dfffc) and
+                            # never refresh the view themselves. The only other writer-side
+                            # update_iceberg_view caller is metadata_sync, which runs right
+                            # after commit_buffer drains the buffer — so without this hop,
+                            # the view is always republished buffer-less and dashboard lag
+                            # is bounded by commit_interval_mins instead of the sync
+                            # cadence. CREATE OR REPLACE VIEW is metadata-only (no cloud
+                            # reads), so this is cheap.
+                            already_published = bool(
+                                published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
+                            )
+                            if done_event.get("rows_inserted", 0) > 0 and not already_published:
+                                from backend.cron.jobs._common import refresh_view_and_warm_pool
+                                from backend.utils.active_requests import yield_to_api
+
+                                # Cooperative yield before each post-ingest CPU stage
+                                # so a concurrent dashboard query gets a chance to
+                                # finish. Each stage (view refresh, rollup recompute,
+                                # bot rollup) is CPU-bound and would otherwise pile
+                                # straight onto whatever sync just spent in ingest.
+                                yield_to_api()
+
+                                refresh_view_and_warm_pool(
+                                    src,
+                                    service_id,
+                                    log_prefix=f"{elapsed()} ",
+                                    progress_log=lambda ev: _log_and_add_progress(
+                                        run_id, service_id, job_name="log_discovery", event=ev
+                                    ),
+                                )
+
+                            if done_event.get("new_files", 0) > 1:
+                                import threading as _t
+
+                                def _compact_and_refresh():
+                                    try:
+                                        from backend.core import local_compaction as _lc
+
+                                        # Compact active hour since new files just landed there
+                                        res = _lc.compact_local_partitions(src, compact_active_hour=True)
+                                        if res.get("files_merged", 0) > 0:
+                                            refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
+                                    except Exception as e:
+                                        logger.warning(
+                                            "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
+                                        )
+
+                                _t.Thread(
+                                    target=_compact_and_refresh,
+                                    name=f"local-compact-on-sync:{service_id}",
+                                    daemon=True,
+                                ).start()
+
+                            touched_hours = done_event.get("touched_hours", [])
+                            if touched_hours:
+                                # Off-thread: closed-hour rollups take minutes on a
+                                # busy service, and holding this max_instances=1
+                                # job that long backs up FOS discovery (request lag).
+                                schedule_post_ingest_rollups(service_id, src, set(touched_hours))
+                                _log_and_add_progress(
+                                    run_id,
+                                    service_id,
+                                    job_name="log_discovery",
+                                    event={
+                                        "type": "status",
+                                        "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
+                                    },
+                                )
+
+            except Exception as e:
+                summary = "Ingestion crashed"
+                if processed_files > 0:
+                    summary += f" after processing {processed_files} files ({inserted_rows} rows)"
+                    _log_and_add_progress(
+                        run_id,
+                        service_id,
+                        job_name="log_discovery",
+                        event={
+                            "type": "status",
+                            "message": f"Crash occurred. Successfully ingested {processed_files} files so far.",
+                        },
+                    )
+                run.fail(
+                    summary,
+                    error_message=str(e),
+                    files_downloaded=processed_files,
+                    rows_ingested=inserted_rows,
+                    corrupt_rows=corrupt_rows,
+                    outcome_counters=ingest_outcomes,
                 )
-            log_cron_run(
-                src,
-                "log_discovery",
-                time.time() - start_time_exec,
-                "error",
-                files_downloaded=processed_files,
-                rows_ingested=inserted_rows,
-                corrupt_rows=corrupt_rows,
-                outcome_counters=ingest_outcomes,
-                error_message=str(e),
-                summary=summary,
-                run_id=run_id,
-                log_output=log_text,
-            )
-            logger.exception("[scheduler] %s: unexpected ingest error.", service_id)
-            _log_and_add_progress(
-                run_id, service_id, job_name="log_discovery", event={"type": "error", "message": str(e)}
-            )
-        finally:
-            end_progress(run_id)
-            # Backstop: guarantee the cron_runs row never stays 'running'. The
-            # branches above finalize it on done/error, but if ingest() returns
-            # without a terminal 'done' event the for/else leaves done_event
-            # empty and NOTHING logs a status — the row leaks as 'running' and
-            # the start_cron_run guard then skips every subsequent sync tick
-            # until the orphan cutoff. That froze prod ingestion ~20 min on
-            # 2026-06-19. Idempotent: no-op once the row is already terminal.
-            finalize_cron_run_if_running(
-                src,
-                "log_discovery",
-                run_id,
-                duration_s=time.time() - start_time_exec,
-                summary="Sync exited without recording a terminal status",
-                error_message="orphaned run auto-finalized (no terminal ingest event)",
-            )
+                logger.exception("[scheduler] %s: unexpected ingest error.", service_id)
+                _log_and_add_progress(
+                    run_id, service_id, job_name="log_discovery", event={"type": "error", "message": str(e)}
+                )
 
     # ── 2. Refresh cached status ──────────────────────────────────────────────
     # Single 60s window covers both the heavy refresh (top_values cache) and

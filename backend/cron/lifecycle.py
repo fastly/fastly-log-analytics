@@ -89,6 +89,11 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         lease/``cron_runs`` task name (defaults to ``task``). ``rollup_compact``
         leases as ``rollup_compact_daily`` but reports progress as
         ``rollup_compact``.
+    backstop_summary, backstop_error_message:
+        When either is set (with ``finalize_running_backstop``), the backstop
+        ``finalize_cron_run_if_running`` call also receives ``duration_s``,
+        ``summary`` and ``error_message`` so an orphaned ``running`` row is
+        finalized with context (``log_discovery``).
     """
 
     def __init__(
@@ -106,6 +111,8 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         include_log_output: bool = True,
         skip_log_prefix: str | None = None,
         progress_task: str | None = None,
+        backstop_summary: str | None = None,
+        backstop_error_message: str | None = None,
     ) -> None:
         self.service_id = service_id
         self.task = task
@@ -119,6 +126,8 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         self.include_log_output = include_log_output
         self.skip_log_prefix = skip_log_prefix
         self.progress_task = progress_task or task
+        self.backstop_summary = backstop_summary
+        self.backstop_error_message = backstop_error_message
 
         self.result: Any = None
         self.skipped: bool = False
@@ -281,8 +290,15 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         if self.finalize_running_backstop and self._source is not None:
             from backend.core.duckdb import finalize_cron_run_if_running
 
+            backstop_kwargs: dict[str, Any] = {}
+            if self.backstop_summary is not None or self.backstop_error_message is not None:
+                backstop_kwargs = {
+                    "duration_s": self.elapsed(),
+                    "summary": self.backstop_summary,
+                    "error_message": self.backstop_error_message,
+                }
             try:
-                finalize_cron_run_if_running(self._source, self.task, self._run_id)
+                finalize_cron_run_if_running(self._source, self.task, self._run_id, **backstop_kwargs)
             finally:
                 try:
                     end_progress(self._run_id)
