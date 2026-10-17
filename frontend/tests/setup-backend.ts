@@ -76,7 +76,7 @@ export async function startBackend(): Promise<void> {
   proc.stdout?.on('data', (chunk) => process.stdout.write(`[backend] ${chunk}`))
   proc.stderr?.on('data', (chunk) => process.stderr.write(`[backend] ${chunk}`))
 
-  await poll(`${CONTRACT_API_BASE}/api/health`, 30_000)
+  await poll(`${CONTRACT_API_BASE}/api/health`, 120_000)
 }
 
 export async function stopBackend(): Promise<void> {

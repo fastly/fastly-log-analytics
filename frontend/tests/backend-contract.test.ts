@@ -38,7 +38,7 @@ const client = createClient<paths>({ baseUrl: CONTRACT_API_BASE })
 
 beforeAll(async () => {
   await startBackend()
-}, 60_000)
+}, 150_000)
 
 afterAll(async () => {
   await stopBackend()

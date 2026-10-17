@@ -85,6 +85,18 @@ export const handlers = [
       sustained_loss: null,
     }),
   ),
+  http.get(`${API_BASE}/api/admin/high-scale/retention-recommendation`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      recommended_hot_days: 1,
+      recommended_warm_days: 30,
+      reasoning: 'default',
+      volume_total_bytes: 1_000_000_000,
+      volume_total_source: 'request',
+      explicit_retention_days: null,
+      effective_retention_days: 30,
+    }),
+  ),
   http.post(`${API_BASE}/api/logs/query`, () =>
     HttpResponse.json({
       rows: [],
