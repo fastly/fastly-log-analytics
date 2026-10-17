@@ -21,19 +21,11 @@ import duckdb
 import pytest
 
 from backend.repositories._base import QueryRunner
+from tests._helpers.sources import make_source
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_source(cache_override: str) -> dict:
-    """Source dict that pins _cache_dir to a temp path via the override hook."""
-    return {
-        "name": "test_service",
-        "service_id": "test-service-id",
-        "_cache_dir_override": cache_override,
-    }
 
 
 def _hours_back(n_hours: int, span_hours: int) -> tuple[str, str, list[str]]:
@@ -181,7 +173,7 @@ class TestBuildNetworkHeatmapBundles:
         # No Iceberg view is available so we expect 0 (not an exception).
         cache_dir = tmp_path / "cache" / "test_svc"
         cache_dir.mkdir(parents=True)
-        src = _make_source(str(cache_dir))
+        src = make_source(str(cache_dir))
         try:
             n = build_network_heatmap_bundles("test", src, [active_hour])
         except Exception:
@@ -244,7 +236,7 @@ def heatmap_rollup_layout(tmp_path):
         _write_heatmap_bundle(bundled, h)
         _write_all_fields_marker(bundled, h)
 
-    src = _make_source(str(cache_dir))
+    src = make_source(str(cache_dir))
     return bundled, src, start_iso, end_iso, hours
 
 
@@ -355,7 +347,7 @@ class TestTryNetworkHeatmapFromRollup:
         """If no network_heatmap.parquet files exist, returns None."""
         cache_dir = tmp_path / "cache" / "test_svc"
         (cache_dir / "rollups" / "hour_bundled").mkdir(parents=True)
-        src = _make_source(str(cache_dir))
+        src = make_source(str(cache_dir))
 
         start_iso, end_iso, _ = _hours_back(n_hours=2, span_hours=72)
         con = duckdb.connect()
@@ -385,7 +377,7 @@ def geo_rollup_layout(tmp_path):
         _write_geo_bundle(bundled, h)
         _write_all_fields_marker(bundled, h)
 
-    src = _make_source(str(cache_dir))
+    src = make_source(str(cache_dir))
     return bundled, src, start_iso, end_iso, hours
 
 
@@ -495,7 +487,7 @@ class TestTryNetworkGeoFromRollup:
         """If no network_geo.parquet files exist, returns None."""
         cache_dir = tmp_path / "cache" / "test_svc"
         (cache_dir / "rollups" / "hour_bundled").mkdir(parents=True)
-        src = _make_source(str(cache_dir))
+        src = make_source(str(cache_dir))
 
         start_iso, end_iso, _ = _hours_back(n_hours=2, span_hours=72)
         con = duckdb.connect()

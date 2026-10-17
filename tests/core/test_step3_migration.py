@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import boto3
 import pyarrow as pa
@@ -25,18 +26,9 @@ from backend.core.iceberg._ducklake_migration import (
     _normalize_data_path,
     adopt_iceberg_to_ducklake,
 )
+from tests._helpers.sources import make_source
 
-
-def _make_source(tmp_path, name: str) -> dict:
-    cache = tmp_path / f"cache_{name}"
-    cache.mkdir(parents=True)
-    return {
-        "name": name,
-        "service_id": name,
-        "fos_local_warehouse": True,
-        "_cache_dir_override": str(cache),
-        "duckdb_path": str(tmp_path / f"{name}.duckdb"),
-    }
+_make_source = partial(make_source, kind="lake")
 
 
 def _arrow_rows(n: int, start_second: int = 0) -> pa.Table:

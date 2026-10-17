@@ -5,32 +5,22 @@ start_time was a str|None date-range parameter) instead of start_time_exec.
 """
 
 import time
+from functools import partial
 from unittest.mock import MagicMock, patch
 
+from tests._helpers.sources import make_source
 
-def _make_source(**overrides) -> dict:
-    base = {
-        "name": "test",
-        "service_id": "test",
-        "service_name": "Test",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "key",
-        "secret_access_key": "secret",
-        "bucket": "bucket",
-        "prefix": "",
-        "region": "us-east-1",
-        "cdn_url": "",
-        "cdn_secret": "",
-        "cdn_service_id": "",
-        "logging_service_id": "test",
-        "duckdb_path": ":memory:",
-        "access_level": "read_write",
-        "storage_mode": "cloud",
-        "log_period": 60,
-        "provisioning": {},
-    }
-    base.update(overrides)
-    return base
+_make_source = partial(
+    make_source,
+    kind="cloud",
+    cdn_url="",
+    cdn_secret="",
+    cdn_service_id="",
+    logging_service_id="test",
+    duckdb_path=":memory:",
+    log_period=60,
+    provisioning={},
+)
 
 
 def _drain(gen) -> list[dict]:

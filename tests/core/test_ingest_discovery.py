@@ -17,6 +17,7 @@ via a fake paginator that records the ``StartAfter`` arg actually passed.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -27,6 +28,7 @@ from backend.core.ingest import (
     _parse_fastly_filename_dt,
     ingest,
 )
+from tests._helpers.sources import make_source
 
 # ── _parse_fastly_filename_dt ────────────────────────────────────────────────
 
@@ -148,25 +150,19 @@ class TestComputeIncrementalStartAfter:
 # can assert on what the discovery loop *asked* the FOS client to do.
 
 
-def _make_source(**overrides) -> dict:
-    base = {
-        "name": "test_disc",
-        "service_id": "test-disc-svc",
-        "service_name": "Disc Test",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "k",
-        "secret_access_key": "s",
-        "bucket": "test-bucket",
-        "prefix": "",
-        "region": "us-east-1",
-        "access_level": "read_write",
-        "storage_mode": "cloud",
-        "log_period": 60,
-        "provisioning": {},
-    }
-    base.update(overrides)
-    return base
+_make_source = partial(
+    make_source,
+    kind="cloud",
+    name="test_disc",
+    service_id="test-disc-svc",
+    service_name="Disc Test",
+    fos_native_endpoint="us-east-1.object.fastlystorage.app",
+    access_key_id="k",
+    secret_access_key="s",
+    bucket="test-bucket",
+    log_period=60,
+    provisioning={},
+)
 
 
 class _FakePaginator:

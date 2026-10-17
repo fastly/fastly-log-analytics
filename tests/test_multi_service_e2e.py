@@ -23,10 +23,14 @@ import shutil
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import duckdb
 import pyarrow as pa
 import pytest
+
+from backend import config as svcconfig
+from tests._helpers.sources import make_source
 
 
 def _make_log_batch(*, n: int, ip_octet: int, path_prefix: str) -> pa.Table:
@@ -48,25 +52,14 @@ def _make_log_batch(*, n: int, ip_octet: int, path_prefix: str) -> pa.Table:
     )
 
 
-def _make_source(*, name: str, service_id: str, bucket: str) -> dict:
-    """``name`` IS the ``_catalog_cache`` key."""
-    from backend import config as svcconfig
-
-    return {
-        "name": name,
-        "service_id": service_id,
-        "service_name": f"Multi-Svc {name}",
-        "bucket": bucket,
-        "prefix": "logs",
-        "region": "us-east-1",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "test-key",
-        "secret_access_key": "test-secret",
-        "access_level": "read_write",
-        "storage_mode": "cloud",
-        "duckdb_path": svcconfig.duckdb_path(service_id),
-    }
+_make_source = partial(
+    make_source,
+    kind="cloud",
+    prefix="logs",
+    fos_native_endpoint="us-east-1.object.fastlystorage.app",
+    access_key_id="test-key",
+    secret_access_key="test-secret",
+)
 
 
 @pytest.fixture
@@ -83,8 +76,20 @@ def two_service_env(monkeypatch):
     }
     for p in warehouses.values():
         os.makedirs(p, exist_ok=True)
-    src_a = _make_source(name="svc_a", service_id="svc-a-id", bucket="svc-a-bucket")
-    src_b = _make_source(name="svc_b", service_id="svc-b-id", bucket="svc-b-bucket")
+    src_a = _make_source(
+        name="svc_a",
+        service_id="svc-a-id",
+        bucket="svc-a-bucket",
+        service_name="Multi-Svc svc_a",
+        duckdb_path=svcconfig.duckdb_path("svc-a-id"),
+    )
+    src_b = _make_source(
+        name="svc_b",
+        service_id="svc-b-id",
+        bucket="svc-b-bucket",
+        service_name="Multi-Svc svc_b",
+        duckdb_path=svcconfig.duckdb_path("svc-b-id"),
+    )
 
     # A bug smearing source dicts across services surfaces as a misrouted path here.
     monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda s: f"file://{warehouses[s['name']]}")

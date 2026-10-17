@@ -12,6 +12,7 @@ import os
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,20 +24,9 @@ from backend.core.iceberg import view as view_mod
 from backend.core.iceberg._ducklake import ducklake_table_name
 from backend.core.iceberg.buffer import _commit_buffer_impl, buffer_files
 from backend.core.iceberg.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
+from tests._helpers.sources import make_source
 
-
-def _make_source(tmp_path, name: str, **overrides) -> dict:
-    cache = tmp_path / f"cache_{name}"
-    (cache / "buffer").mkdir(parents=True)
-    src = {
-        "name": name,
-        "service_id": name,
-        "fos_local_warehouse": True,
-        "_cache_dir_override": str(cache),
-        "duckdb_path": str(tmp_path / f"{name}.duckdb"),
-    }
-    src.update(overrides)
-    return src
+_make_source = partial(make_source, kind="lake", buffer_dir=True)
 
 
 def _write_buffer(

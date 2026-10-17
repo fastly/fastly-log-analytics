@@ -19,6 +19,7 @@ import glob
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 
@@ -26,6 +27,7 @@ from backend import config as svcconfig
 from backend.core.duckdb import get_connection
 from backend.core.iceberg import buffer as buffer_mod
 from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+from tests._helpers.sources import make_source
 
 NOW = datetime.now(UTC)
 
@@ -36,16 +38,7 @@ def _isolated_local_catalog(monkeypatch):
     pass
 
 
-def _make_source(tmp_path, name: str) -> dict:
-    cache = tmp_path / f"cache_{name}"
-    (cache / "buffer").mkdir(parents=True)
-    return {
-        "name": name,
-        "service_id": name,
-        "fos_local_warehouse": True,
-        "_cache_dir_override": str(cache),
-        "duckdb_path": str(tmp_path / f"{name}.duckdb"),
-    }
+_make_source = partial(make_source, kind="lake", buffer_dir=True)
 
 
 def _set_knobs(monkeypatch, **cron_sync) -> None:

@@ -6,10 +6,7 @@ import duckdb
 import pytest
 
 from backend.core.rollups import partial_hour as ph
-
-
-def _make_source(tmp_path):
-    return {"service_id": "svc-a", "name": "svc-a", "cache_dir_override": str(tmp_path)}
+from tests._helpers.sources import make_source
 
 
 @pytest.fixture(autouse=True)
@@ -19,17 +16,17 @@ def _patch_cache_dir(tmp_path, monkeypatch):
 
 
 def test_watermark_defaults_to_zero(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     assert ph.read_partial_hour_watermark(src, "2026-09-09-14") == 0.0
 
 
 def test_all_fields_defaults_to_empty(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     assert ph.read_partial_hour_all_fields(src, "2026-09-09-14") == []
 
 
 def test_total_defaults_to_zero(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     assert ph.read_partial_hour_total(src, "2026-09-09-14") == 0
 
 
@@ -69,7 +66,7 @@ def test_merge_partial_hour_writes_a_total_row_not_per_field_summable(tmp_path):
     read_partial_hour_all_fields's rows across every populated field counts
     each request once PER POPULATED FIELD, not once. merge_partial_hour must
     write a separate, correct total that survives this trap."""
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -104,7 +101,7 @@ def test_merge_partial_hour_excludes_a_custom_field_named_total_field(tmp_path):
     _is_safe_ident's regex would otherwise accept it) must not be merged as
     a per-field row — that would collide with and corrupt the synthetic
     total row's own accounting."""
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -134,7 +131,7 @@ def test_read_partial_hour_functions_reuse_caller_connection(tmp_path, monkeypat
     given one, instead of opening a fresh ``:memory:`` connection per call
     (measured ~16ms overhead per call, paid 3x per dashboard request on the
     hot path this whole feature exists to speed up)."""
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -170,7 +167,7 @@ def test_read_partial_hour_functions_reuse_caller_connection(tmp_path, monkeypat
 
 
 def test_merge_partial_hour_total_accumulates_across_ticks(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -191,7 +188,7 @@ def test_merge_partial_hour_total_accumulates_across_ticks(tmp_path):
 
 
 def test_merge_partial_hour_is_incremental_and_idempotent(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -242,7 +239,7 @@ def test_merge_partial_hour_excludes_rows_before_hour_start(tmp_path):
     file as an in-hour row, then asserts the pre-hour row's value never
     appears in the persisted rollup.
     """
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     cache_dir = str(tmp_path / "svc-a")
     hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
@@ -265,7 +262,7 @@ def test_merge_partial_hour_excludes_rows_before_hour_start(tmp_path):
 
 
 def test_gc_stale_partial_hours_removes_old_but_not_active(tmp_path):
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     stale_hour = (datetime.now(UTC) - timedelta(hours=5)).strftime("%Y-%m-%d-%H")
 
@@ -283,7 +280,7 @@ def test_gc_stale_partial_hours_ignores_malformed_hour_token(tmp_path):
     """A dir whose ``hour=`` suffix isn't a parseable token must be left
     alone (and must not raise) — parse_hour_token(...) is None short-
     circuits before the age comparison ever runs on it."""
-    src = _make_source(tmp_path)
+    src = make_source(tmp_path, "svc-a", cache_key="cache_dir_override")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     stale_hour = (datetime.now(UTC) - timedelta(hours=5)).strftime("%Y-%m-%d-%H")
     malformed_dir = os.path.join(ph.partial_hour_root(src), "hour=garbage")

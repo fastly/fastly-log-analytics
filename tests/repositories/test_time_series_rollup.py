@@ -16,6 +16,7 @@ import duckdb
 import pytest
 
 from backend.repositories._base import QueryRunner
+from tests._helpers.sources import make_source
 
 
 def _write_bundle(bundled_root: Path, hour_str: str, total_requests: int = 600) -> None:
@@ -94,15 +95,6 @@ def rollup_layout(tmp_path):
     return bundled, per_field, str(cache_dir)
 
 
-def _make_source(cache_override: str) -> dict:
-    """Source dict that pins _cache_dir to a temp path via the override hook."""
-    return {
-        "name": "test_service",
-        "service_id": "test-service-id",
-        "_cache_dir_override": cache_override,
-    }
-
-
 def _populate_past_window(
     bundled, per_field, *, hours_back_end: int, span_hours: int
 ) -> tuple[datetime, datetime, list[str]]:
@@ -155,7 +147,7 @@ class TestTryTimeSeriesFromRollup:
         start_cdt_iso = start_utc.astimezone(cdt).isoformat()
         end_cdt_iso = end_utc.astimezone(cdt).isoformat()
 
-        src = _make_source(cache_dir)
+        src = make_source(cache_dir)
         con = duckdb.connect()
         try:
             runner = QueryRunner(con, src)
@@ -212,7 +204,7 @@ class TestTryTimeSeriesFromRollup:
         bundled, per_field, cache_dir = rollup_layout
         start_utc, end_utc, hours = _populate_past_window(bundled, per_field, hours_back_end=1, span_hours=24)
 
-        src = _make_source(cache_dir)
+        src = make_source(cache_dir)
         con = duckdb.connect()
         try:
             runner = QueryRunner(con, src)
@@ -266,7 +258,7 @@ class TestActiveHourDirectLiveSlice:
         finally:
             con.close()
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         st = (active_start - timedelta(hours=2)).isoformat()
         et = (active_start + timedelta(minutes=30)).isoformat()
         rows = runner.try_time_series_from_rollup(
@@ -310,7 +302,7 @@ class TestActiveHourDirectLiveSlice:
         finally:
             con.close()
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
             chart_metric="requests",
             interval="1 hour",
@@ -445,7 +437,7 @@ class TestPartialHourMergeIntoRollupReaders:
         self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
         self._write_buffer_rows(cache_dir, not_yet_merged_row)
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
             chart_metric="requests",
             interval="1 hour",
@@ -483,7 +475,7 @@ class TestPartialHourMergeIntoRollupReaders:
         self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
         self._write_buffer_rows(cache_dir, not_yet_merged_row)
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         total = runner.try_count_from_rollup(
             start_time=(active_start - timedelta(hours=1)).isoformat(),
             end_time=(active_start + timedelta(minutes=30)).isoformat(),
@@ -535,7 +527,7 @@ class TestPartialHourMergeIntoRollupReaders:
             f"AS t(timestamp, status)"
         )
 
-        runner = QueryRunner(con, _make_source(cache_dir))
+        runner = QueryRunner(con, make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
             chart_metric="5xx",
             interval="1 hour",
@@ -597,7 +589,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
         )
 
-        runner = QueryRunner(con, _make_source(cache_dir))
+        runner = QueryRunner(con, make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
             chart_metric="requests",
             interval="1 hour",
@@ -635,7 +627,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
         )
 
-        runner = QueryRunner(con, _make_source(cache_dir))
+        runner = QueryRunner(con, make_source(cache_dir))
         total = runner.try_count_from_rollup(
             start_time=h1_start.isoformat(),
             end_time=(h2_start + timedelta(hours=1)).isoformat(),
@@ -669,7 +661,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             _write_per_field_marker(per_field, "requests", hour_str)
             cursor += timedelta(hours=1)
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
             chart_metric="requests",
             interval="1 hour",
@@ -700,7 +692,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             _write_per_field_marker(per_field, "requests", hour_str)
             cursor += timedelta(hours=1)
 
-        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        runner = QueryRunner(duckdb.connect(), make_source(cache_dir))
         total = runner.try_count_from_rollup(
             start_time=start.isoformat(),
             end_time=end.isoformat(),
@@ -737,7 +729,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             [missing_time_series_hour + timedelta(minutes=m) for m in (1, 2, 3)],
         )
 
-        runner = QueryRunner(con, _make_source(cache_dir))
+        runner = QueryRunner(con, make_source(cache_dir))
         total = runner.try_count_from_rollup(
             start_time=start.isoformat(),
             end_time=end.isoformat(),
