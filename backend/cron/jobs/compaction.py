@@ -27,8 +27,6 @@ import time
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import (
     _display_label,
-    _extract_log_text,
-    _log_and_add_progress,
 )
 
 logger = logging.getLogger("backend.scheduler")
@@ -168,8 +166,9 @@ def _run_rollup_hour_heal(
     rollup_compact.
     """
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service, log_cron_run
     from backend.core.rollups import backfill_missing_hour_bundles
+    from backend.cron.lifecycle import cron_run
     from backend.utils.active_requests import should_defer_cron
 
     # The heal's view scan + per-field COPY are CPU-bound; defer when API
@@ -209,21 +208,29 @@ def _run_rollup_hour_heal(
     except Exception as e:
         logger.warning("[rollup-heal] %s: failed to check disk space: %s", service_id, e)
 
-    if run_id is None:
-        try:
-            run_id = start_cron_run(src, "rollup_hour_heal")
-        except RuntimeError as e:
-            logger.info("⏭️  [rollup-heal] %s: skipping — %s", service_id, str(e))
-            return {"status": "skipped", "service_id": service_id, "summary": str(e)}
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="rollup_hour_heal")
     _display = _display_label(src, service_id)
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_hour_heal",
+        source=src,
+        run_id=run_id,
+        error_summary="hour-bundle self-heal failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error_message": str(exc),
+            "summary": "hour-bundle self-heal failed",
+            "duration_s": run.elapsed(),
+            "run_id": run.run_id,
+        },
+        skip_log_prefix="rollup-heal",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result or {})
 
-    start_time = time.time()
-    try:
         durable_mode = svcconfig.is_durable_serving_mode(src)
         if durable_mode:
             from backend.core.rollup_readiness import rollup_coverage_ready
@@ -239,7 +246,6 @@ def _run_rollup_hour_heal(
             lookback_days=lookback_days,
             max_missing_hours=max_missing_hours,
         )
-        duration = time.time() - start_time
         # Durable mode becomes trusted once the dashboard lookback is
         # complete. A failed or timed-out startup catch-up self-heals on the
         # next tick.
@@ -256,18 +262,11 @@ def _run_rollup_hour_heal(
             f"{heal.get('bundled', 0)} hour(s) bundled, "
             f"{heal.get('stamped_empty', 0)} empty hour(s) stamped"
         )
-        log_cron_run(
-            src,
-            "rollup_hour_heal",
-            duration,
-            "success",
-            summary=summary,
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
+        duration = run.elapsed()
+        run.success(summary)
         if heal.get("missing", 0) or heal.get("stamped_empty", 0):
             logger.info("🏁  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
-        return {
+        outcome = {
             "status": "success",
             "service_id": service_id,
             "missing": heal.get("missing", 0),
@@ -277,34 +276,9 @@ def _run_rollup_hour_heal(
             "coverage_verified": heal.get("coverage_verified", False),
             "duration_s": duration,
             "summary": summary,
-            "run_id": run_id,
+            "run_id": run.run_id,
         }
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "rollup_hour_heal",
-            duration,
-            "error",
-            error_message=str(e),
-            summary="hour-bundle self-heal failed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(
-            run_id, service_id, job_name="rollup_hour_heal", event={"type": "error", "message": str(e)}
-        )
-        logger.exception("[scheduler] %s: rollup_hour_heal failed: %s", service_id, e)
-        return {
-            "status": "error",
-            "service_id": service_id,
-            "error_message": str(e),
-            "summary": "hour-bundle self-heal failed",
-            "duration_s": duration,
-            "run_id": run_id,
-        }
-    finally:
-        end_progress(run_id)
+    return run.result if run.result is not None else outcome
 
 
 # Re-exported from dedicated job module
