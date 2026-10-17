@@ -757,7 +757,8 @@ def origin_latency_us_expr(actual_cols: set[str] | list[str]) -> str:
     """
     expr = metric_expressions.origin_latency_us(actual_cols, absent="NULL")
     # absent="NULL" guarantees a non-None result.
-    assert expr is not None
+    if expr is None:
+        raise RuntimeError("origin_latency_us returned None despite absent='NULL'")
     return expr
 
 

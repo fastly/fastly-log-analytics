@@ -280,7 +280,8 @@ def _shape_summary(
             "obytes_p50": None,
         }
 
-    assert rollup_row is not None  # has_data check above narrowed this
+    if rollup_row is None:  # the has_data check above guarantees a row
+        raise RuntimeError("origin summary rollup row missing after has_data")
     return {
         "has_data": True,
         "total_misses": rollup_row["total_misses"],

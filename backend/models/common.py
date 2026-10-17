@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os as _os
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, Field, model_serializer
 
 from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
@@ -145,11 +146,6 @@ class DebugCall(BaseModel):
     status: str | int | None = None
     details: str | None = None
     caller: str | None = None
-
-
-import os as _os
-
-from pydantic import Field, model_serializer
 
 
 class HasDataMixin(BaseModel):

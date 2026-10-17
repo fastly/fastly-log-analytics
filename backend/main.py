@@ -126,7 +126,7 @@ def _initialize_service(cfg: dict):
 
                 n = metadata_db.reap_running_cron_runs(sid)
                 if n:
-                    logging.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
+                    logger.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
             except Exception as e:
                 # Transient on the first boot after an unclean shutdown — SQLite
                 # WAL recovery rolls the file forward on the next connection, so
@@ -134,13 +134,13 @@ def _initialize_service(cfg: dict):
                 # malformed-image case, WARN otherwise.
                 msg = str(e)
                 if "malformed" in msg or "is locked" in msg:
-                    logging.info(
+                    logger.info(
                         "[fastapi] Service %s: orphan-cron reap deferred (%s); WAL recovery will resolve on the next connection.",
                         sid,
                         msg,
                     )
                 else:
-                    logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
+                    logger.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
 
             src = _db.get_source_for_service(sid)
             if src:
@@ -158,11 +158,11 @@ def _initialize_service(cfg: dict):
 
                     compute_sync_status_cached(sid)
                 except Exception as e:
-                    logging.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
+                    logger.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
 
-                logging.info("[fastapi] Service %s initialised.", sid)
+                logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
-            logging.warning("[fastapi] Could not initialise service %s: %s", sid, e)
+            logger.warning("[fastapi] Could not initialise service %s: %s", sid, e)
 
 
 def _ensure_persistent_view(sid: str, src: dict) -> None:
@@ -183,7 +183,7 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
     files — no cloud round-trip. When the view already exists, this is
     a single information_schema lookup and a no-op."""
     if svcconfig.is_durable_serving_mode(src):
-        logging.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
+        logger.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
         return
     try:
         from backend.core import iceberg as _ice
@@ -195,15 +195,15 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
         # until a sync writer rebuilds it again. The previous "skip if
         # already exists" behaviour kept stale views around when buffer
         # files had been appended since the last writer close.
-        logging.info("[fastapi] Service %s: pre-warming Iceberg view at startup", sid)
+        logger.info("[fastapi] Service %s: pre-warming Iceberg view at startup", sid)
         writer = get_connection(source=src, read_only=False)
         try:
             _ice.update_iceberg_view(writer, src)
         finally:
             writer.close()
-        logging.info("[fastapi] Service %s: view pre-warmed", sid)
+        logger.info("[fastapi] Service %s: view pre-warmed", sid)
     except Exception as e:
-        logging.warning("[fastapi] Service %s: view pre-warm failed: %s", sid, e)
+        logger.warning("[fastapi] Service %s: view pre-warm failed: %s", sid, e)
 
 
 def _ensure_pop_cache():
@@ -218,12 +218,12 @@ def _ensure_pop_cache():
             if api_key:
                 ok = fetch_pop_locations(api_key)
                 if ok:
-                    logging.info("[fastapi] POP locations cached at startup.")
+                    logger.info("[fastapi] POP locations cached at startup.")
                 else:
-                    logging.warning("[fastapi] POP locations fetch failed at startup.")
+                    logger.warning("[fastapi] POP locations fetch failed at startup.")
                 break
     except Exception as e:
-        logging.warning("[fastapi] Could not prefetch POP locations: %s", e)
+        logger.warning("[fastapi] Could not prefetch POP locations: %s", e)
 
 
 def _ensure_scoring_matrix():

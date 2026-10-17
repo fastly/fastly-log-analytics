@@ -335,7 +335,8 @@ async def dashboard_bundle(
             timer.mark("bundle:top_bots", t)
             return res
 
-        assert second_cm is not None  # narrowed by ``parallel`` flag
+        if second_cm is None:  # ``parallel`` guarantees it
+            raise RuntimeError("parallel bundle path is missing its second connection")
         try:
             # return_exceptions=True forces gather() to wait for BOTH
             # threads to finish before returning, even if one raises or

@@ -67,7 +67,7 @@ def test_initialize_service_logs_reaped_count_only_when_nonzero():
     with (
         patch("backend.core.metadata.reap_running_cron_runs", return_value=0),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
-        patch("backend.main.logging.info") as mock_log_info,
+        patch("backend.main.logger.info") as mock_log_info,
     ):
         _initialize_service({"service_id": "svc-x"})
 
@@ -260,7 +260,7 @@ def test_ensure_pop_cache_logs_warning_on_fetch_failure(tmp_path):
         patch("backend.utils.pop_utils.CACHE_FILE", str(tmp_path / "missing.json")),
         patch("backend.config.list_configs", return_value=[{"service_id": "a", "fastly_api_key": "key"}]),
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=False),
-        patch("backend.main.logging.warning") as mock_warn,
+        patch("backend.main.logger.warning") as mock_warn,
     ):
         _ensure_pop_cache()
 

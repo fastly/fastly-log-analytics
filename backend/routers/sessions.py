@@ -137,7 +137,8 @@ def sessions_detail(
         # clamp_or_400 returns (None, None) only when both inputs are None AND
         # there's no analyst session; we already required both inputs above,
         # so the clamp always returns concrete ISO strings here.
-        assert start_time is not None and end_time is not None
+        if start_time is None or end_time is None:
+            raise RuntimeError("clamp returned no bounds although both were supplied")
 
         high_scale_service = ctx.high_scale
         if high_scale_service is not None:
