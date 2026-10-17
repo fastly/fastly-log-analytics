@@ -64,7 +64,8 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         provided, ``start_cron_run`` is not called.
     error_summary:
         Summary recorded on the auto-``error`` row when the body raises without
-        having recorded a terminal status itself.
+        having recorded a terminal status itself. May be an ``exc -> str``
+        callable for jobs whose summary embeds the exception text.
     error_result:
         Value (or ``exc -> value`` callable) assigned to ``self.result`` when the
         body raises — lets dict-returning jobs ``return run.result`` after the
@@ -97,7 +98,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         *,
         source: dict | None = None,
         run_id: int | None = None,
-        error_summary: str | None = None,
+        error_summary: str | Callable[[BaseException], str] | None = None,
         error_result: Any | Callable[[BaseException], Any] | None = None,
         finalize_duration: bool = False,
         finalize_running_backstop: bool = False,
@@ -264,7 +265,10 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         logger.info("⏭️  [%s] %s: skipping — %s", prefix, self.service_id, str(exc))
 
     def _record_exception(self, exc: BaseException) -> None:
-        summary = self.error_summary or f"{self.task} failed"
+        if callable(self.error_summary):
+            summary = self.error_summary(exc)
+        else:
+            summary = self.error_summary or f"{self.task} failed"
         self.record("error", summary=summary, error_message=str(exc))
         self.log_progress({"type": "error", "message": str(exc)})
         logger.exception("[scheduler] %s: %s failed: %s", self.service_id, self.task, exc)

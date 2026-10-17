@@ -109,7 +109,7 @@ def base_context(monkeypatch, stub_source):
     monkeypatch.setattr("backend.cron_progress.start_progress", start_prog)
     monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", reap_prog)
-    monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", log_prog)
+    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_prog)
     monkeypatch.setattr("backend.config.get_status", get_status)
     monkeypatch.setattr("backend.utils.tunnel.get_tunnel_manager", lambda: tunnel_mgr)
     monkeypatch.setattr("backend.core.share_db.get_remote_invites", lambda: [])
@@ -563,7 +563,7 @@ def test_contract_telemetry_attribution_and_sse_emission(base_context):
         assert prog_args[0] == 101
         assert prog_args[1] == "svc-prewarm-contract"
         assert prog_kwargs["job_name"] == "insights_prewarmer"
-        assert prog_kwargs["event"]["type"] == "done"
+        assert prog_args[2]["type"] == "done"
 
         base_context["log_run"].assert_called_once()
         log_args, log_kwargs = base_context["log_run"].call_args

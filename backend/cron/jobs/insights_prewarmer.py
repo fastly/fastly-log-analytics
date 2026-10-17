@@ -46,10 +46,10 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import UTC, datetime
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import _display_label
 
 logger = logging.getLogger("backend.scheduler")
@@ -121,8 +121,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
     entry plus each active analyst clamp shape — so the first user (admin OR
     analyst) lands on a cache hit instead of the cold path."""
     from backend import config as svcconfig
-    from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
-    from backend.cron.jobs.metadata import _log_and_add_progress
+    from backend.core.duckdb import get_connection, get_source_for_service
     from backend.repositories.insights import get_insights
     from backend.utils.active_requests import should_defer_cron, yield_to_api
     from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
@@ -136,141 +135,112 @@ def _run_insights_prewarmer(service_id: str) -> None:
     if should_defer_cron("insights_prewarmer", service_id):
         return
 
-    try:
-        run_id = start_cron_run(src, "insights_prewarmer")
-    except RuntimeError as e:
-        logger.info("⏭️  [insights-prewarmer] %s: skipping — %s", service_id, str(e))
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="insights_prewarmer")
-
     _display = _display_label(src, service_id)
 
-    started = time.time()
     con = None
-    try:
-        # Same cached snapshot the clients' picker reads (bootstrap
-        # log_extents / /api/log-extents both project svcconfig status,
-        # un-clamped for analysts) → same bucket → same cache key.
-        cached_status = svcconfig.get_status(src["name"]) or {}
-        history_hours = history_hours_from_earliest(cached_status.get("earliest_log_at"))
-        window_hours, baseline_hours = pick_insights_default(history_hours)
+    with cron_run(
+        service_id,
+        "insights_prewarmer",
+        source=src,
+        error_summary=lambda exc: f"Prewarm failed: {exc}",
+        finalize_duration=True,
+        include_log_output=False,
+        skip_log_prefix="insights-prewarmer",
+    ) as run:
+        if not run.ok:
+            return
+        try:
+            # Same cached snapshot the clients' picker reads (bootstrap
+            # log_extents / /api/log-extents both project svcconfig status,
+            # un-clamped for analysts) → same bucket → same cache key.
+            cached_status = svcconfig.get_status(src["name"]) or {}
+            history_hours = history_hours_from_earliest(cached_status.get("earliest_log_at"))
+            window_hours, baseline_hours = pick_insights_default(history_hours)
 
-        # Read-only + skip_view_update: insights queries against the live
-        # Iceberg view; a few seconds of view staleness across cron-tick
-        # boundaries is fine here (the next prewarmer tick will resolve
-        # newly-bound view tables anyway).
-        con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
+            # Read-only + skip_view_update: insights queries against the live
+            # Iceberg view; a few seconds of view staleness across cron-tick
+            # boundaries is fine here (the next prewarmer tick will resolve
+            # newly-bound view tables anyway).
+            con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
 
-        # Serial insight queries leave headroom for foreground requests.
-        # Never change DuckDB threads/memory_limit here:
-        # both are instance-global, so they'd clobber every concurrent query, and
-        # changing threads mid-flight deadlocks DuckDB (AGENTS.md Trap #42).
+            # Serial insight queries leave headroom for foreground requests.
+            # Never change DuckDB threads/memory_limit here:
+            # both are instance-global, so they'd clobber every concurrent query, and
+            # changing threads mid-flight deadlocks DuckDB (AGENTS.md Trap #42).
 
-        yield_to_api(max_wait_secs=1.0)
+            yield_to_api(max_wait_secs=1.0)
 
-        # 1) Admin / unclamped default selection.
-        get_insights(
-            con,
-            src,
-            window_hours=window_hours,
-            baseline_hours=baseline_hours,
-            service_id=service_id,
-            force_refresh=True,
-            max_workers=1,
-        )
+            # 1) Admin / unclamped default selection.
+            get_insights(
+                con,
+                src,
+                window_hours=window_hours,
+                baseline_hours=baseline_hours,
+                service_id=service_id,
+                force_refresh=True,
+                max_workers=1,
+            )
 
-        # 2) Analyst clamp shapes — only meaningful while sharing is live (no
-        #    analyst can reach /api/insights otherwise). Warm each active
-        #    invite's (window-params, mask_ips) shape under the SAME stable key
-        #    a live analyst request derives.
-        analyst_warmed = 0
-        if _analyst_prewarm_enabled() and get_tunnel_manager().is_sharing_active():
-            for qs, qe, qwh, mask in _active_analyst_shapes(service_id):
-                if should_defer_cron("insights_prewarmer", service_id):
-                    logger.info(
-                        "[insights-prewarmer] %s: deferring remaining analyst prewarms due to active API requests",
-                        service_id,
-                    )
-                    break
-                yield_to_api(max_wait_secs=0.5)
-                try:
-                    cs, ce, ck = resolve_analyst_insights_clamp(
-                        qs,
-                        qe,
-                        qwh,
-                        baseline_hours=baseline_hours,
+            # 2) Analyst clamp shapes — only meaningful while sharing is live (no
+            #    analyst can reach /api/insights otherwise). Warm each active
+            #    invite's (window-params, mask_ips) shape under the SAME stable key
+            #    a live analyst request derives.
+            analyst_warmed = 0
+            if _analyst_prewarm_enabled() and get_tunnel_manager().is_sharing_active():
+                for qs, qe, qwh, mask in _active_analyst_shapes(service_id):
+                    if should_defer_cron("insights_prewarmer", service_id):
+                        logger.info(
+                            "[insights-prewarmer] %s: deferring remaining analyst prewarms due to active API requests",
+                            service_id,
+                        )
+                        break
+                    yield_to_api(max_wait_secs=0.5)
+                    try:
+                        cs, ce, ck = resolve_analyst_insights_clamp(
+                            qs,
+                            qe,
+                            qwh,
+                            baseline_hours=baseline_hours,
+                            window_hours=window_hours,
+                        )
+                    except ValueError:
+                        continue  # empty window for this shape — nothing to warm
+                    get_insights(
+                        con,
+                        src,
                         window_hours=window_hours,
+                        baseline_hours=baseline_hours,
+                        service_id=service_id,
+                        clamp_start=cs,
+                        clamp_end=ce,
+                        mask_ips=mask,
+                        clamp_cache_key=ck,
+                        force_refresh=True,
+                        max_workers=1,
                     )
-                except ValueError:
-                    continue  # empty window for this shape — nothing to warm
-                get_insights(
-                    con,
-                    src,
-                    window_hours=window_hours,
-                    baseline_hours=baseline_hours,
-                    service_id=service_id,
-                    clamp_start=cs,
-                    clamp_end=ce,
-                    mask_ips=mask,
-                    clamp_cache_key=ck,
-                    force_refresh=True,
-                    max_workers=1,
-                )
-                analyst_warmed += 1
+                    analyst_warmed += 1
 
-        duration = time.time() - started
-        # The warmed shape is in the summary so cron_runs alone can confirm
-        # the prewarm matches what the page requests (the drift this cron
-        # once had was invisible in an "admin + N analyst" summary).
-        summary = (
-            f"Prewarmed default insights selection ({window_hours:g}h/{baseline_hours:g}h: "
-            f"admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
-        )
-        log_cron_run(
-            src,
-            "insights_prewarmer",
-            duration,
-            "success",
-            summary=summary,
-            run_id=run_id,
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="insights_prewarmer",
-            event={"type": "done", "message": summary},
-        )
-        logger.info(
-            "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
-            _display,
-            window_hours,
-            baseline_hours,
-            duration,
-            analyst_warmed,
-        )
-    except Exception as e:
-        duration = time.time() - started
-        log_cron_run(
-            src,
-            "insights_prewarmer",
-            duration,
-            "error",
-            summary=f"Prewarm failed: {e}",
-            error_message=str(e),
-            run_id=run_id,
-        )
-        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e, exc_info=True)
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                pass
-        end_progress(run_id)
-        from backend.cron.jobs._common import finalize_cron_duration
-
-        finalize_cron_duration(src, run_id, started)
+            duration = run.elapsed()
+            # The warmed shape is in the summary so cron_runs alone can confirm
+            # the prewarm matches what the page requests (the drift this cron
+            # once had was invisible in an "admin + N analyst" summary).
+            summary = (
+                f"Prewarmed default insights selection ({window_hours:g}h/{baseline_hours:g}h: "
+                f"admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
+            )
+            run.success(summary)
+            run.log_progress({"type": "done", "message": summary})
+            logger.info(
+                "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
+                _display,
+                window_hours,
+                baseline_hours,
+                duration,
+                analyst_warmed,
+            )
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass

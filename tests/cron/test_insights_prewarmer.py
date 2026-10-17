@@ -492,8 +492,8 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     monkeypatch.setattr("backend.cron_progress.start_progress", lambda rid, **kw: prog_started.append((rid, kw)))
     monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: prog_ended.append(rid))
     monkeypatch.setattr(
-        "backend.cron.jobs.metadata._log_and_add_progress",
-        lambda rid, sid, job_name, event: prog_events.append((rid, sid, job_name, event)),
+        "backend.cron.scheduler._log_and_add_progress",
+        lambda rid, sid, event, job_name=None: prog_events.append((rid, sid, job_name, event)),
     )
     monkeypatch.setattr(
         "backend.cron.jobs._common.finalize_cron_duration",
@@ -516,3 +516,17 @@ def test_prewarmer_source_never_changes_global_threads():
     from backend.cron.jobs import insights_prewarmer
 
     assert "SET threads" not in inspect.getsource(insights_prewarmer)
+
+
+def test_error_row_is_single_with_exact_summary_and_no_log_output(monkeypatch, stub_source, stub_cron_run):
+    monkeypatch.setattr(
+        "backend.repositories.insights.get_insights",
+        MagicMock(side_effect=RuntimeError("duckdb exploded")),
+    )
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    stub_cron_run["log"].assert_called_once()
+    _, log_kwargs = stub_cron_run["log"].call_args
+    assert log_kwargs["summary"] == "Prewarm failed: duckdb exploded"
+    assert log_kwargs["log_output"] is None
