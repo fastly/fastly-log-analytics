@@ -615,7 +615,7 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
     # day_str -> [(hour_part_dir, [parquet_paths])]
     by_day: dict[str, list[tuple[str, list[str]]]] = defaultdict(list)
     for entry in os.listdir(data_dir):
-        m = _HOUR_PART_RE.match(entry)
+        m = _HOUR_PART_RE.fullmatch(entry)
         if not m:
             continue
         day_str = m.group(1)
@@ -717,7 +717,7 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
     for fname in os.listdir(daily_root):
         if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
             continue
-        m = _DAILY_FILE_RE.match(fname)
+        m = _DAILY_FILE_RE.fullmatch(fname)
         if not m:
             continue
         try:

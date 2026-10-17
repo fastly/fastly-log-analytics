@@ -135,3 +135,82 @@ def test_provision_router_has_no_bare_re_match():
     from backend.routers import provision
 
     assert "re.match(" not in inspect.getsource(provision)
+
+
+def test_share_db_name_and_email_validators_hold_with_whitespace():
+    from backend.core.share_db.validation import (
+        InvalidEmailError,
+        InvalidNameError,
+        validate_email,
+        validate_name,
+    )
+
+    assert validate_name("  Bob\n") == "Bob"  # surrounding whitespace is stripped, not an injection vector
+    for bad in ("Bo\nb", "Bo\rb", "Bob\n\nx", "Bo\tb"):
+        with pytest.raises(InvalidNameError):
+            validate_name(bad)
+    assert validate_email(" A@B.co\n") == "a@b.co"
+    for bad in ("a@b.co\nx", "a@b.co\r\nBcc: x@y.z", "a@b.c o", "a b@c.co"):
+        with pytest.raises(InvalidEmailError):
+            validate_email(bad)
+
+
+@pytest.mark.parametrize("value", ["1.2.3.4\n", " 1.2.3.4", "1.2.3.4\r\n", "\t2001:db8::1 \n"])
+def test_mask_ip_values_does_not_pass_ips_wrapped_in_whitespace(value):
+    from backend.core.share_db.validation import mask_ip_values
+
+    out = mask_ip_values({"cell": value})["cell"]
+    assert "1.2.3.4" not in out
+    assert "2001:db8::1" not in out
+
+
+def test_share_db_validator_patterns_use_fullmatch():
+    import inspect
+
+    from backend.core.share_db import validation
+
+    src = inspect.getsource(validation)
+    for name in ("_NAME_RE", "_EMAIL_RE", "_MAYBE_IP_RE"):
+        assert f"{name}.match(" not in src
+        assert f"{name}.fullmatch(" in src
+
+
+def test_no_dollar_anchored_validator_uses_bare_match():
+    """``X.match(...)`` / ``re.match(...)`` on a ``^...$`` pattern accepts a trailing newline."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "backend"
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        anchored: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "compile"
+                and node.value.args
+                and isinstance(node.value.args[0], ast.Constant)
+                and isinstance(node.value.args[0].value, str)
+                and node.value.args[0].value.endswith("$")
+            ):
+                anchored.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "match"):
+                continue
+            recv = node.func.value
+            if isinstance(recv, ast.Name) and recv.id in anchored:
+                offenders.append(f"{path}:{node.lineno}")
+            elif (
+                isinstance(recv, ast.Name)
+                and recv.id == "re"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.endswith("$")
+            ):
+                offenders.append(f"{path}:{node.lineno}")
+        # pattern variables iterated in a loop (``for pat in X: pat.match``) are covered by review of the above
+    assert offenders == []

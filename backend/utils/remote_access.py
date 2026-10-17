@@ -1368,7 +1368,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
                 for allowed in _ANALYST_SSE_ALLOWLIST
             )
-            and not any(pat.match(path) for pat in _ANALYST_SSE_ALLOWED_PATTERNS)
+            and not any(pat.fullmatch(path) for pat in _ANALYST_SSE_ALLOWED_PATTERNS)
         ):
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 

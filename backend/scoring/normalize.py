@@ -136,7 +136,7 @@ def _looks_like_id(segment: str) -> bool:
     if not segment:
         return False
     for pat in _ID_PATTERNS:
-        if pat.match(segment):
+        if pat.fullmatch(segment):
             return True
     return False
 

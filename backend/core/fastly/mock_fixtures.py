@@ -82,7 +82,7 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         # empty list (the name is novel).
         return []
 
-    if re.match(r"^/service/[^/]+$", path) and method in ("GET", "PUT", "DELETE"):
+    if re.fullmatch(r"/service/[^/]+", path) and method in ("GET", "PUT", "DELETE"):
         return {
             "id": _service_id_from_path(path),
             "version": 1,
