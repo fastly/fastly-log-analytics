@@ -768,3 +768,54 @@ def test_contract_alerts_job_module_exports():
     assert hasattr(alerts_job, "_post_slack_notification")
     assert hasattr(alerts_job, "_post_pagerduty_notification")
     assert alerts_job._run_service_alerts_evaluation is metadata_job._run_service_alerts_evaluation
+
+
+def test_lease_held_skips_without_opening_duckdb_or_recording_a_row():
+    src = _sample_source()
+    alerts = [_make_alert("svc-alerts-contract", alert_id="a1")]
+    log_calls = []
+    get_conn = MagicMock()
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", get_conn),
+        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("held")),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.cron_progress.end_progress") as end_progress,
+    ):
+        metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
+
+    assert log_calls == []
+    get_conn.assert_not_called()
+    end_progress.assert_not_called()
+
+
+def test_error_row_has_zero_counters_run_id_and_no_log_output():
+    src = _sample_source()
+    alerts = [_make_alert("svc-alerts-contract", alert_id="a1")]
+    log_calls = []
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
+        patch("backend.core.duckdb.start_cron_run", return_value=108),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.repositories.alerts.evaluate_alert", return_value=(True, None, None, "t")),
+        patch("backend.repositories.alerts.update_last_triggered", side_effect=RuntimeError("boom")),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress") as end_progress,
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[1] == "alerts"
+    assert (kwargs["files_downloaded"], kwargs["rows_ingested"]) == (0, 0)
+    assert kwargs["run_id"] == 108
+    assert kwargs["log_output"] is None
+    end_progress.assert_called_once_with(108)

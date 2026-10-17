@@ -632,7 +632,7 @@ def _run_share_audit_purge() -> tuple[str, str]:
 @cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
     """Evaluate all enabled alerts for a specific service."""
-    from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run
     from backend.cron.decorators import dev_mode_no_crons
     from backend.repositories import alerts as alert_repo
     from backend.utils.active_requests import should_defer_cron
@@ -658,195 +658,170 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     # Fetch alerts from PostgreSQL metadata (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)
     enabled_alerts = [a for a in alerts if a["enabled"]]
-    # DuckDB connection is only needed if we actually have alerts to evaluate.
-    con_ro = get_connection(src, read_only=True) if enabled_alerts else None
-
     if not enabled_alerts:
         logger.info("🔔 \x1b[93m[alerts]\x1b[0m %s: No alerts configured, skipping.", _display)
         log_cron_run(src, task_name, time.monotonic() - start, "skipped", summary="No alerts configured")
         logger.info("🏁  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
         return
-    # Past this point enabled_alerts is non-empty, so con_ro was opened
-    # above — narrow for mypy.
-    assert con_ro is not None
-    run_id = None
-    try:
-        run_id = start_cron_run(src, task_name)
-    except Exception as e:
-        if con_ro is not None:
-            con_ro.close()
-        logger.debug("[scheduler] Could not start alerts evaluation for %s: %s", service_id, e)
-        return
 
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+    with cron_run(
+        service_id,
+        task_name,
+        source=src,
+        error_summary=lambda exc: f"Alerts evaluation failed: {exc}",
+        finalize_duration=True,
+        include_log_output=False,
+        skip_log_prefix="alerts",
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        # DuckDB connection is only needed (and only opened) once the lease is held.
+        con_ro = get_connection(src, read_only=True)
 
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task=task_name)
+        webhook_failures: list[str] = []
 
-    webhook_failures: list[str] = []
+        try:
+            display_name = _display_label(src, service_id)
 
-    try:
-        display_name = _display_label(src, service_id)
+            # (alert, webhook_url, payload, max_ts) for each alert that should fire
+            triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
 
-        # (alert, webhook_url, payload, max_ts) for each alert that should fire
-        triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
-
-        for alert in enabled_alerts:
-            try:
-                fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
-                    con_ro, src, alert, display_name=display_name, service_id=service_id
-                )
-                if fired:
-                    triggered_items.append((alert, webhook_url, payload, max_ts))
-                    logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
-                    _log_and_add_progress(
-                        run_id,
-                        service_id,
-                        job_name=task_name,
-                        event={"type": "status", "message": f"Alert triggered: {alert['name']}"},
+            for alert in enabled_alerts:
+                try:
+                    fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
+                        con_ro, src, alert, display_name=display_name, service_id=service_id
                     )
-            except Exception as e:
-                logger.error(
-                    "%s Failed to evaluate alert %s for %s: %s",
-                    JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
-                    alert["id"],
-                    display_name,
-                    e,
-                )
-    finally:
-        if con_ro is not None:
-            con_ro.close()
-
-    try:
-        # Second pass: write timestamps first, then dispatch webhooks so a crash
-        # between the two doesn't cause duplicate notifications on the next run.
-        if triggered_items:
-            for alert, _, _, max_ts in triggered_items:
-                alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
-
-            # Export updated state before sending webhooks so the quiet-period
-            # timestamp is durable even if a webhook call hangs or fails.
-            from backend.state_sync import export_admin_state
-
-            export_admin_state(service_id)
-
-            for alert, webhook_url, payload, _ in triggered_items:
-                # 1. Post legacy webhook if configured
-                if webhook_url and payload:
-                    try:
-                        _post_alert_webhook(webhook_url, payload)
-                    except Exception as e:
-                        err_str = f"webhook for {alert['name']}: {e}"
-                        webhook_failures.append(err_str)
-                        logger.error(
-                            "%s Failed to send webhook for alert %s: %s",
-                            JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
-                            alert["id"],
-                            e,
+                    if fired:
+                        triggered_items.append((alert, webhook_url, payload, max_ts))
+                        logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
+                        _log_and_add_progress(
+                            run_id,
+                            service_id,
+                            job_name=task_name,
+                            event={"type": "status", "message": f"Alert triggered: {alert['name']}"},
                         )
+                except Exception as e:
+                    logger.error(
+                        "%s Failed to evaluate alert %s for %s: %s",
+                        JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
+                        alert["id"],
+                        display_name,
+                        e,
+                    )
+        finally:
+            if con_ro is not None:
+                con_ro.close()
 
-                # 2. Post to modern alert channels if configured
-                channels = alert.get("channels") or []
-                for channel in channels:
-                    try:
-                        chan_type = channel.get("type")
-                        chan_url = channel.get("url")
-                        if not chan_url:
-                            continue
-                        if chan_type == "slack":
-                            slack_payload = {
-                                "blocks": [
-                                    {
-                                        "type": "section",
-                                        "text": {"type": "mrkdwn", "text": f"🚨 *Alert Triggered: {alert['name']}*"},
-                                    },
-                                    {
-                                        "type": "fields",
-                                        "fields": [
-                                            {"type": "mrkdwn", "text": f"*Service:* {display_name}"},
-                                            {"type": "mrkdwn", "text": f"*Metric:* {alert['metric']}"},
-                                            {"type": "mrkdwn", "text": f"*Operator:* {alert['operator']}"},
-                                            {"type": "mrkdwn", "text": f"*Threshold:* {alert['threshold']}"},
-                                        ],
-                                    },
-                                ]
-                            }
-                            _post_slack_notification(chan_url, slack_payload)
-                        elif chan_type == "pagerduty":
-                            _post_pagerduty_notification(
-                                chan_url,
-                                alert_name=alert["name"],
-                                metric=alert["metric"],
-                                msg_val=f"{alert['operator']} {alert['threshold']}",
-                                service_name=display_name,
+        try:
+            # Second pass: write timestamps first, then dispatch webhooks so a crash
+            # between the two doesn't cause duplicate notifications on the next run.
+            if triggered_items:
+                for alert, _, _, max_ts in triggered_items:
+                    alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
+
+                # Export updated state before sending webhooks so the quiet-period
+                # timestamp is durable even if a webhook call hangs or fails.
+                from backend.state_sync import export_admin_state
+
+                export_admin_state(service_id)
+
+                for alert, webhook_url, payload, _ in triggered_items:
+                    # 1. Post legacy webhook if configured
+                    if webhook_url and payload:
+                        try:
+                            _post_alert_webhook(webhook_url, payload)
+                        except Exception as e:
+                            err_str = f"webhook for {alert['name']}: {e}"
+                            webhook_failures.append(err_str)
+                            logger.error(
+                                "%s Failed to send webhook for alert %s: %s",
+                                JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
+                                alert["id"],
+                                e,
                             )
-                        elif chan_type == "webhook":
-                            _post_alert_webhook(chan_url, payload or {"alert": alert})
-                    except Exception as e:
-                        err_str = f"channel {channel.get('type')} for {alert['name']}: {e}"
-                        webhook_failures.append(err_str)
-                        logger.error(
-                            "%s Failed to send notifications to channel %s for alert %s: %s",
-                            JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
-                            channel.get("type"),
-                            alert["id"],
-                            e,
-                        )
 
-        n_eval = len(enabled_alerts)
-        n_trig = len(triggered_items)
-        status = "warning" if (n_trig > 0 or webhook_failures) else "success"
-        summary = (
-            f"Evaluated {n_eval} {'alert' if n_eval == 1 else 'alerts'}. "
-            f"{n_trig} {'alert' if n_trig == 1 else 'alerts'} triggered."
-        )
-        if webhook_failures:
-            summary += f" ({len(webhook_failures)} notification failure{'s' if len(webhook_failures) > 1 else ''}: {', '.join(webhook_failures)})"
+                    # 2. Post to modern alert channels if configured
+                    channels = alert.get("channels") or []
+                    for channel in channels:
+                        try:
+                            chan_type = channel.get("type")
+                            chan_url = channel.get("url")
+                            if not chan_url:
+                                continue
+                            if chan_type == "slack":
+                                slack_payload = {
+                                    "blocks": [
+                                        {
+                                            "type": "section",
+                                            "text": {
+                                                "type": "mrkdwn",
+                                                "text": f"🚨 *Alert Triggered: {alert['name']}*",
+                                            },
+                                        },
+                                        {
+                                            "type": "fields",
+                                            "fields": [
+                                                {"type": "mrkdwn", "text": f"*Service:* {display_name}"},
+                                                {"type": "mrkdwn", "text": f"*Metric:* {alert['metric']}"},
+                                                {"type": "mrkdwn", "text": f"*Operator:* {alert['operator']}"},
+                                                {"type": "mrkdwn", "text": f"*Threshold:* {alert['threshold']}"},
+                                            ],
+                                        },
+                                    ]
+                                }
+                                _post_slack_notification(chan_url, slack_payload)
+                            elif chan_type == "pagerduty":
+                                _post_pagerduty_notification(
+                                    chan_url,
+                                    alert_name=alert["name"],
+                                    metric=alert["metric"],
+                                    msg_val=f"{alert['operator']} {alert['threshold']}",
+                                    service_name=display_name,
+                                )
+                            elif chan_type == "webhook":
+                                _post_alert_webhook(chan_url, payload or {"alert": alert})
+                        except Exception as e:
+                            err_str = f"channel {channel.get('type')} for {alert['name']}: {e}"
+                            webhook_failures.append(err_str)
+                            logger.error(
+                                "%s Failed to send notifications to channel %s for alert %s: %s",
+                                JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
+                                channel.get("type"),
+                                alert["id"],
+                                e,
+                            )
 
-        log_cron_run(
-            src,
-            task_name,
-            time.monotonic() - start,
-            status,
-            summary=summary,
-            files_downloaded=n_eval,
-            rows_ingested=n_trig,
-            run_id=run_id,
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name=task_name,
-            event={"type": "done", "message": summary},
-        )
+            n_eval = len(enabled_alerts)
+            n_trig = len(triggered_items)
+            status = "warning" if (n_trig > 0 or webhook_failures) else "success"
+            summary = (
+                f"Evaluated {n_eval} {'alert' if n_eval == 1 else 'alerts'}. "
+                f"{n_trig} {'alert' if n_trig == 1 else 'alerts'} triggered."
+            )
+            if webhook_failures:
+                summary += f" ({len(webhook_failures)} notification failure{'s' if len(webhook_failures) > 1 else ''}: {', '.join(webhook_failures)})"
 
-    except Exception as e:
-        import traceback
+            run.record(status, summary=summary, files_downloaded=n_eval, rows_ingested=n_trig)
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name=task_name,
+                event={"type": "done", "message": summary},
+            )
 
-        err_msg = traceback.format_exc()
-        logger.error(
-            "%s Failed during alerts evaluation job for %s: %s\n%s",
-            JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
-            service_id,
-            e,
-            err_msg,
-        )
-        log_cron_run(
-            src,
-            task_name,
-            time.monotonic() - start,
-            "error",
-            summary=f"Alerts evaluation failed: {e}",
-            error_message=err_msg,
-            files_downloaded=0,
-            rows_ingested=0,
-            run_id=run_id,
-        )
-    finally:
-        end_progress(run_id)
-        from backend.cron.jobs._common import finalize_cron_duration
+        except Exception as e:
+            import traceback
 
-        finalize_cron_duration(src, run_id, start, clock=time.monotonic)
+            err_msg = traceback.format_exc()
+            logger.error(
+                "%s Failed during alerts evaluation job for %s: %s\n%s",
+                JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
+                service_id,
+                e,
+                err_msg,
+            )
+            run.fail(f"Alerts evaluation failed: {e}", error_message=err_msg, files_downloaded=0, rows_ingested=0)
 
 
 # ── _run_metadata_cleanup ────────────────────────────────────────────────────
