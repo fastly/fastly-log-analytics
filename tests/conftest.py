@@ -267,21 +267,19 @@ def reset_telemetry():
     start_call_tracking()
 
 
-@pytest.fixture(scope="session")
-def _pg_worker_schema(worker_id):
-    """Give this xdist worker its own Postgres schema for metadata storage.
+_PG_SLOT_LOCK_BASE = 0x464C4100
 
-    ``worker_id`` (pytest-xdist) is ``"master"`` outside xdist, or
-    ``"gw0"``, ``"gw1"``, ... under ``-n auto`` — a unique, filesystem/SQL
-    -safe token per worker process. We create a schema named after it,
-    point ``METADATA_DSN`` at a DSN whose ``options=-c search_path=...``
-    pins every connection opened from this process to that schema (via
-    libpq's ``options`` keyword — the same DSN
-    ``backend.core.metadata.pg_connection.get_pg_pool()`` reads lazily on
-    first use), then run the real schema bootstrap
+
+@pytest.fixture(scope="session")
+def _pg_worker_schema():
+    """Give this pytest process its own Postgres database for metadata storage.
+
+    The process claims an exclusive database slot (see below), resets it,
+    points ``METADATA_DSN`` / ``DUCKLAKE_CATALOG`` at it, then runs the real
+    schema bootstrap
     (:func:`backend.core.metadata.pg_schema.ensure_pg_schema`) against it.
-    Two workers therefore never see each other's rows, and share nothing
-    but the underlying database/server.
+    Two workers — or two concurrent pytest runs — therefore never see each
+    other's rows, and share nothing but the underlying server.
 
     Runs once per worker process, before any test in that worker touches
     metadata — the pool in ``pg_connection`` is a lazy module-level
@@ -296,30 +294,45 @@ def _pg_worker_schema(worker_id):
         "METADATA_DSN",
         "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
     )
-    worker_db = f"ducklake_test_{worker_id}"
-
     from urllib.parse import urlparse, urlunparse
 
     parsed = urlparse(base_dsn)
-    maint_parsed = parsed._replace(path="/postgres")
-    maint_dsn = urlunparse(maint_parsed)
+    maint_dsn = urlunparse(parsed._replace(path="/postgres"))
+
+    import time
 
     admin_conn = psycopg.connect(maint_dsn, autocommit=True)
-    admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
-    for attempt in range(10):
-        try:
-            admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
-            break
-        except (psycopg.errors.UniqueViolation, psycopg.errors.ObjectInUse):
-            if attempt == 9:
-                raise
-            import time
+    # Claim a database slot with a session-level advisory lock (released when the
+    # connection closes, even if the process dies). Naming the database after the
+    # xdist worker id alone made two concurrent pytest runs (parallel agents,
+    # ``make ci`` beside a quick loop) share ``ducklake_test_gw0`` and wipe each
+    # other's live connections; slots are exclusive per live process instead.
+    # Slots are reset in place, never dropped: DROP DATABASE waits on a forced
+    # checkpoint, which stalls for minutes on a busy server.
+    slot = 0
+    while not admin_conn.execute("SELECT pg_try_advisory_lock(%s)", (_PG_SLOT_LOCK_BASE + slot,)).fetchone()[0]:
+        slot += 1
+    worker_db = f"ducklake_test_slot{slot}"
+    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (worker_db,)).fetchone():
+        # CREATE DATABASE clones template1 and fails with ObjectInUse while another
+        # session is cloning it; wait that out.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+                break
+            except psycopg.errors.ObjectInUse:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.25)
 
-            time.sleep(0.1)
-            admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
-
-    worker_parsed = parsed._replace(path=f"/{worker_db}")
-    worker_dsn = urlunparse(worker_parsed)
+    worker_dsn = urlunparse(parsed._replace(path=f"/{worker_db}"))
+    with psycopg.connect(worker_dsn, autocommit=True) as reset_conn:
+        for (schema,) in reset_conn.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'"
+        ).fetchall():
+            reset_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        reset_conn.execute("CREATE SCHEMA public")
 
     _os.environ["METADATA_DSN"] = worker_dsn
     _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
