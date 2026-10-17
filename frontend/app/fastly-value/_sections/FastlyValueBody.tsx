@@ -17,6 +17,7 @@ import { client } from '@/lib/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
+import type { FiltersPayload } from '@/types/filters'
 import { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import SummaryValueTab from './tabs/SummaryValueTab'
 import CachingValueTab from './tabs/CachingValueTab'
@@ -47,9 +48,7 @@ interface FastlyValueBodyProps {
   startTime: string | null
   endTime: string | null
   activeServiceId: string | null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches ReportLayout render-prop type
-  filterPayload: any
-
+  filterPayload: FiltersPayload
   relativeRange: string | null
   isAutoRange: boolean
   anchor: string
