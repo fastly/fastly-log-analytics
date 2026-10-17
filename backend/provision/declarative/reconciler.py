@@ -1354,7 +1354,8 @@ def _detect_and_queue_legacy_cleanup(
 def _validate_draft(service_id: str, token: str, draft_version: int) -> str:
     """Validate draft version via Fastly API. Return error string if invalid."""
     try:
-        fastly_integration.validate_version(service_id, draft_version, token)
+        if not fastly_integration.validate_version(service_id, draft_version, token):
+            return f"VCL validation failed: version {draft_version} did not validate (status not ok)"
         return ""  # Valid
     except RuntimeError as e:
         return str(e)  # Error message
