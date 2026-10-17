@@ -192,84 +192,58 @@ def disable_cmcd(
     active_ver = get_active_version(logging_service_id, token)
     if active_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    clone = fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{active_ver}/clone",
-        token=token,
-    )
-    new_ver = int(clone["number"])
     ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{new_ver}",
-        {"comment": f"Disable CMCD collection {ts}"},
-        token=token,
-    )
 
     try:
-        snippets = list_vcl_snippets(logging_service_id, new_ver, token)
-        for name in cmcd_snippet_names():
-            if name in snippets:
-                encoded = urllib.parse.quote(name, safe="")
-                try:
-                    fastly(
-                        "DELETE",
-                        f"/service/{logging_service_id}/version/{new_ver}/snippet/{encoded}",
-                        token=token,
-                    )
-                except RuntimeError:
-                    pass
-
-        _remove_cmcd_custom_fields(cfg)
-        svcconfig.save_config(logging_service_id, cfg)
-
-        from backend.provision.fastly_api import install_capture_snippets, load_log_format
-
-        scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        install_capture_snippets(
+        with draft_version(
             logging_service_id,
-            new_ver,
-            cfg.get("log_fields"),
             token,
-            scoring_enabled=scoring_enabled,
-        )
+            base_version=active_ver,
+            call=fastly,
+            comment=f"Disable CMCD collection {ts}",
+        ) as new_ver:
+            snippets = list_vcl_snippets(logging_service_id, new_ver, token)
+            for name in cmcd_snippet_names():
+                if name in snippets:
+                    encoded = urllib.parse.quote(name, safe="")
+                    try:
+                        fastly(
+                            "DELETE",
+                            f"/service/{logging_service_id}/version/{new_ver}/snippet/{encoded}",
+                            token=token,
+                        )
+                    except RuntimeError:
+                        pass
 
-        endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-        existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
-        if endpoint_name in existing_endpoints:
-            new_format = load_log_format(cfg.get("log_fields"))
-            encoded = urllib.parse.quote(endpoint_name, safe="")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
-                {"format": new_format, "format_version": 2},
-                token=token,
+            _remove_cmcd_custom_fields(cfg)
+            svcconfig.save_config(logging_service_id, cfg)
+
+            from backend.provision.fastly_api import install_capture_snippets, load_log_format
+
+            scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
+            install_capture_snippets(
+                logging_service_id,
+                new_ver,
+                cfg.get("log_fields"),
+                token,
+                scoring_enabled=scoring_enabled,
             )
 
-        result = fastly(
-            "GET",
-            f"/service/{logging_service_id}/version/{new_ver}/validate",
-            token=token,
-        )
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{new_ver}/activate",
-            token=token,
-        )
+            endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
+            existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
+            if endpoint_name in existing_endpoints:
+                new_format = load_log_format(cfg.get("log_fields"))
+                encoded = urllib.parse.quote(endpoint_name, safe="")
+                fastly(
+                    "PUT",
+                    f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
+                    {"format": new_format, "format_version": 2},
+                    token=token,
+                )
         if status_cb:
             status_cb(f"CMCD collection disabled — version {new_ver} active.")
     except Exception:
         logger.exception("disable_cmcd VCL phase failed for %s", logging_service_id)
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
         raise
 
     try:
