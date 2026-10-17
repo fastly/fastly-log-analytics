@@ -1,5 +1,6 @@
 # --- Build Stage ---
-FROM node:24-slim AS builder
+# node:24-slim
+FROM node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS builder
 
 WORKDIR /app
 
@@ -40,7 +41,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,target=/app/.next/cache npx next build
 
 # --- Production Stage ---
-FROM node:24-slim AS runner
+# node:24-slim
+FROM node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS runner
 
 WORKDIR /app
 

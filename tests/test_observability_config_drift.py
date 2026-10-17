@@ -98,9 +98,7 @@ CHART_EXEMPT_FILES = {
 
 def _relative_files(root: str) -> set[str]:
     found: set[str] = set()
-    for dirpath, dirs, names in os.walk(root):
-        # Bytecode caches appear whenever a test imports a script from these dirs.
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+    for dirpath, _dirs, names in os.walk(root):
         for name in names:
             found.add(os.path.relpath(os.path.join(dirpath, name), root))
     return found

@@ -90,6 +90,14 @@ _CRED_LOCK = threading.Lock()
 _CRED_CACHE: tuple[float, bytes, int] | None = None
 _CRED_TTL_SECONDS = 10.0
 
+_BOOTSTRAP_LOCKS: dict[str, threading.Lock] = {env_id: threading.Lock() for env_id in ENV_BASE_URLS}
+_BOOTSTRAP_CACHE: dict[str, tuple[float, bytes]] = {}
+_BOOTSTRAP_TTL_SECONDS = 3.0
+
+_MONITORED_ERRORS_LOCK = threading.Lock()
+_MONITORED_ERRORS_CACHE: tuple[float, bytes, int] | None = None
+_MONITORED_ERRORS_TTL_SECONDS = 2.0
+
 
 class ReportRequestHandler(SimpleHTTPRequestHandler):
     # SimpleHTTPRequestHandler defaults to HTTP/1.0, which closes the TCP connection
@@ -131,25 +139,39 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def _serve_live_monitored_errors(self) -> None:
-        try:
-            lines: list[str] = []
-            for filename, tag in _LOG_SOURCES:
-                log_path = _CURRENT_REPORT_LINK / "logs" / filename
-                if not log_path.is_file():
-                    continue
-                try:
-                    raw_lines = log_path.read_text(errors="replace").splitlines()
-                except OSError:
-                    continue
-                for line in raw_lines[-_TAIL_LINES:]:
-                    if _SIGNAL_RE.search(line):
-                        lines.append(f"[{tag}] {line}")
-            body = json.dumps({"ok": True, "count": len(lines), "text": "\n".join(lines)}).encode("utf-8")
-            status = 200
-        except Exception as exc:  # pragma: no cover - defensive, keep the report alive
-            body = json.dumps({"ok": False, "error": str(exc)}).encode("utf-8")
-            status = 500
-        self._send_json(status, body)
+        global _MONITORED_ERRORS_CACHE
+        now = time.time()
+        if _MONITORED_ERRORS_CACHE is not None and (now - _MONITORED_ERRORS_CACHE[0]) < _MONITORED_ERRORS_TTL_SECONDS:
+            self._send_json(_MONITORED_ERRORS_CACHE[2], _MONITORED_ERRORS_CACHE[1])
+            return
+
+        with _MONITORED_ERRORS_LOCK:
+            if (
+                _MONITORED_ERRORS_CACHE is not None
+                and (time.time() - _MONITORED_ERRORS_CACHE[0]) < _MONITORED_ERRORS_TTL_SECONDS
+            ):
+                self._send_json(_MONITORED_ERRORS_CACHE[2], _MONITORED_ERRORS_CACHE[1])
+                return
+            try:
+                lines: list[str] = []
+                for filename, tag in _LOG_SOURCES:
+                    log_path = _CURRENT_REPORT_LINK / "logs" / filename
+                    if not log_path.is_file():
+                        continue
+                    try:
+                        raw_lines = log_path.read_text(errors="replace").splitlines()
+                    except OSError:
+                        continue
+                    for line in raw_lines[-_TAIL_LINES:]:
+                        if _SIGNAL_RE.search(line):
+                            lines.append(f"[{tag}] {line}")
+                body = json.dumps({"ok": True, "count": len(lines), "text": "\n".join(lines)}).encode("utf-8")
+                status = 200
+            except Exception as exc:  # pragma: no cover - defensive, keep the report alive
+                body = json.dumps({"ok": False, "error": str(exc)}).encode("utf-8")
+                status = 500
+            _MONITORED_ERRORS_CACHE = (time.time(), body, status)
+            self._send_json(status, body)
 
     def _serve_live_credentials_status(self) -> None:
         global _CRED_CACHE
@@ -177,19 +199,34 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
         if not base_url:
             self._send_json(400, json.dumps({"error": f"unknown env '{env_id}'"}).encode("utf-8"))
             return
-        try:
-            request = urllib.request.Request(
-                f"{base_url}/api/bootstrap",
-                headers={"Accept": "application/json"},
-            )
-            with admin_urlopen(request, timeout=3) as response:
-                payload = response.read()
-                body = json.dumps({"ok": True, "status": response.status, "data": json.loads(payload)}).encode("utf-8")
-        except urllib.error.HTTPError as exc:
-            body = json.dumps({"ok": False, "status": exc.code, "data": None}).encode("utf-8")
-        except Exception as exc:  # pragma: no cover - defensive, keep the report alive
-            body = json.dumps({"ok": False, "status": 0, "data": None, "error": str(exc)}).encode("utf-8")
-        self._send_json(200, body)
+
+        cached = _BOOTSTRAP_CACHE.get(env_id)
+        if cached is not None and (time.time() - cached[0]) < _BOOTSTRAP_TTL_SECONDS:
+            self._send_json(200, cached[1])
+            return
+
+        lock = _BOOTSTRAP_LOCKS.setdefault(env_id, threading.Lock())
+        with lock:
+            cached = _BOOTSTRAP_CACHE.get(env_id)
+            if cached is not None and (time.time() - cached[0]) < _BOOTSTRAP_TTL_SECONDS:
+                self._send_json(200, cached[1])
+                return
+            try:
+                request = urllib.request.Request(
+                    f"{base_url}/api/bootstrap",
+                    headers={"Accept": "application/json"},
+                )
+                with admin_urlopen(request, timeout=3) as response:
+                    payload = response.read()
+                    body = json.dumps({"ok": True, "status": response.status, "data": json.loads(payload)}).encode(
+                        "utf-8"
+                    )
+            except urllib.error.HTTPError as exc:
+                body = json.dumps({"ok": False, "status": exc.code, "data": None}).encode("utf-8")
+            except Exception as exc:  # pragma: no cover - defensive, keep the report alive
+                body = json.dumps({"ok": False, "status": 0, "data": None, "error": str(exc)}).encode("utf-8")
+            _BOOTSTRAP_CACHE[env_id] = (time.time(), body)
+            self._send_json(200, body)
 
     def _send_json(self, status: int, body: bytes) -> None:
         self.send_response(status)
