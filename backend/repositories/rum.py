@@ -120,7 +120,7 @@ def fetch_rum_analytics(
         if st and et and (et - st).total_seconds() <= raw_window_max_s:
             prefer_raw_window = True
     except Exception:
-        pass
+        logger.debug("fetch_rum_analytics: step failed (ignored)", exc_info=True)
 
     if not parsed_filters and not prefer_raw_window:
         # RUM reads are pure-read. Serve from cron-built rollups when they

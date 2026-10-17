@@ -367,7 +367,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                         try:
                             con.execute(f"DETACH {alias}")
                         except Exception:
-                            pass
+                            logger.debug("_ducklake_attach: con.execute failed (ignored)", exc_info=True)
                     if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
                         # Release the process-wide lock while we wait: the
                         # conflict is with a DIFFERENT connection's already
@@ -429,7 +429,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                                 )
                                 return False
                     except Exception:
-                        pass
+                        logger.debug("_ducklake_attach: step failed (ignored)", exc_info=True)
                     return False
                 logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
                 return False
@@ -474,7 +474,7 @@ def _ducklake_detach(con, aliases: tuple[str, ...] = ("lake",), service_id: str 
             try:
                 con.execute(f"DETACH {alias}")
             except Exception:
-                pass
+                logger.debug("_ducklake_detach: con.execute failed (ignored)", exc_info=True)
     finally:
         _attach_lock.release()
 

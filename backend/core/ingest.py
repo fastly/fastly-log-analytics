@@ -1572,7 +1572,7 @@ def ingest(
             try:
                 mem_con.close()
             except Exception:
-                pass
+                logger.debug("ingest: mem_con.close failed (ignored)", exc_info=True)
 
     total_deleted = deleted + reclaimed
     outcome_counters.update(
@@ -2002,7 +2002,7 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                     try:
                         duckdb_con.execute("ROLLBACK")
                     except Exception:
-                        pass
+                        logger.debug("convert_object: duckdb_con.execute failed (ignored)", exc_info=True)
                     raise
 
             # A NULL-timestamp row (see clean_read_expr above) is what
@@ -2063,7 +2063,7 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
             try:
                 _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
-                pass
+                logger.debug("convert_object: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
     if lease_generation is None:
@@ -2333,7 +2333,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                     try:
                         duckdb_con.execute("ROLLBACK")
                     except Exception:
-                        pass
+                        logger.debug("convert_batch_objects: duckdb_con.execute failed (ignored)", exc_info=True)
                     raise
 
             # Quarantine per ORIGINATING file. The NULL-timestamp rows are
@@ -2401,7 +2401,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             try:
                 _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
-                pass
+                logger.debug("convert_batch_objects: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
     for object_key in active:
@@ -2920,7 +2920,7 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 if not pathname_val and "rum_pathname" in qparams:
                     pathname_val = qparams["rum_pathname"][0]
             except Exception:
-                pass
+                logger.debug("_parse_rum_line: step failed (ignored)", exc_info=True)
 
         if metric_value is not None:
             try:
@@ -2933,7 +2933,7 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             try:
                 pathname_val = urlparse(log_data["referer"]).path
             except Exception:
-                pass
+                logger.debug("_parse_rum_line: urlparse failed (ignored)", exc_info=True)
         if not pathname_val:
             pathname_val = "/"
         pathname_val = pathname_val.replace("//", "/")
@@ -3241,7 +3241,7 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
                             try:
                                 duckdb_con.execute("ROLLBACK")
                             except Exception:
-                                pass
+                                logger.debug("_write_table: duckdb_con.execute failed (ignored)", exc_info=True)
                             raise
                 finally:
                     duckdb_con.unregister("_rum_stage")
@@ -3300,7 +3300,7 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
             try:
                 _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
-                pass
+                logger.debug("convert_rum_object: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
     if lease_generation is None:
@@ -3496,7 +3496,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                             try:
                                 duckdb_con.execute("ROLLBACK")
                             except Exception:
-                                pass
+                                logger.debug("_write_table_batch: duckdb_con.execute failed (ignored)", exc_info=True)
                             raise
                 finally:
                     duckdb_con.unregister("_rum_stage")
@@ -3550,7 +3550,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             try:
                 _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
-                pass
+                logger.debug("convert_batch_rum_objects: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
     for object_key in active:

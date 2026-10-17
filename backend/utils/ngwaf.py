@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 import urllib.parse
@@ -10,6 +11,8 @@ from datetime import UTC, datetime
 
 from backend.core.fastly.client import fastly
 from backend.utils.date_utils import iso_z, parse_iso_utc
+
+logger = logging.getLogger(__name__)
 
 # NGWAF requests live under the shared Fastly API host; fastly() prepends
 # https://api.fastly.com, so paths here start with the /ngwaf/v1 prefix.
@@ -174,7 +177,7 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
     try:
         _ensure_cache_schema()
     except Exception:
-        pass
+        logger.debug("oldest_unenriched_timestamp: _ensure_cache_schema failed (ignored)", exc_info=True)
 
     ngwaf_db = svcconfig.ngwaf_db_path()
     table_name = _safe_table(src["name"])
@@ -208,6 +211,6 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
                     return str(ts)
         con.close()
     except Exception:
-        pass
+        logger.debug("oldest_unenriched_timestamp: con.close failed (ignored)", exc_info=True)
 
     return None

@@ -664,7 +664,7 @@ async def rum_analytics(
                 if isinstance(v, dict):
                     parsed_filters[k] = FilterSpec(mode=v.get("mode", "include"), values=v.get("values", []))
         except Exception:
-            pass
+            logger.debug("rum_analytics: step failed (ignored)", exc_info=True)
 
     from backend.repositories.utils.filters import build_where_clause
 
@@ -940,7 +940,7 @@ async def rum_live_events(
         try:
             parsed_filters = json.loads(filters)
         except Exception:
-            pass
+            logger.debug("rum_live_events: json.loads failed (ignored)", exc_info=True)
 
     from backend.repositories.utils.filters import build_where_clause
 

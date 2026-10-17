@@ -235,7 +235,7 @@ def cleanup_metadata(
             on_event(event)
         except Exception:
             # Never let an event-sink failure abort the cleanup itself.
-            pass
+            logger.debug("_emit: on_event failed (ignored)", exc_info=True)
 
     cfg = {**DEFAULT_METADATA_RETENTION, **(retention or {})}
 

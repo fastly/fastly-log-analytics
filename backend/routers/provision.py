@@ -428,7 +428,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                     _cache_src = svcconfig.config_to_source(svc_cfg) if svc_cfg else {"name": sid}
                     db_iceberg.invalidate_service_caches(_cache_src)
                 except Exception:
-                    pass
+                    logger.debug("stream: db_iceberg.invalidate_service_caches failed (ignored)", exc_info=True)
 
                 # Also drop the credential-bearing caches (boto3 FOS client +
                 # pooled DuckDB S3 SECRET) so a same-process re-provision of this
@@ -519,7 +519,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                         },
                     )
                 except Exception:
-                    pass
+                    logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
 
             if sid:
                 logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs", sid))
@@ -642,7 +642,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         try:
             cfg["log_fields"] = json.loads(log_fields)
         except Exception:
-            pass
+            logger.debug("provision_execute: step failed (ignored)", exc_info=True)
 
     if req.cmcd_enabled:
         import datetime as _dt
@@ -772,7 +772,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                             },
                         )
                     except Exception:
-                        pass
+                        logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
 
                     try:
                         from backend.provision import _sync_crontab
@@ -787,7 +787,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                         except Exception as e:
                             logger.warning("[provision] Initial metadata sync after provision failed: %s", e)
                     except Exception:
-                        pass
+                        logger.debug("stream: step failed (ignored)", exc_info=True)
         except Exception as e:
             if not error_already_emitted:
                 yield json.dumps({"type": "error", "message": str(e)})
@@ -1053,7 +1053,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         try:
             state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
-            pass
+            logger.debug("provision_ingest: step failed (ignored)", exc_info=True)
 
     # Construct nested CMCD config from flat fields if present
     has_flat_cmcd = any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
@@ -1154,7 +1154,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
 
         _sync_crontab()
     except Exception:
-        pass
+        logger.warning("provision_ingest: _sync_crontab failed (ignored)", exc_info=True)
 
     # Eagerly trigger an initial metadata sync in a background thread to warm up the status cache
     # so `/api/bootstrap` has populated status fields (such as "rum" and "request" sub-payloads)
@@ -1397,7 +1397,7 @@ def provision_ngwaf_workspaces(
                         "To use NGWAF features, please use a Personal API Token from a human user with Security permissions."
                     )
             except Exception:
-                pass
+                logger.debug("provision_ngwaf_workspaces: step failed (ignored)", exc_info=True)
             req_debug = format_debug_request("GET", _ngwaf_url, _req_headers)
             result["_debug_raw"] = f"{req_debug}\n\n--- Response ({resp_status}) ---\n{raw_body[:500]}"
         return result
@@ -1406,7 +1406,7 @@ def provision_ngwaf_workspaces(
         try:
             body = exc.read().decode()
         except Exception:
-            pass
+            logger.debug("provision_ngwaf_workspaces: exc.read failed (ignored)", exc_info=True)
         logger.warning("[ngwaf-workspaces] HTTPError %s body=%s", exc.code, body[:300])
         if exc.code == 401:
             raise HTTPException(
@@ -1482,6 +1482,6 @@ def provision_set_ngwaf_workspace(
 
         _sync_crontab()
     except Exception:
-        pass
+        logger.warning("provision_set_ngwaf_workspace: _sync_crontab failed (ignored)", exc_info=True)
 
     return {"ok": True, "ngwaf_workspace_id": workspace_id}

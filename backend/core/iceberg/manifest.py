@@ -138,7 +138,7 @@ def _save_manifest_metadata_cache(source: dict, live_manifest_paths: list[str]) 
             json.dump(payload, f)
         os.replace(tmp, cache_file)
     except Exception:
-        pass
+        logger.debug("_save_manifest_metadata_cache: os.replace failed (ignored)", exc_info=True)
 
 
 def _get_scan_lock(source_key: str) -> threading.Lock:
@@ -335,7 +335,9 @@ def _get_cached_or_scan_metadata(source: dict, table) -> tuple[int, int, dict, s
             try:
                 _save_manifest_metadata_cache(source, live_manifest_paths)
             except Exception:
-                pass
+                logger.debug(
+                    "_get_cached_or_scan_metadata: _save_manifest_metadata_cache failed (ignored)", exc_info=True
+                )
 
         return result
 
@@ -462,7 +464,7 @@ def ducklake_table_exists(source: dict, table_name: str = "logs") -> bool:
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("ducklake_table_exists: con.close failed (ignored)", exc_info=True)
 
 
 def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
@@ -556,7 +558,7 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("get_table_info: con.close failed (ignored)", exc_info=True)
 
 
 def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") -> dict:
@@ -592,7 +594,7 @@ def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") ->
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("get_snapshot_calendar: con.close failed (ignored)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -655,4 +657,4 @@ def _prune_empty_dirs(root: str) -> None:
             try:
                 os.rmdir(dirpath)
             except Exception:
-                pass
+                logger.debug("_prune_empty_dirs: os.rmdir failed (ignored)", exc_info=True)

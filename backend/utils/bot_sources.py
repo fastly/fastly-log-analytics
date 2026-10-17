@@ -374,7 +374,7 @@ def get_all_sources_meta() -> list[dict]:
                 meta["last_updated"] = envelope.get("last_updated")
                 meta["entry_count"] = envelope.get("entry_count")
             except Exception:
-                pass
+                logger.debug("get_all_sources_meta: step failed (ignored)", exc_info=True)
         result.append(meta)
     return result
 
@@ -622,7 +622,7 @@ def enrich_bot_metadata(df: Any) -> None:
                         if matched_feed:
                             break
                 except Exception:
-                    pass
+                    logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
 
             if not matches:
                 if matched_feed:

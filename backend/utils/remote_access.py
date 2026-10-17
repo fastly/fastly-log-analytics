@@ -549,7 +549,7 @@ def _remote_host_allowed(host_header: str) -> bool:
                     if val and isinstance(val, str):
                         candidates.append(val.strip().lower())
     except Exception:
-        pass
+        logger.debug("_remote_host_allowed: step failed (ignored)", exc_info=True)
 
     return any(base == c for c in candidates)
 
@@ -581,7 +581,7 @@ def _origin_allowed(origin: str) -> bool:
                     if val and isinstance(val, str) and val.strip().lower() == host:
                         return True
     except Exception:
-        pass
+        logger.debug("_origin_allowed: step failed (ignored)", exc_info=True)
 
     return False
 
@@ -1251,7 +1251,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                     _dur_ms,
                 )
             except Exception:
-                pass
+                logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
             return apply_response_hardening(response)
 
         # ── From here down, we're on the analyst path. ──
@@ -1548,7 +1548,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 int(_touched_idle),
             )
         except Exception:
-            pass
+            logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
 
         # N-1 + N-10: strip server-internal telemetry envelope from analyst
         # responses (success AND error bodies). The handler-side

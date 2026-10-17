@@ -318,7 +318,7 @@ def get_sync_status(
                         data_fp = ("ducklake", snap_id)
                         lake_table = lt
             except Exception:
-                pass
+                logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
 
         cache_key = src["name"]
         direct_stats = None
@@ -599,7 +599,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         if _os.path.isdir(buf_dir):
             buf_bytes = sum(_os.path.getsize(_os.path.join(r, f)) for r, _, files in _os.walk(buf_dir) for f in files)
     except Exception:
-        pass
+        logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
     cached_status = src.get("status") or {}
     iceberg_bytes = None
@@ -616,7 +616,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 iceberg_bytes = int(info.get("size_bytes", 0) or 0)
                 iceberg_files = int(info.get("data_files", 0) or 0)
         except Exception:
-            pass
+            logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
     con = None
     try:
@@ -659,7 +659,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 if ratio is not None:
                     status["edge_ratio"] = ratio
             except Exception:
-                pass
+                logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
         # Schema (SUMMARIZE over the iceberg view) costs ~800 ms because
         # update_iceberg_view runs post-ingest on every tick and clears the
@@ -690,7 +690,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 "started_at"
             )
         except Exception:
-            pass
+            logger.debug("refresh_config_status: cron_data.get failed (ignored)", exc_info=True)
 
         # RUM freshness/count is persisted by the rum_commit cron (which already
         # attaches the RUM lake + scans it during the aggregate recompute). We
@@ -709,7 +709,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 if persisted_rum.get("last_sync_at"):
                     rum_last_sync = persisted_rum.get("last_sync_at")
             except Exception:
-                pass
+                logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
         status["rum"] = {
             "latest_log_at": rum_latest,
@@ -772,7 +772,7 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
             if snap_id is not None:
                 data_fp = ("ducklake", snap_id)
         except Exception:
-            pass
+            logger.debug("update_top_values: step failed (ignored)", exc_info=True)
     if data_fp is not None and os.path.exists(cached_top_values_path):
         with _db_main._top_values_cache_lock:
             prior_fp = _db_main._top_values_cache.get(service_id)
@@ -898,7 +898,7 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         try:
             con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
         except Exception:
-            pass
+            logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
 
     if top_values:
         cache_dir = _cache_dir(source)
@@ -920,7 +920,7 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
                 if snap_id is not None:
                     post_fp = ("ducklake", snap_id)
             except Exception:
-                pass
+                logger.debug("update_top_values: step failed (ignored)", exc_info=True)
         if post_fp is not None:
             with _db_main._top_values_cache_lock:
                 _db_main._top_values_cache[service_id] = post_fp
@@ -1208,7 +1208,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             try:
                 metadata_db.upsert_asn_names(service_id, resolved)
             except Exception:
-                pass
+                logger.warning("get_asn_names: metadata_db.upsert_asn_names failed (ignored)", exc_info=True)
 
     result = {**cached, **resolved}
     for asn in need:

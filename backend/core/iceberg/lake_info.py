@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.parse
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Hostname suffixes allowed for ``cdn_url`` when the SSRF check below
 # decides whether to issue an outbound HTTP request. Any other hostname
@@ -140,7 +143,7 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
                 "range": data.get("range", {"start": None, "end": None}),
             }
     except Exception:
-        pass
+        logger.debug("fetch_lake_info: step failed (ignored)", exc_info=True)
 
     # ── Iceberg fallback ───────────────────────────────────────────────────────
     if use_temp_cache:

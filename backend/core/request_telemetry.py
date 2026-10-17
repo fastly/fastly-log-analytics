@@ -226,7 +226,7 @@ def force_flush() -> None:
             if flush is not None:
                 flush(timeout_millis=5000)
         except Exception:
-            pass
+            logger.debug("force_flush: step failed (ignored)", exc_info=True)
 
 
 # Custom instruments — accessed lazily so the SDK initialises only when

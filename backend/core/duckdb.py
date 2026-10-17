@@ -324,7 +324,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
                 try:
                     con.rollback()
                 except Exception:
-                    pass
+                    logger.debug("_configure_fos: con.rollback failed (ignored)", exc_info=True)
                 try:
                     con.execute(create_secret_sql, secret_params)
                     _fos_secret_fingerprints[con] = fp
@@ -955,7 +955,7 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("get_safe_duckdb_connection: conn.close failed (ignored)", exc_info=True)
 
 
 def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
@@ -994,13 +994,13 @@ def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnecti
         if DUCKDB_MEMORY_LIMIT:
             con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
     except Exception:
-        pass
+        logger.debug("get_memory_connection: step failed (ignored)", exc_info=True)
 
     try:
         n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
         con.execute(f"SET threads = {n_threads};")
     except Exception:
-        pass
+        logger.debug("get_memory_connection: con.execute failed (ignored)", exc_info=True)
 
     con.execute("SET TimeZone='UTC';")
     if source is not None:
@@ -1077,7 +1077,9 @@ def get_connection(
                 try:
                     _duckdb_connect(db_path, read_only=False).close()
                 except Exception:
-                    pass  # If this fails, let the connect below fail and trigger the retry loop
+                    logger.debug(
+                        "get_connection: _duckdb_connect failed (ignored)", exc_info=True
+                    )  # If this fails, let the connect below fail and trigger the retry loop
             # DuckDB's native file lock is process-wide: opening the same
             # service file once read-only and once read-write makes the second
             # connection fail with "different configuration". The service
@@ -1138,18 +1140,18 @@ def get_connection(
         if limit:
             con.execute(f"SET max_memory = '{limit}';")
     except Exception:
-        pass
+        logger.debug("get_connection: step failed (ignored)", exc_info=True)
     # DUCKDB_THREADS is consumed below inside _cached_n_threads initialization
     # (removed the early SET here — it was immediately overridden by the SET
     # threads call at line ~1022 and had no effect).
     try:
         con.execute("SET hive_partitioning = true;")
     except Exception:
-        pass
+        logger.debug("get_connection: con.execute failed (ignored)", exc_info=True)
     try:
         con.execute("SET TimeZone='UTC';")
     except Exception:
-        pass
+        logger.debug("get_connection: con.execute failed (ignored)", exc_info=True)
 
     _configure_fos(con, src)
 
@@ -1167,7 +1169,7 @@ def get_connection(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("get_connection: con.close failed (ignored)", exc_info=True)
         raise
 
     con.execute("SET enable_http_metadata_cache=true;")
@@ -1182,7 +1184,7 @@ def get_connection(
     try:
         _ensure_threads(con, _cached_n_threads)
     except Exception:
-        pass
+        logger.debug("get_connection: _ensure_threads failed (ignored)", exc_info=True)
     # CRITICAL: only auto-derive memory_limit when DUCKDB_MEMORY_LIMIT is
     # UNSET. Pre-fix, the env-based ``SET max_memory`` above was
     # silently overridden here by ``SET memory_limit`` (they're aliases
@@ -1375,7 +1377,7 @@ def log_cron_run(
             try:
                 metadata_db.delete_cron_run(service_id, run_id)
             except Exception:
-                pass
+                logger.warning("log_cron_run: metadata_db.delete_cron_run failed (ignored)", exc_info=True)
         return
 
     try:

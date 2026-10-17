@@ -51,7 +51,7 @@ def get_pop_locations():
             with open(CACHE_FILE) as f:
                 return json.load(f)
         except Exception:
-            pass
+            logger.debug("get_pop_locations: step failed (ignored)", exc_info=True)
     return []
 
 

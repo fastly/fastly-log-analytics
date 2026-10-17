@@ -200,7 +200,7 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
 
                 metadata_db.record_audit(service_id=service_id, event_type="cron_settings_update", details=body_payload)
             except Exception:
-                pass
+                logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
             yield json.dumps({"type": "progress", "current": 4, "total": 4})
             yield json.dumps({"type": "done", "message": "Successfully applied changes."})
         except Exception as e:
@@ -235,7 +235,7 @@ def api_service_clear_time_range(service_id: str):
 
         metadata_db.record_audit(service_id=service_id, event_type="time_range_cleared", details={})
     except Exception:
-        pass
+        logger.warning("api_service_clear_time_range: metadata_db.record_audit failed (ignored)", exc_info=True)
     return {"ok": True, "message": "time_range cleared. Cron will now ingest all available data."}
 
 
@@ -576,7 +576,7 @@ def api_service_logging_settings(service_id: str):
             if current_format != target_format:
                 format_match = False
         except Exception:
-            pass
+            logger.debug("api_service_logging_settings: step failed (ignored)", exc_info=True)
 
         # Cache only the business fields — telemetry (debug_queries,
         # debug_calls, section_timings, is_cached) is regenerated per
@@ -642,7 +642,7 @@ def api_service_log_fields_get(service_id: str):
                 finally:
                     c.close()
         except Exception:
-            pass
+            logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
     history = []
     try:
         from backend.core import metadata as metadata_db
@@ -662,7 +662,7 @@ def api_service_log_fields_get(service_id: str):
                 }
             )
     except Exception:
-        pass
+        logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
 
     from backend.utils.telemetry import get_tracked_calls
 
@@ -738,7 +738,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
 
         export_admin_state(service_id)
     except Exception:
-        pass
+        logger.warning("api_service_log_fields_set: export_admin_state failed (ignored)", exc_info=True)
     return {
         "ok": True,
         "estimate": lf.estimate_log_line_bytes(new_lf),
@@ -899,13 +899,13 @@ def api_service_update_logging_settings(
                                 details=_details,
                             )
                         except Exception:
-                            pass
+                            logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
                     try:
                         from backend.provision import _sync_crontab
 
                         _sync_crontab()
                     except Exception:
-                        pass
+                        logger.warning("stream: _sync_crontab failed (ignored)", exc_info=True)
                 yield json.dumps(event)
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})

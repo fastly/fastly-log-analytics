@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import threading
 import time
 import urllib.parse
@@ -23,6 +24,8 @@ from backend.repositories._sql.insights import (
 )
 
 from .registry import registry
+
+logger = logging.getLogger(__name__)
 
 # ── Caches ────────────────────────────────────────────────────────────────────
 
@@ -636,7 +639,7 @@ def get_insights(
             db_iceberg.update_iceberg_view(con, src, force=True)
             actual_cols = runner.get_schema_cols()
         except Exception:
-            pass
+            logger.debug("get_insights: runner.get_schema_cols failed (ignored)", exc_info=True)
         if not actual_cols:
             return empty_resp
 
@@ -1172,7 +1175,7 @@ def get_insights(
             try:
                 runner.con.execute(f"DETACH {scratch_alias}")
             except Exception:
-                pass
+                logger.debug("get_insights: runner.con.execute failed (ignored)", exc_info=True)
 
 
 def get_cache_collapse_detail(

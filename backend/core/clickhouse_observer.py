@@ -75,7 +75,7 @@ class ClickHouseObserver:
         try:
             logger.warning("clickhouse.observe_failed", probe=probe, error_kind=type(exc).__name__)
         except Exception:
-            pass
+            logger.debug("_log_error: logger.warning failed (ignored)", exc_info=True)
 
     def stop(self) -> None:
         with self._lock:

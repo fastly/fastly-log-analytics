@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 import duckdb
@@ -14,6 +15,8 @@ from backend.repositories._base import (
     empty_schema_response,
 )
 from backend.repositories.utils.filters import build_where_clause
+
+logger = logging.getLogger(__name__)
 
 
 def get_assets_aggregates(
@@ -279,7 +282,7 @@ def get_assets_aggregates(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                logger.debug("get_assets_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
     results["section_timings"] = section_timings
     return results

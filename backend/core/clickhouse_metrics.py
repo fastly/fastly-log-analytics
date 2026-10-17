@@ -1,8 +1,11 @@
 """Lazy low-cardinality ClickHouse instruments on the existing OTel provider."""
 
+import logging
 from functools import cache
 
 from backend.core.request_telemetry import get_meter
+
+logger = logging.getLogger(__name__)
 
 
 @cache
@@ -27,11 +30,11 @@ def record_operation(stats: dict) -> None:
             _instrument("rows_inserted_total", "counter").add(stats["rows_written"])
         _instrument("bytes_read", "counter", "By").add(stats["bytes_read"])
     except Exception:
-        pass
+        logger.debug("record_operation: _instrument failed (ignored)", exc_info=True)
 
 
 def record_publication(outcome: str) -> None:
     try:
         _instrument("publications_total", "counter").add(1, {"outcome": outcome})
     except Exception:
-        pass
+        logger.debug("record_publication: _instrument failed (ignored)", exc_info=True)

@@ -666,7 +666,7 @@ def get_usage_logs(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("get_usage_logs: con.close failed (ignored)", exc_info=True)
 
     totals = {"A": 0, "B": 0, "CDN": 0}
     bytes_by_class = {"A": 0, "B": 0, "CDN": 0}
@@ -782,7 +782,7 @@ def iter_usage_logs_chunks(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("iter_usage_logs_chunks: con.close failed (ignored)", exc_info=True)
 
 
 # ── Metadata retention / cleanup constants ────────────────────────────────────

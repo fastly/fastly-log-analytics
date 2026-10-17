@@ -239,7 +239,7 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
                 try:
                     mtimes.append(os.path.getmtime(p))
                 except Exception:
-                    pass
+                    logger.debug("_safe_buffer_mtime: mtimes.append failed (ignored)", exc_info=True)
             return max(mtimes) if mtimes else None
 
         path = _buffer_dir(src)
@@ -425,7 +425,7 @@ class _Pool:
                             {"service": self.service_key, "outcome": "timeout"},
                         )
                     except Exception:
-                        pass
+                        logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
                     self._record_wait_sample(wait_ms)
                     self._saturated_rejects_total += 1
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
@@ -450,7 +450,7 @@ class _Pool:
         except Exception:
             # OTel SDK not initialised (tests) or histogram creation failed —
             # never let telemetry instrumentation break a checkout.
-            pass
+            logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
         self._record_wait_sample(wait_ms)
 
         # Outside lock. Both branches can call ``update_iceberg_view`` which
@@ -572,7 +572,7 @@ class _Pool:
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("release: con.close failed (ignored)", exc_info=True)
         with self._cond:
             self._in_use -= 1
             self._cond.notify()
@@ -582,7 +582,7 @@ class _Pool:
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("_discard: con.close failed (ignored)", exc_info=True)
         with self._cond:
             self._in_use -= 1
             self._discarded_total += 1
@@ -607,7 +607,7 @@ class _Pool:
                 try:
                     con.close()
                 except Exception:
-                    pass
+                    logger.debug("begin_drain: con.close failed (ignored)", exc_info=True)
                 self._in_use -= 1
             self._cond.notify_all()
 
@@ -656,7 +656,7 @@ class _Pool:
                 try:
                     con.close()
                 except Exception:
-                    pass
+                    logger.debug("discard_idle: con.close failed (ignored)", exc_info=True)
                 self._in_use -= 1
                 closed += 1
             self._cond.notify_all()
@@ -772,7 +772,7 @@ class _Pool:
                     try:
                         con.close()
                     except Exception:
-                        pass
+                        logger.debug("warm_idle: con.close failed (ignored)", exc_info=True)
                     self._in_use -= 1
                     self._cond.notify()
         # SRE-16: stamp the wall-clock so the admin surface can show view /
@@ -783,7 +783,7 @@ class _Pool:
 
             self._last_warmed_at = iso_z_now()
         except Exception:
-            pass
+            logger.debug("warm_idle: iso_z_now failed (ignored)", exc_info=True)
 
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
@@ -927,7 +927,7 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
             try:
                 raw_con.close()
             except Exception:
-                pass
+                logger.debug("checkout_connection: raw_con.close failed (ignored)", exc_info=True)
         return
 
     service_key = src.get("name") or src.get("service_id") or "default"
@@ -1123,7 +1123,7 @@ def shutdown_all() -> None:
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("shutdown_all: con.close failed (ignored)", exc_info=True)
 
 
 def get_pool_status() -> dict[str, Any]:

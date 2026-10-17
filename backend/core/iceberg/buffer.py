@@ -545,12 +545,12 @@ def _ducklake_write_connection(source: dict):
                 try:
                     con.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    logger.debug("_ducklake_write_connection: con.execute failed (ignored)", exc_info=True)
                 _ducklake_detach(con, service_id=service_id)
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("_ducklake_write_connection: con.close failed (ignored)", exc_info=True)
 
 
 def _commit_one_chunk(

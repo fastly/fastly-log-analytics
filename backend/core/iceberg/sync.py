@@ -154,7 +154,7 @@ def sync_data(
             source.get("service_id") or source.get("name") or ""
         )
     except Exception:
-        pass
+        logger.debug("sync_data: _meta.get_locally_compacted_basenames failed (ignored)", exc_info=True)
 
     if not start_time and not end_time and cached_snapshot and cached_snapshot[0] == table.metadata_location:
         try:
@@ -418,7 +418,7 @@ def sync_data(
                         caller="sync_data_files",
                     )
                 except Exception:
-                    pass
+                    logger.debug("_download_file: record_cdn_call failed (ignored)", exc_info=True)
 
             with download_lock:
                 downloaded += 1
@@ -434,7 +434,7 @@ def sync_data(
                 try:
                     os.remove(tmp_path)
                 except Exception:
-                    pass
+                    logger.debug("_download_file: os.remove failed (ignored)", exc_info=True)
             raise e
 
     # Skip files whose basename is in the local-compacted registry: they

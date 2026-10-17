@@ -87,7 +87,7 @@ def restore_direct_state(state: TunnelState) -> bool:
                         )
                         return True
             except Exception:
-                pass
+                logger.debug("restore_direct_state: step failed (ignored)", exc_info=True)
             return False
         with open(path) as f:
             data = json.load(f)

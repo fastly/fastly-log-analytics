@@ -163,7 +163,7 @@ def reset_pg_pool_for_tests() -> None:
         try:
             _pool.close(timeout=1.0)
         except Exception:
-            pass
+            logger.debug("reset_pg_pool_for_tests: _pool.close failed (ignored)", exc_info=True)
         _pool = None
 
 

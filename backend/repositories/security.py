@@ -488,7 +488,9 @@ def get_top_bots(
         try:
             ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
         except Exception:
-            pass  # materialization failed — fall back gracefully
+            _logger.debug(
+                "get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
+            )  # materialization failed — fall back gracefully
 
     needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
     cols_needed: list[str] = []
@@ -725,7 +727,9 @@ def _build_security_response(
         try:
             _ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_cache")
         except Exception:
-            pass  # materialization failed — fall back gracefully
+            _logger.debug(
+                "_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
+            )  # materialization failed — fall back gracefully
     if _ngwaf_attached:
         # The pair runs together (shared ATTACH); both need the temp.
         _need("ngwaf_verified_bots", {"waf_req_id"})
@@ -1276,7 +1280,7 @@ def _build_security_response(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                _logger.debug("_build_security_response: DROP TABLE failed (ignored)", exc_info=True)
 
     # Any requested section left unset (e.g. the temp build failed) falls
     # back to its empty default so the response stays well-formed. Only

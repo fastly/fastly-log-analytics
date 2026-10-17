@@ -159,7 +159,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                 structural = 2 + len(enabled_codes) * 5
                 result["estimated_bytes_per_line"] = structural + field_bytes
             except Exception:
-                pass
+                logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
             try:
                 from backend.provision import parse_period
 
@@ -167,9 +167,9 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                 period_secs = period_val if isinstance(period_val, int) else parse_period(str(period_val))
                 result["log_period_seconds"] = period_secs
             except Exception:
-                pass
+                logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     try:
         cached_status = svcconfig.get_status(source["name"])
@@ -188,9 +188,9 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                     l_dt = parse_iso_utc(latest) or _now
                     result["data_days"] = max(1, (l_dt - e_dt).days + 1)
                 except Exception:
-                    pass
+                    logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     # Empirical node count analysis — SQLite-only, doesn't need a DuckDB hop.
     try:
@@ -200,7 +200,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         if avg:
             result["avg_nodes_per_flush"] = round(float(avg))
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     # Extract historical RUM beacons per day for prefill.
     try:
@@ -308,7 +308,7 @@ async def prefill(source: dict = Depends(get_source)):
                         if "req.restarts == 0" in stmt:
                             updates["edge_only"] = True
             except Exception:
-                pass
+                logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
             return updates
 
         async def _fetch_stats() -> dict | None:
@@ -350,7 +350,7 @@ async def prefill(source: dict = Depends(get_source)):
                 result["requests_per_day"] = round(sum(daily_reqs[d] for d in avg_days) / len(avg_days))
                 result["edge_requests_per_day"] = round(sum(daily_edge[d] for d in avg_days) / len(avg_days))
         except Exception:
-            pass
+            logger.debug("prefill: step failed (ignored)", exc_info=True)
 
     # Skip the DuckDB hop entirely when the cached config status already
     # carries edge_ratio (steady state — the sync cron keeps it fresh).
@@ -384,7 +384,7 @@ async def prefill(source: dict = Depends(get_source)):
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:
-            pass
+            logger.debug("prefill: step failed (ignored)", exc_info=True)
 
     # ``avg_nodes_per_flush`` already populated by _compute_prefill_rates above.
     return PrefillResponse.with_telemetry(debug_queries=debug_queries, section_timings=section_timings, **result)
@@ -473,7 +473,7 @@ def usage_current_storage(
                     iceberg_files = iceberg_info.get("data_files", 0)
                     iceberg_info_success = True
             except Exception:
-                pass
+                logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
         if not iceberg_info_success:
             try:
@@ -497,7 +497,7 @@ def usage_current_storage(
 
             quarantine_bytes = get_quarantine_storage_total(src["name"])
         except Exception:
-            pass
+            logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
 
         # Calculate RUM storage separately from regular logs
         rum_bytes = 0
@@ -511,7 +511,7 @@ def usage_current_storage(
                 for obj in page.get("Contents", []):
                     rum_bytes += obj.get("Size", 0)
         except Exception:
-            pass
+            logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
         regular_log_bytes = total_bytes - rum_bytes
 
@@ -778,7 +778,7 @@ def usage_log_activity(
             res["total_fastly_log_records"] = total_log_records
 
         except Exception:
-            pass
+            logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
 
     return UsageLogActivityResponse.with_telemetry(**res)
 

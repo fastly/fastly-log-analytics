@@ -152,7 +152,7 @@ def download_file(
             try:
                 cdn_resp.close()
             except Exception:
-                pass
+                logger.debug("download_file: cdn_resp.close failed (ignored)", exc_info=True)
             raise
 
         def _iter_cdn(chunk_size: int = 65536):
@@ -170,7 +170,7 @@ def download_file(
                 try:
                     cdn_resp.close()
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: cdn_resp.close failed (ignored)", exc_info=True)
                 try:
                     _rcdn(
                         "GET",
@@ -181,7 +181,7 @@ def download_file(
                         caller="api:/download",
                     )
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: _rcdn failed (ignored)", exc_info=True)
 
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -221,7 +221,7 @@ def download_file(
             try:
                 body.close()
             except Exception:
-                pass
+                logger.debug("_iter_fos: body.close failed (ignored)", exc_info=True)
 
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',

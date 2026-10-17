@@ -486,7 +486,7 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
             con.execute(f"ATTACH '{escaped}' AS {alias} (TYPE SQLITE, READ_ONLY)")
             attached = True
         except Exception:
-            pass
+            _logger.debug("_attach_sqlite: step failed (ignored)", exc_info=True)
     try:
         yield attached
     finally:
@@ -494,7 +494,7 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
             try:
                 con.execute(f"DETACH {alias}")
             except Exception:
-                pass
+                _logger.debug("_attach_sqlite: con.execute failed (ignored)", exc_info=True)
 
 
 def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -> bool:
@@ -798,7 +798,7 @@ def get_source_extent(
             count = runner.execute(f"SELECT count(*) FROM {orig_table_name}").fetchone()[0]
             return count, None, None
         except Exception:
-            pass
+            _logger.debug("get_source_extent: step failed (ignored)", exc_info=True)
     return 0, None, None
 
 
@@ -836,14 +836,14 @@ def _latest_log_in_window(
             if st_dt is not None and latest_dt < st_dt:
                 return False
         except Exception:
-            pass
+            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
     if end_time:
         try:
             et_dt = parse_iso_utc(end_time)
             if et_dt is not None and latest_dt > et_dt:
                 return False
         except Exception:
-            pass
+            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
     return True
 
 
@@ -952,7 +952,7 @@ class QueryRunner:
             try:
                 self.execute(f'DROP TABLE IF EXISTS "{name}"')
             except Exception:
-                pass
+                _logger.debug("end_shared_active_hour_temps: DROP TABLE failed (ignored)", exc_info=True)
 
     def release_active_direct_temp(self, name: str) -> None:
         """Drop a direct active-hour temp unless the shared scope owns it.
@@ -965,7 +965,7 @@ class QueryRunner:
         try:
             self.execute(f'DROP TABLE IF EXISTS "{name}"')
         except Exception:
-            pass
+            _logger.debug("release_active_direct_temp: DROP TABLE failed (ignored)", exc_info=True)
 
     @property
     def debug_calls(self) -> list[dict]:
@@ -1092,7 +1092,7 @@ class QueryRunner:
                 db_iceberg.update_iceberg_view(self.con, self.src, force=True)
                 actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
             except Exception:
-                pass
+                _logger.debug("get_schema_cols: step failed (ignored)", exc_info=True)
         self.actual_cols = set(actual_cols)
         # Only cache non-empty results. An empty result here means the
         # self-heal path also failed — caching empty would pin the
@@ -1398,7 +1398,7 @@ class QueryRunner:
             try:
                 self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
             except Exception:
-                pass
+                _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
             try:
                 self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
             except Exception:
@@ -1406,7 +1406,7 @@ class QueryRunner:
                 try:
                     self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
                 except Exception:
-                    pass
+                    _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
                 return None
         if self._shared_active_temps is not None:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
@@ -1526,7 +1526,7 @@ class QueryRunner:
                 try:
                     self.execute(f'DROP TABLE IF EXISTS "{name}"')
                 except Exception:
-                    pass
+                    _logger.debug("temp_table: DROP TABLE failed (ignored)", exc_info=True)
 
     def execute_top_n_rollups(
         self,
@@ -2278,7 +2278,7 @@ class QueryRunner:
                         try:
                             self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
                         except Exception:
-                            pass
+                            _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
             except Exception:
                 # Best-effort: a failed heal leaves the pre-fallback
                 # behavior (rollups + active hour only), never a 500.

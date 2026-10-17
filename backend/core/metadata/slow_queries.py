@@ -15,10 +15,13 @@ router, and a retention purge used by ``cleanup_metadata``.
 from __future__ import annotations
 
 import atexit
+import logging
 import threading
 from typing import Any
 
 from backend.core.metadata.base import get_con, release_thread_connection
+
+logger = logging.getLogger(__name__)
 
 _INSERT_SQL = """
     INSERT INTO slow_queries (
@@ -140,7 +143,7 @@ def _flush_all(*, only_service: str | None = None) -> None:
             con.executemany(_INSERT_SQL, [_insert_params(_normalise_row(row)) for row in rows])
             con.commit()
         except Exception:
-            pass
+            logger.debug("_flush_all: con.commit failed (ignored)", exc_info=True)
         finally:
             release_thread_connection()
 

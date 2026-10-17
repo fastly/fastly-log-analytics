@@ -144,7 +144,7 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
         try:
             pathname = urlparse(url_str).path
         except Exception:
-            pass
+            logger.debug("extract_metrics_from_faro_payload: urlparse failed (ignored)", exc_info=True)
 
     cid = log_data.get("rum_cid") or log_data.get("cid") or ""
 

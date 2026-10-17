@@ -176,7 +176,7 @@ def process_context_scope(name: str):
 
                 current_attribution.set(prev_attribution)
             except Exception:
-                pass
+                logger.debug("process_context_scope: current_attribution.set failed (ignored)", exc_info=True)
         with _LATEST_PROCESS_CONTEXT_LOCK:
             try:
                 # Remove the *last* occurrence so nested scopes with the
@@ -314,7 +314,7 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("_query_iothread_calls_from_usage_log: con.close failed (ignored)", exc_info=True)
         return [
             {
                 "service": "CDN" if r[6] == "CDN" else "FOS",
@@ -463,7 +463,7 @@ def record_call(
                 caller = code.co_name
                 break
         except Exception:
-            pass
+            logger.debug("record_call: step failed (ignored)", exc_info=True)
 
     # Use the un-augmented view: this is the in-thread append path, and
     # triggering the iothread/usage_log query here would add a coalescer
@@ -514,7 +514,7 @@ def record_call(
     except Exception:
         # OTel SDK import or recording failure must never fail the caller —
         # this is best-effort telemetry, not load-bearing.
-        pass
+        logger.debug("record_call: step failed (ignored)", exc_info=True)
 
 
 class track_query:
@@ -579,7 +579,7 @@ class track_query:
                     },
                 )
         except Exception:
-            pass
+            logger.debug("__exit__: step failed (ignored)", exc_info=True)
 
 
 def is_full_miss(x_cache: str | None) -> bool:
@@ -638,7 +638,7 @@ def record_cdn_call(
             age = headers.get("Age") or headers.get("age")
             cache_control = headers.get("Cache-Control") or headers.get("cache-control")
         except Exception:
-            pass
+            logger.debug("record_cdn_call: headers.get failed (ignored)", exc_info=True)
 
     detail_parts: list[str] = []
     if x_cache:

@@ -114,7 +114,7 @@ def _sources_by_db_path() -> dict[str, list[dict]]:
                 rum_src = rum_source_for(src)
                 groups.setdefault(_db.db_path_for_source(rum_src), []).append(rum_src)
             except Exception:
-                pass
+                logger.debug("_sources_by_db_path: groups.setdefault failed (ignored)", exc_info=True)
     return groups
 
 
@@ -135,7 +135,7 @@ def _trim_memory() -> None:
 
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
-        pass
+        logger.debug("_trim_memory: ctypes.CDLL failed (ignored)", exc_info=True)
 
 
 def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:

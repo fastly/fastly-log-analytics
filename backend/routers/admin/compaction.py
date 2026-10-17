@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime
 
@@ -27,6 +28,8 @@ from backend.models.admin import (
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
 from ._router import router
+
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -645,7 +648,7 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
             details=current,
         )
     except Exception:
-        pass
+        logger.warning("update_metadata_retention: _mdb.record_audit failed (ignored)", exc_info=True)
 
     return {"retention": {**DEFAULT_METADATA_RETENTION, **current}}
 

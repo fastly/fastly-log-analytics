@@ -221,4 +221,4 @@ def teardown() -> None:
         con = _pg_write_connection()
         con.execute("TRUNCATE TABLE metric_snapshots")
     except Exception:
-        pass
+        logger.debug("teardown: con.execute failed (ignored)", exc_info=True)

@@ -169,7 +169,7 @@ def start_cron_run(service_id: str, task: str) -> int:
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("start_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle any connected /api/cron-runs/stream subscribers that a run
     # just started. Same defensive contract as the sync-status publish
@@ -334,7 +334,7 @@ def log_cron_run(
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("log_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle subscribers that this run reached a terminal status.
     # Broad except so an SSE-channel failure never breaks cron
@@ -481,7 +481,7 @@ def finalize_cron_run_if_running(
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("finalize_cron_run_if_running: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle subscribers that this run reached a terminal status — same
     # contract (and broad except) as log_cron_run's publish hook.

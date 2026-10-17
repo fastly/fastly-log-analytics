@@ -177,7 +177,7 @@ class ValkeyPublisher:
                     await pubsub.unsubscribe(channel)
                     await pubsub.close()
                 except Exception:
-                    pass
+                    logger.debug("subscribe: pubsub.close failed (ignored)", exc_info=True)
 
     # ── seed / introspection (sync callers) ───────────────────────────────────
 

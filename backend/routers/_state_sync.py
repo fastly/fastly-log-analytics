@@ -7,6 +7,10 @@ router mutation. Lives under ``backend.routers`` rather than
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def sync_admin_state(service_id: str | None) -> None:
     """Fire-and-forget admin state export after alert/view mutations.
@@ -25,10 +29,10 @@ def sync_admin_state(service_id: str | None) -> None:
 
         export_admin_state(service_id)
     except Exception:
-        pass
+        logger.warning("sync_admin_state: export_admin_state failed (ignored)", exc_info=True)
     try:
         from backend.cron.scheduler import get_scheduler
 
         get_scheduler().reload()
     except Exception:
-        pass
+        logger.warning("sync_admin_state: get_scheduler failed (ignored)", exc_info=True)

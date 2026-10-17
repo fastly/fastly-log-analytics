@@ -703,13 +703,13 @@ def invalidate_service_caches(source: dict) -> None:
         try:
             cache.pop(name, None)
         except Exception:
-            pass
+            logger.debug("invalidate_service_caches: cache.pop failed (ignored)", exc_info=True)
     # tuple-keyed caches: loaded Table object + FOS metadata pointer
     for fn in (_invalidate_cached_table, _pointer_cache_invalidate):
         try:
             fn(source, identifier)
         except Exception:
-            pass
+            logger.debug("invalidate_service_caches: fn failed (ignored)", exc_info=True)
 
 
 def _load_table_cached(source: dict, identifier: tuple, catalog=None):
@@ -747,7 +747,7 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
                         )
                         cat_con.commit()
                 except Exception:
-                    pass
+                    logger.debug("_load_table_cached: step failed (ignored)", exc_info=True)
 
             # Clear cached table
             _invalidate_cached_table(source, identifier)
@@ -1171,7 +1171,7 @@ def _try_register_from_fos(catalog, source: dict, identifier: tuple):
     try:
         catalog.create_namespace(namespace)
     except Exception:
-        pass
+        logger.debug("_try_register_from_fos: catalog.create_namespace failed (ignored)", exc_info=True)
 
     # ── Fast path: admin-exported metadata location ───────────────────────────
     metadata_location = source.get("iceberg_metadata_location")

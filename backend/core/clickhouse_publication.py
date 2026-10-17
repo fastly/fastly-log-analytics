@@ -130,7 +130,7 @@ def publish_batch(
         try:
             record_publication(outcome)
         except Exception:
-            pass
+            logger.debug("publish_batch: record_publication failed (ignored)", exc_info=True)
         try:
             log = logger.error if outcome == "failed" else logger.info
             log(
@@ -142,7 +142,7 @@ def publish_batch(
                 duration_ms=(time.monotonic() - started) * 1000,
             )
         except Exception:
-            pass
+            logger.debug("publish_batch: log failed (ignored)", exc_info=True)
 
 
 def _publish_batch(
@@ -188,7 +188,7 @@ def _publish_batch(
         try:
             store.finish(service_id, generation, artifact.batch_id, fence, digest=None, error=kind)
         except Exception:
-            pass
+            logger.warning("_publish_batch: store.finish failed (ignored)", exc_info=True)
         raise RuntimeError(f"ClickHouse publication failed: {kind}") from None
     return PublicationResult(artifact.batch_id, "published" if published else "stale", len(batch.rows), fence)
 

@@ -9,6 +9,7 @@ join against ``usage_log`` (for the unbackfilled-edge-files sweep).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from backend.core.metadata.base import (
@@ -18,6 +19,8 @@ from backend.core.metadata.base import (
     get_con,
     get_con_readonly,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_ingested_filenames(service_id: str, limit: int | None = None, table_name: str = "logs") -> set[str]:
@@ -501,7 +504,7 @@ def list_unbackfilled_fastly_edge_files(
             try:
                 ul_con.close()
             except Exception:
-                pass
+                logger.debug("list_unbackfilled_fastly_edge_files: ul_con.close failed (ignored)", exc_info=True)
 
     return [
         (r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"])

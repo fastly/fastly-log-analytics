@@ -34,6 +34,7 @@ insights/views/bootstrap, then defer admin/provision/share to Phase 5.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
 
     from backend.high_scale.registry import HighScaleService
     from backend.utils.remote_access import TimeBounds
+
+logger = logging.getLogger(__name__)
 
 
 class RangeWindowRequest(Protocol):
@@ -262,7 +265,7 @@ def build_request_context(
         try:
             holder.__exit__(*sys.exc_info())
         except Exception:
-            pass
+            logger.debug("build_request_context: holder.__exit__ failed (ignored)", exc_info=True)
         telemetry.end_request()
     # Note on Live Query Monitor attribution: the attribution ContextVar is
     # set/restored by ``telemetry_middleware`` in backend/main.py, NOT here.

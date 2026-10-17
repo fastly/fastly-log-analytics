@@ -367,7 +367,7 @@ class ClickHouseClient:
                         "ClickHouse", f"ClickHouse {operation}; query_id={query_id}", con=None
                     )
                 except Exception:
-                    pass
+                    logger.debug("_request: query_registry.register failed (ignored)", exc_info=True)
             with self._state_lock:
                 if self._closed:
                     raise ClickHouseError("client closed", query_id=query_id)
@@ -484,22 +484,22 @@ class ClickHouseClient:
                         )
                         _QUERIES.set(queries)
                     except Exception:
-                        pass
+                        logger.debug("_request: _QUERIES.set failed (ignored)", exc_info=True)
                 try:
                     _record_operation(**stats)
                 except Exception:
-                    pass
+                    logger.debug("_request: _record_operation failed (ignored)", exc_info=True)
                 try:
                     record_operation(stats)
                 except Exception:
-                    pass
+                    logger.debug("_request: record_operation failed (ignored)", exc_info=True)
                 try:
                     query_registry.deregister(
                         registry_id,
                         error=None if stats["outcome"] == "success" else RuntimeError(stats["outcome"]),
                     )
                 except Exception:
-                    pass
+                    logger.debug("_request: query_registry.deregister failed (ignored)", exc_info=True)
 
 
 _client: ClickHouseClient | None = None

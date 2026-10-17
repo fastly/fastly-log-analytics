@@ -336,7 +336,7 @@ def scoring_retrain(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("scoring_retrain: con.close failed (ignored)", exc_info=True)
 
     matrix_dict = tmatrix.to_json_dict(version=matrix_version)
 

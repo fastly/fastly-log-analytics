@@ -16,11 +16,14 @@ admin-polling RAM blow-up.
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 from fastapi import HTTPException
 
 from backend.repositories._sql import session_scoring as sql_scoring
+
+logger = logging.getLogger(__name__)
 
 
 def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
@@ -62,7 +65,7 @@ def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("query_logs: con.close failed (ignored)", exc_info=True)
 
 
 # Core edge-scoring columns emitted by the scoring VCL. Absent on services

@@ -134,7 +134,7 @@ def stream_zip(
                 try:
                     _flush(service_name)
                 except Exception:
-                    pass
+                    logger.debug("zip_worker: _flush failed (ignored)", exc_info=True)
                 q.put(None)
 
     return _stream_from_worker(zip_worker)

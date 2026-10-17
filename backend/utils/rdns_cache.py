@@ -80,7 +80,7 @@ def _is_ip_in_cidrs(ip: str, cidrs: list[str]) -> bool:
             except ValueError:
                 continue
     except Exception:
-        pass
+        logger.debug("_is_ip_in_cidrs: step failed (ignored)", exc_info=True)
     return False
 
 
@@ -305,7 +305,7 @@ async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, st
         try:
             resolver.cancel()
         except Exception:
-            pass
+            logger.debug("_resolve_batch_async: resolver.cancel failed (ignored)", exc_info=True)
 
     out: dict[str, tuple[str | None, str, bool]] = {}
     for ip, result in zip(ips, results, strict=True):

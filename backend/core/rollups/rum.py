@@ -53,7 +53,7 @@ def rum_count_and_latest(con):
             if cnt > 0:
                 return cnt, _rum_raw_latest(con)
         except Exception:
-            pass
+            logger.debug("rum_count_and_latest: step failed (ignored)", exc_info=True)
 
     # Raw fallback: aggregates missing, empty, or errored. Count distinct
     # beacons and read freshness straight from the raw tables.

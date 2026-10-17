@@ -350,7 +350,7 @@ def get_health(
                 span_secs = max(1, int((_et0 - _st0).total_seconds()))
                 bucket_seconds = max(bucket_seconds, span_secs // 8640)
     except Exception:
-        pass
+        logger.debug("get_health: step failed (ignored)", exc_info=True)
 
     bucket_ms = bucket_seconds * 1000
 
@@ -1086,7 +1086,7 @@ def get_health(
             try:
                 get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                logger.debug("get_health: DROP TABLE failed (ignored)", exc_info=True)
 
 
 def get_quality(
@@ -1230,7 +1230,7 @@ def get_quality(
             try:
                 _db.enrich_asn_labels(by_asn, src["name"])
             except Exception:
-                pass
+                logger.debug("get_quality: _db.enrich_asn_labels failed (ignored)", exc_info=True)
         by_region = (
             run_bar("region", extra_where=" AND country = ?", extra_params=[region_country])
             if "region" in actual_cols
@@ -1272,7 +1272,7 @@ def get_quality(
             try:
                 get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                logger.debug("get_quality: DROP TABLE failed (ignored)", exc_info=True)
 
 
 def get_transport_metrics(
@@ -1448,7 +1448,7 @@ def get_transport_metrics(
                     }
                 )
         except Exception:
-            pass
+            logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)
 
     return {
         "has_transport_data": has_transport_data,

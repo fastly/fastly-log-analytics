@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -25,6 +26,8 @@ from backend.repositories import dashboard as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import get_sqlite_queries
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -310,7 +313,7 @@ async def dashboard_bundle(
             try:
                 second_cm.__exit__(None, None, None)
             except Exception:
-                pass
+                logger.debug("dashboard_bundle: second_cm.__exit__ failed (ignored)", exc_info=True)
         second_cm = None
         second_con = None
     finally:
@@ -373,7 +376,7 @@ async def dashboard_bundle(
                 try:
                     cm_to_exit.__exit__(None, None, None)
                 except Exception:
-                    pass
+                    logger.debug("dashboard_bundle: cm_to_exit.__exit__ failed (ignored)", exc_info=True)
     else:
         t0 = time.perf_counter()
         task_agg = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))

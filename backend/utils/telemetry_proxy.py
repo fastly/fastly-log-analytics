@@ -851,12 +851,12 @@ def stop_proxy_server() -> None:
             try:
                 asyncio.run_coroutine_threadsafe(_SESSION.close(), _LOOP).result(timeout=2.0)
             except Exception:
-                pass
+                logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
         if _RUNNER is not None:
             try:
                 asyncio.run_coroutine_threadsafe(_RUNNER.cleanup(), _LOOP).result(timeout=2.0)
             except Exception:
-                pass
+                logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
         _LOOP.call_soon_threadsafe(_LOOP.stop)
     if _SERVER_THREAD is not None:
         _SERVER_THREAD.join(timeout=2.0)
@@ -938,7 +938,7 @@ def _reset_for_tests() -> None:
     try:
         _flush_log_writes_for_tests(timeout=1.0)
     except Exception:
-        pass
+        logger.debug("_reset_for_tests: _flush_log_writes_for_tests failed (ignored)", exc_info=True)
     while True:
         try:
             _LOG_QUEUE.get_nowait()

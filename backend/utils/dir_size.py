@@ -6,9 +6,12 @@ use it without creating a cron -> routers import edge (import-linter).
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 _DIR_SIZE_CACHE: dict[str, tuple[float, int]] = {}
 _DIR_SIZE_TTL_S = 120.0
@@ -109,7 +112,7 @@ def _scan_dir_size(path: str) -> int:
                 elif entry.is_dir():
                     total += _scan_dir_size(entry.path)
     except Exception:
-        pass
+        logger.debug("_scan_dir_size: step failed (ignored)", exc_info=True)
     return total
 
 

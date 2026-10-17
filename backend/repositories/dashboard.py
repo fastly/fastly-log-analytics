@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -41,6 +42,8 @@ from backend.repositories.utils.filters import build_where_clause
 # 500 entries × ~30MB = ~15GB worst case; in practice the working set is
 # much smaller, but the cap is a hard backstop.
 from backend.utils.bounded_cache import BoundedTTLCache
+
+logger = logging.getLogger(__name__)
 
 # Dashboard response cache disabled.
 #
@@ -478,7 +481,7 @@ def get_aggregates(
                     if rollup_count is not None:
                         return rollup_count
                 except Exception:
-                    pass
+                    logger.debug("_compute_count: step failed (ignored)", exc_info=True)
 
                 try:
                     return runner.execute(
@@ -579,7 +582,7 @@ def get_aggregates(
                 try:
                     con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
                 except Exception:
-                    pass
+                    logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
                 temp_table = None
             rebuilt = _build_query_target()
             if rebuilt is not None:
@@ -1062,7 +1065,7 @@ def get_aggregates(
             try:
                 con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # ── raw ───────────────────────────────────────────────────────────────────────
@@ -1156,7 +1159,7 @@ def get_field_values(
                         enrich_asn_labels(vals, src["name"])
                     return {"values": vals, "field": field, **runner.telemetry()}
         except Exception:
-            pass
+            logger.debug("get_field_values: step failed (ignored)", exc_info=True)
 
     # Verify table exists
     try:

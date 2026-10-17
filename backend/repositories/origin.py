@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -24,6 +25,8 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # Frontend Origin page fires 6 endpoints in parallel; on cold load each one
@@ -1461,7 +1464,7 @@ async def get_aggregates(
         try:
             runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         except Exception:
-            pass
+            logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # R-1: register the response TTL cache so the autouse fixture in

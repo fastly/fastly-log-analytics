@@ -204,7 +204,7 @@ def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -
 
             clear_ducklake_stats_cache(source_key)
         except Exception:
-            pass
+            logger.debug("clear_source_caches: clear_ducklake_stats_cache failed (ignored)", exc_info=True)
 
 
 def _get_cache_file(source: dict, name: str) -> str:
@@ -233,7 +233,7 @@ def _load_persistent_cache(source: dict):
                     data.get("local_iceberg_files", []),
                 )
         except Exception:
-            pass
+            logger.debug("_load_persistent_cache: step failed (ignored)", exc_info=True)
 
 
 def _save_persistent_cache(source: dict):
@@ -252,7 +252,7 @@ def _save_persistent_cache(source: dict):
         with open(cache_file, "w") as f:
             json.dump(data, f)
     except Exception:
-        pass
+        logger.debug("_save_persistent_cache: step failed (ignored)", exc_info=True)
 
 
 def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
@@ -296,7 +296,7 @@ def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
         try:
             _save_persistent_cache(source)
         except Exception:
-            pass
+            logger.debug("_update_snapshot_cache_from_delta: _save_persistent_cache failed (ignored)", exc_info=True)
         return True
 
     # Linear-history check: the cached snapshot must be the direct parent of
@@ -332,7 +332,7 @@ def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
         try:
             _save_persistent_cache(source)
         except Exception:
-            pass
+            logger.debug("_update_snapshot_cache_from_delta: _save_persistent_cache failed (ignored)", exc_info=True)
         return True
 
     from pyiceberg.manifest import ManifestEntryStatus
@@ -408,7 +408,7 @@ def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
     try:
         _save_persistent_cache(source)
     except Exception:
-        pass
+        logger.debug("_update_snapshot_cache_from_delta: _save_persistent_cache failed (ignored)", exc_info=True)
 
     logger.info(
         "%s %s: snapshot cache +%d via delta (was %d, now %d) snapshot=%s parent=%s",
@@ -461,7 +461,7 @@ def _reconcile_snapshot_cache_after_sync(source: dict, table_name: str = "logs")
         try:
             _save_persistent_cache(source)
         except Exception:
-            pass
+            logger.debug("_reconcile_snapshot_cache_after_sync: _save_persistent_cache failed (ignored)", exc_info=True)
 
 
 def get_last_view_stats(source: dict) -> dict:
@@ -916,7 +916,7 @@ def update_iceberg_view(
                 try:
                     con.execute(cached[3])
                 except Exception:
-                    pass
+                    logger.debug("update_iceberg_view: con.execute failed (ignored)", exc_info=True)
                 return
             if _persistent_view_exists(con, source, target_table=target_table):
                 return

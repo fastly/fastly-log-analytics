@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 import duckdb
@@ -14,6 +15,8 @@ from backend.repositories._base import (
     percentile_ms_expr,
 )
 from backend.repositories.utils.filters import build_where_clause
+
+logger = logging.getLogger(__name__)
 
 # Temp-table projection order for the section-aware narrowed temp. Mirrors the
 # origin/security ``_TEMP_COL_ORDER`` pattern: the temp is built for ONLY the
@@ -354,7 +357,7 @@ def get_performance_aggregates(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                logger.debug("get_performance_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
     # Backstop: any requested section left unpopulated (temp-create failure, or
     # a live section whose required column was absent) gets its empty default so
