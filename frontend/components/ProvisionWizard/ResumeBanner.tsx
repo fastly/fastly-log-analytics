@@ -4,19 +4,13 @@ import React from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "lucide-react";
+import { ELAPSED_RELATIVE_AGO, formatElapsed } from "@/lib/format";
 import { getStepsForMode, type WizardDraft } from "./types";
 
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "earlier";
-  const secs = Math.floor((Date.now() - then) / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return formatElapsed(Math.floor((Date.now() - then) / 1000), ELAPSED_RELATIVE_AGO);
 }
 
 function stepLabelFor(draft: WizardDraft): string {

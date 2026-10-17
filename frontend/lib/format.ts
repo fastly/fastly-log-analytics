@@ -19,6 +19,79 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Binary byte formatter with fixed per-unit decimals (B as-is, KB/MB 1 decimal,
+ * GB 2 decimals) and strict 1024 thresholds. ``maxUnit: 'MB'`` keeps counting
+ * in MB past 1 GiB. Distinct from ``formatBytes`` above, which bumps units at
+ * 1000 and trims trailing zeros.
+ */
+export function formatBytesTiered(
+  bytes: number | null | undefined,
+  options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {},
+): string {
+  const { maxUnit = 'MB', nullText = '–' } = options
+  if (bytes == null) return nullText
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (maxUnit === 'MB' || bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+export interface ElapsedOptions {
+  /** Seconds at which the minute / hour / day units take over. */
+  minutesFrom?: number
+  hoursFrom?: number
+  /** ``Infinity`` caps the ladder at hours. */
+  daysFrom?: number
+  rounding?: 'floor' | 'round'
+  /** Fixed decimals for the hour / day units (0 = integer via ``rounding``). */
+  fractionDigits?: { hours?: number; days?: number }
+  /** Below this many seconds, render ``just now`` (no suffix). */
+  justNowBelow?: number
+  suffix?: string
+}
+
+/** Compact elapsed-time ladder: 45s / 12m / 3h / 6d, parameterised so every
+ *  caller keeps its own thresholds, rounding and decimals. */
+export function formatElapsed(seconds: number, options: ElapsedOptions = {}): string {
+  const {
+    minutesFrom = 60,
+    hoursFrom = 3600,
+    daysFrom = 86400,
+    rounding = 'floor',
+    fractionDigits = {},
+    justNowBelow,
+    suffix = '',
+  } = options
+  const r = rounding === 'round' ? Math.round : Math.floor
+  const unit = (value: number, digits: number | undefined, label: string) =>
+    `${digits ? value.toFixed(digits) : r(value)}${label}${suffix}`
+  if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
+  if (seconds < minutesFrom) return unit(seconds, 0, 's')
+  if (seconds < hoursFrom) return unit(seconds / 60, 0, 'm')
+  if (seconds < daysFrom) return unit(seconds / 3600, fractionDigits.hours, 'h')
+  return unit(seconds / 86400, fractionDigits.days, 'd')
+}
+
+/** BotSourcesPanel: "just now" under 2 minutes, then m / h / d ago. */
+export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
+/** ResumeBanner: s / m / h / d ago. */
+export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
+/** SystemHealthCard: 45s / 12m / 3.4h / 6.2d, rounded. */
+export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
+  rounding: 'round',
+  minutesFrom: 90,
+  hoursFrom: 5400,
+  daysFrom: 172800,
+  fractionDigits: { hours: 1, days: 1 },
+}
+/** HighScaleRequestFactsPanel: 45s / 12m / 3.4h (never days), rounded. */
+export const ELAPSED_FRESHNESS: ElapsedOptions = {
+  rounding: 'round',
+  daysFrom: Infinity,
+  fractionDigits: { hours: 1 },
+}
+
+/**
  * Resolve an ISO-3166 alpha-2 country code to its English display name.
  *
  * Intl.DisplayNames is constructed PER CALL (not memoised at module scope)

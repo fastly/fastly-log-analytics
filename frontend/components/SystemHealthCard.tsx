@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/components/Sparkline'
+import { ELAPSED_AGE_COMPACT, formatElapsed } from '@/lib/format'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
@@ -52,10 +53,7 @@ type Tone = 'default' | 'warn' | 'crit' | 'unknown'
 
 /** Compact "time ago" for an age in seconds: 45s / 12m / 3.4h / 6.2d. */
 function fmtAgeS(seconds: number): string {
-  if (seconds < 90) return `${Math.round(seconds)}s`
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`
-  if (seconds < 172800) return `${(seconds / 3600).toFixed(1)}h`
-  return `${(seconds / 86400).toFixed(1)}d`
+  return formatElapsed(seconds, ELAPSED_AGE_COMPACT)
 }
 
 function Stat({ label, value, sub, tone = 'default', trend, trendDomain, formatTrendValue }: {

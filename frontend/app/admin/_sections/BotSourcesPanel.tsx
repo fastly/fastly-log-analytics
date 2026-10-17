@@ -1,6 +1,6 @@
 'use client'
 import React, { useState } from 'react'
-import { formatCount } from '@/lib/format'
+import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -80,13 +80,7 @@ function RebuildLocalViewButton() {
 
 function fmtRelative(iso: string | null | undefined): string {
   if (!iso) return '—'
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 2) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  return formatElapsed(Math.floor((Date.now() - new Date(iso).getTime()) / 1000), ELAPSED_RELATIVE_AGO_JUST_NOW)
 }
 
 export function BotSourcesPanel() {

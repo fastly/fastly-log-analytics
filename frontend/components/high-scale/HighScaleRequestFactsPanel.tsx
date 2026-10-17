@@ -6,6 +6,7 @@ import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataRe
 import { useTimeRange } from '@/hooks/useTimeRange'
 import { useHighScaleRequestFacts } from '@/hooks/useHighScaleRequestFacts'
 import { extractApiError } from '@/lib/api'
+import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/format'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -26,9 +27,7 @@ function formatTimestamp(value: unknown): string {
 }
 
 function formatFreshness(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`
-  return `${(seconds / 3600).toFixed(1)}h`
+  return formatElapsed(seconds, ELAPSED_FRESHNESS)
 }
 
 function Metadata({ metadata }: { metadata: NonNullable<ReturnType<typeof useHighScaleRequestFacts>['data']>['metadata'] }) {

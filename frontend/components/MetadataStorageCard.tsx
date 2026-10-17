@@ -13,7 +13,7 @@ import { client } from '@/lib/api'
 import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
-import { formatCount } from '@/lib/format'
+import { formatBytesTiered, formatCount } from '@/lib/format'
 // Deliberate narrowing of the all-optional generated MetadataStorageResponse
 // (+ its MetadataTableStat / MetadataRetentionValues sub-schemas): the
 // endpoint always emits tables/db_path/retention; db_bytes is null only when
@@ -63,11 +63,7 @@ function labelFor(rawName: string): { label: string; sub: string } {
 }
 
 function fmtBytes(n: number | null | undefined): string {
-  if (n == null) return '–'
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+  return formatBytesTiered(n, { maxUnit: 'GB' })
 }
 
 function fmtRows(n: number | null | undefined): string {

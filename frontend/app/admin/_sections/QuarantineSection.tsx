@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { adminFetch, adminJson } from '@/lib/api'
+import { formatBytesTiered } from '@/lib/format'
 import { downloadBlob } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
@@ -170,7 +171,7 @@ export function QuarantineSection() {
             <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
               <div>
                 <span className="text-muted-foreground">Stored size: </span>
-                <span className="font-medium tabular-nums">{formatBytes(summary?.total_bytes ?? 0)}</span>
+                <span className="font-medium tabular-nums">{formatBytesTiered(summary?.total_bytes ?? 0)}</span>
               </div>
               <div>
                 <span className="text-muted-foreground">Request / RUM: </span>
@@ -276,7 +277,7 @@ function QuarantineItemRow({
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">{item.source_type}</Badge>
             <Badge variant="secondary">{item.error_category}</Badge>
-            <span className="text-xs text-muted-foreground">#{item.id} · {formatBytes(item.byte_length)}</span>
+            <span className="text-xs text-muted-foreground">#{item.id} · {formatBytesTiered(item.byte_length)}</span>
           </div>
           <p className="break-all font-mono text-xs">{item.original_key}</p>
           <p className="text-xs text-muted-foreground">
@@ -300,10 +301,4 @@ function QuarantineItemRow({
       </div>
     </div>
   )
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
