@@ -64,6 +64,27 @@ export const handlers = [
   http.get(`${API_BASE}/api/query/schema/:service_id`, () =>
     HttpResponse.json({ source: 'svc-default', table_name: 'logs', schema: [], columns: [] }),
   ),
+  http.get(`${API_BASE}/api/admin/sync-status`, () =>
+    HttpResponse.json({ configured: false, access_level: 'read_write', state: 'idle' }),
+  ),
+  http.get(`${API_BASE}/api/admin/health`, () =>
+    HttpResponse.json({ status: 'ok', load: [0, 0, 0], recent_cron_failures: [] }),
+  ),
+  http.get(`${API_BASE}/api/admin/system-metrics`, () =>
+    HttpResponse.json({ load: [0, 0, 0], vcpus: 1, in_flight_runs: [], compaction: {} }),
+  ),
+  http.post(`${API_BASE}/api/admin/commit/:service_id`, () =>
+    HttpResponse.json({ type: 'done', message: 'ok' }),
+  ),
+  http.get(`${API_BASE}/api/admin/log-accounting/:service_id`, () =>
+    HttpResponse.json({
+      configured: true,
+      hours: 24,
+      buckets: [],
+      totals: { requests: 0, log_lines: 0, log_bytes: 0, ingested_rows: 0, gap: 0, gap_pct: 0 },
+      sustained_loss: null,
+    }),
+  ),
   http.post(`${API_BASE}/api/logs/query`, () =>
     HttpResponse.json({
       rows: [],

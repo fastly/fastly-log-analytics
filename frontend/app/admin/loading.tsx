@@ -1,5 +1,7 @@
 import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
 
+const OVERVIEW_CARD_SLOTS = ['queries', 'ingest-gap', 'slow-queries', 'workers']
+
 export default function Loading() {
   return (
     <div
@@ -14,8 +16,8 @@ export default function Loading() {
       </div>
       <div className="min-h-[108px] [contain-intrinsic-size:auto_108px] [content-visibility:auto]">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-[108px] rounded-xl border bg-card/50 animate-pulse" />
+          {OVERVIEW_CARD_SLOTS.map((slot) => (
+            <div key={slot} className="h-[108px] rounded-xl border bg-card/50 animate-pulse" />
           ))}
         </div>
       </div>

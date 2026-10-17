@@ -67,15 +67,17 @@ test('AdminPage wraps all child sections in zero-CLS contain-intrinsic-size rese
 })
 
 test('OperationsOverview renders live query, ingest gap, slow query, and worker status cards', async () => {
+  // adminFetch uses same-origin relative URLs, so handlers are registered relative too
+  // (`${API_BASE}` is the openapi-fetch client's origin).
   server.use(
-    http.get(`${API_BASE}/api/admin/queries/summary`, () =>
+    http.get('/api/admin/queries/summary', () =>
       HttpResponse.json({
         active_total: 2,
         by_db_type: { duckdb: 2 },
         recent_count: 15,
       }),
     ),
-    http.get(`${API_BASE}/api/admin/log-accounting`, () =>
+    http.get('/api/admin/log-accounting', () =>
       HttpResponse.json({
         configured: true,
         service_id: 'test-svc',
@@ -92,10 +94,10 @@ test('OperationsOverview renders live query, ingest gap, slow query, and worker 
         sustained_loss: null,
       }),
     ),
-    http.get(`${API_BASE}/api/admin/slow-queries/count`, () =>
+    http.get('/api/admin/slow-queries/count', () =>
       HttpResponse.json({ count: 0, since_hours: 24, threshold_ms: 1000 }),
     ),
-    http.get(`${API_BASE}/api/admin/celery/status`, () =>
+    http.get('/api/admin/celery/status', () =>
       HttpResponse.json({
         workers: { count: 4 },
         queues: { 'q.ingest': 0, 'q.control': 0 },

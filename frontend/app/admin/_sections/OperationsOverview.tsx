@@ -93,7 +93,7 @@ function LiveQueriesCard() {
   const seed = useOpsOverviewSeed().seed.queries_summary
   // Freshness via useAdminEventStream (mounted in SyncStatusBadge).
   // 5-min refetchInterval is a pure safety net.
-const { data, isLoading, isFetching, isError } = useQuery<SummaryResponse>({
+  const { data, isLoading, isFetching, isError } = useQuery<SummaryResponse>({
     queryKey: queryKeys.admin.overviewQueriesSummary(),
     queryFn: async ({ signal }) => {
       return adminJson('/api/admin/queries/summary', '/api/admin/queries/summary', { signal })
@@ -142,7 +142,7 @@ function IngestHealthCard() {
   // changes). The gap is per-service, so the key MUST include the service id;
   // without it, switching services serves the previous service's cached gap.
   const seed = activeServiceId === seedServiceId ? opsSeed.log_accounting : undefined
-const { data, isFetching, isLoading, isError } = useQuery<LogAccountingResponse>({
+  const { data, isFetching, isLoading, isError } = useQuery<LogAccountingResponse>({
     queryKey: queryKeys.admin.overviewLogAccounting(activeServiceId),
     queryFn: async ({ signal }) => {
       return adminJson('/api/admin/log-accounting', '/api/admin/log-accounting?hours=24', { signal })
@@ -232,7 +232,7 @@ function SlowQueriesTeaser() {
   // id; gate the seed to the matching service to avoid flashing the previous
   // service's count on switch.
   const seed = activeServiceId === seedServiceId ? opsSeed.slow_queries_count : undefined
-const { data, isFetching, isLoading, isError } = useQuery<{ count: number }>({
+  const { data, isFetching, isLoading, isError } = useQuery<{ count: number }>({
     queryKey: queryKeys.admin.overviewSlowQueriesCount(activeServiceId),
     queryFn: async ({ signal }) => {
       return adminJson(
@@ -359,7 +359,7 @@ function OverviewCard({
 // ── Card 4: Celery Status ───────────────────────────────────────────
 
 function CeleryStatusCard() {
-const { data, isFetching, isLoading, isError } = useQuery<CeleryStatus>({
+  const { data, isFetching, isLoading, isError } = useQuery<CeleryStatus>({
     queryKey: queryKeys.admin.overviewCeleryStatus(),
     queryFn: async ({ signal }) => {
       return adminJson<'/api/admin/celery/status', CeleryStatus>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
