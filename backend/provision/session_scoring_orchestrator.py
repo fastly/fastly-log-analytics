@@ -37,6 +37,7 @@ from backend.core.fastly.service import (
     get_active_version,
     list_vcl_snippets,
 )
+from backend.provision.draft_version import draft_version
 from backend.provision.session_scoring_setup import (
     MATRIX_KEY_NAME,
     MATRIX_RESOURCE_LINK_NAME,
@@ -975,21 +976,17 @@ def disable_scoring(
     active_ver = get_active_version(logging_service_id, token)
     if active_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    clone = fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{active_ver}/clone",
-        token=token,
-    )
-    new_ver = int(clone["number"])
     ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{new_ver}",
-        {"comment": f"Disable session scoring {ts}"},
-        token=token,
-    )
 
-    try:
+    # ── Stage 4 (validate + activate) is owned by draft_version. ───────────
+    with draft_version(
+        logging_service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Disable session scoring {ts}",
+        on_failure=lambda exc: fail(f"disable_scoring VCL phase failed: {exc}"),
+    ) as new_ver:
         # ── Stage 2: remove scoring VCL bits. ───────────────────────────────
         _remove_scoring_snippets(logging_service_id, new_ver, token)
         _remove_scoring_backend(logging_service_id, new_ver, token)
@@ -1037,31 +1034,7 @@ def disable_scoring(
                 token=token,
             )
 
-        # ── Stage 4: validate + activate. ──────────────────────────────────
-        result = fastly(
-            "GET",
-            f"/service/{logging_service_id}/version/{new_ver}/validate",
-            token=token,
-        )
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{new_ver}/activate",
-            token=token,
-        )
-        ok(f"Logging service version {new_ver} active (scoring stripped)")
-    except Exception as exc:
-        fail(f"disable_scoring VCL phase failed: {exc}")
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Logging service version {new_ver} active (scoring stripped)")
 
     # ── Stage 5: tear down the Compute service + stores. ───────────────────
     failed_stores = delete_scoring_service(
