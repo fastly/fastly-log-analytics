@@ -1488,3 +1488,13 @@ def get_security_proxies(
         "suspicious_isps": suspicious_isps,
         "active_clients": active_clients,
     }
+
+
+def get_threat_intel_rows(con, table_name: str, start: str, end: str) -> list[tuple]:
+    """Rows ``(tls_fingerprint, requests, top_country, waf_rule_count, bot_pct, is_proxy)`` for ``[start, end]``."""
+    from backend.utils.telemetry import track_query
+
+    probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
+    cols = {d[0] for d in probe}
+    with track_query(con, SQL.threat_intel_sql(table_name, cols), [start, end], "threat_intel") as cursor:
+        return cursor.fetchall()

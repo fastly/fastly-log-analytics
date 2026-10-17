@@ -410,3 +410,16 @@ def fetch_rum_live_events(con, *, where_sql: str, params: list) -> list[tuple]:
     """Newest 50 vitals + error beacons for the live ticker, newest first."""
     with track_query(con, sql_rum.RUM_LIVE_EVENTS.format(where_sql=where_sql), params * 2, "rum_live_events") as cur:
         return cur.fetchall()
+
+
+def get_header_stats(con) -> tuple[int, Any]:
+    """``(distinct beacon count, newest beacon timestamp)`` over vitals + errors for the header badge."""
+    cnt = con.execute(sql_rum.HEADER_STATS_COUNT).fetchone()[0] or 0
+    l_row = con.execute(sql_rum.HEADER_STATS_LATEST).fetchone()
+    return cnt, (l_row[0] if l_row else None)
+
+
+def count_aggregate_buckets(con, service_id: str) -> int | None:
+    """Distinct ``bucket_start`` values in ``rum_vitals_aggregates`` for the service."""
+    row = con.execute(sql_rum.AGGREGATE_BUCKET_COUNT, [service_id]).fetchone()
+    return row[0] if row is not None else None

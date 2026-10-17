@@ -1022,3 +1022,45 @@ def get_node_count_avg(service_id: str) -> float | None:
     if not row or row["avg_c"] is None:
         return None
     return float(row["avg_c"])
+
+
+_RUM_TABLES_SQL = "table_name IN ('client_vitals', 'client_errors')"
+
+
+def get_rum_beacons_avg_per_day(service_id: str) -> float | None:
+    """Mean of per-day RUM beacon rows (client_vitals + client_errors) in ``ingested_files``."""
+    con = get_con(service_id)
+    row = con.execute(
+        f"""
+        SELECT AVG(daily_beacons) FROM (
+            SELECT SUM(row_count) as daily_beacons
+            FROM ingested_files
+            WHERE source_name = ?
+              AND {_RUM_TABLES_SQL}
+            GROUP BY file_date
+        ) sub
+        """,
+        (service_id,),
+    ).fetchone()
+    val = row[0]
+    return float(val) if val is not None else None
+
+
+def get_rum_beacons_by_date(service_id: str, start_date: str, end_date: str) -> dict[str, int]:
+    """``{file_date: beacon_rows}`` for RUM tables in ``[start_date, end_date)``."""
+    con = get_con(service_id)
+    rows = con.execute(
+        f"""
+        SELECT
+            file_date as date,
+            SUM(row_count) as beacon_count
+        FROM ingested_files
+        WHERE source_name = ?
+          AND {_RUM_TABLES_SQL}
+          AND file_date >= ? AND file_date < ?
+        GROUP BY file_date
+        ORDER BY date
+        """,
+        (service_id, start_date, end_date),
+    ).fetchall()
+    return {str(row["date"]): row["beacon_count"] for row in rows if row["date"]}

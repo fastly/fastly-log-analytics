@@ -20,6 +20,7 @@ from backend.models.admin import (
     LogAccountingTotals,
     SustainedLossAlert,
 )
+from backend.repositories import log_accounting as log_accounting_repo
 from backend.utils.router_utils import raise_internal
 
 from ._router import router
@@ -205,14 +206,9 @@ def _try_row_counts_from_rollup(
         st_tz = start.astimezone(UTC).isoformat()
         et_tz = end.astimezone(UTC).isoformat()
         with _ConnectionHolder(source, read_only=True) as con:
-            rows = con.execute(
-                f"SELECT strftime(date_trunc('{unit}', hour_start), '{fmt}') AS bucket, "
-                f"  SUM(requests) AS n "
-                f"FROM read_parquet([{paths_sql}]) "
-                f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
-                f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
-                f"GROUP BY date_trunc('{unit}', hour_start)"
-            ).fetchall()
+            rows = log_accounting_repo.rollup_bucket_counts(
+                con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=st_tz, end_tz=et_tz
+            )
         for b, n in rows:
             result[b] = int(n)
 
@@ -249,13 +245,9 @@ def _try_row_counts_from_rollup(
         if active_paths:
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
             with _ConnectionHolder(source, read_only=True) as con:
-                rows = con.execute(
-                    f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-                    f"FROM read_parquet([{paths_sql}], union_by_name=true) "
-                    f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
-                    f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-                    f"GROUP BY date_trunc('{unit}', timestamp)"
-                ).fetchall()
+                rows = log_accounting_repo.active_hour_bucket_counts(
+                    con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=live_start_iso, end_iso=end_iso
+                )
             for b, n in rows:
                 result[b] = result.get(b, 0) + int(n)
 
@@ -277,13 +269,9 @@ def _raw_row_counts(
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
     unit = "day" if "%H" not in fmt else "hour"
     with _ConnectionHolder(source, read_only=True) as con:
-        rows = con.execute(
-            f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-            f"FROM {table_name} "
-            f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
-            f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-            f"GROUP BY date_trunc('{unit}', timestamp)"
-        ).fetchall()
+        rows = log_accounting_repo.raw_bucket_counts(
+            con, unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso
+        )
     return {b: int(n) for b, n in rows}
 
 

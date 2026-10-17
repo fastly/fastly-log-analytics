@@ -424,3 +424,14 @@ FROM combined
 ORDER BY timestamp DESC
 LIMIT 50
 """  # str.format template: {where_sql}
+
+HEADER_STATS_COUNT = (
+    f"SELECT COUNT(DISTINCT {DISTINCT_ID}) FROM "
+    "(SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
+)
+
+HEADER_STATS_LATEST = (
+    "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+)
+
+AGGREGATE_BUCKET_COUNT = "SELECT COUNT(DISTINCT bucket_start) FROM rum_vitals_aggregates WHERE service_id = ?"

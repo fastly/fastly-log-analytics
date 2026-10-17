@@ -204,23 +204,8 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
 
     # Extract historical RUM beacons per day for prefill.
     try:
-        from backend.core.metadata import get_con
-
-        db = get_con(source["name"])
-        cur = db.execute(
-            """
-            SELECT AVG(daily_beacons) FROM (
-                SELECT SUM(row_count) as daily_beacons
-                FROM ingested_files
-                WHERE source_name = ?
-                  AND table_name IN ('client_vitals', 'client_errors')
-                GROUP BY file_date
-            ) sub
-            """,
-            (source["name"],),
-        )
-        val = cur.fetchone()[0]
-        result["rum_beacons_per_day"] = round(float(val)) if val is not None else 0
+        val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
+        result["rum_beacons_per_day"] = round(val) if val is not None else 0
     except Exception as e:
         logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
 
@@ -807,7 +792,7 @@ def usage_rum_breakdown(
     source: dict = Depends(get_source),
 ):
     """Calculate RUM beacon volume and estimated FOS Class A operations cost."""
-    from backend.core.metadata import get_con
+    from backend.core import metadata as metadata_db
 
     requested_by = by
     if by not in ("hour", "day"):
@@ -837,28 +822,9 @@ def usage_rum_breakdown(
 
     # Query RUM beacon count by date from metadata DB using the new DuckDB/Iceberg ingestion tracking
     try:
-        db = get_con(service_id)
         start_date = start_str.split("T")[0]
         end_date = end_str.split("T")[0]
-        cur = db.execute(
-            """
-            SELECT
-                file_date as date,
-                SUM(row_count) as beacon_count
-            FROM ingested_files
-            WHERE source_name = ?
-              AND table_name IN ('client_vitals', 'client_errors')
-              AND file_date >= ? AND file_date < ?
-            GROUP BY file_date
-            ORDER BY date
-            """,
-            (service_id, start_date, end_date),
-        )
-        rows = cur.fetchall()
-        beacons_by_date: dict[str, int] = {}
-        for row in rows:
-            if row["date"]:
-                beacons_by_date[str(row["date"])] = row["beacon_count"]
+        beacons_by_date: dict[str, int] = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
     except Exception:
         beacons_by_date = {}
 

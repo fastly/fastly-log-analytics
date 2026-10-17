@@ -27,6 +27,7 @@ from backend.models.services import (
     ServiceCronSettingsBody,
     ServicesListResponse,
 )
+from backend.repositories import service_stats as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, load_service_config, make_error, raise_internal
@@ -635,9 +636,7 @@ def api_service_log_fields_get(service_id: str):
                     table_name = _db._safe_table_name(src["name"])
                     actual_cols = {col["name"] for col in _db.get_schema(c, src, stats=False)}
                     if "waf" in actual_cols:
-                        result = c.execute(
-                            f"\n                            SELECT SUM(CASE WHEN waf = true THEN 1 ELSE 0 END), COUNT(*)\n                            FROM {table_name}\n                            WHERE timestamp >= now() - INTERVAL '7 days'\n                        "
-                        ).fetchone()
+                        result = service_stats_repo.get_waf_flag_counts_7d(c, table_name)
                         if result and result[1] and (result[1] >= 10000) and ((result[0] or 0) == 0):
                             waf_warning = True
                 finally:

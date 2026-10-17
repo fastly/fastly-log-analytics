@@ -267,7 +267,7 @@ def _emulate_standard_request_facts(
     from backend.core.duckdb import _safe_table_name
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.high_scale.pagination import KeysetCursor
-    from backend.utils.telemetry import track_query
+    from backend.repositories import request_facts as request_facts_repo
 
     secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET", "").strip() or "standard-emulation-cursor-secret").encode("utf-8")
     decoded = KeysetCursor.decode(req.cursor, secret) if req.cursor else None
@@ -279,100 +279,14 @@ def _emulate_standard_request_facts(
         candidate_tables.append("logs")
 
     def _run_emulation(con):
-        table = candidate_tables[0]
-        col_names: set[str] = set()
-        for cand in candidate_tables:
-            try:
-                with track_query(con, f"DESCRIBE {cand}", [], "high_scale.describe_emulation") as desc_cur:
-                    col_names = {str(r[0]) for r in desc_cur.fetchall()}
-                if col_names:
-                    table = cand
-                    break
-            except Exception:
-                continue
-
-        if "timestamp" not in col_names:
-            with track_query(con, "SELECT 1 AS duckdb_emulation_probe", [], "high_scale.emulation_probe") as probe_cur:
-                probe_cur.fetchone()
-            return [], None, None
-
-        country_col = (
-            "country" if "country" in col_names else ("geo_country_code" if "geo_country_code" in col_names else None)
+        return request_facts_repo.fetch_request_facts_emulation(
+            con,
+            candidate_tables,
+            req,
+            start=start,
+            end=end,
+            cursor_ts=decoded.timestamp if decoded is not None else None,
         )
-
-        select_exprs = [
-            "timestamp",
-            f"{country_col} AS country" if country_col else "'' AS country",
-            "client_ip" if "client_ip" in col_names else "'' AS client_ip",
-            "url" if "url" in col_names else "'' AS url",
-            "CAST(status AS VARCHAR) AS status" if "status" in col_names else "'' AS status",
-            "pop" if "pop" in col_names else "'' AS pop",
-            "host" if "host" in col_names else "'' AS host",
-        ]
-        where_parts = ["timestamp >= ?", "timestamp <= ?"]
-        params: list[object] = [start, end]
-
-        if decoded is not None:
-            where_parts.append("timestamp > ?")
-            params.append(decoded.timestamp)
-
-        if req.country is not None and str(req.country).strip():
-            if country_col:
-                where_parts.append(f"{country_col} = ?")
-                params.append(str(req.country).strip())
-            else:
-                return [], None, None
-
-        if req.status is not None and str(req.status).strip():
-            if "status" in col_names:
-                where_parts.append("CAST(status AS VARCHAR) = ?")
-                params.append(str(req.status).strip())
-            else:
-                return [], None, None
-
-        if req.pop is not None and str(req.pop).strip():
-            if "pop" in col_names:
-                where_parts.append("pop = ?")
-                params.append(str(req.pop).strip())
-            else:
-                return [], None, None
-
-        if req.domain is not None and str(req.domain).strip():
-            dom_val = str(req.domain).strip()
-            if "host" in col_names and "url" in col_names:
-                where_parts.append("(host = ? OR url ILIKE ?)")
-                params.extend([dom_val, f"%{dom_val}%"])
-            elif "host" in col_names:
-                where_parts.append("host = ?")
-                params.append(dom_val)
-            elif "url" in col_names:
-                where_parts.append("url ILIKE ?")
-                params.append(f"%{dom_val}%")
-            else:
-                return [], None, None
-
-        if req.batch_id is not None and str(req.batch_id).strip():
-            b_val = str(req.batch_id).strip()
-            if b_val != "duckdb-emulation":
-                return [], None, None
-
-        limit_plus_one = int(req.limit) + 1
-        sql = (
-            f"SELECT {', '.join(select_exprs)} "
-            f"FROM {table} "
-            f"WHERE {' AND '.join(where_parts)} "
-            f"ORDER BY timestamp ASC "
-            f"LIMIT {limit_plus_one}"
-        )
-        with track_query(con, sql, params, "high_scale.request_facts_emulation") as cur:
-            fetched = cur.fetchall()
-
-        ext_sql = f"SELECT MIN(timestamp), MAX(timestamp) FROM {table}"
-        with track_query(con, ext_sql, [], "high_scale.request_facts_extents") as ext_cur:
-            ext_row = ext_cur.fetchone()
-        cov_start = ext_row[0] if ext_row else None
-        cov_end = ext_row[1] if ext_row else None
-        return fetched, cov_start, cov_end
 
     raw_rows, cov_start, cov_end = execute_with_stale_view_retry(ctx.con, ctx.source, _run_emulation)
 

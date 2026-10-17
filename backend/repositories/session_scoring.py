@@ -20,6 +20,8 @@ import time as _time
 
 from fastapi import HTTPException
 
+from backend.repositories._sql import session_scoring as sql_scoring
+
 
 def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
     """Execute ``sql`` against the per-service logs view and return
@@ -106,7 +108,7 @@ def _scoring_table_columns(service_id: str, table: str) -> set[str]:
     """Column-name set for ``table``, or empty set on error (view not ready /
     table missing). Used to gate :func:`scoring_source`."""
     try:
-        rows = query_logs(service_id, f"DESCRIBE {table}")
+        rows = describe_table(service_id, table)
     except HTTPException:
         return set()
     return {str(r.get("column_name")) for r in rows if r.get("column_name")}
@@ -253,3 +255,62 @@ def reconstruct_labeled_sessions(
             )
         )
     return out
+
+
+# ── Analytics reads (SQL lives in ``_sql/session_scoring.py``) ────────────────
+# ``src`` / ``ts_pred`` come from the router's ``scoring_source`` / ``_scoring_time_window``
+# helpers; every function goes through ``query_logs`` so telemetry and the 404/400 mapping apply.
+
+
+def top_flagged_rows(service_id: str, src: str, ts_pred: str, limit: int) -> list[dict]:
+    """Highest-scored recent rows (score DESC, newest first), at most ``limit``."""
+    return query_logs(service_id, sql_scoring.TOP_FLAGGED.format(src=src, ts_pred=ts_pred, limit=int(limit)))
+
+
+def score_distribution_rows(service_id: str, src: str, ts_pred: str) -> list[dict]:
+    """Hourly counts per score bucket (0-25 / 25-50 / 50-75 / 75-100)."""
+    return query_logs(service_id, sql_scoring.SCORE_DISTRIBUTION.format(src=src, ts_pred=ts_pred))
+
+
+def compliance_breakdown_rows(service_id: str, src: str, ts_pred: str) -> list[dict]:
+    """Hourly counts grouped by ``edge_cookie_compliance``."""
+    return query_logs(service_id, sql_scoring.COMPLIANCE_BREAKDOWN.format(src=src, ts_pred=ts_pred))
+
+
+def latency_timeseries_rows(
+    service_id: str, src: str, ts_pred: str, bucket: str, has_rtt: bool, has_exec: bool
+) -> list[dict]:
+    """Per-bucket scored / fail-open counts and (when the columns exist) RTT and Wasm-exec percentiles."""
+    return query_logs(service_id, sql_scoring.latency_timeseries_sql(src, ts_pred, bucket, has_rtt, has_exec))
+
+
+def health_snapshot_row(service_id: str, src: str, ts_pred: str, has_rtt: bool, has_exec: bool) -> dict:
+    """The single aggregate row behind the scoring-health card (``{}`` when the query returns nothing)."""
+    rows = query_logs(service_id, sql_scoring.health_snapshot_sql(src, ts_pred, has_rtt, has_exec))
+    return rows[0] if rows else {}
+
+
+def threshold_preview_counts(
+    service_id: str, src: str, ts_pred: str, threshold: int, labeled_pairs: list[tuple[str, str]]
+) -> dict:
+    """Per-sid max-score bucket counts at ``threshold``, joined to ``(sid, label)`` pairs when any exist.
+
+    Without labels only ``total`` / ``flagged_total`` are returned (single aggregate scan, no join).
+    """
+    threshold_int = int(threshold)
+    if labeled_pairs:
+        values_placeholders = ", ".join("(?, ?)" for _ in labeled_pairs)
+        values_params: tuple = tuple(p for pair in labeled_pairs for p in pair)
+        single_sql = sql_scoring.THRESHOLD_PREVIEW_LABELED.format(
+            src=src, ts_pred=ts_pred, values_placeholders=values_placeholders, threshold=threshold_int
+        )
+        rows = query_logs(service_id, single_sql, values_params)
+    else:
+        agg_sql = sql_scoring.THRESHOLD_PREVIEW_UNLABELED.format(src=src, ts_pred=ts_pred, threshold=threshold_int)
+        rows = query_logs(service_id, agg_sql)
+    return rows[0] if rows else {}
+
+
+def describe_table(service_id: str, table: str) -> list[dict]:
+    """``DESCRIBE`` rows (``column_name``, ``column_type``, ...) for a ``_safe_table_name`` identifier."""
+    return query_logs(service_id, f"DESCRIBE {table}")

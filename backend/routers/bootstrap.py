@@ -15,6 +15,8 @@ from backend.models.common import BootstrapResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 from backend.models.status_reads import SchemaResponse
+from backend.repositories import rum as rum_repo
+from backend.repositories import service_stats as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
@@ -480,25 +482,8 @@ def _bootstrap_sync(
 
                     rum_source = rum_source_for(active_src)
                     with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-
-                        def _query_rum_bootstrap(con):
-                            distinct_id = (
-                                "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
-                            )
-                            cnt = (
-                                con.execute(
-                                    f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
-                                ).fetchone()[0]
-                                or 0
-                            )
-                            l_row = con.execute(
-                                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
-                            ).fetchone()
-                            l_ts = l_row[0] if l_row else None
-                            return cnt, l_ts
-
                         rum_count, rum_last_dt = execute_with_stale_view_retry(
-                            rum_con, rum_source, _query_rum_bootstrap
+                            rum_con, rum_source, rum_repo.get_header_stats
                         )
 
                     if rum_count > 0:
@@ -517,21 +502,16 @@ def _bootstrap_sync(
 
                     duckdb_con = get_connection(active_src)
                     try:
-                        req_count = duckdb_con.execute(
-                            f"SELECT COUNT(*) FROM {_safe_table_name(active_src['name'])}"
-                        ).fetchone()[0]
+                        req_count, req_latest = service_stats_repo.get_request_row_stats(
+                            duckdb_con, _safe_table_name(active_src["name"])
+                        )
                         if req_count > 0:
                             request_total = req_count
                             # RUM beacons are in metadata SQLite, so REQUEST is everything in DuckDB
                             # Get latest log timestamp from DuckDB
-                            req_latest_row = duckdb_con.execute(
-                                f"SELECT MAX(timestamp) FROM {_safe_table_name(active_src['name'])}"
-                            ).fetchone()
-                            if req_latest_row and req_latest_row[0]:
+                            if req_latest:
                                 request_latest = (
-                                    req_latest_row[0].isoformat()
-                                    if hasattr(req_latest_row[0], "isoformat")
-                                    else req_latest_row[0]
+                                    req_latest.isoformat() if hasattr(req_latest, "isoformat") else req_latest
                                 )
                     finally:
                         duckdb_con.close()

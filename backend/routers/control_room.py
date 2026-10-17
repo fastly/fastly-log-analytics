@@ -33,6 +33,7 @@ from backend.models.control_room import (
     WizardStepResponse,
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.repositories import control_room as control_room_repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, query_errors
 
@@ -317,72 +318,13 @@ def _recent_standard_errors(source: dict, service_id: str) -> list[dict]:
     con = _db.get_connection(source=source, read_only=True)
     try:
         view_name = _safe_table(service_id.replace("-", "_"))
-        rows = con.execute(
-            f"""
-            SELECT
-                md5(concat_ws('|', CAST(timestamp AS VARCHAR), CAST(status AS VARCHAR),
-                              COALESCE(url, ''), COALESCE(pop, ''), COALESCE(ip, ''),
-                              CAST(row_number() OVER (
-                                  ORDER BY timestamp DESC, status, url, pop, ip
-                              ) AS VARCHAR))) AS event_id,
-                timestamp,
-                TRY_CAST(status AS INTEGER) AS status,
-                COALESCE(url, '') AS url,
-                COALESCE(pop, '') AS pop,
-                COALESCE(ip, '') AS client_ip
-            FROM {view_name}
-            WHERE timestamp >= now() - INTERVAL 2 MINUTE
-              AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
-            ORDER BY timestamp DESC
-            LIMIT 20
-            """
-        ).fetchall()
-        return [
-            {
-                "event_id": str(row[0]),
-                "timestamp": row[1].isoformat(),
-                "status": int(row[2]),
-                "url": str(row[3]),
-                "pop": str(row[4]),
-                "client_ip": str(row[5]),
-            }
-            for row in rows
-        ]
+        return control_room_repo.recent_standard_error_events(con, view_name)
     finally:
         con.close()
 
 
 def _recent_high_scale_errors(service: Any) -> list[dict]:
-    rows = service.client.execute(
-        """
-        SELECT
-            toString(event_id) AS event_id,
-            event_timestamp AS timestamp,
-            toInt32OrZero(custom_fields['status']) AS status,
-            url,
-            custom_fields['pop'] AS pop,
-            client_ip
-        FROM request_facts
-        WHERE service_id={service_id:String}
-          AND event_timestamp >= now() - INTERVAL 2 MINUTE
-          AND toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599
-          AND publication_state = 'visible'
-        ORDER BY event_timestamp DESC
-        LIMIT 20
-        """,
-        {"service_id": service.service_id},
-    )
-    return [
-        {
-            "event_id": str(row["event_id"]),
-            "timestamp": row["timestamp"].isoformat(),
-            "status": int(row["status"]),
-            "url": str(row.get("url") or ""),
-            "pop": str(row.get("pop") or ""),
-            "client_ip": str(row.get("client_ip") or ""),
-        }
-        for row in rows
-    ]
+    return control_room_repo.recent_high_scale_error_events(service.client, service.service_id)
 
 
 def _mask_error_events(events: list[dict], request: Request) -> list[dict]:
@@ -560,19 +502,9 @@ async def control_room_correlate(
         con = _db.get_connection(source=source, read_only=True)
         try:
             view_name = _safe_table(service_id.replace("-", "_"))
-            result = con.execute(
-                f"""
-                SELECT {col} AS value, COUNT(*) AS count
-                FROM {view_name}
-                WHERE timestamp >= ?
-                GROUP BY 1
-                ORDER BY 2 DESC
-                LIMIT ?
-                """,
-                [datetime.now(UTC) - timedelta(minutes=window_minutes), limit],
-            ).fetchall()
-            freshness_row = con.execute(f"SELECT MAX(timestamp) AS latest FROM {view_name}").fetchone()
-            return result, freshness_row
+            return control_room_repo.correlate_top_values(
+                con, view_name, col, datetime.now(UTC) - timedelta(minutes=window_minutes), limit
+            )
         finally:
             con.close()
 

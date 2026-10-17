@@ -166,8 +166,6 @@ def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb,
 
     import duckdb
 
-    from backend.routers import network as network_mod
-
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=5)
     for log in logs:
@@ -183,7 +181,9 @@ def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb,
     st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
     et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
 
-    real_track_query = network_mod.track_query
+    from backend.utils import telemetry as telemetry_mod
+
+    real_track_query = telemetry_mod.track_query
     calls = {"n": 0}
 
     class _RaiseOnEnter:
@@ -203,7 +203,7 @@ def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb,
         return real_track_query(con, query, params, label)
 
     with (
-        patch.object(network_mod, "track_query", flaky_track_query),
+        patch.object(telemetry_mod, "track_query", flaky_track_query),
         patch("backend.core.iceberg._core.update_iceberg_view", lambda *a, **k: None),
         patch("backend.core.iceberg._core.clear_source_caches", lambda *a, **k: None),
     ):

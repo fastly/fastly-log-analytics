@@ -291,8 +291,6 @@ def preview_alert(
     lookback_hours: int = Query(default=24, ge=1),
     con: duckdb.DuckDBPyConnection = Depends(get_con),
 ):
-    import datetime
-
     from backend.core.duckdb import _safe_table_name, get_source_for_service
 
     # Security: analyst can only preview alerts against their scoped
@@ -305,169 +303,11 @@ def preview_alert(
         raise HTTPException(status_code=404, detail=not_found("Service not found"))
 
     table_name = _safe_table_name(src["name"])
-    metric = alert.metric
-    window = alert.window_min
-    eval_type = getattr(alert, "evaluation_type", "absolute")
-    eval_scope = getattr(alert, "evaluation_scope", "all")
-    comp_period = getattr(alert, "comparison_period_min", None)
-    status_codes = getattr(alert, "status_codes", None)
-
-    lookback_mins = lookback_hours * 60
-    if eval_type in ("relative_increase", "relative_decrease") and comp_period:
-        lookback_mins = max(lookback_mins, comp_period + window + 60)
-
-    if lookback_mins <= 180:
-        group_sql = "time_bucket(INTERVAL '1 minute', timestamp)"
-    elif lookback_mins <= 1440:
-        group_sql = "time_bucket(INTERVAL '15 minutes', timestamp)"
-    else:
-        group_sql = "time_bucket(INTERVAL '1 hour', timestamp)"
-
-    from backend.core.metrics import get_metric_sql
-
-    agg_sql = get_metric_sql(metric, status_codes)
-
-    scope_filter = ""
-    if eval_scope == "edge":
-        scope_filter = " AND edge = true"
-    elif eval_scope == "origin":
-        scope_filter = " AND edge = false"
-
-    q = f"""
-        SELECT {group_sql} as ts, {agg_sql} as val
-        FROM {table_name}
-        WHERE timestamp >= (SELECT max(timestamp) FROM {table_name}) - INTERVAL '{lookback_mins} minutes' {scope_filter}
-        GROUP BY 1
-        ORDER BY 1 ASC
-    """
 
     try:
-        from backend.repositories._base import safe_iso
-        from backend.utils.telemetry import track_query
-
-        with track_query(con, q, [], "alerts_preview") as cursor:
-            rows = cursor.fetchall()
-
-        # View-lag self-heal: the window is anchored to ``(SELECT
-        # max(timestamp) FROM table)``, which is NULL when the cached
-        # Iceberg view SQL lags a fresh ingest (e.g. a single buffered log
-        # before the next sync/commit cron rebuild; dev runs no crons).
-        # That yields 0 preview rows even though the data exists. If the
-        # preview is empty BUT the per-service status cache reports data,
-        # the view MUST be stale — force ONE rebuild (local boolean, no
-        # retry storm) and re-run. A genuinely empty service won't have a
-        # status-cache row count, so this won't fire there.
-        if not rows and _status_cache_has_data(src):
-            with track_query(con, f"SELECT 1 FROM {table_name} LIMIT 1", [], "alerts_preview_check") as cursor:
-                has_any = cursor.fetchone()
-            if not has_any:
-                from backend.repositories._base import force_rebuild_view
-
-                force_rebuild_view(con, src)
-                with track_query(con, q, [], "alerts_preview") as cursor:
-                    rows = cursor.fetchall()
-
-        times = [safe_iso(r[0]) for r in rows]
-        values = [float(r[1] or 0) for r in rows]
-
-        res = {
-            "times": times,
-            "values": values,
-            "type": "anomaly_zscore" if eval_type == "anomaly_zscore" else "absolute",
-        }
-
-        if eval_type == "anomaly_zscore":
-            days = getattr(alert, "baseline_period_days", 7) or 7
-            zscore_thresh = getattr(alert, "zscore_threshold", 3.0) or 3.0
-
-            try:
-                probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-                existing_cols = {d[0] for d in probe}
-            except Exception:
-                existing_cols = set()
-
-            baseline_start_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{days} days'"
-            baseline_end_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '1 hours'"
-
-            baseline_where = f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} {scope_filter}"
-
-            try:
-                with track_query(
-                    con, f"SELECT max(timestamp) FROM {table_name}", [], "alerts_preview_max_ts"
-                ) as cursor:
-                    max_ts_row = cursor.fetchone()
-                    max_ts_dt = max_ts_row[0] if max_ts_row else None
-            except Exception:
-                max_ts_dt = None
-
-            if max_ts_dt:
-                st_dt = max_ts_dt - datetime.timedelta(days=days)
-                st_utc = st_dt.astimezone(datetime.UTC)
-                if "dt" in existing_cols:
-                    baseline_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
-
-            q_baseline = f"""
-                SELECT
-                    EXTRACT(hour FROM ts) AS hr,
-                    avg(val) AS mean_val,
-                    stddev(val) AS stddev_val
-                FROM (
-                    SELECT date_trunc('hour', timestamp) AS ts, {agg_sql} AS val
-                    FROM {table_name}
-                    WHERE {baseline_where}
-                    GROUP BY 1
-                )
-                GROUP BY 1
-            """
-
-            try:
-                with track_query(con, q_baseline, [], "alerts_preview_baseline") as cursor:
-                    baseline_rows = cursor.fetchall()
-                baseline_map = {int(r[0]): (float(r[1] or 0), float(r[2] or 0)) for r in baseline_rows}
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).error(f"Baseline fetch failed: {e}")
-                baseline_map = {}
-
-            baseline_means = []
-            baseline_thresholds = []
-
-            for r in rows:
-                dt = r[0]
-                hr = dt.hour if (dt and hasattr(dt, "hour")) else 0
-                mean_val, stddev_val = baseline_map.get(hr, (0.0, 0.0))
-                stddev_val = stddev_val or 0.0001
-
-                baseline_means.append(mean_val)
-                baseline_thresholds.append(mean_val + zscore_thresh * stddev_val)
-
-            res["hist_values"] = baseline_means
-            res["threshold_values"] = baseline_thresholds
-
-        if eval_type in ("relative_increase", "relative_decrease") and comp_period:
-            res["type"] = "relative"
-            q_hist = f"""
-                 SELECT {group_sql} as ts, {agg_sql} as val
-                 FROM {table_name}
-                 WHERE timestamp >= (SELECT max(timestamp) FROM {table_name}) - INTERVAL '{lookback_mins + comp_period} minutes'
-                   AND timestamp <= (SELECT max(timestamp) FROM {table_name}) - INTERVAL '{comp_period} minutes'
-                   {scope_filter}
-                 GROUP BY 1
-                 ORDER BY 1 ASC
-             """
-            with track_query(con, q_hist, [], "alerts_preview") as cursor:
-                hist_rows = cursor.fetchall()
-
-            hist_map = {}
-            for r in hist_rows:
-                if r[0]:
-                    shifted = r[0] + datetime.timedelta(minutes=comp_period)
-                    hist_map[shifted.isoformat()] = float(r[1] or 0)
-
-            hist_values = [hist_map.get(t, 0) for t in times]
-            res["hist_values"] = hist_values
-
+        res = repo.preview_alert_series(
+            con, src, table_name, alert, lookback_hours, has_status_data=lambda: _status_cache_has_data(src)
+        )
         return AlertPreviewResponse.with_telemetry(data=res)
     except Exception as e:
         import logging

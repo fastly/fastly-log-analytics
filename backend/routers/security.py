@@ -21,7 +21,6 @@ from backend.models.security import (
 from backend.repositories import security as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.telemetry import track_query
 
 router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror SecurityAggregatesResponse fields one-to-one
@@ -249,59 +248,19 @@ def get_security_threat_intel(
     from backend.repositories._base import _safe_table
 
     table_name = _safe_table(ctx.source["name"])
-    time_filter = "WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
-    params = [resolved_start, resolved_end]
 
     def _run_threat_intel(con) -> list[ThreatIntelItem]:
-        probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-        cols = {d[0] for d in probe}
-
-        if "ja3" in cols:
-            fingerprint_col = "ja3"
-        elif "ja4" in cols:
-            fingerprint_col = "ja4"
-        else:
-            fingerprint_col = "CAST('Unknown' AS VARCHAR)"
-
-        proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
-        waf_conditions = []
-        if "waf_logged_rules" in cols:
-            waf_conditions.append("waf_logged_rules IS NOT NULL")
-        if "waf_blocked_rules" in cols:
-            waf_conditions.append("waf_blocked_rules IS NOT NULL")
-        waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
-        bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
-        country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
-
-        query = f"""
-            SELECT
-                {fingerprint_col} AS tls_fingerprint,
-                COUNT(*) AS requests,
-                mode({country_col}) AS top_country,
-                {waf_col} AS matched_waf_rules_count,
-                ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
-                MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
-            FROM {table_name}
-            {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
-            GROUP BY tls_fingerprint
-            ORDER BY requests DESC
-            LIMIT 50
-        """
-
-        data = []
-        with track_query(con, query, params, "threat_intel") as cursor:
-            for row in cursor.fetchall():
-                data.append(
-                    ThreatIntelItem(
-                        tls_fingerprint=row[0],
-                        requests=row[1],
-                        top_country=row[2] or "Unknown",
-                        matched_waf_rules_count=row[3],
-                        bot_percentage=row[4] or 0.0,
-                        is_anonymized_proxy=bool(row[5]),
-                    )
-                )
-        return data
+        return [
+            ThreatIntelItem(
+                tls_fingerprint=row[0],
+                requests=row[1],
+                top_country=row[2] or "Unknown",
+                matched_waf_rules_count=row[3],
+                bot_percentage=row[4] or 0.0,
+                is_anonymized_proxy=bool(row[5]),
+            )
+            for row in repo.get_threat_intel_rows(con, table_name, resolved_start, resolved_end)
+        ]
 
     data = execute_with_stale_view_retry(ctx.con, ctx.source, _run_threat_intel)
     return ThreatIntelListResponse.with_telemetry(data=data)

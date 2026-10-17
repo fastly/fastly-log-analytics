@@ -101,6 +101,8 @@ from backend.core.metadata.ingest_log import (
     get_log_activity,
     get_node_count_avg,
     get_reclaimable_strand_filenames,
+    get_rum_beacons_avg_per_day,
+    get_rum_beacons_by_date,
     get_storage_stats_window,
     insert_ingested_files,
     list_committed_basenames,
@@ -266,6 +268,8 @@ __all__ = [
     "purge_committed_buffer_rows",
     "get_log_activity",
     "get_node_count_avg",
+    "get_rum_beacons_avg_per_day",
+    "get_rum_beacons_by_date",
     # Persistent slow-SQL history
     "flush_slow_query_buffer",
     "insert_slow_query",

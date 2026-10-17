@@ -1473,3 +1473,11 @@ def get_transport_metrics(
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("network._response_cache", _response_cache)
+
+
+def get_pop_health_rows(con, table_name: str, start: Any, end: Any) -> list[tuple]:
+    """Live per-POP aggregate rows for ``[start, end]`` (rollup-miss fallback)."""
+    from backend.utils.telemetry import track_query
+
+    with track_query(con, SQL.POP_HEALTH_LIVE.format(table_name=table_name), [start, end], "pop_health") as cursor:
+        return cursor.fetchall()

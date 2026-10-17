@@ -2806,7 +2806,7 @@ def test_top_flagged_analyst_clamps_window_and_keeps_ua_url(monkeypatch):
         captured["sql"] = sql
         return [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/secret", "edge_score": 91, "edge_sid": "s1"}]
 
-    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    monkeypatch.setattr("backend.repositories.session_scoring.query_logs", fake_query_logs)
     session = SimpleNamespace(
         query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={"mask_ips": True}
     )
@@ -2828,7 +2828,7 @@ def test_top_flagged_admin_keeps_full_window(monkeypatch):
         captured["sql"] = sql
         return [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/x", "edge_score": 91}]
 
-    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    monkeypatch.setattr("backend.repositories.session_scoring.query_logs", fake_query_logs)
     out = _ss.scoring_top_flagged(request=_fake_request(None), service_id="svc", since_hours=24, limit=50)
 
     assert "INTERVAL 24 HOUR" in captured["sql"]
@@ -2928,8 +2928,6 @@ def _noscore_table(monkeypatch):
     """
     import duckdb
 
-    from backend.routers import session_scoring as _ss
-
     con = duckdb.connect(":memory:")
     con.execute(
         """
@@ -2948,7 +2946,7 @@ def _noscore_table(monkeypatch):
         cnames = [d[0] for d in cur.description] if cur.description else []
         return [dict(zip(cnames, r)) for r in rows]
 
-    monkeypatch.setattr(_ss, "_query_logs", fake_query_logs)
+    monkeypatch.setattr("backend.repositories.session_scoring.query_logs", fake_query_logs)
     yield "noscore"
     con.close()
 

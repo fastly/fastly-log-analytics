@@ -25,7 +25,7 @@ from backend.repositories import network as repo
 from backend.repositories._base import _safe_table
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.telemetry import process_context_scope, track_query
+from backend.utils.telemetry import process_context_scope
 from backend.utils.time_window import (
     invite_clamp_fingerprint,
     is_valid_range_token,
@@ -209,44 +209,22 @@ def _fetch_pop_health_data(
     else:
         st_param = start_time_dt if start_time_dt.tzinfo is not None else start_time_dt.replace(tzinfo=UTC)
         et_param = end_time_dt if end_time_dt.tzinfo is not None else end_time_dt.replace(tzinfo=UTC)
-        time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
-        params = [st_param, et_param]
-
-        query = f"""
-            SELECT
-                pop,
-                COUNT(*) AS requests,
-                COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
-                ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
-                approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
-                approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
-                ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
-                SUM(resp_bytes) AS bandwidth_bytes
-            FROM {table_name}
-            {time_filter} AND pop IS NOT NULL AND pop != ''
-            GROUP BY pop
-            ORDER BY requests DESC
-        """
-
         from backend.core.iceberg import execute_with_stale_view_retry
 
         def _run_fallback(c):
-            rows = []
-            with track_query(c, query, params, "pop_health") as cursor:
-                for row in cursor.fetchall():
-                    rows.append(
-                        PopHealthItem(
-                            pop=row[0],
-                            requests=row[1],
-                            errors=row[2],
-                            error_rate=row[3],
-                            p50_rtt_us=row[4],
-                            p95_ttfb_ms=row[5],
-                            cache_hit_rate=row[6],
-                            bandwidth_bytes=row[7] or 0,
-                        )
-                    )
-            return rows
+            return [
+                PopHealthItem(
+                    pop=row[0],
+                    requests=row[1],
+                    errors=row[2],
+                    error_rate=row[3],
+                    p50_rtt_us=row[4],
+                    p95_ttfb_ms=row[5],
+                    cache_hit_rate=row[6],
+                    bandwidth_bytes=row[7] or 0,
+                )
+                for row in repo.get_pop_health_rows(c, table_name, st_param, et_param)
+            ]
 
         data = execute_with_stale_view_retry(con, source, _run_fallback)
         return data, False

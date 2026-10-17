@@ -468,6 +468,7 @@ GET_ACTIVE_PROXY_CLIENTS = """
 """
 
 __all__ = [
+    "threat_intel_sql",
     "TOP_UAS_BY_COUNT",
     "NGWAF_TOP_BOTS_JOIN",
     "NGWAF_TOP_BOTS_JOIN_DIRECT",
@@ -487,3 +488,47 @@ __all__ = [
     "GET_SUSPICIOUS_ISPS",
     "GET_ACTIVE_PROXY_CLIENTS",
 ]
+
+
+# ── Threat intel (get_threat_intel_rows) ──────────────────────────────────────
+
+
+def threat_intel_sql(table_name: str, cols: set[str]) -> str:
+    """Schema-adaptive TLS-fingerprint threat-intel query (top 50 by requests).
+
+    ``table_name`` is a ``_safe_table`` identifier; every other substitution is a column name
+    chosen from the fixed set below based on which columns ``cols`` contains — never request
+    input. The time bounds are bound by the caller as two ``?`` parameters.
+    """
+    if "ja3" in cols:
+        fingerprint_col = "ja3"
+    elif "ja4" in cols:
+        fingerprint_col = "ja4"
+    else:
+        fingerprint_col = "CAST('Unknown' AS VARCHAR)"
+
+    proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
+    waf_conditions = []
+    if "waf_logged_rules" in cols:
+        waf_conditions.append("waf_logged_rules IS NOT NULL")
+    if "waf_blocked_rules" in cols:
+        waf_conditions.append("waf_blocked_rules IS NOT NULL")
+    waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
+    bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
+    country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
+    time_filter = "WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
+
+    return f"""
+            SELECT
+                {fingerprint_col} AS tls_fingerprint,
+                COUNT(*) AS requests,
+                mode({country_col}) AS top_country,
+                {waf_col} AS matched_waf_rules_count,
+                ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
+                MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
+            FROM {table_name}
+            {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
+            GROUP BY tls_fingerprint
+            ORDER BY requests DESC
+            LIMIT 50
+        """
