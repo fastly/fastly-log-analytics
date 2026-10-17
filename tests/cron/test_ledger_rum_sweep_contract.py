@@ -389,7 +389,7 @@ def test_run_rum_ledger_sweep_success(monkeypatch):
     monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
     monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", progress_mock)
+    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", progress_mock)
 
     rum_ledger_mod._run_rum_ledger_sweep.__wrapped__(SERVICE_ID)
 
