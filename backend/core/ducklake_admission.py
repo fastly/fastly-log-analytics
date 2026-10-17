@@ -60,9 +60,9 @@ def ducklake_write_admission(
 ) -> Iterator[None]:
     """Serialize one service's DuckLake writer across threads and processes.
 
-    SQLite/local sync uses only the process-local reentrant lock. When metadata
-    is Postgres-backed, the same service also takes a PostgreSQL advisory lock,
-    fencing writers in separate worker processes/pods.
+    Besides the process-local reentrant lock, the same service also takes a
+    PostgreSQL advisory lock (metadata is Postgres-only, ADR-22), fencing writers
+    in separate worker processes/pods.
     """
     lock = _local_lock(service_id)
     wait_started = time.monotonic()
@@ -77,34 +77,33 @@ def ducklake_write_admission(
     key = _advisory_key(service_id)
     hold_started = time.monotonic()
     try:
-        from backend.core.metadata.pg_connection import get_pg_thread_connection, is_postgres
+        import psycopg
 
-        if is_postgres():
-            import psycopg
+        from backend.core.metadata.pg_connection import get_pg_thread_connection
 
-            pg_con = get_pg_thread_connection()
-            assert pg_con is not None
-            # Fair FIFO acquisition: block in PostgreSQL's lock-wait queue
-            # (pg_advisory_lock) bounded by lock_timeout, instead of busy-polling
-            # the non-blocking pg_try_advisory_lock. Polling has no queue, so under
-            # write saturation whichever writer keeps losing the 0.1s race starves
-            # and discards its whole already-parsed batch — a measured congestion
-            # collapse (RUM 229 lock timeouts vs requests' 58, 792 files wedged).
-            # lock_timeout is a session GUC; reset it afterward since these
-            # connections are long-lived and reused across services.
-            remaining_ms = int(max(1.0, (deadline - time.monotonic()) * 1000.0))
-            pg_con.execute(f"SET lock_timeout = {remaining_ms}")
+        pg_con = get_pg_thread_connection()
+        assert pg_con is not None
+        # Fair FIFO acquisition: block in PostgreSQL's lock-wait queue
+        # (pg_advisory_lock) bounded by lock_timeout, instead of busy-polling
+        # the non-blocking pg_try_advisory_lock. Polling has no queue, so under
+        # write saturation whichever writer keeps losing the 0.1s race starves
+        # and discards its whole already-parsed batch — a measured congestion
+        # collapse (RUM 229 lock timeouts vs requests' 58, 792 files wedged).
+        # lock_timeout is a session GUC; reset it afterward since these
+        # connections are long-lived and reused across services.
+        remaining_ms = int(max(1.0, (deadline - time.monotonic()) * 1000.0))
+        pg_con.execute(f"SET lock_timeout = {remaining_ms}")
+        try:
+            pg_con.execute("SELECT pg_advisory_lock(?)", (key,))
+            advisory = True
+        except psycopg.errors.LockNotAvailable as exc:
+            _record_stat(service_id, "timeouts")
+            raise DuckLakeAdmissionTimeout(f"DuckLake advisory lock timed out for {service_id}") from exc
+        finally:
             try:
-                pg_con.execute("SELECT pg_advisory_lock(?)", (key,))
-                advisory = True
-            except psycopg.errors.LockNotAvailable as exc:
-                _record_stat(service_id, "timeouts")
-                raise DuckLakeAdmissionTimeout(f"DuckLake advisory lock timed out for {service_id}") from exc
-            finally:
-                try:
-                    pg_con.execute("SET lock_timeout = 0")
-                except Exception:
-                    logger.exception("Failed to reset lock_timeout for %s", service_id)
+                pg_con.execute("SET lock_timeout = 0")
+            except Exception:
+                logger.exception("Failed to reset lock_timeout for %s", service_id)
         yield
     finally:
         if advisory and pg_con is not None:

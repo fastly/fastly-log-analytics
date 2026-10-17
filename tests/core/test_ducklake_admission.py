@@ -89,7 +89,6 @@ def test_postgres_admission_uses_fair_blocking_lock():
 
     fake_con = Cursor()
     with (
-        patch("backend.core.metadata.pg_connection.is_postgres", return_value=True),
         patch("backend.core.metadata.pg_connection.get_pg_thread_connection", return_value=fake_con),
     ):
         with ducklake_write_admission("admission-postgres", timeout_s=0.2):
@@ -124,7 +123,6 @@ def test_postgres_admission_timeout_raises_on_lock_not_available():
 
     fake_con = Cursor()
     with (
-        patch("backend.core.metadata.pg_connection.is_postgres", return_value=True),
         patch("backend.core.metadata.pg_connection.get_pg_thread_connection", return_value=fake_con),
     ):
         with pytest.raises(DuckLakeAdmissionTimeout):
