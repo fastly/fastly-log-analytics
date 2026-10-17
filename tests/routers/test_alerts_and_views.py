@@ -744,6 +744,7 @@ def test_toggle_alert_analyst_not_authorized_returns_403(client):
         # Analyst scoped to _SERVICE_ID trying to toggle other_service_id's alert
         with (
             patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
+            patch("backend.utils.auth.analyst_allowed_services", return_value={_SERVICE_ID}),
             patch(
                 "backend.repositories.alerts.svcconfig.list_configs",
                 return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
@@ -794,6 +795,7 @@ def test_delete_alert_analyst_not_authorized_returns_403(client):
         # Analyst scoped to _SERVICE_ID trying to delete other_service_id's alert
         with (
             patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
+            patch("backend.utils.auth.analyst_allowed_services", return_value={_SERVICE_ID}),
             patch(
                 "backend.repositories.alerts.svcconfig.list_configs",
                 return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
@@ -860,7 +862,7 @@ def test_delete_view_analyst_not_authorized_returns_403(client):
     try:
         # Analyst scoped only to _SERVICE_ID trying to delete other_service_id's view
         with (
-            patch("backend.routers.views.require_service_in_scope", return_value={_SERVICE_ID}),
+            patch("backend.utils.auth.analyst_allowed_services", return_value={_SERVICE_ID}),
         ):
             response = client.delete(f"/api/views/{view_id}")
         assert response.status_code == 403
