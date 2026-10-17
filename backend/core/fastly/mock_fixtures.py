@@ -30,6 +30,17 @@ def is_mock_mode() -> bool:
     return os.environ.get("FASTLY_MOCK_MODE") == "1"
 
 
+def api_key_or_mock(key: str) -> str:
+    """``key`` unchanged, or a placeholder in FASTLY_MOCK_MODE when it is empty.
+
+    The mock Fastly client short-circuits every call, but the e2e sandbox config
+    deliberately has no key (an empty key keeps the Control Room RT poller off
+    rt.fastly.com), so endpoints that 4xx on a missing key need this to be
+    reachable in e2e.
+    """
+    return key or ("mock-api-key" if is_mock_mode() else key)
+
+
 def _service_id_from_path(path: str) -> str:
     m = re.match(r"^/service/([^/]+)", path)
     return m.group(1) if m else "mock-svc-id"

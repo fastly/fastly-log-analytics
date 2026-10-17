@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from backend.config import get_fastly_api_key
-from backend.core.fastly.mock_fixtures import is_mock_mode
+from backend.core.fastly.mock_fixtures import api_key_or_mock
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -228,14 +228,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
 
 
 def _api_key(service_id: str) -> str:
-    """Configured Fastly API key; a placeholder in FASTLY_MOCK_MODE.
-
-    The mock Fastly client short-circuits every call, but the e2e sandbox config
-    deliberately has no key (an empty key keeps the Control Room RT poller off
-    rt.fastly.com), so without this the usage endpoints 403 in e2e.
-    """
-    key = get_fastly_api_key(service_id)
-    return key or ("mock-api-key" if is_mock_mode() else key)
+    return api_key_or_mock(get_fastly_api_key(service_id))
 
 
 @router.get("/prefill/rates", response_model=PrefillRatesResponse)

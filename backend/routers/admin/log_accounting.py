@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Query, Response
 
+from backend.core.fastly.mock_fixtures import api_key_or_mock
 from backend.deps import get_source
 from backend.models.admin import (
     LogAccountingBucket,
@@ -321,7 +322,7 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
             status_code=400,
             detail={"error": "no logging_service_id configured for this service"},
         )
-    api_key = svcconfig.get_fastly_api_key(service_id)
+    api_key = api_key_or_mock(svcconfig.get_fastly_api_key(service_id))
     if not api_key:
         raise HTTPException(
             status_code=400,
