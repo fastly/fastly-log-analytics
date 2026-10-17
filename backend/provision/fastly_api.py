@@ -1283,11 +1283,29 @@ def remove_logging_endpoint(
         ok(f"No matching logging endpoints found on version {active_ver} — checking snippets anyway")
 
     info(f"Cloning version {active_ver} → new draft…")
-    clone = fastly("PUT", f"/service/{service_id}/version/{active_ver}/clone", token=token)
-    new_ver = clone["number"]
-    ok(f"Draft version: {new_ver}")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    try:
+    def _draft_status(msg: str) -> None:
+        info(msg)
+
+    def _log_failure(exc: Exception) -> None:
+        fail(str(exc))
+        info(f"Rolling back — re-activating version {active_ver}...")
+
+    with draft_version(
+        service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Deactivating Fastly Object Storage logging at {ts}",
+        comment_before_activate=True,
+        status_cb=_draft_status,
+        validate_msg="Validating draft version…",
+        activate_msg="Activating version {ver}…",
+        on_failure=_log_failure,
+    ) as new_ver:
+        ok(f"Draft version: {new_ver}")
+
         for ep in endpoints_to_delete:
             info(f"Removing '{_c(BOLD, ep)}' from draft…")
             encoded = urllib.parse.quote(ep, safe="")
@@ -1431,31 +1449,7 @@ def remove_logging_endpoint(
         except Exception as e:
             warn(f"Failed to check/remove conditions: {e}")
 
-        info("Validating draft version…")
-        result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        ok("Draft validated")
-
-        ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{new_ver}",
-            {"comment": f"Deactivating Fastly Object Storage logging at {ts}"},
-            token=token,
-        )
-        info(f"Activating version {new_ver}…")
-        fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
-        ok(f"Version {new_ver} is now active")
-
-    except Exception as exc:
-        fail(str(exc))
-        info(f"Rolling back — re-activating version {active_ver}...")
-        try:
-            fastly("PUT", f"/service/{service_id}/version/{active_ver}/activate", token=token)
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Version {new_ver} is now active")
 
 
 def update_logging_endpoint(cfg: dict, token: str):

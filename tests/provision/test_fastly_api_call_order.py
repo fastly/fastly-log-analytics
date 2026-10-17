@@ -116,3 +116,49 @@ def test_ensure_endpoint_status_messages_keep_their_wording_and_order():
         "⏳ Activating version 11...",
         "✅ Version 11 is now active.",
     ]
+
+
+def _remove_endpoint(fake: _Fastly):
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=["MyEndpoint"]),
+        patch("backend.provision.fastly_api.fastly", side_effect=fake),
+    ):
+        return fastly_api.remove_logging_endpoint(SID, "MyEndpoint", "tok")
+
+
+def test_remove_endpoint_comment_is_put_between_validate_and_activate():
+    fake = _Fastly()
+    _remove_endpoint(fake)
+    assert _order(fake.calls) == ["clone", "delete", "validate", "comment", "activate:11"]
+
+
+def test_remove_endpoint_keeps_expect_empty_on_deletes_and_not_on_activate():
+    fake = _Fastly()
+    _remove_endpoint(fake)
+    delete_kwargs = [kw for (m, p), kw in zip(fake.calls, fake.kwargs) if m == "DELETE"]
+    assert delete_kwargs and all(kw.get("expect_empty") is True for kw in delete_kwargs)
+    activate_kwargs = [kw for (m, p), kw in zip(fake.calls, fake.kwargs) if p.endswith("/version/11/activate")]
+    assert activate_kwargs == [{"token": "tok"}]
+
+
+def test_remove_endpoint_validation_failure_reactivates_previous_version_without_comment():
+    fake = _Fastly(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        _remove_endpoint(fake)
+    assert _order(fake.calls) == ["clone", "delete", "validate", "activate:10"]
+
+
+def test_remove_endpoint_edit_failure_skips_validate_and_rolls_back():
+    fake = _Fastly(fail_on=lambda m, p: m == "DELETE" and "/logging/s3/" in p)
+    with pytest.raises(RuntimeError, match="edit rejected"):
+        _remove_endpoint(fake)
+    assert _order(fake.calls) == ["clone", "delete", "activate:10"]
+
+
+def test_remove_endpoint_failed_rollback_is_logged_not_masked(caplog):
+    fake = _Fastly(validate_ok=False, rollback_raises=True)
+    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+        with pytest.raises(RuntimeError, match="Validation failed"):
+            _remove_endpoint(fake)
+    assert any("rollback activation of version 10 failed" in r.getMessage() for r in caplog.records)
