@@ -21,6 +21,7 @@ from backend.high_scale.network_projection import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.performance_projection import build_performance_projection_rows
+from backend.high_scale.projections import project_cmcd
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -372,6 +373,10 @@ class HighScaleIngestController:
                 duplicate=False,
             )
         self._publish_aggregates(service_id, source, owner.owner_epoch, decoded.events)
+        if source.domain == "request":
+            self._publish_cmcd_projection(
+                service_id, f"{service_id}:cmcd:{source.object_id}", owner.owner_epoch, decoded.events
+            )
         if self._control is not None:
             self._control.mark_source_appended(
                 service_id,
@@ -566,6 +571,13 @@ class HighScaleIngestController:
             )
 
         self._publish_aggregates_batch(service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events)
+        if domain == "request":
+            self._publish_cmcd_projection(
+                service_id,
+                build_batch_id_from_manifest_id(f"{manifest.manifest_id}:cmcd"),
+                owner.owner_epoch,
+                all_events,
+            )
 
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
         if self._control is not None:
@@ -704,6 +716,55 @@ class HighScaleIngestController:
             logger.exception(
                 "high-scale aggregate publish failed",
                 extra={"service_id": service_id, "domain": source.domain, "object_key": source.object_key},
+            )
+
+    def _publish_cmcd_projection(
+        self,
+        service_id: str,
+        batch_id: str,
+        owner_epoch: int,
+        events: Sequence[dict[str, Any]],
+    ) -> None:
+        """Best-effort CMCD projection of request events carrying CMCD fields.
+
+        Layered on the facts path like the aggregates: a failure here must
+        never fail, retry, or duplicate the request ingest. The batch id is
+        derived from the request manifest/object, so a replay is idempotent,
+        and the archive remains the recovery source for any projection gap.
+        """
+        try:
+            rows: list[dict[str, Any]] = []
+            skipped = 0
+            for event in events:
+                if not event.get("cmcd"):
+                    continue
+                try:
+                    projection = project_cmcd(event)
+                except ValueError:
+                    skipped += 1
+                    continue
+                if projection is not None:
+                    rows.append(projection)
+            if skipped:
+                logger.warning(
+                    "high-scale cmcd projection skipped malformed events",
+                    extra={"service_id": service_id, "skipped": skipped},
+                )
+            if not rows:
+                return
+            self._serving.publish(
+                HighScaleBatch(
+                    batch_id=batch_id,
+                    service_id=service_id,
+                    domain="cmcd",
+                    generation=str(owner_epoch),
+                    rows=tuple(rows),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "high-scale cmcd projection publish failed",
+                extra={"service_id": service_id, "batch_id": batch_id},
             )
 
     def _publish_control_manifest(self, manifest: ArchiveManifest, owner_epoch: int) -> None:
