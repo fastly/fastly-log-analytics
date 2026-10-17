@@ -1112,7 +1112,7 @@ class TestCdnReconciliation:
 
         with patch("pathlib.Path.exists", return_value=True):
             with patch("pathlib.Path.read_text") as mock_read:
-                with patch("pathlib.Path.write_text") as mock_write:
+                with patch("backend.provision.declarative.reconciler._update_local_config") as mock_update:
                     cfg = {
                         "service_id": "logging_svc_test",
                         "cdn_service_name": "Test CDN Svc",
@@ -1133,8 +1133,12 @@ class TestCdnReconciliation:
                     )
 
                     assert result.service_id == "cdn_svc_created"
-                    assert mock_write.called
-                    written_cfg = json.loads(mock_write.call_args_list[-1][0][0])
+                    # The CDN ids are persisted through the locked config edit helper.
+                    assert mock_update.called
+                    service_id_arg, mutate = mock_update.call_args_list[-1][0]
+                    assert service_id_arg == "logging_svc_test"
+                    written_cfg: dict = {}
+                    mutate(written_cfg)
                     assert written_cfg["fos_proxy"]["service_id"] == "cdn_svc_created"
                     assert written_cfg["cdn_service_id"] == "cdn_svc_created"
 

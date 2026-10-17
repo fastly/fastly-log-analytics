@@ -247,6 +247,22 @@ def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Call
             status_cb(f"⚠️  RUM JS upload warning: {e}")
 
 
+def _update_local_config(service_id: str, mutate: Callable[[dict], None]) -> None:
+    """Best-effort locked edit of the local config cache.
+
+    Goes through ``mutate_config`` (cross-process lock + fresh read) so activation metadata
+    never clobbers or races a concurrent writer; a read-only volume is skipped, as before.
+    """
+    from backend.config import mutate_config
+
+    try:
+        mutate_config(service_id, mutate)
+    except OSError as e:
+        import logging
+
+        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+
+
 def reconcile_vcl_state(
     service_id: str,
     token: str,
@@ -300,7 +316,11 @@ def reconcile_vcl_state(
                 # Bootstrap from Fastly if config missing (Gotcha 1)
                 desired_state = _bootstrap_featurestate_from_fastly(service_id, token)
                 try:
-                    config_path.write_text(json.dumps(asdict(desired_state), indent=2))
+                    from backend.config import config_lock
+
+                    with config_lock(service_id):
+                        if not config_path.exists():
+                            config_path.write_text(json.dumps(asdict(desired_state), indent=2))
                 except OSError as e:
                     import logging
 
@@ -439,14 +459,7 @@ def reconcile_vcl_state(
                     _purge_rum_surrogate_key(service_id, token)
 
                     # Update local config with activation metadata
-                    cfg = json.loads(config_path.read_text())
-                    cfg["last_activated_version"] = draft_version
-                    try:
-                        config_path.write_text(json.dumps(cfg, indent=2))
-                    except OSError as e:
-                        import logging
-
-                        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+                    _update_local_config(service_id, lambda c: c.__setitem__("last_activated_version", draft_version))
                 else:
                     if status_cb:
                         status_cb(
@@ -596,20 +609,16 @@ def reconcile_cdn_service_state(
                 status_cb("✓ Domain added to CDN service")
 
         # Persist cdn_service_id back to config
-        if "fos_proxy" not in cfg:
-            cfg["fos_proxy"] = {}
-        cfg["fos_proxy"]["service_id"] = cdn_service_id
-        cfg["fos_proxy"]["service_name"] = cdn_service_name
-        cfg["fos_proxy"]["domain"] = cdn_url
-        cfg["fos_proxy"]["shield"] = cdn_shield
-        cfg["fos_proxy"]["secret"] = cdn_secret
-        cfg["cdn_service_id"] = cdn_service_id  # flat key
-        try:
-            config_path.write_text(json.dumps(cfg, indent=2))
-        except OSError as e:
-            import logging
+        def _persist_cdn(c: dict) -> None:
+            proxy = c.setdefault("fos_proxy", {})
+            proxy["service_id"] = cdn_service_id
+            proxy["service_name"] = cdn_service_name
+            proxy["domain"] = cdn_url
+            proxy["shield"] = cdn_shield
+            proxy["secret"] = cdn_secret
+            c["cdn_service_id"] = cdn_service_id  # flat key
 
-            logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+        _update_local_config(logging_service_id, _persist_cdn)
 
     result = ReconciliationResult(service_id=cdn_service_id)
 
@@ -780,17 +789,12 @@ def reconcile_cdn_service_state(
                     result.activated_version = draft_version
 
                     # Update local config with activation metadata
-                    cfg = json.loads(config_path.read_text())
-                    if "fos_proxy" not in cfg:
-                        cfg["fos_proxy"] = {}
-                    cfg["fos_proxy"]["last_activated_version"] = draft_version
-                    cfg["last_activated_version_cdn"] = draft_version
-                    try:
-                        config_path.write_text(json.dumps(cfg, indent=2))
-                    except OSError as e:
-                        import logging
 
-                        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+                    def _persist_activation(c: dict) -> None:
+                        c.setdefault("fos_proxy", {})["last_activated_version"] = draft_version
+                        c["last_activated_version_cdn"] = draft_version
+
+                    _update_local_config(logging_service_id, _persist_activation)
                 else:
                     if status_cb:
                         status_cb(

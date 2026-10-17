@@ -36,6 +36,15 @@ KEYS_STORE = "KEYS_STORE_ID"
 CFG_STORE = "CFG_STORE_ID"
 
 
+@pytest.fixture(autouse=True)
+def _no_local_config_writes():
+    """Activation metadata is persisted through the locked ``mutate_config`` helper; these tests
+    drive the orchestrator with mocked Fastly responses (non-JSON draft versions) and have no
+    service config on disk, so isolate that persistence step."""
+    with patch("backend.provision.declarative.reconciler._update_local_config"):
+        yield
+
+
 def _scoring_meta(*, with_secret: bool = True) -> dict:
     meta = {
         "scoring_service_id": SCORE_SVC,
