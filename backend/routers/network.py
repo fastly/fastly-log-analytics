@@ -304,6 +304,8 @@ def _network_bundle_impl(
             or "health" in sections
             or any(s in CORE_SECTIONS or s in SHIELDING_SECTIONS for s in sections)
         )
+        bundle_dq: list = []
+        bundle_dc: list = []
         health_resp = None
         if want_health:
             want_core = sections is None or "health" in sections or bool(sections & CORE_SECTIONS)
@@ -347,6 +349,8 @@ def _network_bundle_impl(
                         ctx.source.get("name"),
                     )
                     res["shielding_analysis"] = {"has_data": False, "error": True, "rows": []}
+            bundle_dq.extend(res.get("debug_queries") or [])
+            bundle_dc.extend(res.get("debug_calls") or [])
             health_resp = NetworkHealthResponse.with_telemetry(**res)
 
         # 2. Quality
@@ -361,6 +365,8 @@ def _network_bundle_impl(
                 filters=req.filters,
                 region_country=req.region_country,
             )
+            bundle_dq.extend(q_res.get("debug_queries") or [])
+            bundle_dc.extend(q_res.get("debug_calls") or [])
             quality_resp = NetworkQualityResponse.with_telemetry(**q_res)
 
         # 3. Pop Health
@@ -392,6 +398,8 @@ def _network_bundle_impl(
                 end_time=end_time,
                 filters=req.filters,
             )
+            bundle_dq.extend(t_res.get("debug_queries") or [])
+            bundle_dc.extend(t_res.get("debug_calls") or [])
             transport_resp = TransportMetrics(**t_res)
 
         return NetworkBundleResponse.with_telemetry(
@@ -400,6 +408,8 @@ def _network_bundle_impl(
             quality=quality_resp,
             pop_health=pop_health_items,
             transport=transport_resp,
+            debug_queries=bundle_dq or None,
+            debug_calls=bundle_dc or None,
         )
 
 

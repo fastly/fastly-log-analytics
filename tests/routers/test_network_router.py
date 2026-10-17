@@ -406,3 +406,29 @@ def test_network_bundle_analyst_write_allowed():
     assert any("/api/network/bundle".startswith(prefix) for prefix in _ANALYST_ALLOWED_WRITE_PREFIXES), (
         "/api/network/bundle must be in _ANALYST_ALLOWED_WRITE_PREFIXES"
     )
+
+
+def test_network_bundle_surfaces_section_queries_in_debug_envelope(client, in_memory_duckdb, test_service_source):
+    """Queries run by a bundle section (transport here) must appear in the bundle's
+    own ``_debug_queries`` — they were dropped because only the section sub-model
+    carried them."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["tcp_rtt"] = 20_000
+        log["proto"] = "HTTP/2"
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    now = datetime.now(UTC)
+    response = client.post(
+        "/api/network/bundle",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID, "x-debug-responses": "1"},
+        json={
+            "start_time": (now - timedelta(hours=3)).replace(tzinfo=None).isoformat(),
+            "end_time": (now + timedelta(hours=3)).replace(tzinfo=None).isoformat(),
+            "sections": ["transport"],
+            "filters": {},
+        },
+    )
+    assert response.status_code == 200
+    assert len(response.json()["_debug_queries"]) > 0
