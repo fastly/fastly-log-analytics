@@ -203,6 +203,11 @@ const SERVICELESS_PATH_PREFIXES = [
   // are specific enough not to shadow the service-scoped /api/admin/* routes
   // (log-accounting, slow-queries/count).
   "/api/admin/health-snapshot",
+  "/api/admin/system-metrics",
+  "/api/admin/health",
+  "/api/admin/system-jobs",
+  "/api/admin/queries/summary",
+  "/api/admin/celery/status",
   "/api/admin/metric-history",
   // Bot intelligence sources + rDNS cache stats are GLOBAL — the backend
   // handlers (get_all_sources_meta / rdns stats) take no service param, so

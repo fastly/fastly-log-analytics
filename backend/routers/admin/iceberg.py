@@ -9,8 +9,8 @@ from typing import Literal
 from fastapi import Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from backend.deps import get_source
-from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest
+from backend.deps import get_source, require_admin
+from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest, SyncStartResponse
 from backend.utils.router_utils import (
     SSE_PASSTHROUGH_HEADERS,
     make_error,
@@ -51,18 +51,36 @@ def iceberg_calendar_endpoint(
     return {**result, "_debug_calls": get_tracked_calls()}
 
 
-@router.post("/admin/commit-iceberg", status_code=202)
-def iceberg_commit_endpoint(source: dict = Depends(get_source)):
-    """Manually flush the local buffer to the Iceberg table.
+@router.post(
+    "/admin/commit-iceberg",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/commit/{service_id}",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def iceberg_commit_endpoint(
+    service_id: str | None = None,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    """Manually flush the local buffer to the DuckLake table.
 
     Returns 202 Accepted — the commit runs asynchronously in a worker
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run DuckLake commit.")
+
     from backend.cron.jobs.commit import _run_commit
     from backend.utils.router_utils import start_or_resume_cron
 
-    return start_or_resume_cron(
+    res = start_or_resume_cron(
         source,
         "commit",
         _run_commit,
@@ -70,6 +88,7 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
         success_msg="Commit started.",
         in_progress_msg="Commit already running.",
     )
+    return SyncStartResponse(**res)
 
 
 @router.post("/admin/rebuild-local-view", status_code=202)

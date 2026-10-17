@@ -72,7 +72,7 @@ docs/pages/
 | `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Live-certified** |
 | `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer & Standard-mode DuckDB emulation | **Live-certified** |
 | `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Live-certified** |
-| `/admin` | [Admin Overview](admin/overview.md) | Sync status, compaction, storage usage, services CRUD | **Scaffolded (Pending AI Verification)** |
+| `/admin` | [Admin Overview](admin/overview.md) | Sync status, compaction, storage usage, services CRUD | **Live-certified** |
 | `/admin/queries` | [Live Query Monitor](admin/queries.md) | Running & recent SQLite/DuckDB queries, durations, locks | **Scaffolded (Pending AI Verification)** |
 | `/admin/queue` | [Task Queue](admin/queue.md) | Ingestion ledger claims, Celery queue depth, RedBeat | **Scaffolded (Pending AI Verification)** |
 | `/admin/rum` | [RUM Ingestion](admin/rum.md) | Beacon ingestion status, sample rates, client scripts | **Scaffolded (Pending AI Verification)** |

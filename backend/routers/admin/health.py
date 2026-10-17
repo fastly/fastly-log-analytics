@@ -14,6 +14,8 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 
+@router.get("/admin/system-metrics", response_model=HealthSnapshotResponse)
+@router.get("/admin/health", response_model=HealthSnapshotResponse)
 @router.get("/admin/health-snapshot", response_model=HealthSnapshotResponse)
 def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     """One-shot health snapshot for the admin page system health card.

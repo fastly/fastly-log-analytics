@@ -73,13 +73,22 @@ export function ServicesTable() {
     [setActiveServiceId, router],
   )
 
-  const { data: services, isLoading, isError, error } = useQuery({
+  const { data: services, isLoading, isFetching, isError, error } = useQuery({
     queryKey: ['services'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/services", { signal })
       return data
     },
   })
+
+  const isRefreshing = isFetching && !isLoading
+
+  const handleRefreshAll = React.useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ['services'] })
+    void queryClient.invalidateQueries({ queryKey: ['admin', 'overview'] })
+    void queryClient.invalidateQueries({ queryKey: ['admin', 'health-snapshot'] })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+  }, [queryClient, activeServiceId])
 
   const columns = React.useMemo(
     () => buildServiceColumns({
@@ -100,13 +109,35 @@ export function ServicesTable() {
 
   return (
     <>
-      <div className="space-y-4">
-        <div className="flex items-center gap-4">
-          <h2 className="text-xl font-semibold tracking-tight">Service Management</h2>
-          <Button size="sm" onClick={() => setWizardOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" /> Add Service
+      <div className="space-y-4" data-testid="admin-services-section">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <h2 className="text-xl font-semibold tracking-tight">Service Management</h2>
+            <Button size="sm" onClick={() => setWizardOpen(true)}>
+              <Plus className="h-4 w-4 mr-1" /> Add Service
+            </Button>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            data-testid="admin-overview-refresh-btn"
+            onClick={handleRefreshAll}
+            disabled={isFetching}
+          >
+            Refresh Status
           </Button>
         </div>
+
+        {isLoading && (
+          <div
+            className="text-xs text-muted-foreground"
+            role="status"
+            aria-live="polite"
+            data-testid="services-loading-status"
+          >
+            Loading service configs...
+          </div>
+        )}
 
         {isError && (
           <Alert variant="destructive">
@@ -118,7 +149,12 @@ export function ServicesTable() {
           </Alert>
         )}
 
-        <div className="border rounded-lg bg-card shadow-sm overflow-hidden">
+        <div
+          data-testid="services-table-container"
+          className={`border rounded-lg bg-card shadow-sm overflow-hidden transition-opacity ${
+            isRefreshing ? 'opacity-40 pointer-events-none' : ''
+          }`}
+        >
           <DataTable
             columns={columns}
             data={services?.services || []}

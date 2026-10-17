@@ -44,6 +44,7 @@ meta_router = APIRouter(prefix="/api", tags=["meta"], responses=DEFAULT_ERROR_RE
 from backend.sync_status_snapshot import compute_sync_status_cached  # noqa: E402, F401
 
 
+@router.get("/admin/sync-status", response_model=SyncStatusResponse)
 @router.get("/sync-status", response_model=SyncStatusResponse)
 def sync_status(
     service_id: str | None = Depends(get_service_id),

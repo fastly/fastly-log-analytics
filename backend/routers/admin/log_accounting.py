@@ -530,8 +530,10 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
 
 
 @router.get("/admin/log-accounting", response_model=LogAccountingResponse)
+@router.get("/admin/log-accounting/{service_id}", response_model=LogAccountingResponse)
 def api_log_accounting(
     response: Response,
+    service_id: str | None = None,
     source: dict = Depends(get_source),
     hours: int = Query(24, ge=1, le=720),
     by: str = Query("hour", pattern="^(hour|day)$"),
