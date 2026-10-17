@@ -86,3 +86,48 @@ def test_prometheus_chart_copy_matches_canonical_minus_omitted_jobs() -> None:
             f"Prometheus scrape job '{name}' drifted between canonical and chart "
             f"copy.\n  canonical: {canonical_jobs[name]}\n  chart:     {chart_job}"
         )
+
+
+# Canonical files that are intentionally NOT byte-copied into the chart, with
+# the reason. prometheus.yml is compared structurally above.
+CHART_EXEMPT_FILES = {
+    "docker_stats_exporter.py": "docker-compose-only sidecar; needs the Docker Engine API",
+    "prometheus.yml": "compared structurally by the Prometheus test above (documented transform)",
+}
+
+
+def _relative_files(root: str) -> set[str]:
+    found: set[str] = set()
+    for dirpath, _dirs, names in os.walk(root):
+        for name in names:
+            found.add(os.path.relpath(os.path.join(dirpath, name), root))
+    return found
+
+
+def test_every_canonical_observability_file_is_guarded_in_the_chart() -> None:
+    canonical = _relative_files(CANONICAL_DIR)
+    chart = _relative_files(CHART_DIR)
+
+    missing = (canonical - set(CHART_EXEMPT_FILES)) - chart
+    assert not missing, (
+        f"chart copy is missing canonical observability files: {sorted(missing)}. "
+        "Copy them into deploy/chart/fastly-log-analytics/files/observability/ "
+        "or record the exemption in CHART_EXEMPT_FILES."
+    )
+    extra = chart - canonical
+    assert not extra, (
+        f"chart observability files with no canonical source: {sorted(extra)}. "
+        "Add them under observability/ (the single source of truth) first."
+    )
+
+
+def test_chart_observability_copies_are_byte_identical() -> None:
+    for rel in sorted(_relative_files(CANONICAL_DIR) - set(CHART_EXEMPT_FILES)):
+        with open(os.path.join(CANONICAL_DIR, rel), "rb") as fh:
+            canonical_bytes = fh.read()
+        with open(os.path.join(CHART_DIR, rel), "rb") as fh:
+            chart_bytes = fh.read()
+        assert chart_bytes == canonical_bytes, (
+            f"{rel} drifted from the canonical observability/{rel}. Re-copy it: "
+            f"cp observability/{rel} deploy/chart/fastly-log-analytics/files/observability/{rel}"
+        )
