@@ -1,47 +1,17 @@
-"""Ratchet: JSON operations without a typed ``response_model`` may only shrink.
+"""Ratchet: every JSON operation has a typed ``response_model``.
 
 An untyped 2xx JSON body (``{}`` / bare ``additionalProperties: true``) reaches
-the frontend as ``unknown``. ``UNTYPED_JSON`` is the seeded backlog (26 JSON
-routes on release/v3.0.0-beta3; SSE/file routes excluded); remove an entry when
-its route gets a model and never add one. ``NON_JSON_EXEMPT`` lists SSE, file,
-redirect, beacon and always-501 stub routes whose body is not a JSON contract.
+the frontend as ``unknown``. ``UNTYPED_JSON`` (the former backlog) is now empty: a new JSON route
+without a ``response_model`` fails here. ``NON_JSON_EXEMPT`` lists SSE, file, redirect and
+always-501 stub routes whose body is not a JSON contract.
 """
 
 from __future__ import annotations
 
 import pytest
 
-# Never grows. Each entry is a route whose JSON body still needs a response_model.
-UNTYPED_JSON = frozenset(
-    {
-        "POST /api/admin/bot-sources/refresh",
-        "POST /api/admin/bots/refresh",
-        "POST /api/admin/duckdb/recycle",
-        "POST /api/admin/ducklake/migrate",
-        "POST /api/admin/metadata-cleanup/{service_id}",
-        "POST /api/admin/ngwaf/sync/{service_id}",
-        "POST /api/admin/rdns/enrich",
-        "POST /api/admin/share/purge",
-        "GET /api/admin/iceberg-calendar",
-        "GET /api/admin/vcl-health",
-        "GET /api/debug/page-telemetry",
-        "GET /api/health",
-        "POST /api/admin/backfill-window",
-        "POST /api/admin/bot-sources/{source_id}/refresh",
-        "POST /api/admin/commit-iceberg",
-        "POST /api/admin/ingest-logs",
-        "POST /api/admin/metadata-cleanup",
-        "POST /api/admin/rebuild-local-view",
-        "POST /api/admin/reset-logs",
-        "POST /api/admin/reset-rum",
-        "POST /api/services/{service_id}/cron-settings",
-        "POST /api/services/{service_id}/logging-settings/update",
-        "POST /api/services/{service_id}/ngwaf-sync",
-        "POST /api/sharing/teardown-frontend",
-        "POST /api/ux-events",
-        "POST /api/web-vitals",
-    }
-)
+# Empty: every JSON route has a response_model. Never add an entry — type the route instead.
+UNTYPED_JSON: frozenset[str] = frozenset()
 
 NON_JSON_EXEMPT = frozenset(
     {
@@ -63,6 +33,10 @@ NON_JSON_EXEMPT = frozenset(
         "GET /api/share/oauth/callback",
         "GET /js/faro-sdk.js",
         "GET /js/rum.js",
+        "POST /api/admin/metadata-cleanup",
+        "POST /api/admin/metadata-cleanup/{service_id}",
+        "POST /api/admin/reset-logs",
+        "POST /api/admin/reset-rum",
         "POST /api/admin/share/backup/export",
         "POST /api/dashboard/raw/csv",
         "POST /api/provision/execute",
@@ -76,6 +50,9 @@ NON_JSON_EXEMPT = frozenset(
         "POST /api/services/{service_id}/control-room/cost-governor",
         "POST /api/services/{service_id}/control-room/mitigations",
         "POST /api/services/{service_id}/control-room/rules",
+        "POST /api/services/{service_id}/cron-settings",
+        "POST /api/services/{service_id}/logging-settings/update",
+        "POST /api/services/{service_id}/ngwaf-sync",
         "POST /api/services/{service_id}/rum/disable",
         "POST /api/services/{service_id}/rum/enable",
         "POST /api/services/{service_id}/rum/upgrade",
@@ -84,7 +61,7 @@ NON_JSON_EXEMPT = frozenset(
     }
 )
 
-UNTYPED_JSON_CEILING = 26
+UNTYPED_JSON_CEILING = 0
 _METHODS = ("get", "post", "put", "patch", "delete")
 
 

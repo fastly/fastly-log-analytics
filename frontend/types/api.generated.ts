@@ -7223,6 +7223,26 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * BackfillWindowResponse
+         * @description ``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``.
+         */
+        BackfillWindowResponse: {
+            /** Error */
+            error?: string | null;
+            /** Files Downloaded */
+            files_downloaded?: number | null;
+            /** Rows Downloaded */
+            rows_downloaded?: number | null;
+            /** Bytes Downloaded */
+            bytes_downloaded?: number | null;
+            /** Files Removed */
+            files_removed?: number | null;
+            /** Files Skipped */
+            files_skipped?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * BackupExportPayload
          * @description Body for ``POST /api/share-admin/backup/export`` — passphrase used
          *     to encrypt the share-db backup blob (minimum 12 characters).
@@ -7413,6 +7433,38 @@ export interface components {
             last_updated?: string | null;
             /** Entry Count */
             entry_count?: number | null;
+        };
+        /**
+         * BotSourceRefreshResponse
+         * @description ``POST /admin/bot-sources/{source_id}/refresh``.
+         */
+        BotSourceRefreshResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Source */
+            source: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BotSourcesRefreshResponse
+         * @description ``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``.
+         */
+        BotSourcesRefreshResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Sources */
+            sources: {
+                [key: string]: unknown;
+            }[];
+            /** Updated Count */
+            updated_count: number;
+            /** Failed Count */
+            failed_count: number;
+        } & {
+            [key: string]: unknown;
         };
         /** BotSourcesResponse */
         BotSourcesResponse: {
@@ -8786,6 +8838,32 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * DuckdbRecycleResponse
+         * @description ``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest.
+         */
+        DuckdbRecycleResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Status */
+            status: string;
+            /** Reason */
+            reason?: string | null;
+            /** Rss Mb */
+            rss_mb?: number | null;
+            /** Threshold Mb */
+            threshold_mb?: number | null;
+            /** Detail */
+            detail?: string | null;
+            /** Rss Before Mb */
+            rss_before_mb?: number | null;
+            /** Rss After Mb */
+            rss_after_mb?: number | null;
+            /** Freed Mb */
+            freed_mb?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** DuckdbStatusResponse */
         DuckdbStatusResponse: {
             /** Ok */
@@ -8802,6 +8880,20 @@ export interface components {
             pools?: unknown;
             /** Retired Pools */
             retired_pools?: unknown;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DucklakeMigrateResponse
+         * @description ``POST /admin/ducklake/migrate`` (202).
+         */
+        DucklakeMigrateResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Message */
+            message: string;
+            /** Service Id */
+            service_id: string;
         } & {
             [key: string]: unknown;
         };
@@ -9083,6 +9175,39 @@ export interface components {
             log_format: string;
             /** Otel Exporter */
             otel_exporter: string;
+        };
+        /**
+         * HealthResponse
+         * @description ``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers.
+         */
+        HealthResponse: {
+            /** Status */
+            status: string;
+            /** Version */
+            version: string;
+            /** Services */
+            services?: components["schemas"]["HealthServiceState"][] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** HealthServiceState */
+        HealthServiceState: {
+            /** Service Id */
+            service_id: string;
+            /** Status */
+            status: string;
+            /** Last Ingest */
+            last_ingest?: unknown;
+            /** Last Sync Status */
+            last_sync_status?: string | null;
+            /** Last Sync At */
+            last_sync_at?: unknown;
+            /** Reason */
+            reason?: string | null;
+            /** Stale Minutes Used */
+            stale_minutes_used?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * HealthSnapshotResponse
@@ -9617,6 +9742,22 @@ export interface components {
             image_bandwidth_bytes?: number | null;
             /** Estimated Savings Bytes */
             estimated_savings_bytes?: number | null;
+        };
+        /** IcebergCalendarDay */
+        IcebergCalendarDay: {
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * IcebergCalendarResponse
+         * @description ``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys.
+         */
+        IcebergCalendarResponse: {
+            [key: string]: components["schemas"]["IcebergCalendarDay"] | unknown[];
         };
         /** IcebergTableInfoResponse */
         IcebergTableInfoResponse: {
@@ -10996,6 +11137,24 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * NgwafSyncResponse
+         * @description ``POST /admin/ngwaf/sync/{service_id}``.
+         */
+        NgwafSyncResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Service Id */
+            service_id: string;
+            /** Workspace Id */
+            workspace_id: string;
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** NgwafWorkspace */
         NgwafWorkspace: {
             /** Id */
@@ -11844,6 +12003,59 @@ export interface components {
             edge_hit_requests?: number | null;
             /** Origin Requests */
             origin_requests?: number | null;
+        };
+        /** PageTelemetryCall */
+        PageTelemetryCall: {
+            /** Service */
+            service: string;
+            /** Method */
+            method?: string | null;
+            /** Path */
+            path?: string | null;
+            /** Status */
+            status?: string | number | null;
+            /** Time Ms */
+            time_ms?: number | null;
+            /** Caller */
+            caller?: string | null;
+            /** Bytes */
+            bytes?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PageTelemetryQuery */
+        PageTelemetryQuery: {
+            /** Engine */
+            engine?: string | null;
+            /** Sql Query */
+            sql_query?: string | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PageTelemetryResponse
+         * @description ``GET /debug/page-telemetry``.
+         */
+        PageTelemetryResponse: {
+            /** Queries */
+            queries: components["schemas"]["PageTelemetryQuery"][];
+            /** Sections */
+            sections: components["schemas"]["PageTelemetrySection"][];
+            /** Calls */
+            calls: components["schemas"]["PageTelemetryCall"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** PageTelemetrySection */
+        PageTelemetrySection: {
+            /** Section Name */
+            section_name?: string | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * PartialHourMergeResponse
@@ -12970,6 +13182,30 @@ export interface components {
              * @default []
              */
             columns: string[];
+        };
+        /**
+         * RdnsEnrichResponse
+         * @description ``POST /admin/rdns/enrich``.
+         */
+        RdnsEnrichResponse: {
+            /** Ok */
+            ok: boolean;
+            summary: components["schemas"]["RdnsEnrichSummary"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** RdnsEnrichSummary */
+        RdnsEnrichSummary: {
+            /** Resolved */
+            resolved: number;
+            /** Errors */
+            errors: number;
+            /** Discovered */
+            discovered: number;
+            /** Batch Limit */
+            batch_limit: number;
+        } & {
+            [key: string]: unknown;
         };
         /** RdnsStats */
         RdnsStats: {
@@ -15195,6 +15431,28 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * SharePurgeResponse
+         * @description ``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``.
+         */
+        SharePurgeResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Deleted Audit Logs */
+            deleted_audit_logs?: number | null;
+            /** Deleted Expired Invites */
+            deleted_expired_invites?: number | null;
+            /** Deleted Stale Sessions */
+            deleted_stale_sessions?: number | null;
+            /** Deleted Claim Tokens */
+            deleted_claim_tokens?: number | null;
+            /** Audit Retention Days */
+            audit_retention_days?: number | null;
+            /** Max Idle Session Days */
+            max_idle_session_days?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareServiceEntry */
         ShareServiceEntry: {
             /** Service Id */
@@ -16241,6 +16499,32 @@ export interface components {
             performance?: components["schemas"]["PerformanceMetrics"] | null;
             network?: components["schemas"]["NetworkMetrics"] | null;
             io?: components["schemas"]["IOMetrics"] | null;
+        };
+        /**
+         * VclHealthResponse
+         * @description ``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run.
+         */
+        VclHealthResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Is Clean */
+            is_clean: boolean;
+            /** Error */
+            error?: string | null;
+            /** Active Version */
+            active_version?: number | string | null;
+            /** Legacy Snippets Found */
+            legacy_snippets_found?: number | null;
+            /** Legacy Names */
+            legacy_names?: string[] | null;
+            /** Consolidated Snippets Found */
+            consolidated_snippets_found?: number | null;
+            /** Consolidated Names */
+            consolidated_names?: string[] | null;
+            /** Recommendation */
+            recommendation?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** VclLintRequest */
         VclLintRequest: {
@@ -30359,7 +30643,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BotSourceRefreshResponse"];
                 };
             };
             /** @description Bad request */
@@ -30460,7 +30744,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BotSourcesRefreshResponse"];
                 };
             };
             /** @description Bad request */
@@ -30561,7 +30845,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BotSourcesRefreshResponse"];
                 };
             };
             /** @description Bad request */
@@ -30665,7 +30949,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RdnsEnrichResponse"];
                 };
             };
             /** @description Bad request */
@@ -34530,9 +34814,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DuckdbRecycleResponse"];
                 };
             };
             /** @description Bad request */
@@ -35479,9 +35761,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["VclHealthResponse"];
                 };
             };
             /** @description Bad request */
@@ -35697,7 +35977,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["IcebergCalendarResponse"];
                 };
             };
             /** @description Bad request */
@@ -36020,7 +36300,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SyncStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -36127,7 +36407,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DucklakeMigrateResponse"];
                 };
             };
             /** @description Bad request */
@@ -37229,9 +37509,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SyncStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -37342,9 +37620,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BackfillWindowResponse"];
                 };
             };
             /** @description Bad request */
@@ -37771,7 +38047,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NgwafSyncResponse"];
                 };
             };
             /** @description Bad request */
@@ -42123,7 +42399,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkMessageResponse"];
                 };
             };
             /** @description Bad request */
@@ -46881,7 +47157,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PageTelemetryResponse"];
                 };
             };
             /** @description Bad request */
@@ -50197,7 +50473,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SharePurgeResponse"];
                 };
             };
             /** @description Bad request */
@@ -50302,9 +50578,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -50409,9 +50683,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -50515,7 +50787,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
             /** @description Bad request */

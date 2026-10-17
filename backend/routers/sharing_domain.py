@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from backend.config import list_configs
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.services import OkMessageResponse
 from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def deploy_frontend(payload: SharingDeployRequest):
         raise_internal(logger, exc)
 
 
-@router.post("/teardown-frontend")
+@router.post("/teardown-frontend", response_model=OkMessageResponse, response_model_exclude_unset=True)
 def teardown_frontend(payload: SharingTeardownRequest):
     """Teardown a remote frontend service.
 

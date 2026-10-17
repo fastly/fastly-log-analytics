@@ -255,7 +255,7 @@ def rum_ledger_sweep_service(
     return SyncStartResponse(**res)
 
 
-@router.post("/admin/ingest-logs")
+@router.post("/admin/ingest-logs", response_model=SyncStartResponse, response_model_exclude_unset=True)
 def ingest_endpoint(
     start_time: str | None = Query(default=None),
     end_time: str | None = Query(default=None),

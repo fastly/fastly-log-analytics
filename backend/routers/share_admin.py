@@ -17,6 +17,7 @@ from fastapi.responses import Response
 from backend import config as svcconfig
 from backend.core import share_db
 from backend.core.oauth import registry as oauth_registry
+from backend.models.admin_actions import SharePurgeResponse
 from backend.models.common import OkResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.share_admin import (
@@ -536,7 +537,7 @@ def oauth_providers():
 # ── Retention Purge ──────────────────────────────────────────────────────────
 
 
-@router.post("/purge")
+@router.post("/purge", response_model=SharePurgeResponse, response_model_exclude_unset=True)
 def trigger_share_purge(
     audit_retention_days: int | None = Query(
         default=None,

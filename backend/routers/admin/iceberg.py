@@ -11,6 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest, SyncStartResponse
+from backend.models.admin_actions import DucklakeMigrateResponse, IcebergCalendarResponse
 from backend.utils.router_utils import (
     SSE_PASSTHROUGH_HEADERS,
     make_error,
@@ -37,7 +38,7 @@ def iceberg_info_endpoint(
     return IcebergTableInfoResponse.with_telemetry(**result)
 
 
-@router.get("/admin/iceberg-calendar")
+@router.get("/admin/iceberg-calendar", response_model=IcebergCalendarResponse, response_model_exclude_unset=True)
 @query_errors(status_code=500)
 def iceberg_calendar_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
@@ -91,7 +92,9 @@ def iceberg_commit_endpoint(
     return SyncStartResponse(**res)
 
 
-@router.post("/admin/rebuild-local-view", status_code=202)
+@router.post(
+    "/admin/rebuild-local-view", status_code=202, response_model=SyncStartResponse, response_model_exclude_unset=True
+)
 def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     """One-button "fix it" for a stuck or stale local DuckDB view.
 
@@ -145,7 +148,12 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
 
 
-@router.post("/admin/ducklake/migrate", status_code=202)
+@router.post(
+    "/admin/ducklake/migrate",
+    status_code=202,
+    response_model=DucklakeMigrateResponse,
+    response_model_exclude_unset=True,
+)
 def ducklake_migrate_endpoint(source: dict = Depends(get_source)):
     """Adopt this service's legacy pyiceberg-era parquet into DuckLake.
 

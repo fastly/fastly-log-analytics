@@ -20,6 +20,7 @@ from backend.models.admin import (
     LogAccountingTotals,
     SustainedLossAlert,
 )
+from backend.models.admin_actions import BackfillWindowResponse
 from backend.repositories import log_accounting as log_accounting_repo
 from backend.utils.router_utils import raise_internal
 
@@ -44,7 +45,7 @@ _DUCKDB_COUNTS_TTL = 45.0
 _DUCKDB_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, dict[str, int]]] = {}
 
 
-@router.post("/admin/backfill-window")
+@router.post("/admin/backfill-window", response_model=BackfillWindowResponse, response_model_exclude_unset=True)
 def backfill_window(
     start_time: str = Query(..., description="ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"),
     end_time: str = Query(..., description="ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"),

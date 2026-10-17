@@ -10,6 +10,7 @@ from fastapi import Query
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
+from backend.models.admin_actions import DuckdbRecycleResponse
 from backend.models.admin_status import DuckdbStatusResponse
 
 from ._router import router
@@ -17,7 +18,7 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 
-@router.post("/admin/duckdb/recycle")
+@router.post("/admin/duckdb/recycle", response_model=DuckdbRecycleResponse, response_model_exclude_unset=True)
 def trigger_duckdb_recycle_endpoint(
     force: bool = Query(False, description="Bypass RSS threshold check and force recycle"),
 ) -> dict[str, Any]:

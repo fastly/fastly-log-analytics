@@ -7,6 +7,11 @@ import logging
 from fastapi import HTTPException, Query
 
 from backend.models.admin import BotSourcesResponse
+from backend.models.admin_actions import (
+    BotSourceRefreshResponse,
+    BotSourcesRefreshResponse,
+    RdnsEnrichResponse,
+)
 from backend.models.admin_status import RdnsStatsResponse
 from backend.utils.router_utils import not_found, raise_internal
 
@@ -24,7 +29,9 @@ def get_bot_sources_endpoint():
     return BotSourcesResponse.with_telemetry(sources=get_all_sources_meta(), rdns=rdns_stats())
 
 
-@router.post("/admin/bot-sources/{source_id}/refresh")
+@router.post(
+    "/admin/bot-sources/{source_id}/refresh", response_model=BotSourceRefreshResponse, response_model_exclude_unset=True
+)
 def refresh_bot_source_endpoint(source_id: str):
     """Fetch and re-cache a single bot source."""
     from backend.utils.bot_sources import fetch_and_cache_source
@@ -38,8 +45,8 @@ def refresh_bot_source_endpoint(source_id: str):
     return {"ok": True, "source": meta}
 
 
-@router.post("/admin/bot-sources/refresh")
-@router.post("/admin/bots/refresh")
+@router.post("/admin/bot-sources/refresh", response_model=BotSourcesRefreshResponse, response_model_exclude_unset=True)
+@router.post("/admin/bots/refresh", response_model=BotSourcesRefreshResponse, response_model_exclude_unset=True)
 def refresh_all_bot_sources_endpoint():
     """Fetch and re-cache all enabled bot sources."""
     from backend.utils.bot_sources import refresh_all_sources
@@ -58,7 +65,7 @@ def refresh_all_bot_sources_endpoint():
         raise_internal(logger, e, code="bot_sources_refresh_failed", status=502)
 
 
-@router.post("/admin/rdns/enrich")
+@router.post("/admin/rdns/enrich", response_model=RdnsEnrichResponse, response_model_exclude_unset=True)
 def trigger_rdns_enrich_endpoint(
     limit: int | None = Query(None, description="Optional override for batch limit"),
 ):

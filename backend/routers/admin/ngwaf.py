@@ -6,6 +6,7 @@ import logging
 
 from fastapi import HTTPException, Query
 
+from backend.models.admin_actions import NgwafSyncResponse
 from backend.models.admin_status import NgwafStatusResponse
 from backend.utils.router_utils import bad_request, not_found, raise_internal
 
@@ -14,7 +15,7 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 
-@router.post("/admin/ngwaf/sync/{service_id}")
+@router.post("/admin/ngwaf/sync/{service_id}", response_model=NgwafSyncResponse, response_model_exclude_unset=True)
 def trigger_ngwaf_sync_endpoint(service_id: str):
     """Trigger manual NGWAF bot sync for a service."""
     from backend import config as svcconfig

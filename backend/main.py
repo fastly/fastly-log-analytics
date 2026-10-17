@@ -49,6 +49,7 @@ from contextlib import asynccontextmanager
 # import. bridge_uvicorn_loggers() (called from lifespan startup, which runs
 # after uvicorn's logging setup) re-points them at root so access lines render
 # through the same chain — see its docstring for the boot-line caveat.
+from backend.models.admin_actions import HealthResponse
 from backend.utils.structlog_config import bridge_uvicorn_loggers, configure_structlog  # noqa: E402
 
 configure_structlog()
@@ -1167,7 +1168,13 @@ def prometheus_metrics():
         raise HTTPException(status_code=501, detail="Prometheus client not installed")
 
 
-@app.get("/api/health", tags=["meta"], responses=_HEALTH_ERROR_RESPONSES)
+@app.get(
+    "/api/health",
+    tags=["meta"],
+    responses=_HEALTH_ERROR_RESPONSES,
+    response_model=HealthResponse,
+    response_model_exclude_unset=True,
+)
 def health_check(
     request: Request,
     deep: bool = False,

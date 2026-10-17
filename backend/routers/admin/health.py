@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.models.admin import HealthSnapshotResponse
+from backend.models.admin_actions import VclHealthResponse
 
 from ._router import router
 
@@ -278,7 +279,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     return out
 
 
-@router.get("/admin/vcl-health")
+@router.get("/admin/vcl-health", response_model=VclHealthResponse, response_model_exclude_unset=True)
 def api_vcl_health(service_id: str) -> dict[str, Any]:
     """Verify VCL state after migration — check for legacy/consolidated snippet presence.
 
