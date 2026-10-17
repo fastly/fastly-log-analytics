@@ -97,7 +97,6 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
   })
 
   test('5. Terminal stream viewport and row inspector interaction', async ({ page }) => {
-    test.skip(!!process.env.CI, 'requires seeded log data / real FOS; the CI e2e backend has neither')
     await page.goto('/streaming')
     await expect(page.locator('[data-testid="stream-terminal-container"]')).toBeVisible({ timeout: 30_000 })
 

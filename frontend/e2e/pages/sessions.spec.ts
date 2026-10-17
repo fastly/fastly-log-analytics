@@ -69,7 +69,6 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
   })
 
   test('3. Data contract & schema validation (/api/sessions and /api/sessions/detail)', async ({ page }) => {
-    test.skip(!!process.env.CI, 'requires seeded log data / real FOS; the CI e2e backend has neither')
     // 1. Verify POST /api/sessions
     const postRes = await page.request.post('/api/sessions', {
       data: {
@@ -141,7 +140,6 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
   })
 
   test('5. Row detail inspection dialog with session metadata', async ({ page }) => {
-    test.skip(!!process.env.CI, 'requires seeded log data / real FOS; the CI e2e backend has neither')
     await page.goto('/sessions')
     await expect(page.locator('[data-testid="sessions-table-container"]')).toBeVisible({ timeout: 30_000 })
 

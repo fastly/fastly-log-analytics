@@ -186,7 +186,6 @@ test.describe('Network Page Contract (/network)', () => {
   })
 
   test('8. Telemetry instrumentation & query attribution audit', async ({ page }) => {
-    test.skip(!!process.env.CI, 'requires seeded log data / real FOS; the CI e2e backend has neither')
     // Request with debug responses enabled
     const res = await page.request.post('/api/network/bundle', {
       data: {
