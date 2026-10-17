@@ -42,6 +42,7 @@ test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
   })
 
   test('3. Data contract & schema validation on /api/usage endpoints', async ({ page }) => {
+    test.skip(!!process.env.CI, 'requires seeded log data / real FOS; the CI e2e backend has neither')
     // 1. Storage endpoint
     const storageRes = await page.request.get('/api/usage/current-storage')
     expect(storageRes.ok()).toBeTruthy()
