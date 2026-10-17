@@ -487,8 +487,8 @@ class TestBackendWhitelistEnforcement:
         diff = DiffResult()
         diff.backends_to_remove = ["my_origin"]  # Not in whitelist!
 
-        # Should raise AssertionError before deletion
-        with pytest.raises(AssertionError, match="non-whitelisted backend"):
+        # Should raise RuntimeError before deletion
+        with pytest.raises(RuntimeError, match="non-whitelisted backend"):
             _apply_diff("srv_test", "token", 2, diff)
 
     def test_managed_backend_names_constant_is_defined(self):

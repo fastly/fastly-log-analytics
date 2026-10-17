@@ -1620,11 +1620,15 @@ class TimeBounds:
             eff_start = now - timedelta(hours=1)
             eff_end = now
         elif eff_start is None:
-            assert eff_end is not None  # narrowed by `not (start is None and end is None)` above
+            # narrowed by `not (start is None and end is None)` above
+            if eff_end is None:
+                raise RuntimeError("eff_end is unexpectedly None")
             eff_start = eff_end - timedelta(hours=1)
         elif eff_end is None:
             eff_end = datetime.now(UTC)
-        assert eff_start is not None and eff_end is not None  # narrowed by the branches above
+        # narrowed by the branches above
+        if eff_start is None or eff_end is None:
+            raise RuntimeError("eff_start / eff_end is unexpectedly None")
         # L5: cap the maximum span (keep the most-recent ``max_span`` slice).
         if max_span is not None and (eff_end - eff_start) > max_span:
             eff_start = eff_end - max_span

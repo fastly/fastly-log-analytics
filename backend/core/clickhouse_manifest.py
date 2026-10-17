@@ -111,7 +111,8 @@ class PgManifest:
                 "SELECT count(*) AS n FROM clickhouse_datasets WHERE service_id=%s AND expires_at<=clock_timestamp()",
                 (service_id,),
             ).fetchone()
-        assert freshness is not None and expired is not None
+        if freshness is None or expired is None:
+            raise RuntimeError("freshness / expired is unexpectedly None")
         active_response = None
         if active:
             active_response = {
@@ -179,7 +180,8 @@ class PgManifest:
                 "(SELECT 1 FROM clickhouse_artifacts WHERE service_id=%s AND dataset_id=%s LIMIT 101) a",
                 (service_id, dataset_id),
             ).fetchone()
-            assert count_row is not None
+            if count_row is None:
+                raise RuntimeError("count_row is unexpectedly None")
             count = count_row["n"]
             if count > 100:
                 raise ValueError("dataset exceeds HTTP replay cap")
@@ -190,7 +192,8 @@ class PgManifest:
                     "WHERE service_id=%s AND generation=%s AND status!='published'",
                     (service_id, generation),
                 ).fetchone()
-                assert pending_row is not None
+                if pending_row is None:
+                    raise RuntimeError("pending_row is unexpectedly None")
                 pending = pending_row["n"]
         return {"dataset_id": dataset_id, "artifact_count": count, "planned_artifacts": min(pending, limit)}
 
@@ -212,7 +215,8 @@ class PgManifest:
                 "WHERE p.status IN ('pending', 'claimed', 'failed') AND g.status='building' "
                 "AND d.expires_at>clock_timestamp()"
             ).fetchone()
-        assert row is not None
+        if row is None:
+            raise RuntimeError("row is unexpectedly None")
         return max(0.0, float(row["lag_seconds"])) if row["lag_seconds"] is not None else 0.0
 
     def seal(self, dataset: Dataset, artifacts: list[Artifact]) -> None:

@@ -120,7 +120,8 @@ class ValkeyPublisher:
     def _publish_async(self, channel: str, payload_json: str) -> None:
         async def _do() -> None:
             try:
-                assert self._redis is not None
+                if self._redis is None:
+                    raise RuntimeError("self._redis is unexpectedly None")
                 pipe = self._redis.pipeline()
                 pipe.publish(channel, payload_json)
                 self._apply_history(pipe, channel, payload_json)
@@ -131,7 +132,8 @@ class ValkeyPublisher:
                 _log_rate_limited("publish_async", "[valkey] publish to %s failed: %s", channel, e)
 
         try:
-            assert self._loop is not None
+            if self._loop is None:
+                raise RuntimeError("self._loop is unexpectedly None")
             self._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_do()))
         except RuntimeError as e:
             # Loop shutting down — fall back to the sync client rather than drop.

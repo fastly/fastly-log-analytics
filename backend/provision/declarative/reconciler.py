@@ -411,7 +411,8 @@ def reconcile_vcl_state(
                     # Assertion: active version unchanged after validation failure
                     active_now = _fetch_active_version(service_id, token)
                     active_before = _fetch_active_version(service_id, token)
-                    assert active_before == active_now, "Active version changed during validation failure"
+                    if active_before != active_now:
+                        raise RuntimeError("Active version changed during validation failure")
                     raise VclValidationError(service_id, draft_version, validation_errors)
 
                 result.draft_version = draft_version
@@ -1143,10 +1144,11 @@ def _apply_diff(
 
     # Step 6.3: Purge old backends (with whitelist guard)
     for backend_name in diff.backends_to_remove:
-        assert backend_name in MANAGED_BACKEND_NAMES, (
-            f"CRITICAL: Attempted to delete non-whitelisted backend '{backend_name}'. "
-            f"Whitelisted: {MANAGED_BACKEND_NAMES}"
-        )
+        if backend_name not in MANAGED_BACKEND_NAMES:
+            raise RuntimeError(
+                f"CRITICAL: Attempted to delete non-whitelisted backend '{backend_name}'. "
+                f"Whitelisted: {MANAGED_BACKEND_NAMES}"
+            )
         if status_cb:
             status_cb(f"🧹 Removing outdated backend '{backend_name}'...")
         try:
@@ -1156,10 +1158,11 @@ def _apply_diff(
 
     # Step 6.4: Purge old dictionaries (with whitelist guard)
     for dict_name in diff.dictionaries_to_remove:
-        assert dict_name in MANAGED_DICTIONARY_NAMES, (
-            f"CRITICAL: Attempted to delete non-whitelisted dictionary '{dict_name}'. "
-            f"Whitelisted: {MANAGED_DICTIONARY_NAMES}"
-        )
+        if dict_name not in MANAGED_DICTIONARY_NAMES:
+            raise RuntimeError(
+                f"CRITICAL: Attempted to delete non-whitelisted dictionary '{dict_name}'. "
+                f"Whitelisted: {MANAGED_DICTIONARY_NAMES}"
+            )
         if status_cb:
             status_cb(f"🧹 Removing outdated edge dictionary '{dict_name}'...")
         try:

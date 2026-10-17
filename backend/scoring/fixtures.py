@@ -215,7 +215,8 @@ def sessionize(
                 user_agent=ua,
             )
 
-        assert current is not None
+        if current is None:
+            raise RuntimeError("current is unexpectedly None")
         current.events.append(ev)
         last_ts = ts
 

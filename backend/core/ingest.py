@@ -2066,7 +2066,8 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                 pass
             duckdb_con.close()
 
-    assert lease_generation is not None
+    if lease_generation is None:
+        raise RuntimeError("lease_generation is unexpectedly None")
     return _ledger_mark_committed(con_meta, service_id, object_key, lease_generation)
 
 
@@ -3302,7 +3303,8 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
                 pass
             duckdb_con.close()
 
-    assert lease_generation is not None
+    if lease_generation is None:
+        raise RuntimeError("lease_generation is unexpectedly None")
     return _ledger_mark_committed(con_meta, service_id, object_key, lease_generation)
 
 

@@ -604,7 +604,8 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
                 # diverged from what R2 verifies — producing
                 # HTTP 403 'The calculated signature does not match'.
                 wire_url = yarl.URL(upstream_url, encoded=True)
-                assert _SESSION is not None, "telemetry-proxy session not initialised"
+                if _SESSION is None:
+                    raise RuntimeError("telemetry-proxy session not initialised")
                 async with _SESSION.request(
                     method=request.method,
                     url=wire_url,
@@ -811,7 +812,8 @@ def _run_server() -> None:
     # every concrete implementation (Server/UnixServer) provides it; the
     # site is started so `_server` is the concrete subclass at runtime.
     _server = site._server
-    assert _server is not None
+    if _server is None:
+        raise RuntimeError("_server is unexpectedly None")
     _PORT = _server.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
     _READY.set()
 

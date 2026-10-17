@@ -723,7 +723,8 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         return False
 
     if only_buf_changed:
-        assert cached is not None
+        if cached is None:
+            raise RuntimeError("cached is unexpectedly None")
         try:
             # Reconstruct the view SQL with the new local buffer files
             # instantly — no lock, no catalog walk. cached[7] holds the RAW
@@ -773,7 +774,8 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
             logger.warning("[iceberg] Incremental fast-path reconstruction failed: %s", e)
             return False
 
-    assert cached is not None
+    if cached is None:
+        raise RuntimeError("cached is unexpectedly None")
     view_sql = cached[3]
     committed_sql_parts = cached[7] if len(cached) > 7 else ()
     if view_sql:

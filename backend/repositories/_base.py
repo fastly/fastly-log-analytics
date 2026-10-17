@@ -4654,7 +4654,8 @@ class QueryRunner:
             rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
             if rollup_paths is None:
                 return None
-        assert rollup_paths is not None
+        if rollup_paths is None:
+            raise RuntimeError("rollup_paths is unexpectedly None")
 
         paths_sql = quote_path_list(rollup_paths)
         if use_all_fields:

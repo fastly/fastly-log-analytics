@@ -172,7 +172,9 @@ def resolve_window(
     now_dt = now if now is not None else datetime.now(UTC)
     quantized = quantize_anchor(anchor, now=now_dt)
     anchor_dt = parse_iso_utc(quantized)
-    assert anchor_dt is not None  # quantize_anchor always returns a parseable ISO-Z
+    # quantize_anchor always returns a parseable ISO-Z
+    if anchor_dt is None:
+        raise RuntimeError("anchor_dt is unexpectedly None")
 
     # ``range_token`` is non-None here (is_valid_range_token gated above), and
     # ``_pick_auto_token`` always returns a fixed token, so ``token`` is a known
@@ -180,7 +182,9 @@ def resolve_window(
     if range_token == "auto":
         token = _pick_auto_token(earliest_log_at, now=now_dt)
     else:
-        assert range_token is not None  # narrowed by is_valid_range_token above
+        # narrowed by is_valid_range_token above
+        if range_token is None:
+            raise RuntimeError("range_token is unexpectedly None")
         token = range_token
 
     delta = _FIXED_TOKEN_DELTAS[token]

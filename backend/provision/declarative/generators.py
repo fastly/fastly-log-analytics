@@ -129,7 +129,8 @@ def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
         var_decl_pattern = r"^\s*declare\s+local\s+var\.(\w+)"
         declared_vars = re.findall(var_decl_pattern, body, re.MULTILINE)
         duplicates = [v for v in set(declared_vars) if declared_vars.count(v) > 1]
-        assert not duplicates, f"{subroutine}: duplicate var declarations {duplicates}"
+        if duplicates:
+            raise RuntimeError(f"{subroutine}: duplicate var declarations {duplicates}")
 
     return snippets
 

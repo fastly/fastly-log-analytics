@@ -82,7 +82,8 @@ def ducklake_write_admission(
         from backend.core.metadata.pg_connection import get_pg_thread_connection
 
         pg_con = get_pg_thread_connection()
-        assert pg_con is not None
+        if pg_con is None:
+            raise RuntimeError("pg_con is unexpectedly None")
         # Fair FIFO acquisition: block in PostgreSQL's lock-wait queue
         # (pg_advisory_lock) bounded by lock_timeout, instead of busy-polling
         # the non-blocking pg_try_advisory_lock. Polling has no queue, so under

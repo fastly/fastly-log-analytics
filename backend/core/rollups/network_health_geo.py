@@ -66,7 +66,8 @@ def build_network_geo_bundles(service_id: str, source: dict, hours: list[str]) -
         }
 
     def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
-        assert isinstance(ctx, dict)
+        if not isinstance(ctx, dict):
+            raise RuntimeError("isinstance(ctx, dict) must hold")
         city_col = "CAST(city AS VARCHAR)" if ctx["has_city"] else "CAST('' AS VARCHAR)"
         lat_col = "CAST(lat AS DOUBLE)" if ctx["has_lat"] else "CAST(NULL AS DOUBLE)"
         lon_col = "CAST(lon AS DOUBLE)" if ctx["has_lat"] else "CAST(NULL AS DOUBLE)"

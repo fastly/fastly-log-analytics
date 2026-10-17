@@ -72,7 +72,8 @@ PREV_ROUTE_MAX_BYTES: Final[int] = 255
 # Fixed head: 30 bytes. Full plaintext: 30 + 1 (length byte) + N (path).
 _HEAD_PACK_FMT: Final[str] = "<B 6s H I Q I B I"
 _HEAD_PACK_SIZE: Final[int] = struct.calcsize(_HEAD_PACK_FMT)
-assert _HEAD_PACK_SIZE == 30, f"head pack size drifted: {_HEAD_PACK_SIZE} != 30"
+if _HEAD_PACK_SIZE != 30:
+    raise RuntimeError(f"head pack size drifted: {_HEAD_PACK_SIZE} != 30")
 
 # Sliding caps per §3.3. Going over u16 for seq triggers a fresh sid (see
 # encode); the u32 / u64 widths leave plenty of headroom for any realistic

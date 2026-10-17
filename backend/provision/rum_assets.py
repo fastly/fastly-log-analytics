@@ -69,7 +69,8 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
     if not all([access_key, secret_key, bucket]) or not stored_hash:
         return False
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
     fos_host = region_endpoint(region)
@@ -487,7 +488,8 @@ def upload_rum_tracker_js(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = "rum/rum-tracker.js"
     fos_host = region_endpoint(region)
@@ -633,7 +635,8 @@ def delete_rum_tracker_js(
         warn(f"Service {service_id} missing FOS credentials — skipping JS cleanup")
         return
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Deleting RUM tracker JS from FOS bucket {bucket}")
     if status_cb:
@@ -744,7 +747,8 @@ async def download_and_upload_faro(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Downloading Faro Web SDK v{version}")
     if status_cb:
@@ -892,7 +896,8 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
         if not all([access_key, secret_key, bucket]):
             return
 
-        assert access_key is not None and secret_key is not None
+        if access_key is None or secret_key is None:
+            raise RuntimeError("access_key / secret_key is unexpectedly None")
 
         keep_version = (cfg.get("rum") or {}).get("faro_version") if keep_current else None
         keep_key = _faro_fos_key(keep_version) if keep_version else None

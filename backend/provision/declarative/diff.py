@@ -309,21 +309,25 @@ def compute_diff(
     to_add_names = {s.name for s in diff.snippets_to_add}
     to_update_names = {s.name for s in diff.snippets_to_update}
     overlap = to_add_names & to_update_names
-    assert not overlap, f"Snippets in both to_add and to_update: {overlap}"
+    if overlap:
+        raise RuntimeError(f"Snippets in both to_add and to_update: {overlap}")
 
     to_add_names = {e.name for e in diff.endpoints_to_add}
     to_update_names = {e.name for e in diff.endpoints_to_update}
     overlap = to_add_names & to_update_names
-    assert not overlap, f"Endpoints in both to_add and to_update: {overlap}"
+    if overlap:
+        raise RuntimeError(f"Endpoints in both to_add and to_update: {overlap}")
 
     to_add_names = {b.name for b in diff.backends_to_add}
     to_update_names = {b.name for b in diff.backends_to_update}
     overlap = to_add_names & to_update_names
-    assert not overlap, f"Backends in both to_add and to_update: {overlap}"
+    if overlap:
+        raise RuntimeError(f"Backends in both to_add and to_update: {overlap}")
 
     to_add_names = {d.name for d in diff.dictionaries_to_add}
     to_update_names = {d.name for d in diff.dictionaries_to_update}
     overlap = to_add_names & to_update_names
-    assert not overlap, f"Dictionaries in both to_add and to_update: {overlap}"
+    if overlap:
+        raise RuntimeError(f"Dictionaries in both to_add and to_update: {overlap}")
 
     return diff

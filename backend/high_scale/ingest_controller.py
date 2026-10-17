@@ -768,7 +768,8 @@ class HighScaleIngestController:
             )
 
     def _publish_control_manifest(self, manifest: ArchiveManifest, owner_epoch: int) -> None:
-        assert self._control is not None
+        if self._control is None:
+            raise RuntimeError("self._control is unexpectedly None")
         record = self._control.register_archive_manifest(manifest, owner_epoch=owner_epoch)
         states = (
             ArchiveState.ARTIFACT_UPLOADING,

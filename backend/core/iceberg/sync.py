@@ -242,10 +242,12 @@ def sync_data(
 
             if start_time:
                 # start_time truthy ⇒ st_dt was set above; narrow for mypy.
-                assert st_dt is not None
+                if st_dt is None:
+                    raise RuntimeError("st_dt is unexpectedly None")
                 scan = scan.filter(gte("timestamp", st_dt.isoformat()))
             if end_time:
-                assert et_dt is not None
+                if et_dt is None:
+                    raise RuntimeError("et_dt is unexpectedly None")
                 scan = scan.filter(lte("timestamp", et_dt.isoformat()))
 
             for f in scan.plan_files():

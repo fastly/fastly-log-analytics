@@ -1101,7 +1101,8 @@ def get_schema(
             "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
             [table_name],
         ).fetchone()
-        assert row is not None
+        if row is None:
+            raise RuntimeError("row is unexpectedly None")
         table_exists = row[0] > 0
         if not table_exists:
             return []

@@ -139,7 +139,8 @@ def create_remote_invite(
                 (invite_id, sid),
             )
     created = get_remote_invite(invite_id, con=con)
-    assert created is not None, "invite vanished immediately after insert"
+    if created is None:
+        raise RuntimeError("invite vanished immediately after insert")
     return created
 
 

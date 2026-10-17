@@ -159,7 +159,8 @@ def get_aggregates(*, sections: set[str] | None = None, **kwargs) -> dict:
                 client = get_clickhouse_client()
                 if client is None:
                     raise HybridUnavailable("ClickHouse disabled during request")
-                assert start is not None and end is not None
+                if start is None or end is None:
+                    raise RuntimeError("start / end is unexpectedly None")
                 ready = timer.call(
                     "clickhouse:readiness",
                     lambda: readiness(
@@ -173,7 +174,8 @@ def get_aggregates(*, sections: set[str] | None = None, **kwargs) -> dict:
                     ),
                 )
                 if ready.eligible:
-                    assert ready.generation is not None
+                    if ready.generation is None:
+                        raise RuntimeError("ready.generation is unexpectedly None")
                     selected = timer.call(
                         "clickhouse:time_series_country",
                         lambda: query_slice(

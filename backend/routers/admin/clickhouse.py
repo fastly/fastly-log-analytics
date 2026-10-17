@@ -115,7 +115,8 @@ def api_clickhouse_replay(req: ClickHouseReplayRequest):
                     req.service_id, req.dataset_id, loader=objects.load, limit=req.limit, store=store, client=client
                 )
             else:
-                assert req.generation is not None
+                if req.generation is None:
+                    raise RuntimeError("req.generation is unexpectedly None")
                 result = replay_unpublished(
                     req.service_id,
                     generation=req.generation,
