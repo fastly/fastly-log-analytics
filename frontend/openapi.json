@@ -23586,7 +23586,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BotSourceRefreshResponse"
+                }
               }
             }
           },
@@ -23696,7 +23698,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BotSourcesRefreshResponse"
+                }
               }
             }
           },
@@ -23806,7 +23810,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BotSourcesRefreshResponse"
+                }
               }
             }
           },
@@ -23936,7 +23942,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RdnsEnrichResponse"
+                }
               }
             }
           },
@@ -30193,9 +30201,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Trigger Duckdb Recycle Endpoint Api Admin Duckdb Recycle Post"
+                  "$ref": "#/components/schemas/DuckdbRecycleResponse"
                 }
               }
             }
@@ -31560,9 +31566,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Api Vcl Health Api Admin Vcl Health Get"
+                  "$ref": "#/components/schemas/VclHealthResponse"
                 }
               }
             }
@@ -31947,7 +31951,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/IcebergCalendarResponse"
+                }
               }
             }
           },
@@ -32495,7 +32501,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStartResponse"
+                }
               }
             }
           },
@@ -32671,7 +32679,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DucklakeMigrateResponse"
+                }
               }
             }
           },
@@ -34621,9 +34631,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Ingest Endpoint Api Admin Ingest Logs Post"
+                  "$ref": "#/components/schemas/SyncStartResponse"
                 }
               }
             }
@@ -34823,9 +34831,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Backfill Window Api Admin Backfill Window Post"
+                  "$ref": "#/components/schemas/BackfillWindowResponse"
                 }
               }
             }
@@ -35491,7 +35497,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NgwafSyncResponse"
+                }
               }
             }
           },
@@ -41739,7 +41747,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OkMessageResponse"
+                }
               }
             }
           },
@@ -47822,7 +47832,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PageTelemetryResponse"
+                }
               }
             }
           },
@@ -51780,7 +51792,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SharePurgeResponse"
+                }
               }
             }
           },
@@ -51901,9 +51915,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Report Web Vitals Api Web Vitals Post"
+                  "$ref": "#/components/schemas/OkResponse"
                 }
               }
             }
@@ -52025,9 +52037,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Report Ux Event Api Ux Events Post"
+                  "$ref": "#/components/schemas/OkResponse"
                 }
               }
             }
@@ -52160,7 +52170,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             }
           },
@@ -54358,6 +54370,80 @@
         "title": "BackfillBundleRollupsResponse",
         "description": "Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."
       },
+      "BackfillWindowResponse": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "files_downloaded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Downloaded"
+          },
+          "rows_downloaded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows Downloaded"
+          },
+          "bytes_downloaded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes Downloaded"
+          },
+          "files_removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Removed"
+          },
+          "files_skipped": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Skipped"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BackfillWindowResponse",
+        "description": "``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``."
+      },
       "BackupExportPayload": {
         "properties": {
           "passphrase": {
@@ -54955,6 +55041,61 @@
           "name"
         ],
         "title": "BotSourceMeta"
+      },
+      "BotSourceRefreshResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "source": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Source"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "source"
+        ],
+        "title": "BotSourceRefreshResponse",
+        "description": "``POST /admin/bot-sources/{source_id}/refresh``."
+      },
+      "BotSourcesRefreshResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "sources": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "updated_count": {
+            "type": "integer",
+            "title": "Updated Count"
+          },
+          "failed_count": {
+            "type": "integer",
+            "title": "Failed Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "sources",
+          "updated_count",
+          "failed_count"
+        ],
+        "title": "BotSourcesRefreshResponse",
+        "description": "``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``."
       },
       "BotSourcesResponse": {
         "properties": {
@@ -58273,6 +58414,103 @@
         "title": "DebugStateResponse",
         "description": "``GET /api/debug/state``."
       },
+      "DuckdbRecycleResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "rss_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rss Mb"
+          },
+          "threshold_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold Mb"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "rss_before_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rss Before Mb"
+          },
+          "rss_after_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rss After Mb"
+          },
+          "freed_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freed Mb"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "status"
+        ],
+        "title": "DuckdbRecycleResponse",
+        "description": "``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest."
+      },
       "DuckdbStatusResponse": {
         "properties": {
           "ok": {
@@ -58316,6 +58554,31 @@
           "ok"
         ],
         "title": "DuckdbStatusResponse"
+      },
+      "DucklakeMigrateResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "message",
+          "service_id"
+        ],
+        "title": "DucklakeMigrateResponse",
+        "description": "``POST /admin/ducklake/migrate`` (202)."
       },
       "ErrorDetail": {
         "properties": {
@@ -58999,6 +59262,98 @@
         ],
         "title": "HealthObservability",
         "description": "Effective logging/telemetry mode (SRE-20).\n\nTells an incident responder what their ``jq``/``grep`` over ``docker logs``\nwill actually match: prod leaves ``STRUCTLOG_FORMAT`` unset \u2192 ConsoleRenderer\n(bracketed text, not JSON), and ``OTEL_EXPORTER=none`` means no span records\n\u2192 empty trace fields. The ADR documents the wiring; this is the runtime truth."
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "services": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HealthServiceState"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Services"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "status",
+          "version"
+        ],
+        "title": "HealthResponse",
+        "description": "``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers."
+      },
+      "HealthServiceState": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "last_ingest": {
+            "title": "Last Ingest"
+          },
+          "last_sync_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync Status"
+          },
+          "last_sync_at": {
+            "title": "Last Sync At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "stale_minutes_used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale Minutes Used"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "service_id",
+          "status"
+        ],
+        "title": "HealthServiceState"
       },
       "HealthSnapshotResponse": {
         "properties": {
@@ -60505,6 +60860,42 @@
         },
         "type": "object",
         "title": "IOMetrics"
+      },
+      "IcebergCalendarDay": {
+        "properties": {
+          "data_files": {
+            "type": "integer",
+            "title": "Data Files"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "data_files",
+          "size_bytes"
+        ],
+        "title": "IcebergCalendarDay"
+      },
+      "IcebergCalendarResponse": {
+        "properties": {},
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/IcebergCalendarDay"
+            },
+            {
+              "items": {},
+              "type": "array"
+            }
+          ]
+        },
+        "type": "object",
+        "title": "IcebergCalendarResponse",
+        "description": "``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys."
       },
       "IcebergTableInfoResponse": {
         "properties": {
@@ -64364,6 +64755,37 @@
         "title": "NgwafStatusResponse",
         "description": "``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;\n``service_workspace_id`` / ``service_configured`` only when ``service_id`` was passed."
       },
+      "NgwafSyncResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "workspace_id": {
+            "type": "string",
+            "title": "Workspace Id"
+          },
+          "stats": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Stats"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "service_id",
+          "workspace_id",
+          "stats"
+        ],
+        "title": "NgwafSyncResponse",
+        "description": "``POST /admin/ngwaf/sync/{service_id}``."
+      },
       "NgwafWorkspace": {
         "properties": {
           "id": {
@@ -66050,6 +66472,192 @@
         },
         "type": "object",
         "title": "OverviewMetrics"
+      },
+      "PageTelemetryCall": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "time_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ms"
+          },
+          "caller": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "service"
+        ],
+        "title": "PageTelemetryCall"
+      },
+      "PageTelemetryQuery": {
+        "properties": {
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "sql_query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Query"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "PageTelemetryQuery"
+      },
+      "PageTelemetryResponse": {
+        "properties": {
+          "queries": {
+            "items": {
+              "$ref": "#/components/schemas/PageTelemetryQuery"
+            },
+            "type": "array",
+            "title": "Queries"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/PageTelemetrySection"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/PageTelemetryCall"
+            },
+            "type": "array",
+            "title": "Calls"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "queries",
+          "sections",
+          "calls"
+        ],
+        "title": "PageTelemetryResponse",
+        "description": "``GET /debug/page-telemetry``."
+      },
+      "PageTelemetrySection": {
+        "properties": {
+          "section_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Name"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "PageTelemetrySection"
       },
       "PartialHourMergeResponse": {
         "properties": {
@@ -68900,6 +69508,54 @@
         },
         "type": "object",
         "title": "RawRequest"
+      },
+      "RdnsEnrichResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RdnsEnrichSummary"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok",
+          "summary"
+        ],
+        "title": "RdnsEnrichResponse",
+        "description": "``POST /admin/rdns/enrich``."
+      },
+      "RdnsEnrichSummary": {
+        "properties": {
+          "resolved": {
+            "type": "integer",
+            "title": "Resolved"
+          },
+          "errors": {
+            "type": "integer",
+            "title": "Errors"
+          },
+          "discovered": {
+            "type": "integer",
+            "title": "Discovered"
+          },
+          "batch_limit": {
+            "type": "integer",
+            "title": "Batch Limit"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "resolved",
+          "errors",
+          "discovered",
+          "batch_limit"
+        ],
+        "title": "RdnsEnrichSummary"
       },
       "RdnsStats": {
         "properties": {
@@ -75731,6 +76387,87 @@
         "type": "object",
         "title": "SharePanicResponse"
       },
+      "SharePurgeResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "deleted_audit_logs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Audit Logs"
+          },
+          "deleted_expired_invites": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Expired Invites"
+          },
+          "deleted_stale_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Stale Sessions"
+          },
+          "deleted_claim_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted Claim Tokens"
+          },
+          "audit_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Retention Days"
+          },
+          "max_idle_session_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Idle Session Days"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "SharePurgeResponse",
+        "description": "``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``."
+      },
       "ShareServiceEntry": {
         "properties": {
           "service_id": {
@@ -78627,6 +79364,112 @@
         },
         "type": "object",
         "title": "ValueSummaryResponse"
+      },
+      "VclHealthResponse": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "is_clean": {
+            "type": "boolean",
+            "title": "Is Clean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "active_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version"
+          },
+          "legacy_snippets_found": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Snippets Found"
+          },
+          "legacy_names": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Names"
+          },
+          "consolidated_snippets_found": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consolidated Snippets Found"
+          },
+          "consolidated_names": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consolidated Names"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "service_id",
+          "is_clean"
+        ],
+        "title": "VclHealthResponse",
+        "description": "``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run."
       },
       "VclLintRequest": {
         "properties": {
