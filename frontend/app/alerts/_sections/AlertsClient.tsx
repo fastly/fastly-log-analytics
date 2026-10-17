@@ -68,12 +68,15 @@ export default function AlertsClient() {
     VALID_STATUS_FILTERS.has(initialStatusParam) ? initialStatusParam : 'all',
   )
 
-  React.useEffect(() => {
-    const param = (searchParams?.get('status') || '').toLowerCase() as AlertStatusFilter
-    if (VALID_STATUS_FILTERS.has(param)) {
-      setStatusFilter(param)
+  // The filter follows `?status=` whenever it changes (adjusted during render, keyed on the param).
+  const statusParam = (searchParams?.get('status') || '').toLowerCase()
+  const [seenStatusParam, setSeenStatusParam] = React.useState(statusParam)
+  if (statusParam !== seenStatusParam) {
+    setSeenStatusParam(statusParam)
+    if (VALID_STATUS_FILTERS.has(statusParam as AlertStatusFilter)) {
+      setStatusFilter(statusParam as AlertStatusFilter)
     }
-  }, [searchParams])
+  }
 
   // IDs hidden from the list while the post-confirm undo window is open.
   // The DELETE fires after the toast duration unless the user hits Undo,

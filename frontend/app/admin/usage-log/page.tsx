@@ -38,7 +38,7 @@ export default async function UsageLogPage({
 }) {
   const params = await searchParams
   const serviceId = firstParam(params.service)
-  const nowMs = Date.now()
+  const nowMs = new Date().getTime()
 
   return (
     <Suspense fallback={<UsageLogLoading />}>

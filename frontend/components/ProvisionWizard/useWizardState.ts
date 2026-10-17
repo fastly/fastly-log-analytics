@@ -522,15 +522,13 @@ export function useWizardState(
       setStep,
     });
 
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    setPendingDraft(loadDraft());
-    return () => {
-      setPendingDraft(null);
-    };
-  }, [open]);
+  // The saved draft is loaded when the wizard opens and dropped when it closes (adjusted during
+  // render, keyed on `open`).
+  const [draftOpen, setDraftOpen] = useState(false);
+  if (open !== draftOpen) {
+    setDraftOpen(open);
+    setPendingDraft(open ? loadDraft() : null);
+  }
 
   useEffect(() => {
     if (!open) return;

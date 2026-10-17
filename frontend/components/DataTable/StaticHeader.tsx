@@ -57,6 +57,8 @@ export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, un
         )}
       </div>
       <div
+        // Pointer-only affordance: column resizing has no keyboard path, so the handle carries no role.
+        role="presentation"
         onMouseDown={(e) => {
           try { header.getResizeHandler()(e) } catch { /* stale header */ }
         }}

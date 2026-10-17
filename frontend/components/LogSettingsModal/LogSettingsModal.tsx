@@ -100,7 +100,15 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
     }
   })
 
-  useEffect(() => {
+  // Load the saved settings into the form whenever the server data or the open state changes
+  // (adjusted during render; the conditions are read as of that change, as the effect did).
+  const [syncedFrom, setSyncedFrom] = useState<{
+    lfResponse: typeof lfResponse
+    loggingSettings: typeof loggingSettings
+    open: boolean
+  }>({ lfResponse: undefined, loggingSettings: undefined, open: false })
+  if (syncedFrom.lfResponse !== lfResponse || syncedFrom.loggingSettings !== loggingSettings || syncedFrom.open !== open) {
+    setSyncedFrom({ lfResponse, loggingSettings, open })
     if (open && status === 'idle' && !fieldsMutation.isPending && !fieldsMutation.isSuccess) {
       if (lfResponse?.log_fields) {
         setConfig({
@@ -118,7 +126,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setCmcdVersion(loggingSettings.cmcd?.version ?? 1)
       }
     }
-  }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
+  }
 
   // Reset state only when opening the modal freshly
   useEffect(() => {

@@ -360,17 +360,18 @@ function NetworkBody({
     }]
   }, [qualityData?.scatter])
 
+  const leaderboard = data?.leaderboard
   const asnOptions = React.useMemo(() => {
-    if (!data?.leaderboard) return []
-    return data.leaderboard.map((a) => ({ value: String(a.asn), label: a.label }))
-  }, [data?.leaderboard])
+    if (!leaderboard) return []
+    return leaderboard.map((a) => ({ value: String(a.asn), label: a.label }))
+  }, [leaderboard])
 
   // Pre-memoise the ASN leaderboard rows so toggling the metric / mapAsn
   // selectors (which re-render the parent) doesn't rebuild the
   // 30-row × 7-column subtree every time. Row identity is keyed on
   // `data?.leaderboard` so a real data refetch still re-renders.
   const asnLeaderboardRows = React.useMemo(() => {
-    return (data?.leaderboard ?? []).map((asn) => {
+    return (leaderboard ?? []).map((asn) => {
       const delta = (asn.health_score_now ?? 0) - (asn.health_score_1h_ago ?? 0)
       return (
         <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
@@ -404,19 +405,21 @@ function NetworkBody({
         </tr>
       )
     })
-  }, [data?.leaderboard])
+  }, [leaderboard])
 
+  const heatmapRows = mapData?.heatmap
+  const heatmapBuckets = mapData?.buckets
   const heatmapData = React.useMemo(() => {
-    if (!mapData?.heatmap?.length || !mapData.buckets?.length) return null
-    const yLabels = mapData.heatmap.map((d) => d.label)
-    const xBuckets = mapData.buckets
-    const z = mapData.heatmap.map((row) => {
+    if (!heatmapRows?.length || !heatmapBuckets?.length) return null
+    const yLabels = heatmapRows.map((d) => d.label)
+    const xBuckets = heatmapBuckets
+    const z = heatmapRows.map((row) => {
       const byBucket: Record<string, number | null> = {}
       row.buckets?.forEach((b) => { byBucket[b.bucket] = b.health_score })
       return xBuckets.map((bk) => byBucket[bk] ?? null)
     })
     return { x: xBuckets, y: yLabels, z }
-  }, [mapData?.heatmap, mapData?.buckets])
+  }, [heatmapRows, heatmapBuckets])
 
   // Stable ref so PlotlyChart's React.memo treats unrelated parent re-renders
   // as no-ops. Must live ABOVE the `data.available === false` early-return so

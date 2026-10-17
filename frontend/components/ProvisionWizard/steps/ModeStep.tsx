@@ -54,7 +54,7 @@ export function ModeStep({ s }: { s: WizardState }) {
             <h4 className="font-bold text-lg">Admin: Connect Terraform</h4>
             <p className="text-xs text-muted-foreground leading-relaxed">
               Set up ingestion for a service that is already managed via
-              Terraform. We'll skip creating Fastly resources but set up data
+              Terraform. We&apos;ll skip creating Fastly resources but set up data
               sync.
             </p>
           </div>
@@ -80,7 +80,7 @@ export function ModeStep({ s }: { s: WizardState }) {
           <div className="space-y-2 text-center">
             <h4 className="font-bold text-lg">Analyst: Join</h4>
             <p className="text-xs text-muted-foreground leading-relaxed">
-              Connect to an existing project. We'll only sync the processed data
+              Connect to an existing project. We&apos;ll only sync the processed data
               from the cloud. No new resources.
             </p>
             {joinDisabled && (

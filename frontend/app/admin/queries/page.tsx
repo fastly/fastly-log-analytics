@@ -146,20 +146,28 @@ export default function QueryMonitorPage() {
 
   // Incremental ``since_seq`` polling — the backend returns the full active
   // list every poll (so a long-running query never disappears) but only
-  // streams completed rows newer than ``lastSeqRef``. We accumulate the
-  // delta into ``completedBuffer`` (capped at 500 rows, FIFO eviction by
-  // query_id) so steady-state wire bytes drop from ~320 MB/min to ~2 MB/min
-  // on a busy admin tab. Three reset paths keep the buffer honest:
+  // streams completed rows newer than ``lastSeqRef``. The queryFn accumulates
+  // the delta into ``completedRef`` (capped at 500 rows, FIFO eviction by
+  // query_id) and returns the merged snapshot, so steady-state wire bytes drop
+  // from ~320 MB/min to ~2 MB/min on a busy admin tab. Two reset paths keep the
+  // buffer honest (an effect flags ``resetPendingRef`` and invalidates; the next
+  // fetch starts from scratch):
   //   1. viewMode toggle (live↔all↔past) — completed-list shape changes
   //   2. tab-visibility hidden→visible — operator returning from another tab
-  //   3. (implicit) pause→resume — the existing Resume click already invalidates
+  //   (pause→resume already invalidates on the Resume click)
   const COMPLETED_BUFFER_CAP = 500
   const lastSeqRef = React.useRef(0)
-  const [completedBuffer, setCompletedBuffer] = React.useState<Map<number, CompletedRow>>(() => new Map())
+  const completedRef = React.useRef<Map<number, CompletedRow>>(new Map())
+  const resetPendingRef = React.useRef(false)
 
   const snapshotQuery = useQuery<SnapshotResponse>({
     queryKey: queryKeys.admin.queryMonitorSnapshot(includeCompleted),
     queryFn: async ({ signal }) => {
+      if (resetPendingRef.current) {
+        resetPendingRef.current = false
+        lastSeqRef.current = 0
+        completedRef.current = new Map()
+      }
       const params = new URLSearchParams()
       if (includeCompleted) params.set('include_completed', 'true')
       if (lastSeqRef.current > 0) {
@@ -173,11 +181,26 @@ export default function QueryMonitorPage() {
         params.set('cold_limit', '50')
       }
       const qs = params.toString()
-      return adminJson<'/api/admin/queries', SnapshotResponse>(
+      const delta = await adminJson<'/api/admin/queries', SnapshotResponse>(
         '/api/admin/queries',
         `/api/admin/queries${qs ? '?' + qs : ''}`,
         { signal },
       )
+      if (delta.last_seq > lastSeqRef.current) {
+        lastSeqRef.current = delta.last_seq
+      }
+      const buffer = completedRef.current
+      for (const row of delta.completed ?? []) {
+        buffer.set(row.query_id, row)
+      }
+      // FIFO eviction by query_id (lowest id = oldest insert). For a
+      // 500-row cap and ~1-2 new completions per tick, this runs rarely.
+      if (buffer.size > COMPLETED_BUFFER_CAP) {
+        const sortedIds = [...buffer.keys()].sort((a, b) => a - b)
+        const toRemove = sortedIds.length - COMPLETED_BUFFER_CAP
+        for (let k = 0; k < toRemove; k++) buffer.delete(sortedIds[k])
+      }
+      return { last_seq: delta.last_seq, active: delta.active, completed: [...buffer.values()] }
     },
     enabled: visible && enabled && !paused,
     refetchInterval: (query) => {
@@ -191,12 +214,9 @@ export default function QueryMonitorPage() {
   // (live drops completed entirely), so the buffer's prior contents become
   // semantically wrong. Reset everything and force a fresh full pull.
   React.useEffect(() => {
-    lastSeqRef.current = 0
-    setCompletedBuffer(new Map())
+    resetPendingRef.current = true
     queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
-    // viewMode is the only dep we want — re-running on queryClient/setCompletedBuffer
-    // identity changes would loop. eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [viewMode, queryClient])
 
   // Tab-visibility restore — the operator may have been away long enough
   // for the in-memory ring buffer (deque maxlen=400 on the backend) to
@@ -204,61 +224,14 @@ export default function QueryMonitorPage() {
   const wasVisibleRef = React.useRef(visible)
   React.useEffect(() => {
     if (visible && !wasVisibleRef.current) {
-      lastSeqRef.current = 0
-      setCompletedBuffer(new Map())
+      resetPendingRef.current = true
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
     }
     wasVisibleRef.current = visible
   }, [visible, queryClient])
 
-  // Accumulate the delta into completedBuffer (and advance lastSeqRef).
-  // Pause: skip — the query itself is disabled so data won't update, but
-  // belt-and-suspenders.
-  React.useEffect(() => {
-    const data = snapshotQuery.data
-    if (!data || paused) return
-    if (data.last_seq > lastSeqRef.current) {
-      lastSeqRef.current = data.last_seq
-    }
-    if (!data.completed || data.completed.length === 0) return
-    setCompletedBuffer((prev) => {
-      const next = new Map(prev)
-      for (const row of data.completed) {
-        next.set(row.query_id, row)
-      }
-      // FIFO eviction by query_id (lowest id = oldest insert). For a
-      // 500-row cap and ~1-2 new completions per tick, this runs rarely.
-      if (next.size > COMPLETED_BUFFER_CAP) {
-        const sortedIds = [...next.keys()].sort((a, b) => a - b)
-        const toRemove = sortedIds.length - COMPLETED_BUFFER_CAP
-        for (let i = 0; i < toRemove; i++) next.delete(sortedIds[i])
-      }
-      return next
-    })
-  }, [snapshotQuery.data, paused])
-
-  // Synthesize the buffered snapshot for downstream filtering: active comes
-  // from the raw response (backend sends full list each poll), completed
-  // comes from the accumulated buffer.
-  //
-  // Stable-array trick: memoize the spread of completedBuffer separately
-  // on completedBuffer identity. The buffer ref only changes when the
-  // accumulator effect actually appended new rows (no-op polls bail out
-  // before setCompletedBuffer), so downstream memos that depend on
-  // bufferedSnapshot.completed get a stable reference across same-data
-  // polls instead of a fresh array every time snapshotQuery.data ticks.
-  const completedArray = React.useMemo(
-    () => [...completedBuffer.values()],
-    [completedBuffer],
-  )
-  const bufferedSnapshot: SnapshotResponse | undefined = React.useMemo(() => {
-    if (!snapshotQuery.data) return undefined
-    return {
-      last_seq: snapshotQuery.data.last_seq,
-      active: snapshotQuery.data.active,
-      completed: completedArray,
-    }
-  }, [snapshotQuery.data, completedArray])
+  // The query already returns active (full list each poll) + the accumulated completed rows.
+  const bufferedSnapshot: SnapshotResponse | undefined = snapshotQuery.data
 
   const cancelMutation = useMutation({
     mutationFn: async (qid: number): Promise<CancelResponse> => {

@@ -47,8 +47,8 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
     [catalog.groups],
   )
   const insightsById = React.useMemo(
-    () => new Map((catalog?.insights || []).map((ins) => [ins.id, ins] as const)),
-    [catalog?.insights],
+    () => new Map((catalog.insights || []).map((ins) => [ins.id, ins] as const)),
+    [catalog.insights],
   )
 
   const enabledGroups = new Set(config.groups)
@@ -149,7 +149,7 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
                           <span className="font-sans text-[10px] text-muted-foreground ml-1 font-normal">(~{field.typical_bytes || 0} B)</span>
                         </Label>
                         {field.has_limit && (
-                          <div className="flex items-center gap-1.5 ml-2" onClick={e => e.stopPropagation()}>
+                          <div className="flex items-center gap-1.5 ml-2">
                             <Label htmlFor={`limit-${field.id}`} className="text-[9px] text-muted-foreground whitespace-nowrap">
                               Max Length
                             </Label>
@@ -286,7 +286,7 @@ export function StandardFieldsStep({
           )}
           {(period === '10' || period === '20') && (
             <p className="text-xs text-muted-foreground mt-1">
-              Dashboard freshness is bounded by the sync cadence (~30s floor); sub-30s log periods produce more files but won't appear faster.
+              Dashboard freshness is bounded by the sync cadence (~30s floor); sub-30s log periods produce more files but won&apos;t appear faster.
             </p>
           )}
         </div>

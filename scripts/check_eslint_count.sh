@@ -83,8 +83,9 @@ cd "$REPO_ROOT/frontend"
 # 328 -> 170: security, origin and network sections read typed row models from the generated
 # schema (no row `any` casts), the network page's hooks moved out of the ReportLayout render-prop
 # into NetworkBody, and the DataTable/map internals use tanstack/maplibre generics.
-# Drive toward zero.
-CEILING=170
+# 170 -> 0: effects that only mirrored props/storage into state are derived state, keyed state or
+# external-store reads; components are hoisted; index keys and unescaped entities are gone.
+CEILING=0
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

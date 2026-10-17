@@ -13,6 +13,8 @@ import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useDerivedState } from '@/hooks/useDerivedState'
+import { useLocalStorageString } from '@/hooks/useLocalStorageString'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Play, Search, AlertCircle, Database, Terminal, Activity, Bug } from 'lucide-react'
@@ -47,6 +49,54 @@ function errorBodyMessage(body: ErrorBody | null): string | undefined {
 }
 
 const HISTORY_KEY = 'fastly_qe_history'
+
+/**
+ * Apply the deep-link params the dashboard's "See Raw Logs" CTA puts on the URL
+ * (``?start_time`` + ``?end_time`` and/or ``?filters=<json>``) into the filter store.
+ * Returns whether anything was applied — a deep-link landing is an explicit intent to run.
+ */
+function applyDeepLinkToFilterStore(): boolean {
+  if (typeof window === 'undefined') return false
+  const params = new URLSearchParams(window.location.search)
+  const qsStart = params.get('start_time')
+  const qsEnd = params.get('end_time')
+  const qsFilters = params.get('filters')
+  const { setRange, clearFilters, addFilter } = useFilterStore.getState()
+
+  let mutated = false
+  if (qsStart && qsEnd) {
+    setRange(qsStart, qsEnd)
+    mutated = true
+  }
+  if (qsFilters) {
+    try {
+      const parsed = JSON.parse(qsFilters) as FiltersPayload
+      if (parsed && typeof parsed === 'object') {
+        clearFilters()
+        for (const [rawCol, spec] of Object.entries(parsed)) {
+          if (!spec || !Array.isArray(spec.values)) continue
+          const col = rawCol.replace(/_\d+$/, '')
+          for (const v of spec.values) {
+            addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
+          }
+        }
+        mutated = true
+      }
+    } catch {
+      // Malformed ?filters= — ignore silently rather than break the page.
+    }
+  }
+  return mutated
+}
+
+function parseHistory(raw: string | null): { sql: string; ts: number }[] {
+  if (!raw) return []
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return []
+  }
+}
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
@@ -65,22 +115,20 @@ function QueryPageInner() {
   const urlQueryParam = searchParams.get('q')
   const urlMode: QueryMode =
     searchParams.get('mode') === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
-  const [mode, setMode] = useState<QueryMode>(urlMode)
+  // Local mode follows the URL when it changes underneath us (e.g. back/forward).
+  const [mode, setMode] = useDerivedState<QueryMode>(urlMode)
 
-  // Keep local mode in sync if the URL changes underneath us (e.g. back/forward).
-  useEffect(() => {
-    setMode(urlMode)
-  }, [urlMode])
+  // One-shot deep-link hydration, applied BEFORE this component reads the filter store below
+  // (a lazy initializer, like QueryProvider's URL hydration). A deep-link landing marks the
+  // first run as wanted.
+  const [deepLinked] = useState(applyDeepLinkToFilterStore)
 
   // Filter store drives Structured Mode. We pull primitives so we can compose
   // the generated SQL purely from filter-bar state.
-  const { startTime, endTime, addFilter, setRange, clearFilters } = useFilterStore(
+  const { startTime, endTime } = useFilterStore(
     useShallow(state => ({
       startTime: state.startTime,
       endTime: state.endTime,
-      addFilter: state.addFilter,
-      setRange: state.setRange,
-      clearFilters: state.clearFilters,
     })),
   )
   // Pass `true` so the FilterBar's "Edge only" toggle reaches the query
@@ -93,70 +141,13 @@ function QueryPageInner() {
   // write-back loop the audit identified as missing here.
   useFilterUrlWriteback()
 
-  // ── One-shot URL hydration ────────────────────────────────────────────────
-  // The dashboard "See Raw Logs" CTA links here with ?start_time, ?end_time,
-  // and ?filters=<json>. Apply them once into the filter store so the
-  // structured mode picks them up, then strip the params so subsequent
-  // FilterBar edits aren't fighting a stale URL.
-  const [hasHydratedFromUrl, setHasHydratedFromUrl] = useState(false)
   // Gate the Structured-mode auto-run on user intent. A fresh /query
   // visit (no deep-link params, no Run click) should NOT immediately
   // fire a backend query — the previous behaviour issued a default
   // ``SELECT * FROM logs LIMIT 100`` against the cold view on every
-  // navigation. ``hasUserRun`` becomes true on a deep-link hydration
-  // (See Raw Logs CTA) and on an explicit Run button click.
-  const [hasUserRun, setHasUserRun] = useState(false)
-  useEffect(() => {
-    if (hasHydratedFromUrl) return
-    if (typeof window === 'undefined') return
-
-    const params = new URLSearchParams(window.location.search)
-    const qsStart = params.get('start_time')
-    const qsEnd = params.get('end_time')
-    const qsFilters = params.get('filters')
-    const qsRawQuery = params.get('q')
-
-    let mutated = false
-
-    if (qsRawQuery) {
-      setRawSql(qsRawQuery)
-      setMode('raw')
-    }
-
-    if (qsStart && qsEnd) {
-      setRange(qsStart, qsEnd)
-      mutated = true
-    }
-
-    if (qsFilters) {
-      try {
-        const parsed = JSON.parse(qsFilters) as FiltersPayload
-        if (parsed && typeof parsed === 'object') {
-          clearFilters()
-          for (const [rawCol, spec] of Object.entries(parsed)) {
-            if (!spec || !Array.isArray(spec.values)) continue
-            const col = rawCol.replace(/_\d+$/, '')
-            for (const v of spec.values) {
-              addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
-            }
-          }
-          mutated = true
-        }
-      } catch {
-        // Malformed ?filters= — ignore silently rather than break the page.
-      }
-    }
-
-    if (mutated) {
-      // Deep-link landings are an explicit user intent — auto-run is
-      // the entire point of the See Raw Logs CTA. useFilterUrlWriteback owns
-      // the canonical URL state from the next effect tick onward, so we
-      // intentionally do NOT strip the consumed params here.
-      setHasUserRun(true)
-    }
-
-    setHasHydratedFromUrl(true)
-  }, [hasHydratedFromUrl, addFilter, clearFilters, setRange])
+  // navigation. ``hasUserRun`` starts true on a deep-link landing
+  // (See Raw Logs CTA) and becomes true on an explicit Run button click.
+  const [hasUserRun, setHasUserRun] = useState(deepLinked)
 
   // ── SQL editor + run controls ─────────────────────────────────────────────
   type Dataset = 'logs' | 'client_vitals' | 'client_errors'
@@ -220,7 +211,8 @@ function QueryPageInner() {
   // also page in more rows on demand.
   const [maxRows, setMaxRows] = useState<number>(100)
   const [explain, setExplain] = useState<boolean>(false)
-  const [history, setHistory] = useState<{ sql: string; ts: number }[]>([])
+  const [historyRaw, writeHistoryRaw] = useLocalStorageString(HISTORY_KEY)
+  const history = useMemo(() => parseHistory(historyRaw), [historyRaw])
 
   // Structured-mode sort lives here so the generated SQL can ORDER BY it
   // server-side. Raw-mode sort is owned uncontrolled by DataTable (client side)
@@ -228,15 +220,6 @@ function QueryPageInner() {
   const [structuredSorting, setStructuredSorting] = useState<SortingState>([
     { id: 'timestamp', desc: true },
   ])
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(HISTORY_KEY)
-      if (stored) {
-        setHistory(JSON.parse(stored))
-      }
-    } catch { /* ignore */ }
-  }, [])
 
   const { data: schemaData } = useQuery({
     queryKey: queryKeys.admin.schema(activeServiceId),
@@ -345,17 +328,12 @@ function QueryPageInner() {
   })
 
   const pushHistory = useCallback((sqlToRun: string) => {
-    setHistory(prev => {
-      const updated = [
-        { sql: sqlToRun, ts: Date.now() },
-        ...prev.filter(h => h.sql !== sqlToRun),
-      ].slice(0, 20)
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated))
-      } catch { /* ignore */ }
-      return updated
-    })
-  }, [])
+    const updated = [
+      { sql: sqlToRun, ts: Date.now() },
+      ...history.filter(h => h.sql !== sqlToRun),
+    ].slice(0, 20)
+    writeHistoryRaw(JSON.stringify(updated))
+  }, [history, writeHistoryRaw])
 
   const handleRun = useCallback(() => {
     const sqlToRun = effectiveSql.trim()
@@ -377,14 +355,13 @@ function QueryPageInner() {
   useEffect(() => {
     if (mode !== 'structured') return
     if (!activeServiceId) return
-    if (!hasHydratedFromUrl) return
     if (!hasUserRun) return
     pushHistory(structuredSql)
     queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
     // queryMutation/pushHistory are stable from useMutation/useCallback; we
     // only want to re-fire when the generated SQL or run-time inputs change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, hasUserRun, maxRows, explain, dataset])
+  }, [structuredSql, mode, activeServiceId, hasUserRun, maxRows, explain, dataset])
 
   const handleExportCSV = useCallback(() => {
     if (!queryMutation.data?.data?.length) return
@@ -395,15 +372,10 @@ function QueryPageInner() {
 
   const removeHistoryItem = useCallback((e: React.MouseEvent, index: number) => {
     e.stopPropagation()
-    setHistory(prev => {
-      const updated = [...prev]
-      updated.splice(index, 1)
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated))
-      } catch { /* ignore */ }
-      return updated
-    })
-  }, [])
+    const updated = [...history]
+    updated.splice(index, 1)
+    writeHistoryRaw(JSON.stringify(updated))
+  }, [history, writeHistoryRaw])
 
   // Switching modes is reflected in the URL so AppLayout's filter-bar
   // visibility (driven by ?mode=raw) stays in sync without a hard reload.
@@ -421,11 +393,12 @@ function QueryPageInner() {
     }
     const qs = params.toString()
     router.replace(qs ? `/query?${qs}` : '/query')
-  }, [router, structuredSql])
+  }, [router, structuredSql, setMode])
 
+  const resultColumns = queryMutation.data?.columns
   const columns: ColumnDef<Record<string, unknown>>[] = useMemo(() => {
-    if (!queryMutation.data?.columns) return []
-    return queryMutation.data.columns.map((col: string) => ({
+    if (!resultColumns) return []
+    return resultColumns.map((col: string) => ({
       id: col,
       accessorFn: (row: Record<string, unknown>) => row[col],
       meta: { label: getFieldLabel(col) },
@@ -447,7 +420,7 @@ function QueryPageInner() {
         return <span className="text-xs font-mono">{value !== null && value !== undefined ? String(value) : 'null'}</span>
       },
     }))
-  }, [queryMutation.data?.columns, full, abbr, getFieldLabel])
+  }, [resultColumns, full, abbr, getFieldLabel])
 
   if (!activeServiceId && bootstrapResolved) {
     return <NoServiceSelected icon={Search} message="Please select a service from the header to run queries." />

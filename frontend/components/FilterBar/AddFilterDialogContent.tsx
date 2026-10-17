@@ -170,9 +170,9 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
               <div className="mt-1 border rounded-md bg-background shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                 <ScrollArea className={cn("max-h-[160px]", suggestions.values.length > 5 ? "h-[160px]" : "")}>
                   <div className="p-1">
-                    {suggestions.values.map((v, i) => (
+                    {suggestions.values.map((v) => (
                       <button
-                        key={i}
+                        key={String(v.value)}
                         type="button"
                         onClick={() => handleSelectSuggestion(v.value)}
                         className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-muted rounded-sm transition-colors text-left group"

@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { InsightCardData } from '@/types/api'
-import { cn } from '@/lib/utils'
+import { cn, keyByOccurrence } from '@/lib/utils'
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { InsightDataModal } from './InsightDataModal'
@@ -126,9 +126,9 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
 
           {insight.items && insight.items.length > 0 && (
             <div className="space-y-1.5 mt-1">
-              {insight.items.slice(0, 5).map((item, i) => (
+              {keyByOccurrence(insight.items.slice(0, 5), (it) => it.label).map(({ key, item }) => (
                 <InsightItemRow
-                  key={i}
+                  key={key}
                   item={item}
                   insightId={insight.id}
                   onMapClick={(data) => setSelectedMapItem(data)}

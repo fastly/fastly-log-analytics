@@ -8,7 +8,6 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
   TableBody,
@@ -20,6 +19,7 @@ import {
 import { client } from '@/lib/api'
 import { formatTimeAgo } from '@/lib/date'
 import type { components } from '@/types/api.generated'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 
 interface AuditLogTabProps {
   serviceId: string
@@ -102,9 +102,7 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
     >
       {query.isLoading ? (
         <div className="p-4 space-y-2">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
+          <SkeletonGrid count={3} height="2.5rem" className="rounded-md" />
         </div>
       ) : (
         <div className="max-h-[520px] overflow-auto">

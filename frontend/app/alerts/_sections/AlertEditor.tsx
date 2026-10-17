@@ -28,6 +28,7 @@ import {
 import type { components } from '@/types/api.generated'
 import { AlertPreview } from './AlertPreview'
 import { oneOf } from '@/lib/narrow'
+import { keyByOccurrence } from '@/lib/utils'
 
 type Alert = components["schemas"]["Alert"]
 type AlertChannel = components["schemas"]["AlertChannel"]
@@ -66,6 +67,24 @@ const METRICS_BY_CATEGORY: Record<Category, { value: Metric; label: string }[]> 
   caching: [{ value: 'hit_rate', label: 'Cache Hit Rate (%)' }],
 }
 const ALL_METRICS: readonly Metric[] = Object.values(METRICS_BY_CATEGORY).flatMap((ms) => ms.map((m) => m.value))
+
+function LabelWithInfo({ htmlFor, children, tooltip }: { htmlFor?: string; children: React.ReactNode; tooltip: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger type="button" tabIndex={-1} className="text-muted-foreground hover:text-foreground">
+            <Info className="h-3.5 w-3.5" />
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[300px] text-xs">
+            {tooltip}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  )
+}
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null, onSuccess: () => void }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -116,8 +135,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     setChannels([...channels, { type: newChannelType, url: newChannelUrl.trim() }])
     setNewChannelUrl('')
   }
-  const handleRemoveChannel = (index: number) => {
-    setChannels(channels.filter((_, i) => i !== index))
+  const handleRemoveChannel = (channel: AlertChannel) => {
+    setChannels(channels.filter((c) => c !== channel))
   }
 
   // Fetch preview data on change
@@ -246,22 +265,6 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
       setIsSaving(false)
     }
   }
-
-  const LabelWithInfo = ({ htmlFor, children, tooltip }: { htmlFor?: string, children: React.ReactNode, tooltip: React.ReactNode }) => (
-    <div className="flex items-center gap-1.5">
-      <Label htmlFor={htmlFor}>{children}</Label>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger type="button" tabIndex={-1} className="text-muted-foreground hover:text-foreground">
-            <Info className="h-3.5 w-3.5" />
-          </TooltipTrigger>
-          <TooltipContent className="max-w-[300px] text-xs">
-            {tooltip}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    </div>
-  )
 
   return (
     <form onSubmit={handleSave} className="flex flex-col overflow-hidden">
@@ -495,8 +498,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
             {channels.length > 0 ? (
               <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
-                {channels.map((chan, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
+                {keyByOccurrence(channels, (c) => `${c.type}|${c.url}`).map(({ key, item: chan }) => (
+                  <div key={key} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
                     <div className="flex items-center gap-2 overflow-hidden">
                       <span className="font-semibold capitalize px-1.5 py-0.5 rounded bg-accent/60 text-[10px]">
                         {chan.type}
@@ -510,7 +513,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                       variant="ghost"
                       size="sm"
                       className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
-                      onClick={() => handleRemoveChannel(idx)}
+                      onClick={() => handleRemoveChannel(chan)}
                     >
                       ×
                     </Button>

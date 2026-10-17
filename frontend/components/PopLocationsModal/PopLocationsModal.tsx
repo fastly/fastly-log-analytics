@@ -75,7 +75,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
             POP Location Data
           </DialogTitle>
           <p className="text-sm text-muted-foreground mt-1">
-            POP coordinates power the Impossible Distance insight — they detect when a client's
+            POP coordinates power the Impossible Distance insight — they detect when a client&apos;s
             claimed geo location is physically impossible given their TCP RTT. Refresh when
             Fastly adds new POPs.
           </p>

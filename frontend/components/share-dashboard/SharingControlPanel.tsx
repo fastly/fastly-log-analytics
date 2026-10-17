@@ -41,7 +41,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   // fill in right after mount. Sibling to formatDeterministicUTC's fix in lib/date.ts.
   const mounted = useMounted()
   const [mode, setMode] = React.useState<SharingMode>('hostname')
-  const [hostnameValue, setHostnameValue] = React.useState('')
+  const [hostnameDraft, setHostnameValue] = React.useState('')
   const [ipValue, setIpValue] = React.useState('')
 
   const searchParams = useSearchParams()
@@ -50,11 +50,8 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     return status?.services?.find((s) => s.service_id === activeServiceId)
   }, [status?.services, activeServiceId])
 
-  React.useEffect(() => {
-    if (activeService?.sharing_domain && !hostnameValue) {
-      setHostnameValue(activeService.sharing_domain)
-    }
-  }, [activeService, hostnameValue])
+  // An empty field shows the service's saved sharing domain (derived, not copied into state).
+  const hostnameValue = hostnameDraft || activeService?.sharing_domain || ''
   // Editable copy of the global concurrent-analyst cap. `capDraft` is null
   // while the input mirrors the server value; once the admin types it holds
   // their edit. Deriving the displayed value during render (rather than syncing

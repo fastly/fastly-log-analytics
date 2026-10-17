@@ -211,9 +211,10 @@ export function HealthBadge({ score }: { score: number | null }) {
   )
 }
 
-const shieldingHeader = (label: string) => () => (
-  <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
-)
+const shieldingHeader = (label: string) =>
+  function ShieldingHeader() {
+    return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
+  }
 // Cells read their own column through `getValue()` (typed `unknown` for a heterogeneous column set).
 const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
 const numberValue = (v: unknown): number | null => (typeof v === 'number' ? v : null)

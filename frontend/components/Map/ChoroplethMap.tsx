@@ -391,6 +391,14 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
               aria-label="Countries by request count — use arrow keys to navigate, Enter to filter"
               aria-activedescendant={`choropleth-country-option-${activeIndex}`}
               onKeyDown={handlePickerKeyDown}
+              onClick={(e) => {
+                // One delegated handler for the options (keyboard activation lives in onKeyDown above).
+                const option = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]')
+                const country = option?.dataset.country
+                if (country === undefined) return
+                onCountryClickRef.current?.(country)
+                closePicker()
+              }}
               className="mt-1 max-h-72 w-64 overflow-y-auto bg-popover/95 backdrop-blur-sm border rounded-md shadow-lg text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {tableRows.map((d, i) => {
@@ -401,11 +409,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
                     id={`choropleth-country-option-${i}`}
                     role="option"
                     aria-selected={isActive}
+                    data-country={d.country}
                     onMouseEnter={() => setActiveIndex(i)}
-                    onClick={() => {
-                      onCountryClickRef.current?.(d.country)
-                      closePicker()
-                    }}
                     className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer ${isActive ? 'bg-accent text-accent-foreground' : ''}`}
                   >
                     <span className="truncate">

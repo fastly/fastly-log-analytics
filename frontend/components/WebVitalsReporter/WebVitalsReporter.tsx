@@ -30,7 +30,10 @@ export function WebVitalsReporter() {
   // callback always sees the latest value: bootstrap resolves a tick after
   // first paint, and the callback is registered once on mount.
   const enabledRef = React.useRef(false)
-  enabledRef.current = Boolean(bootstrap?.settings?.web_vitals_enabled)
+  const webVitalsEnabled = Boolean(bootstrap?.settings?.web_vitals_enabled)
+  React.useEffect(() => {
+    enabledRef.current = webVitalsEnabled
+  }, [webVitalsEnabled])
 
   const disabledRef = React.useRef(false)
   useReportWebVitals((metric) => {

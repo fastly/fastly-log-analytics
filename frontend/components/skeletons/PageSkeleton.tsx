@@ -25,6 +25,7 @@ import { Loader2 } from 'lucide-react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 
 /**
  * When a route's loading.tsx passes its (static, build-time-known) title,
@@ -83,9 +84,7 @@ export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHea
       <div className="border rounded-md overflow-hidden">
         <Skeleton className="h-10 w-full rounded-none" />
         <div className="divide-y">
-          {Array.from({ length: rows }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full rounded-none" />
-          ))}
+          <SkeletonGrid count={rows} height="3rem" className="rounded-none" />
         </div>
       </div>
     </div>

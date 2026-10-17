@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useRef } from 'react'
+import { useInViewOnce } from '@/hooks/useInViewOnce'
 
 interface LazyMountProps {
   children: React.ReactNode
@@ -40,34 +41,11 @@ export function LazyMount({
   className,
 }: LazyMountProps) {
   const ref = useRef<HTMLDivElement>(null)
-  // Always start false so server and client render the same initial DOM
-  // (an empty min-height placeholder). The effect below promotes to
-  // true either immediately (no IntersectionObserver) or once the
-  // viewport observer fires. Starting true on the server caused
-  // hydration mismatches when this component sat above the fold —
-  // server emitted ``<div>{children}</div>``, client emitted the empty
-  // placeholder, React 418.
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => {
-    if (visible || !ref.current) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
-    const node = ref.current
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisible(true)
-          observer.disconnect()
-        }
-      },
-      { rootMargin },
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [visible, rootMargin])
+  // `useInViewOnce` starts false on the server and the first client render, so both emit the
+  // same empty min-height placeholder (starting true on the server caused hydration mismatches
+  // when this component sat above the fold — React 418); it flips once the viewport observer
+  // fires, or immediately where IntersectionObserver is unavailable.
+  const visible = useInViewOnce(ref, { rootMargin })
 
   return (
     <div ref={ref} className={className} style={visible ? undefined : { minHeight }}>

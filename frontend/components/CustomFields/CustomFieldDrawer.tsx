@@ -127,14 +127,12 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
     onError: (error: Error) => setValidationError(error.message || "Failed to save field")
   })
 
-  // Reset form when the drawer opens or the edited field changes. The deps
-  // intentionally exclude `saveMutation` — TanStack Query's mutation object
-  // is recreated on every render, so listing it would re-fire this effect on
-  // every keystroke and clobber the user's in-progress edits. We only want
-  // to reset on the open/field transition; `saveMutation.reset()` is safe to
-  // call against the current ref each time.
-
-  useEffect(() => {
+  // Reset the form when the drawer opens or the edited field changes (adjusted during render
+  // against what was last seen). The mutation's own state is reset in the effect below — it is
+  // external to this component, so it cannot be derived.
+  const [seenDrawer, setSeenDrawer] = useState<{ open: boolean; field: typeof field }>({ open: false, field: null })
+  if (seenDrawer.open !== open || seenDrawer.field !== field) {
+    setSeenDrawer({ open, field })
     if (open) {
       setFormData(field ? {
         ...field,
@@ -143,8 +141,13 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
       setValidationError(null)
       setLintResult(null)
       setLintFetchError(null)
-      saveMutation.reset()
     }
+  }
+
+  // The deps intentionally exclude `saveMutation` — TanStack Query's mutation object is
+  // recreated on every render, so listing it would re-fire this effect on every keystroke.
+  useEffect(() => {
+    if (open) saveMutation.reset()
   }, [open, field])
 
   const handleChange = <K extends keyof FormState>(key: K, value: FormState[K]) => {

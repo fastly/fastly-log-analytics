@@ -54,10 +54,12 @@ function InputGroupAddon({
       data-slot="input-group-addon"
       data-align={align}
       className={cn(inputGroupAddonVariants({ align }), className)}
-      onClick={(e) => {
-        if ((e.target as HTMLElement).closest("button")) {
+      onMouseDown={(e) => {
+        if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) {
           return
         }
+        // Pointer convenience only: keyboard users reach the input directly.
+        e.preventDefault()
         e.currentTarget.parentElement?.querySelector("input")?.focus()
       }}
       {...props}

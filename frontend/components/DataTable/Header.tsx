@@ -96,6 +96,8 @@ export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData,
           <GripHorizontal className="w-3.5 h-3.5" />
         </button>
         <div
+          // Pointer-only affordance: column resizing has no keyboard path, so the handle carries no role.
+          role="presentation"
           // Guard `getResizeHandler` against the column being removed
           // mid-render: when a column toggles off, the DOM header lingers
           // for one frame and tanstack-table's resize handler throws

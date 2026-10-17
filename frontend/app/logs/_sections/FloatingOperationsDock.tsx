@@ -183,34 +183,39 @@ export function FloatingOperationsDock({
               {displayedJobs.map((job) => {
                 const isActive = job.id === selectedJobId
                 return (
-                  <button
+                  <div
                     key={job.id}
-                    onClick={() => setSelectedJobId(job.id)}
                     className={cn(
-                      "px-3 py-1.5 rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 cursor-pointer border-t border-x transition-all shrink-0",
+                      "rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 border-t border-x transition-all shrink-0",
                       isActive
                         ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold"
                         : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30"
                     )}
                   >
-                    <span className={cn(
-                      "w-1.5 h-1.5 rounded-full transition-colors duration-300",
-                      job.status === 'running'
-                        ? "bg-blue-500 animate-pulse"
-                        : "bg-zinc-600"
-                    )} />
-                    {job.task === 'metadata_sync' ? 'sync' : job.task}
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDismiss(job.id)
-                      }}
-                      className="ml-1 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300"
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job.id)}
+                      className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider"
+                    >
+                      <span className={cn(
+                        "w-1.5 h-1.5 rounded-full transition-colors duration-300",
+                        job.status === 'running'
+                          ? "bg-blue-500 animate-pulse"
+                          : "bg-zinc-600"
+                      )} />
+                      {job.task === 'metadata_sync' ? 'sync' : job.task}
+                    </button>
+                    {/* A sibling button, not a child: interactive content may not nest inside a button. */}
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(job.id)}
+                      className="mr-3 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300 cursor-pointer"
                       title="Dismiss task"
+                      aria-label={`Dismiss ${job.task === 'metadata_sync' ? 'sync' : job.task} task`}
                     >
                       <X className="h-2.5 w-2.5" />
-                    </span>
-                  </button>
+                    </button>
+                  </div>
                 )
               })}
             </div>

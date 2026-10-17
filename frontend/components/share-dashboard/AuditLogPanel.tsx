@@ -80,30 +80,34 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
   const [filteredLogs, setFilteredLogs] = React.useState<AuditLog[] | null>(null)
   const [loading, setLoading] = React.useState(false)
 
+  // The email filter follows the upstream `initialEmailFilter` (adjusted during render when it
+  // changes); the fetch for a provided filter runs in the effect below.
+  const [seenInitialEmail, setSeenInitialEmail] = React.useState(initialEmailFilter)
+  if (initialEmailFilter !== seenInitialEmail) {
+    setSeenInitialEmail(initialEmailFilter)
+    setFilters((f) => ({ ...f, email: initialEmailFilter || '' }))
+    if (!initialEmailFilter) setFilteredLogs(null)
+  }
+
   React.useEffect(() => {
-    if (initialEmailFilter) {
-      setFilters((f) => ({ ...f, email: initialEmailFilter }))
-      const autoApply = async () => {
-        setLoading(true)
-        onError('')
-        try {
-          const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
-          const { data, response } = await client.GET('/api/admin/share/audit-logs', {
-            params: { query: params },
-          })
-          if (!response.ok) throw new Error(`status ${response.status}`)
-          setFilteredLogs(data?.audit_logs || [])
-        } catch (e) {
-          onError(extractApiError(e))
-        } finally {
-          setLoading(false)
-        }
+    if (!initialEmailFilter) return
+    const autoApply = async () => {
+      setLoading(true)
+      onError('')
+      try {
+        const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
+        const { data, response } = await client.GET('/api/admin/share/audit-logs', {
+          params: { query: params },
+        })
+        if (!response.ok) throw new Error(`status ${response.status}`)
+        setFilteredLogs(data?.audit_logs || [])
+      } catch (e) {
+        onError(extractApiError(e))
+      } finally {
+        setLoading(false)
       }
-      autoApply()
-    } else {
-      setFilters((f) => ({ ...f, email: '' }))
-      setFilteredLogs(null)
     }
+    autoApply()
   }, [initialEmailFilter, onError])
 
   const applyFilters = async () => {

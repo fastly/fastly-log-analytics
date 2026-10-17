@@ -20,6 +20,71 @@ export type BackgroundCronToast = Pick<
 > | null
 
 /**
+ * Accumulate running and completed jobs, pruning older runs of the same task type to prevent
+ * historical clutter: keep the active running job and the single most recent completed job
+ * (last run) for each task. Returns `prev` untouched when nothing changed.
+ */
+function mergeRunningJobs(prev: CronRun[], entries: CronRun[]): CronRun[] {
+  // 1. Identify which tasks are currently running in the poll response
+  const runningTasks = new Set(entries.map((j) => j.task))
+
+  // 2. Filter out completed jobs of the tasks that are now running a new instance
+  const filtered = prev.filter((j) => {
+    const isRunningNow = entries.some((rc) => rc.id === j.id)
+    return isRunningNow || !runningTasks.has(j.task)
+  })
+
+  // 3. Keep only the single most recent completed job per task to prevent history clutter
+  const jobsByTask: Record<string, CronRun[]> = {}
+  filtered.forEach(j => {
+    if (!jobsByTask[j.task]) jobsByTask[j.task] = []
+    jobsByTask[j.task].push(j)
+  })
+
+  const pruned: CronRun[] = []
+  Object.keys(jobsByTask).forEach(task => {
+    const taskJobs = jobsByTask[task]
+    const running = taskJobs.filter(j => entries.some((rc) => rc.id === j.id))
+    const completed = taskJobs.filter(j => !entries.some((rc) => rc.id === j.id))
+
+    if (running.length > 0) {
+      pruned.push(...running.map(j => ({ ...j, status: 'running' })))
+      if (completed.length > 0) {
+        const latestCompleted = completed.reduce((max, job) => job.id > max.id ? job : max, completed[0])
+        pruned.push({ ...latestCompleted, status: 'completed' })
+      }
+    } else if (completed.length > 0) {
+      const latestCompleted = completed.reduce((max, job) => job.id > max.id ? job : max, completed[0])
+      pruned.push({ ...latestCompleted, status: 'completed' })
+    }
+  })
+
+  // 4. Merge in brand new running jobs
+  const prunedIds = new Set(pruned.map(j => j.id))
+  const brandNew = entries
+    .filter((j) => !prunedIds.has(j.id))
+    .map((j) => ({ ...j, status: 'running' }))
+
+  const nextJobs = [...pruned, ...brandNew]
+
+  // 5. Compare nextJobs with prev (by id, status, duration, and rows_ingested) to avoid updating state if nothing changed
+  if (prev.length === nextJobs.length) {
+    const matchesAll = prev.every(pj => {
+      const nj = nextJobs.find(j => j.id === pj.id)
+      return (
+        nj &&
+        nj.status === pj.status &&
+        nj.duration_s === pj.duration_s &&
+        nj.rows_ingested === pj.rows_ingested
+      )
+    })
+    if (matchesAll) return prev
+  }
+
+  return nextJobs
+}
+
+/**
  * Orchestrates all state, data queries, and side-effects for the
  * Logs / Data Management page. Returns the entire bag of values
  * needed by the rendering shell + its section components.
@@ -50,8 +115,17 @@ export function useLogsPageState(initialTab?: string) {
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [selectedConsoleJobId, setSelectedConsoleJobId] = useState<number | string | null>(null)
 
-  // Background cron toast notification state
-  const [backgroundCronToast, setBackgroundCronToast] = useState<BackgroundCronToast>(null)
+  // Background cron toast notification state. Scoped to the service it was raised for, so
+  // switching services drops it without an effect (the stored toast simply stops matching).
+  const [toastState, setToastState] = useState<{ serviceId: string | null; toast: BackgroundCronToast }>({
+    serviceId: activeServiceId,
+    toast: null,
+  })
+  const storedToast = toastState.serviceId === activeServiceId ? toastState.toast : null
+  const setBackgroundCronToast = useCallback(
+    (toast: BackgroundCronToast) => setToastState({ serviceId: activeServiceId, toast }),
+    [activeServiceId],
+  )
 
   // Multi-tenant safe run ID tracker to prevent alerting old runs or cross-tenant leaks
   const maxSeenIdRef = React.useRef<number | null>(null)
@@ -59,7 +133,6 @@ export function useLogsPageState(initialTab?: string) {
   // Reset tracker when switching active services
   useEffect(() => {
     maxSeenIdRef.current = null
-    setBackgroundCronToast(null)
   }, [activeServiceId])
 
   const { data: status } = useSyncStatus()
@@ -151,68 +224,14 @@ export function useLogsPageState(initialTab?: string) {
   // to prevent historical clutter. We only keep the active running job and the single
   // most recent completed job (last run) for each task.
   const [displayedJobs, setDisplayedJobs] = useState<CronRun[]>([])
-  useEffect(() => {
-    if (!runningCrons?.entries) return
-    setDisplayedJobs(prev => {
-      // 1. Identify which tasks are currently running in the poll response
-      const runningTasks = new Set(runningCrons.entries.map((j) => j.task))
-
-      // 2. Filter out completed jobs of the tasks that are now running a new instance
-      const filtered = prev.filter((j) => {
-        const isRunningNow = runningCrons.entries.some((rc) => rc.id === j.id)
-        return isRunningNow || !runningTasks.has(j.task)
-      })
-
-      // 3. Keep only the single most recent completed job per task to prevent history clutter
-      const jobsByTask: Record<string, CronRun[]> = {}
-      filtered.forEach(j => {
-        if (!jobsByTask[j.task]) jobsByTask[j.task] = []
-        jobsByTask[j.task].push(j)
-      })
-
-      const pruned: CronRun[] = []
-      Object.keys(jobsByTask).forEach(task => {
-        const taskJobs = jobsByTask[task]
-        const running = taskJobs.filter(j => runningCrons.entries.some((rc) => rc.id === j.id))
-        const completed = taskJobs.filter(j => !runningCrons.entries.some((rc) => rc.id === j.id))
-
-        if (running.length > 0) {
-          pruned.push(...running.map(j => ({ ...j, status: 'running' })))
-          if (completed.length > 0) {
-            const latestCompleted = completed.reduce((max, job) => job.id > max.id ? job : max, completed[0])
-            pruned.push({ ...latestCompleted, status: 'completed' })
-          }
-        } else if (completed.length > 0) {
-          const latestCompleted = completed.reduce((max, job) => job.id > max.id ? job : max, completed[0])
-          pruned.push({ ...latestCompleted, status: 'completed' })
-        }
-      })
-
-      // 4. Merge in brand new running jobs
-      const prunedIds = new Set(pruned.map(j => j.id))
-      const brandNew = runningCrons.entries
-        .filter((j) => !prunedIds.has(j.id))
-        .map((j) => ({ ...j, status: 'running' }))
-
-      const nextJobs = [...pruned, ...brandNew]
-
-      // 5. Compare nextJobs with prev (by id, status, duration, and rows_ingested) to avoid updating state if nothing changed
-      if (prev.length === nextJobs.length) {
-        const matchesAll = prev.every(pj => {
-          const nj = nextJobs.find(j => j.id === pj.id)
-          return (
-            nj &&
-            nj.status === pj.status &&
-            nj.duration_s === pj.duration_s &&
-            nj.rows_ingested === pj.rows_ingested
-          )
-        })
-        if (matchesAll) return prev
-      }
-
-      return nextJobs
-    })
-  }, [runningCrons?.entries])
+  const runningEntries = runningCrons?.entries
+  const [seenRunningEntries, setSeenRunningEntries] = useState<typeof runningEntries | undefined>(undefined)
+  if (runningEntries && runningEntries !== seenRunningEntries) {
+    // Derived during render (the poll result is the input), not synced in an effect.
+    const entries = runningEntries
+    setSeenRunningEntries(entries)
+    setDisplayedJobs((prev) => mergeRunningJobs(prev, entries))
+  }
 
   const removeDisplayedJob = useCallback((id: number) => {
     setDisplayedJobs(prev => prev.filter((j) => j.id !== id))
@@ -275,21 +294,22 @@ export function useLogsPageState(initialTab?: string) {
     }
   }, [recentCrons?.entries])
 
-  // Effect to update an active running toast when that specific run completes
-  useEffect(() => {
-    if (!backgroundCronToast || backgroundCronToast.status !== 'running' || !recentCrons?.entries) return
-    const updatedRun = recentCrons.entries.find((e) => e.id === backgroundCronToast.id)
-    if (updatedRun && updatedRun.status !== 'running') {
-      setBackgroundCronToast({
-        id: updatedRun.id,
-        task: updatedRun.task,
-        status: updatedRun.status ?? 'unknown',
-        started_at: updatedRun.started_at,
-        duration_s: updatedRun.duration_s,
-        rows_ingested: updatedRun.rows_ingested
-      })
+  // An active running toast flips to its completed form as soon as the poll shows that run
+  // finished — derived from the stored toast + the latest poll rather than written back.
+  const recentEntries = recentCrons?.entries
+  const backgroundCronToast = React.useMemo<BackgroundCronToast>(() => {
+    if (!storedToast || storedToast.status !== 'running' || !recentEntries) return storedToast
+    const updatedRun = recentEntries.find((e) => e.id === storedToast.id)
+    if (!updatedRun || updatedRun.status === 'running') return storedToast
+    return {
+      id: updatedRun.id,
+      task: updatedRun.task,
+      status: updatedRun.status ?? 'unknown',
+      started_at: updatedRun.started_at,
+      duration_s: updatedRun.duration_s,
+      rows_ingested: updatedRun.rows_ingested,
     }
-  }, [recentCrons?.entries, backgroundCronToast])
+  }, [storedToast, recentEntries])
 
   // Effect to auto-dismiss non-running notifications after 8 seconds of inactivity
   useEffect(() => {
@@ -302,17 +322,16 @@ export function useLogsPageState(initialTab?: string) {
     }
   }, [backgroundCronToast])
 
-  // Auto-focus the floating console on the most relevant active job
-  useEffect(() => {
-    if (displayedJobs.length > 0) {
-      if (selectedConsoleJobId === null || !displayedJobs.some(j => j.id === selectedConsoleJobId)) {
-        setSelectedConsoleJobId(displayedJobs[0].id)
-      }
-    } else {
-      setSelectedConsoleJobId(null)
-      setConsoleOpen(false)
+  // Auto-focus the floating console on the most relevant active job. Adjusted during render
+  // from `displayedJobs` (the input), never synced through an effect.
+  if (displayedJobs.length > 0) {
+    if (selectedConsoleJobId === null || !displayedJobs.some((j) => j.id === selectedConsoleJobId)) {
+      setSelectedConsoleJobId(displayedJobs[0].id)
     }
-  }, [displayedJobs])
+  } else if (selectedConsoleJobId !== null || consoleOpen) {
+    setSelectedConsoleJobId(null)
+    setConsoleOpen(false)
+  }
 
   const { data: cronSchedule } = useQuery({
     queryKey: queryKeys.admin.cronSchedule(activeServiceId),

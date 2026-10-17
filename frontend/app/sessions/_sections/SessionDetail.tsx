@@ -82,9 +82,10 @@ export function SessionDetail({
     enabled: !!activeServiceId && !!selectedSession
   })
 
+  const detailColumnNames = detailData?.columns
   const detailColumns: ColumnDef<Record<string, unknown>>[] = React.useMemo(() => {
-    if (!detailData?.columns) return []
-    return detailData.columns.map(col => ({
+    if (!detailColumnNames) return []
+    return detailColumnNames.map(col => ({
       id: col,
       accessorFn: (row) => row[col],
       meta: { label: getFieldLabel(col) },
@@ -118,7 +119,7 @@ export function SessionDetail({
         return <span className="text-xs truncate max-w-[220px] inline-block">{String(value ?? '')}</span>
       }
     }))
-  }, [detailData?.columns, relative, full, abbr, getFieldLabel])
+  }, [detailColumnNames, relative, full, abbr, getFieldLabel])
 
   const cmcdDetailCols = ['cmcd_ot', 'cmcd_br', 'cmcd_bl', 'cmcd_sf', 'cmcd_st']
 

@@ -115,8 +115,8 @@ function CachedInviteBanner({ serviceId, onReveal }: { serviceId: string; onReve
   const nowMs = useNowMs()
   const entry = recentInvites.get(serviceId)
   if (!entry || !getRecentInvite(serviceId)) return null
-  // useNowMs() is 0 on the server snapshot; fall back to the wall clock.
-  const ageMs = (nowMs || Date.now()) - entry.issuedAt
+  // useNowMs() is 0 on the server snapshot; treat the invite as brand new until the client clock lands.
+  const ageMs = nowMs ? nowMs - entry.issuedAt : 0
   const remainingMin = Math.max(1, Math.ceil(Math.max(0, REVEAL_TTL_MS - ageMs) / 60000))
   return (
     <Alert className="bg-primary/5 border-primary/20">
@@ -234,9 +234,9 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
                   What will happen
                 </div>
                 <ul className="text-sm text-muted-foreground space-y-1.5 ml-6 list-disc">
-                  <li>A new <strong className="text-foreground">read-only</strong> Fastly Object Storage access key will be created, scoped to this service's bucket.</li>
+                  <li>A new <strong className="text-foreground">read-only</strong> Fastly Object Storage access key will be created, scoped to this service&apos;s bucket.</li>
                   <li>Your stored Fastly API token will be used — no re-entry needed.</li>
-                  <li>You'll receive a JSON config to send to the analyst.</li>
+                  <li>You&apos;ll receive a JSON config to send to the analyst.</li>
                 </ul>
               </div>
 

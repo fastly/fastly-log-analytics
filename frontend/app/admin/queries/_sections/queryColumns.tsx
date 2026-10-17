@@ -131,7 +131,7 @@ function buildActionsCell(
   onKill: (row: ActiveRow) => void,
   cancellingQid: number | null,
 ) {
-  return ({ row }: { row: Row<ActiveOrPromotedRow> }) => {
+  return function ActionsCell({ row }: { row: Row<ActiveOrPromotedRow> }) {
     const r: ActiveOrPromotedRow = row.original
     const isCancelled = r.cancelled_at !== null
     const promoted = !!r._completed

@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
   Dialog,
   DialogContent,
@@ -35,22 +36,65 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
   const { timezone } = useTimezoneStore()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null)
-  const [lakeError, setLakeError] = useState<string | null>(null)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  // Lake analysis is server state: fetched whenever the modal opens for a service, and re-run on
+  // demand from the retry button. The window the lake covers seeds the import range until the
+  // operator edits it.
+  const lakeQuery = useQuery({
+    queryKey: ['lake-info', activeServiceId],
+    queryFn: async (): Promise<LakeInfo> => {
+      // Raw fetch: the lake-info route resolves service_id via a FastAPI
+      // dependency, so OpenAPI declares `path?: never` and the typed
+      // client can't substitute the param. The URL path is still tightly
+      // coupled to the backend route. Add a response_model on the
+      // handler (and lift service_id into an explicit path arg) to make
+      // this typed.
+      const resp = await adminJsonResult(
+        '/api/services/{service_id}/lake-info',
+        `/api/services/${activeServiceId}/lake-info`,
+      )
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`)
+      }
+      const data: LakeInfo = resp.data
+      if (!data.ok) {
+        throw new Error(data.error || data.message || 'Failed to analyze data lake.')
+      }
+      return data
+    },
+    enabled: open && !!activeServiceId,
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  })
+  const lakeInfo = lakeQuery.data ?? null
+  const isAnalyzing = lakeQuery.isFetching
+  const lakeError = lakeQuery.error
+    ? lakeQuery.error.message || 'Connection error while analyzing data lake.'
+    : null
+  const handleAnalyzeLake = () => {
+    void lakeQuery.refetch()
+  }
 
   const [importMode, setImportMode] = useState<"all" | "range">("all")
-  const [importRange, setImportRange] = useState({ start: "", end: "" })
+  const [rangeDraft, setRangeDraft] = useState<{ start: string; end: string } | null>(null)
+  const importRange = rangeDraft ?? (
+    lakeInfo?.range?.start && lakeInfo.range.end
+      ? { start: lakeInfo.range.start, end: lakeInfo.range.end }
+      : { start: "", end: "" }
+  )
+  const setImportRange = (update: (prev: { start: string; end: string }) => { start: string; end: string }) =>
+    setRangeDraft(update(importRange))
 
-  useEffect(() => {
-    if (open && activeServiceId) {
-      handleAnalyzeLake()
-    }
+  // Closing the modal drops the import choices (adjusted during render, keyed on `open`).
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
     if (!open) {
       setImportMode("all")
-      setImportRange({ start: "", end: "" })
+      setRangeDraft(null)
     }
-  }, [open, activeServiceId])
+  }
 
   const estimatedImportSize = React.useMemo(() => {
     if (!lakeInfo?.calendar) return 0;
@@ -70,41 +114,6 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
     }
     return total;
   }, [lakeInfo, importMode, importRange]);
-
-  const handleAnalyzeLake = async () => {
-    if (!activeServiceId) return;
-    setIsAnalyzing(true);
-    setLakeError(null);
-    try {
-      // Raw fetch: the lake-info route resolves service_id via a FastAPI
-      // dependency, so OpenAPI declares `path?: never` and the typed
-      // client can't substitute the param. The URL path is still tightly
-      // coupled to the backend route. Add a response_model on the
-      // handler (and lift service_id into an explicit path arg) to make
-      // this typed.
-      const resp = await adminJsonResult(
-        '/api/services/{service_id}/lake-info',
-        `/api/services/${activeServiceId}/lake-info`,
-      );
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-      }
-      const data: LakeInfo = resp.data;
-      if (data.ok) {
-        setLakeInfo(data);
-        if (data.range?.start && data.range?.end) {
-          setImportRange({ start: data.range.start, end: data.range.end });
-        }
-      } else {
-        setLakeError(data.error || data.message || "Failed to analyze data lake.");
-      }
-    } catch (e) {
-      console.error("Failed to analyze data lake:", e);
-      setLakeError(e instanceof Error && e.message ? e.message : "Connection error while analyzing data lake.");
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
 
   const handleStartSync = () => {
     if (importMode === "range") {

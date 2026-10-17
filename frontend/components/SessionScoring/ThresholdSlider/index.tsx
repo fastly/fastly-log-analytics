@@ -1,5 +1,6 @@
 'use client'
 
+import { useDerivedState } from '@/hooks/useDerivedState'
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { SlidersHorizontal } from 'lucide-react'
@@ -102,19 +103,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   })
 
   // One-shot: when the committed threshold loads, jump the slider to it so
-  // the operator isn't staring at a misleading default of 75. Guarded by a
-  // ref so subsequent edits don't get clobbered by the query refetching.
-  const syncedFromCommittedRef = React.useRef(false)
-  React.useEffect(() => {
-    if (syncedFromCommittedRef.current) return
-    if (committed?.threshold != null && thresholdRaw === 75) {
-      syncedFromCommittedRef.current = true
-      setThresholdRaw(committed.threshold)
-      setThreshold(committed.threshold)
-    }
-    // intentionally not depending on thresholdRaw — one-shot sync
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committed?.threshold])
+  // the operator isn't staring at a misleading default of 75. Guarded so
+  // subsequent edits don't get clobbered by the query refetching.
+  const [syncedFromCommitted, setSyncedFromCommitted] = React.useState(false)
+  if (!syncedFromCommitted && committed?.threshold != null && thresholdRaw === 75) {
+    setSyncedFromCommitted(true)
+    setThresholdRaw(committed.threshold)
+    setThreshold(committed.threshold)
+  }
 
   const commitMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
@@ -218,10 +214,7 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   // don't fire a re-publish on every keystroke. Sync once when the query
   // resolves, and again whenever the committed value changes from elsewhere
   // (e.g. after this user clicks Apply → confirm → mutation succeeds).
-  const [codeDraft, setCodeDraft] = React.useState<string>(String(effectiveStatusCode))
-  React.useEffect(() => {
-    setCodeDraft(String(effectiveStatusCode))
-  }, [effectiveStatusCode])
+  const [codeDraft, setCodeDraft] = useDerivedState(String(effectiveStatusCode))
 
   const codeDraftNum = Number(codeDraft)
   const codeDraftValid =

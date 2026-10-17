@@ -1,6 +1,8 @@
 'use client'
 
+import type { PlotlyTrace } from '@/types/plotly'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useInViewOnce } from '@/hooks/useInViewOnce'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
@@ -197,28 +199,9 @@ function UsagePageContent({
   })
 
   const estimatorRef = useRef<HTMLDivElement>(null)
-  const [estimatorVisible, setEstimatorVisible] = useState(false)
-  useEffect(() => {
-    if (estimatorVisible || !estimatorRef.current) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setEstimatorVisible(true)
-      return
-    }
-    const node = estimatorRef.current
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setEstimatorVisible(true)
-          observer.disconnect()
-        }
-      },
-      // 600px rootMargin matches the site-wide LazyMount default so the
-      // fetch fires one screen ahead of the user reaching the section.
-      { rootMargin: '600px' },
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [estimatorVisible])
+  // 600px rootMargin matches the site-wide LazyMount default so the fetch fires one screen
+  // ahead of the user reaching the section.
+  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
 
   const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
@@ -284,7 +267,7 @@ function UsagePageContent({
   const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
   const hasApiCounts = apiCounts.some(v => v != null && v > 0)
 
-  const logProcData: any[] = [
+  const logProcData: PlotlyTrace[] = [
     { type: 'bar', name: 'Log Lines Ingested', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: 'Ingested: %{y:,}<extra></extra>' }
   ]
   if (hasApiCounts) {

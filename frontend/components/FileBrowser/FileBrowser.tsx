@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -34,11 +34,12 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
   const { full, abbr, relative } = useDateFormat()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  useEffect(() => {
-    if (forceExpand !== undefined) {
-      setIsOpen(forceExpand)
-    }
-  }, [forceExpand])
+  // A defined `forceExpand` overrides the open state whenever it changes (adjusted during render).
+  const [seenForceExpand, setSeenForceExpand] = useState<boolean | undefined>(undefined)
+  if (forceExpand !== seenForceExpand) {
+    setSeenForceExpand(forceExpand)
+    if (forceExpand !== undefined) setIsOpen(forceExpand)
+  }
 
   if (node.type === 'directory') {
     return (

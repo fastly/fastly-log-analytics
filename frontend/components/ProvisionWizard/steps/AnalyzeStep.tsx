@@ -187,7 +187,7 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
               <div className="space-y-1">
                 <h4 className="font-bold">No Data Found</h4>
                 <p className="text-sm text-muted-foreground max-w-xs mx-auto">
-                  We couldn't find an Iceberg table in this bucket. The admin
+                  We couldn&apos;t find an Iceberg table in this bucket. The admin
                   might not have started the ingestion yet.
                 </p>
               </div>

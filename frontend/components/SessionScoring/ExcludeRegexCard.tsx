@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
+import { keyByOccurrence } from '@/lib/utils'
 
 interface ExcludeRegexCardProps {
   serviceId: string
@@ -224,7 +225,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
             autoComplete="off"
           />
           <p className="text-[10px] text-muted-foreground">
-            VCL pattern compiled by Fastly's regex engine (RE2). No quotes / control chars; max 2 KB.
+            VCL pattern compiled by Fastly&apos;s regex engine (RE2). No quotes / control chars; max 2 KB.
             Hit <span className="font-semibold">Reset to default</span> to drop any custom override.
             Lint runs on blur and on publish.
           </p>
@@ -257,8 +258,8 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
               <AlertDescription className="text-xs">
                 <strong>Lint warnings (non-blocking):</strong>
                 <ul className="list-disc ml-4 mt-1">
-                  {lintResult.lint_warnings.slice(0, 5).map((w, i) => (
-                    <li key={i} className="font-mono text-[10px]">
+                  {keyByOccurrence(lintResult.lint_warnings.slice(0, 5), String).map(({ key, item: w }) => (
+                    <li key={key} className="font-mono text-[10px]">
                       {w}
                     </li>
                   ))}
@@ -296,8 +297,8 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
                 <div className="mt-2">
                   <strong>Lint warnings (non-blocking):</strong>
                   <ul className="list-disc ml-4 mt-1">
-                    {saveMut.data.lint_warnings.slice(0, 5).map((w, i) => (
-                      <li key={i} className="font-mono text-[10px]">{w}</li>
+                    {keyByOccurrence(saveMut.data.lint_warnings.slice(0, 5), String).map(({ key, item: w }) => (
+                      <li key={key} className="font-mono text-[10px]">{w}</li>
                     ))}
                   </ul>
                 </div>

@@ -10,6 +10,7 @@ import { InsightCardData } from '@/types/api'
 import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
 import { InsightItemRow } from './InsightItemRow'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { keyByOccurrence } from '@/lib/utils'
 
 interface InsightDataModalProps {
   insight: InsightCardData
@@ -35,9 +36,9 @@ export function InsightDataModal({ insight, isOpen, onOpenChange, onMapClick, on
 
         <ScrollArea className="flex-1 -mx-6 px-6">
           <div className="space-y-1.5 py-4">
-            {insight.items.map((item, i) => (
+            {keyByOccurrence(insight.items, (it) => it.label).map(({ key, item }) => (
               <InsightItemRow
-                key={i}
+                key={key}
                 item={item}
                 insightId={insight.id}
                 onMapClick={onMapClick}

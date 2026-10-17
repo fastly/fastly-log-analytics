@@ -331,9 +331,11 @@ export function AppLayout({
   // Route change auto-closes the panel as a belt-and-braces safeguard
   // (any Link onClick that doesn't fire — e.g. middle-click that we
   // didn't handle — still produces a pathname update).
-  React.useEffect(() => {
+  const [navPathname, setNavPathname] = React.useState(pathname)
+  if (pathname !== navPathname) {
+    setNavPathname(pathname)
     setMobileNavOpen(false)
-  }, [pathname])
+  }
   // Cmd/Ctrl+B toggles the sidebar. Skip when an editable surface is
   // focused so the Query page's SQL editor (and any future text inputs
   // that want ⌘B for bold) keep their own binding.
@@ -435,7 +437,21 @@ export function AppLayout({
   // sr-only live region below renders it so screen readers pick it up
   // alongside the RouteFocus "Loaded: …" announcement that fires after
   // the navigation completes.
-  const [redirectAnnouncement, setRedirectAnnouncement] = React.useState('')
+  const analystBlocked =
+    isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
+  const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
+  const needsWizard = !isAnalyst && !hasServices && !pathname.startsWith('/admin')
+  // Derived from the same conditions the redirect effect below acts on (precedence included),
+  // so the announcement is never out of step with the redirect it describes.
+  const redirectAnnouncement = isLoading
+    ? ''
+    : needsSignIn
+      ? 'Sign in required. Redirecting to the sign-in page.'
+      : analystBlocked
+        ? 'This page is not available for your account. Redirecting to the dashboard.'
+        : needsWizard
+          ? 'No services configured yet. Redirecting to the admin setup page.'
+          : ''
 
   React.useEffect(() => {
     if (isLoading) return
@@ -444,8 +460,7 @@ export function AppLayout({
     // first instead of stalling on the synchronous URL change.
     // Anonymous remote visitors get redirected to /share-login before any
     // other layout/redirect logic kicks in. Skip while already there.
-    if (needsLogin && !pathname.startsWith('/share-login')) {
-      setRedirectAnnouncement('Sign in required. Redirecting to the sign-in page.')
+    if (needsSignIn) {
       if (typeof window !== 'undefined') {
         window.location.replace('/share-login')
       } else {
@@ -471,11 +486,8 @@ export function AppLayout({
     // reaches the destination's data fetches anyway), it can't be raced
     // by the destination route's own effects, and it preserves browser
     // history correctly.
-    const analystBlocked =
-      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
     if (analystBlocked) {
       const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
-      setRedirectAnnouncement('This page is not available for your account. Redirecting to the dashboard.')
       if (typeof window !== 'undefined') {
         window.location.replace(target)
       } else {
@@ -484,11 +496,10 @@ export function AppLayout({
       return
     }
     // Admin-side wizard redirect — only for local admins.
-    if (!isAnalyst && !hasServices && !pathname.startsWith('/admin')) {
-      setRedirectAnnouncement('No services configured yet. Redirecting to the admin setup page.')
+    if (needsWizard) {
       React.startTransition(() => router.replace('/admin'))
     }
-  }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
+  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId])
 
   // SECURITY GATE: never render the app shell (sidebar, header, service
   // selector) for unauthenticated visitors. The /share-login page is a
