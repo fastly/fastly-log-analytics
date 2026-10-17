@@ -14,6 +14,7 @@ from backend.core.fastly.service import (
     list_s3_endpoints,
 )
 from backend.core.fastly.utils import load_vcl, region_endpoint
+from backend.provision.draft_version import draft_version
 from backend.provision.utils import BOLD, _c, fail, info, ok, warn
 from backend.provision.vcl_builder import VclBuilder
 from backend.utils import field_codes as fc
@@ -1102,19 +1103,31 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
     info(f"Cloning version {active_ver} → new draft…")
     if status_cb:
         status_cb(f"🔄 Cloning version {active_ver} to create a new draft...")
-    clone = fastly("PUT", f"/service/{service_id}/version/{active_ver}/clone", token=token)
-    new_ver = clone["number"]
 
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{service_id}/version/{new_ver}",
-        {"comment": f"Provisioning Fastly Object Storage logging at {ts}"},
-        token=token,
-    )
-    ok(f"Draft version: {new_ver}")
 
-    try:
+    def _draft_status(msg: str) -> None:
+        info(msg)
+        if status_cb:
+            status_cb(msg)
+
+    def _log_failure(exc: Exception) -> None:
+        fail(str(exc))
+        info(f"Rolling back — re-activating version {active_ver}...")
+
+    with draft_version(
+        service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Provisioning Fastly Object Storage logging at {ts}",
+        status_cb=_draft_status,
+        validate_msg="⏳ Validating draft configuration...",
+        activate_msg="⏳ Activating version {ver}...",
+        on_failure=_log_failure,
+    ) as new_ver:
+        ok(f"Draft version: {new_ver}")
+
         info(f"Adding Fastly Object Storage logging endpoint '{_c(BOLD, endpoint_name)}'…")
         if status_cb:
             status_cb(f"➕ Adding logging endpoint '{endpoint_name}' to draft...")
@@ -1208,31 +1221,10 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
 
         ok("Logging endpoint and VCL snippets added to draft")
 
-        info("Validating draft version…")
-        if status_cb:
-            status_cb("⏳ Validating draft configuration...")
-        result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        ok("Draft validated")
-
-        info(f"Activating version {new_ver}…")
-        if status_cb:
-            status_cb(f"⏳ Activating version {new_ver}...")
-        fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
-        ok(f"Version {new_ver} is now active")
-        if status_cb:
-            status_cb(f"✅ Version {new_ver} is now active.")
-        return new_ver
-
-    except Exception as exc:
-        fail(str(exc))
-        info(f"Rolling back — re-activating version {active_ver}...")
-        try:
-            fastly("PUT", f"/service/{service_id}/version/{active_ver}/activate", token=token)
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Version {new_ver} is now active")
+    if status_cb:
+        status_cb(f"✅ Version {new_ver} is now active.")
+    return new_ver
 
 
 # Snippet-ownership attribution for teardown. Every name we install is either
