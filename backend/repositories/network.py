@@ -8,6 +8,8 @@ from typing import Any
 
 import duckdb
 
+from backend.utils.log_throttle import log_once_per
+
 logger = logging.getLogger(__name__)
 
 from backend.core import duckdb as _db
@@ -1086,7 +1088,8 @@ def get_health(
             try:
                 get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                logger.debug("get_health: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("get_health: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_health: DROP TABLE failed (ignored)", exc_info=True)
 
 
 def get_quality(
@@ -1272,7 +1275,8 @@ def get_quality(
             try:
                 get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                logger.debug("get_quality: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("get_quality: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_quality: DROP TABLE failed (ignored)", exc_info=True)
 
 
 def get_transport_metrics(

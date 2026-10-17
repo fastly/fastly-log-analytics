@@ -13,6 +13,7 @@ from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, ma
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
@@ -157,7 +158,8 @@ def execute_query(
                 # Non-fatal: CREATE OR REPLACE on the next analyst request
                 # refreshes it before use, so a leaked view can't serve stale
                 # data — but log it so a recurring leak is visible.
-                logger.debug("[query] failed to drop analyst window view", exc_info=True)
+                if log_once_per("[query] failed to drop analyst window view", 60):
+                    logger.debug("[query] failed to drop analyst window view", exc_info=True)
             _drop_analyst_cid_salt(con)
 
 
@@ -304,7 +306,8 @@ def _drop_analyst_cid_salt(con: duckdb.DuckDBPyConnection) -> None:
     try:
         con.execute(f"DROP TABLE IF EXISTS {_ANALYST_CID_SALT_TABLE}")
     except Exception:
-        logger.debug("[query] failed to drop analyst cid-salt table", exc_info=True)
+        if log_once_per("[query] failed to drop analyst cid-salt table", 60):
+            logger.debug("[query] failed to drop analyst cid-salt table", exc_info=True)
 
 
 def _run_validated_query(

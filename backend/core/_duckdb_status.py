@@ -32,6 +32,7 @@ import duckdb
 
 from backend import config as svcconfig
 from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__.replace("_duckdb_status", "duckdb"))
 
@@ -898,7 +899,8 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         try:
             con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
         except Exception:
-            logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
+            if log_once_per("update_top_values: DROP TABLE failed (ignored)", 60):
+                logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
 
     if top_values:
         cache_dir = _cache_dir(source)

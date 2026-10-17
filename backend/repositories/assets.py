@@ -15,6 +15,7 @@ from backend.repositories._base import (
     empty_schema_response,
 )
 from backend.repositories.utils.filters import build_where_clause
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +283,8 @@ def get_assets_aggregates(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                logger.debug("get_assets_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("get_assets_aggregates: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_assets_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
     results["section_timings"] = section_timings
     return results

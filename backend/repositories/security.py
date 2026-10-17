@@ -22,6 +22,7 @@ from backend.repositories._base import (
 from backend.repositories._sql import security as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.date_utils import parse_window
+from backend.utils.log_throttle import log_once_per
 
 _logger = logging.getLogger(__name__)
 
@@ -1280,7 +1281,8 @@ def _build_security_response(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                _logger.debug("_build_security_response: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("_build_security_response: DROP TABLE failed (ignored)", 60):
+                    _logger.debug("_build_security_response: DROP TABLE failed (ignored)", exc_info=True)
 
     # Any requested section left unset (e.g. the temp build failed) falls
     # back to its empty default so the response stays well-formed. Only

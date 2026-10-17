@@ -28,6 +28,7 @@ from backend.core.duckdb import (
 from backend.core.field_registry import LOG_FIELD_CATALOG
 from backend.utils import field_codes as fc
 from backend.utils.active_requests import yield_to_api
+from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
@@ -2920,7 +2921,8 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 if not pathname_val and "rum_pathname" in qparams:
                     pathname_val = qparams["rum_pathname"][0]
             except Exception:
-                logger.debug("_parse_rum_line: step failed (ignored)", exc_info=True)
+                if log_once_per("_parse_rum_line: step failed (ignored)", 60):
+                    logger.debug("_parse_rum_line: step failed (ignored)", exc_info=True)
 
         if metric_value is not None:
             try:
@@ -2933,7 +2935,8 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             try:
                 pathname_val = urlparse(log_data["referer"]).path
             except Exception:
-                logger.debug("_parse_rum_line: urlparse failed (ignored)", exc_info=True)
+                if log_once_per("_parse_rum_line: urlparse failed (ignored)", 60):
+                    logger.debug("_parse_rum_line: urlparse failed (ignored)", exc_info=True)
         if not pathname_val:
             pathname_val = "/"
         pathname_val = pathname_val.replace("//", "/")

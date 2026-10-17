@@ -42,6 +42,7 @@ from backend.repositories.utils.filters import build_where_clause
 # 500 entries × ~30MB = ~15GB worst case; in practice the working set is
 # much smaller, but the cap is a hard backstop.
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -582,7 +583,8 @@ def get_aggregates(
                 try:
                     con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
                 except Exception:
-                    logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+                    if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                        logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
                 temp_table = None
             rebuilt = _build_query_target()
             if rebuilt is not None:
@@ -1065,7 +1067,8 @@ def get_aggregates(
             try:
                 con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # ── raw ───────────────────────────────────────────────────────────────────────

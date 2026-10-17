@@ -25,6 +25,8 @@ from backend.core.rollups._common import quote_path_list
 if TYPE_CHECKING:
     from datetime import datetime
 
+from backend.utils.log_throttle import log_once_per
+
 _logger = logging.getLogger(__name__)
 
 
@@ -952,7 +954,8 @@ class QueryRunner:
             try:
                 self.execute(f'DROP TABLE IF EXISTS "{name}"')
             except Exception:
-                _logger.debug("end_shared_active_hour_temps: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("end_shared_active_hour_temps: DROP TABLE failed (ignored)", 60):
+                    _logger.debug("end_shared_active_hour_temps: DROP TABLE failed (ignored)", exc_info=True)
 
     def release_active_direct_temp(self, name: str) -> None:
         """Drop a direct active-hour temp unless the shared scope owns it.
@@ -965,7 +968,8 @@ class QueryRunner:
         try:
             self.execute(f'DROP TABLE IF EXISTS "{name}"')
         except Exception:
-            _logger.debug("release_active_direct_temp: DROP TABLE failed (ignored)", exc_info=True)
+            if log_once_per("release_active_direct_temp: DROP TABLE failed (ignored)", 60):
+                _logger.debug("release_active_direct_temp: DROP TABLE failed (ignored)", exc_info=True)
 
     @property
     def debug_calls(self) -> list[dict]:
@@ -1398,7 +1402,8 @@ class QueryRunner:
             try:
                 self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
             except Exception:
-                _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
+                if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
+                    _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
             try:
                 self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
             except Exception:
@@ -1406,7 +1411,8 @@ class QueryRunner:
                 try:
                     self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
                 except Exception:
-                    _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
+                    if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
+                        _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
                 return None
         if self._shared_active_temps is not None:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
@@ -1526,7 +1532,8 @@ class QueryRunner:
                 try:
                     self.execute(f'DROP TABLE IF EXISTS "{name}"')
                 except Exception:
-                    _logger.debug("temp_table: DROP TABLE failed (ignored)", exc_info=True)
+                    if log_once_per("temp_table: DROP TABLE failed (ignored)", 60):
+                        _logger.debug("temp_table: DROP TABLE failed (ignored)", exc_info=True)
 
     def execute_top_n_rollups(
         self,
@@ -2278,7 +2285,8 @@ class QueryRunner:
                         try:
                             self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
                         except Exception:
-                            _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
+                            if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
+                                _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
             except Exception:
                 # Best-effort: a failed heal leaves the pre-fallback
                 # behavior (rollups + active hour only), never a 500.

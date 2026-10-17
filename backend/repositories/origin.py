@@ -25,6 +25,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -1464,7 +1465,8 @@ async def get_aggregates(
         try:
             runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         except Exception:
-            logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+            if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # R-1: register the response TTL cache so the autouse fixture in

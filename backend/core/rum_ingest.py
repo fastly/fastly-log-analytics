@@ -22,6 +22,7 @@ from backend.core.metadata.cron_log import (
     log_cron_run,
     start_cron_run,
 )
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,8 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
         try:
             pathname = urlparse(url_str).path
         except Exception:
-            logger.debug("extract_metrics_from_faro_payload: urlparse failed (ignored)", exc_info=True)
+            if log_once_per("extract_metrics_from_faro_payload: urlparse failed (ignored)", 60):
+                logger.debug("extract_metrics_from_faro_payload: urlparse failed (ignored)", exc_info=True)
 
     cid = log_data.get("rum_cid") or log_data.get("cid") or ""
 
