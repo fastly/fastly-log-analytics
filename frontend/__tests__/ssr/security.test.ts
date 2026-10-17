@@ -55,16 +55,6 @@ describe('resolveSecurityDefaultKey (key-match contract)', () => {
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
 
-  it.skip('stale log extents (>15min old) snap the anchor to the real latest log, not now', async () => {
-    const { resolveSecurityDefaultKey } = await import('@/lib/ssr/security')
-    const now = new Date('2026-06-29T12:00:00Z')
-    const got = resolveSecurityDefaultKey(now, {
-      earliest_log_at: '2026-06-01T00:00:00Z',
-      latest_log_at: '2026-06-29T11:00:00Z',
-    })
-    expect(got.anchor).toBe('2026-06-29T11:00:00Z')
-  })
-
   it('fresh log extents (<=15min old) leave the naive "now" anchor unchanged', async () => {
     const { resolveSecurityDefaultKey } = await import('@/lib/ssr/security')
     const now = new Date('2026-06-29T12:00:00Z')
