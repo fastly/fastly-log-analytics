@@ -6,7 +6,7 @@ describe('statusBadgeClass', () => {
   it.each([
     [200, 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
     [302, 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'],
-    [404, 'bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/20'],
+    [404, 'bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/20'],
     [503, 'bg-destructive/15 text-destructive border-destructive/20 font-bold'],
     ['200', 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
     [null, 'bg-muted text-muted-foreground'],

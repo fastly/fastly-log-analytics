@@ -88,9 +88,11 @@ const TAB_BADGE_SEVERITIES = new Set(['critical', 'warning'])
 
 function TabSeverityBadges({ severities }: { severities: SeveritySummary[] }) {
   const compact = severities.filter((s) => TAB_BADGE_SEVERITIES.has(s.severity))
-  if (compact.length === 0) return null
+  // Always reserve one pill's width: the skeleton tab bar (no severities) and the loaded one must
+  // be the same width or every tab shifts when /api/insights lands (CLS).
+  if (compact.length === 0) return <span aria-hidden="true" className="inline-block min-w-[1.125rem]" />
   return (
-    <span className="flex items-center gap-1">
+    <span className="flex min-w-[1.125rem] items-center gap-1">
       {compact.map(({ severity, count }) => (
         <span
           key={severity}
@@ -161,7 +163,7 @@ function InsightTabs<T extends SectionableInsight>({
             >
               <Icon className="size-4 shrink-0" aria-hidden="true" />
               <span>{section.label}</span>
-              <span className="text-xs tabular-nums">{cards.length}</span>
+              <span className="min-w-[2ch] text-right text-xs tabular-nums">{cards.length}</span>
               <TabSeverityBadges severities={summarizeSeverities(cards)} />
             </TabsTrigger>
           )

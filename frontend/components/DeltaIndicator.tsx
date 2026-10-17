@@ -15,14 +15,14 @@ export function DeltaIndicator({ current, baseline }: DeltaIndicatorProps) {
   if (Math.abs(pct) < 1) return <Minus className="h-3 w-3 text-muted-foreground" />
 
   if (pct > 0) return (
-    <span className="flex items-center gap-0.5 text-red-500 text-[11px] sm:text-[10px] font-semibold" title={`${absStr} from baseline`}>
+    <span className="flex items-center gap-0.5 text-red-600 dark:text-red-400 text-[11px] sm:text-[10px] font-semibold" title={`${absStr} from baseline`}>
       <TrendingUp className="h-3 w-3" />
       {absStr} (+{Math.round(pct)}%)
     </span>
   )
 
   return (
-    <span className="flex items-center gap-0.5 text-green-500 text-[11px] sm:text-[10px] font-semibold" title={`${absStr} from baseline`}>
+    <span className="flex items-center gap-0.5 text-green-700 dark:text-green-400 text-[11px] sm:text-[10px] font-semibold" title={`${absStr} from baseline`}>
       <TrendingDown className="h-3 w-3" />
       {absStr} ({Math.round(pct)}%)
     </span>
