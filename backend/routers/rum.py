@@ -56,7 +56,7 @@ from backend.provision.rum_orchestrator_v2 import (
 )
 from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, require_fastly_token
 
 logger = logging.getLogger(__name__)
 
@@ -178,17 +178,6 @@ async def get_faro_sdk(request: Request, service_id: str | None = None):
     )
 
 
-def _get_fastly_token(service_id: str) -> str:
-    """Get Fastly API token from service config."""
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
-    token = cfg.get("fastly_api_key", "")
-    if not token:
-        raise HTTPException(status_code=400, detail={"error": f"No Fastly API key for service {service_id}"})
-    return token
-
-
 @router.post("/{service_id}/rum/enable")
 async def enable_rum_handler(
     service_id: str = Path(...),
@@ -274,7 +263,7 @@ async def disable_rum_handler(
 ) -> EventSourceResponse:
     """Disable RUM for a service (admin-only, SSE stream)."""
     body = body or RumDisableRequest()
-    token = body.token or _get_fastly_token(service_id)
+    token = require_fastly_token(service_id, body.token)
 
     def stream():
 
@@ -394,7 +383,7 @@ async def upgrade_rum_handler(
     body: RumUpgradeRequest = Body(...),
 ) -> EventSourceResponse:
     """Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream)."""
-    token = body.token or _get_fastly_token(service_id)
+    token = require_fastly_token(service_id, body.token)
 
     try:
         available = await fetch_available_faro_versions()
@@ -472,7 +461,7 @@ def update_rum_settings(
     svcconfig.save_config(service_id, cfg)
 
     # Re-deploy tracker JS wrapper with the new compiled settings inside it
-    token = body.token or _get_fastly_token(service_id)
+    token = require_fastly_token(service_id, body.token)
 
     from backend.provision.rum_assets import upload_rum_tracker_js
 

@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.status_reads import CmcdStatusResponse
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+from backend.utils.router_utils import resolve_fastly_token as _resolve_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["cmcd-admin"], responses=DEFAULT_ERROR_RESPONSES)
@@ -31,17 +32,6 @@ class CmcdEnableBody(BaseModel):
 
 class CmcdDisableBody(BaseModel):
     token: str = ""
-
-
-def _resolve_token(service_id: str, override_token: str = "") -> str:
-    if override_token:
-        return override_token
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        return cfg.get("fastly_api_key", "") or ""
-    return ""
 
 
 @router.get("/{service_id}/cmcd/status", response_model=CmcdStatusResponse, response_model_exclude_unset=True)

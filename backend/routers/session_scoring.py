@@ -49,7 +49,7 @@ from backend.models.session_scoring import (
     ScoringTopFlaggedResponse,
 )
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, not_found
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, not_found, resolve_fastly_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["session-scoring"], responses=DEFAULT_ERROR_RESPONSES)
@@ -414,18 +414,7 @@ def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[t
     return result
 
 
-def _resolve_token(service_id: str, override_token: str = "") -> str:
-    """Use the provided token, or fall back to the service-config's
-    fastly_api_key. Returns empty string if neither is available — the
-    caller raises an HTTPException in that case."""
-    if override_token:
-        return override_token
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        return cfg.get("fastly_api_key", "") or ""
-    return ""
+_resolve_token = resolve_fastly_token
 
 
 @router.post("/{service_id}/scoring/enable")

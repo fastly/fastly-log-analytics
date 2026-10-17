@@ -142,6 +142,40 @@ def load_service_config(service_id: str) -> dict:
     return cfg
 
 
+def resolve_fastly_token(service_id: str, override: str | None = "") -> str:
+    """Lenient token resolution: ``override`` if given, else the service config's stored
+    ``fastly_api_key``, else ``""`` (callers raise their own error on empty).
+
+    Reads the config for exactly ``service_id`` — it never falls back to the *active* service's key
+    (unlike ``config.get_fastly_api_key``), so an empty or unknown id can't borrow another service's
+    credential. The token value is never logged.
+    """
+    if override:
+        return override
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id)
+    if cfg:
+        return cfg.get("fastly_api_key", "") or ""
+    return ""
+
+
+def require_fastly_token(service_id: str, override: str | None = "") -> str:
+    """Strict token resolution: ``override`` if given, else the stored key — 404 when the service has no
+    config, 400 when it has no key. Error bodies match the RUM endpoints' historical ones."""
+    if override:
+        return override
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    token = cfg.get("fastly_api_key", "")
+    if not token:
+        raise HTTPException(status_code=400, detail={"error": f"No Fastly API key for service {service_id}"})
+    return token
+
+
 # ── Standardised error-envelope helpers ───────────────────────────────────────
 #
 # Convention: every router error response carries ``detail = {"error":
