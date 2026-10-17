@@ -297,8 +297,19 @@ The route uses `RequestContext` tenancy and analyst time clamping, masks
 `client_ip` under the existing invite PII policy, and returns signed keyset
 pagination plus `QueryResponseMetadata`.
 
-### Intentionally unwired `backend/high_scale` modules
-`disk_guard.py`, `fairness.py`, `projections.py`, `recovery_capacity.py`, `retention.py` and `topology.py` have no production importer; only their tests under `tests/high_scale/` reference them. They are kept on purpose pending a designed capacity-guard feature, so do not delete them as dead code and do not wire them in ad hoc.
+### High-scale helper modules (wired)
+The six capacity helpers each have a production caller, all behind the high-scale topology (`config.is_high_scale_mode()` for backend code; the worker and ingest controller are high-scale-only). Standard mode runs none of this and its responses are unchanged. Full design, gates and non-goals: [docs/runbooks/high-scale-helper-wiring.md](docs/runbooks/high-scale-helper-wiring.md).
+
+| Module | Caller |
+|---|---|
+| `disk_guard.py` | 60 s `metric_snapshot` sampler (`_sample_high_scale_disk` via `disk_sampler.py`) reads the real serving volume from ClickHouse `system.disks`; mode is logged on transition, exported as gauges, and surfaced as `high_scale.disk` in `GET /api/admin/health-snapshot`. Evaluate-and-surface only: no documented optional work exists to gate, so nothing is suspended |
+| `retention.py` | `GET /api/admin/high-scale/retention-recommendation` (admin-only via the `/api/admin/` prefix). Advisory; an explicit `provisioning.cron_sync.data_retention_days` always wins and nothing is persisted |
+| `fairness.py` | `HighScaleWorkerLoop.run_once` / `_MultiServiceWorkerLoop.run_once` select (service, domain) pages through `FairPageSelector`. `HIGH_SCALE_PAGES_PER_TICK` (default uncapped, original order) and `HIGH_SCALE_SERVICE_WEIGHTS` tune it |
+| `projections.py` | `HighScaleIngestController._publish_cmcd_projection` publishes `project_cmcd` rows to `cmcd_projection_facts` after request ingest (best-effort, idempotent batch id) |
+| `recovery_capacity.py` | `rebuild_serving_state_from_fos` / `rebuild_origin_projections_from_fos` take an optional measurement and report `capacity` + `recovery_claim_valid`; recovery is never blocked. `scripts/backfill_high_scale_origin.py --capacity-json` exits 3 when the rebuild completes but the claim is invalid |
+| `topology.py` | `HighScaleConfig.validate()` / `topology_profile()` (worker startup), `recommend_high_scale_sizing` warnings, and the `high_scale.topology` health block |
+
+Do not wire a new caller that disables ingest, compaction, replay or deletion on a disk mode without a design that names the work to suspend.
 
 ### Certificate-authenticated administrator connection
 
