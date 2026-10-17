@@ -50,7 +50,10 @@ export function AcknowledgeFallback() {
   }, [router])
 
   return (
-    <>
+    <div
+      data-testid="share-acknowledge-fallback"
+      className="space-y-4 min-h-[140px] [contain-intrinsic-size:auto_140px] [content-visibility:auto]"
+    >
       {error && (
         <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1}>
           <AlertTriangle className="h-4 w-4" />
@@ -64,12 +67,17 @@ export function AcknowledgeFallback() {
         </>
       ) : (
         !error && (
-          <div role="status">
+          <div
+            role="status"
+            data-testid="share-acknowledge-loading"
+            className="min-h-[120px] [contain-intrinsic-size:auto_120px] [content-visibility:auto] flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground"
+          >
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span>Verifying share session &amp; security policies...</span>
             <span className="sr-only">Loading the terms…</span>
           </div>
         )
       )}
-    </>
+    </div>
   )
 }

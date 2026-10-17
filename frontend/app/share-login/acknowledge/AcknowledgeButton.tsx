@@ -5,12 +5,14 @@ import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertTriangle, Check, Loader2 } from 'lucide-react'
 import { analystFetch } from '@/lib/analystFetch'
+import { safeReturnTarget } from '../ShareLoginForm'
 
 interface AcknowledgeButtonProps {
   version: string
+  returnTo?: string
 }
 
-export function AcknowledgeButton({ version }: AcknowledgeButtonProps) {
+export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps) {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const errorAlertRef = React.useRef<HTMLDivElement>(null)
@@ -44,7 +46,11 @@ export function AcknowledgeButton({ version }: AcknowledgeButtonProps) {
       // re-renders /dashboard with that stale cache → AppLayout bounces
       // back to /share-login. .assign() forces a fresh document load that
       // re-fetches bootstrap with the new cookie.
-      window.location.assign('/dashboard')
+      const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+      const safeTarget = safeReturnTarget(
+        returnTo ?? search?.get('return') ?? search?.get('next'),
+      )
+      window.location.assign(safeTarget ?? '/dashboard')
     } catch (err: any) {
       setError(err?.message || 'Network error.')
     } finally {
@@ -53,15 +59,18 @@ export function AcknowledgeButton({ version }: AcknowledgeButtonProps) {
   }
 
   return (
-    <>
+    <div
+      data-testid="share-acknowledge-actions"
+      className={busy ? 'space-y-4 opacity-40 pointer-events-none transition-opacity' : 'space-y-4 transition-opacity'}
+    >
       {error && (
-        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1}>
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1} data-testid="share-acknowledge-error">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
       <div className="flex justify-end">
-        <Button onClick={accept} disabled={busy}>
+        <Button onClick={accept} disabled={busy} data-testid="share-acknowledge-submit">
           {busy ? (
             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
           ) : (
@@ -70,6 +79,6 @@ export function AcknowledgeButton({ version }: AcknowledgeButtonProps) {
           I acknowledge
         </Button>
       </div>
-    </>
+    </div>
   )
 }

@@ -145,16 +145,24 @@ export function AuthCardSkeleton({
     .filter(Boolean)
     .join(' ')
   return (
-    <div className={container}>
-      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'}`}>
+    <div className={container} data-testid="auth-card-skeleton">
+      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'} min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]`}>
         <CardHeader className="space-y-2">
           <div className="flex items-center gap-2">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
-            <span className="text-sm text-muted-foreground" role="status">Loading…</span>
+            <span className="text-sm text-muted-foreground" role="status">
+              Verifying share session &amp; security policies...
+            </span>
           </div>
         </CardHeader>
-        <CardContent>
-          <div className="h-32" aria-hidden="true" />
+        <CardContent className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]">
+          <div className="h-32 space-y-3" aria-hidden="true">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-4 w-28" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
         </CardContent>
       </Card>
     </div>

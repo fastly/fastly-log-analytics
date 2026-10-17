@@ -503,7 +503,14 @@ export function AppLayout({
         <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
           {redirectAnnouncement}
         </div>
-        {isLoginPage ? children : null}
+        {isLoginPage ? (
+          <div className="min-h-screen flex flex-col bg-muted/40">
+            <main id="main" tabIndex={0} className="flex-1 outline-none">
+              {children}
+            </main>
+            {serverFooter && !isAnalyst && serverFooter}
+          </div>
+        ) : null}
       </>
     )
   }

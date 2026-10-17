@@ -15,12 +15,21 @@ export default async function AcknowledgePage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-muted/40 p-6">
-      <Card className="w-full max-w-xl">
+    <div
+      data-testid="share-acknowledge-page"
+      className="min-h-screen flex items-center justify-center bg-muted/40 p-6"
+    >
+      <Card
+        data-testid="share-acknowledge-card"
+        className="w-full max-w-xl min-h-[260px] [contain-intrinsic-size:auto_260px] [content-visibility:auto]"
+      >
         <CardHeader>
           <CardTitle>Terms of access</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent
+          data-testid="share-acknowledge-card-content"
+          className="space-y-4 min-h-[160px] [contain-intrinsic-size:auto_160px] [content-visibility:auto]"
+        >
           {tos ? (
             <>
               <p className="text-sm leading-relaxed text-muted-foreground">{tos.text}</p>
