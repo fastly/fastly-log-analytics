@@ -3,6 +3,7 @@ import re
 import shutil
 import urllib.parse
 
+from backend.config import is_rum_enabled
 from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
@@ -1146,7 +1147,7 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
         cond_parts = ["!segmented_caching.is_inner_req"]
 
-        rum_enabled = cfg.get("rum_enabled", False) or bool((cfg.get("rum") or {}).get("enabled", False))
+        rum_enabled = is_rum_enabled(cfg)
         if rum_enabled:
             cond_parts.append('req.url.path != "/rum-beacon"')
 

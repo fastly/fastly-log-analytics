@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.config import is_rum_enabled
 from backend.core.fastly.utils import load_vcl
 from backend.provision.declarative.generators import (
     desired_backends,
@@ -133,7 +134,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         "custom_condition": custom_condition,
         "fos_prefix": prefix,
         "logging_enabled": bool(cfg.get("logging_enabled", True)),
-        "rum_enabled": bool(cfg.get("rum_enabled", False)),
+        "rum_enabled": is_rum_enabled(cfg),
         "cmcd": {
             "enabled": bool(cmcd_cfg.get("enabled", False)),
             "mode": cmcd_cfg.get("mode", "query_string"),

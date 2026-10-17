@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from backend.config import is_rum_enabled
+
 _AUTO_INJECTED_NAMES: set[str] = {
     # RUM fields
     "rum_cid",
@@ -237,11 +239,7 @@ class FeatureState:
         rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
 
         # Extract feature toggles
-        rum_enabled = cfg.get("rum_enabled", False)
-        if not rum_enabled:
-            rum_cfg = cfg.get("rum", {})
-            if isinstance(rum_cfg, dict):
-                rum_enabled = bool(rum_cfg.get("enabled", False))
+        rum_enabled = is_rum_enabled(cfg)
 
         # Extract and construct CMCD config
         cmcd_cfg = cfg.get("cmcd", {})

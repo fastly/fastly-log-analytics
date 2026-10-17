@@ -245,7 +245,7 @@ async def enable_rum_handler(
                     if body.activate
                     else "Real User Monitoring (RUM) draft configuration compiled and validated successfully!",
                     "rum": {
-                        "enabled": updated_cfg.get("rum_enabled", False),
+                        "enabled": svcconfig.is_rum_enabled(updated_cfg),
                         "enabled_at": updated_cfg.get("rum_enabled_at", ""),
                     },
                 }
@@ -299,7 +299,7 @@ async def disable_rum_handler(
                     if body.activate
                     else "Real User Monitoring (RUM) draft configuration compiled and validated successfully!",
                     "rum": {
-                        "enabled": updated_cfg.get("rum_enabled", False),
+                        "enabled": svcconfig.is_rum_enabled(updated_cfg),
                     },
                 }
             )
