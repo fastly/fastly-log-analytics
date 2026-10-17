@@ -63,6 +63,8 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "cs_mode",
     "cs_rl_mode",
     "cs_pace_kbps",
+    "cs_policy_id",
+    "cs_policy_reason",
 }
 
 

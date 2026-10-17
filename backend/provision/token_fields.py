@@ -89,6 +89,20 @@ ENFORCEMENT_FIELDS: tuple[EnforcementField, ...] = (
         "Effective throttle rate in KB/s; only set when the request was throttled.",
         6,
     ),
+    EnforcementField(
+        "cs_policy_id",
+        "req.http.cs-policy",
+        "Policy ID",
+        "The Content Security policy whose rules were evaluated for the request, when one applied.",
+        36,
+    ),
+    EnforcementField(
+        "cs_policy_reason",
+        "req.http.cs-reason",
+        "Policy Reason",
+        "Which rule decided the outcome: a category (country, asn, ...), country_regex, subscriber_id, ip, or exempt:<category>.",
+        24,
+    ),
 )
 
 # Field name → header it logs; drives the per-field scrub in fastly_api. The

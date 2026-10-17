@@ -804,6 +804,41 @@ export const handlers = [
     }),
   ),
 
+  http.post(`${API_BASE}/api/cmcd/content-security/subscriber`, () =>
+    HttpResponse.json({ available: true, subscriber_id: '', fields: {}, truncated: false, ips: [] }),
+  ),
+
+  // ── Content Security: settings and policies (admin-only) ──────────
+  // Bland shapes: nothing configured, no policies, no assignments, nothing in effect.
+  http.get(`${API_BASE}/api/admin/content-security/settings`, ok({ blocklist_url: '', auth_header_name: null })),
+  http.put(`${API_BASE}/api/admin/content-security/settings`, ok({ blocklist_url: '', auth_header_name: null })),
+  http.get(`${API_BASE}/api/admin/content-security/policies`, ok({ configured: false, policies: [] })),
+  http.post(`${API_BASE}/api/admin/content-security/policies`, ok()),
+  http.get(`${API_BASE}/api/admin/content-security/policies/:policy_id`, ok()),
+  http.put(`${API_BASE}/api/admin/content-security/policies/:policy_id`, ok()),
+  http.delete(`${API_BASE}/api/admin/content-security/policies/:policy_id`, ok()),
+  http.post(`${API_BASE}/api/admin/content-security/policies/:policy_id/rules`, ok()),
+  http.delete(`${API_BASE}/api/admin/content-security/policies/:policy_id/rules`, ok()),
+  http.get(`${API_BASE}/api/admin/content-security/policies/:policy_id/revisions`, ok({ revisions: [] })),
+  http.get(`${API_BASE}/api/admin/content-security/assignments`, ok({ configured: false, assignments: [] })),
+  http.post(`${API_BASE}/api/admin/content-security/assignments`, ok()),
+  http.put(`${API_BASE}/api/admin/content-security/assignments/:assignment_id`, ok()),
+  http.delete(`${API_BASE}/api/admin/content-security/assignments/:assignment_id`, ok()),
+  http.get(
+    `${API_BASE}/api/admin/content-security/effective`,
+    ok({ content_id: null, assignment: null, policy: null, shared_with: 0, configured: false }),
+  ),
+  http.post(`${API_BASE}/api/admin/content-security/live-rule`, ok()),
+  http.post(`${API_BASE}/api/admin/content-security/publish`, ok({ status: 'not_configured', rev: 0, error: null })),
+  http.get(
+    `${API_BASE}/api/admin/content-security/sync-status`,
+    ok({ configured: false, rev: 0, published_rev: 0, in_sync: false, last_ok_at: null, last_error: null }),
+  ),
+  http.get(
+    `${API_BASE}/api/admin/content-security/country-regex/preview`,
+    ok({ valid: true, error: null, matches: [] }),
+  ),
+
   // ── Client telemetry collectors ───────────────────────────────────
   // Mounted globally by the SPA: web-vitals reports on pagehide /
   // navigation; ux-events fires on column-reorder and similar SPA

@@ -2,156 +2,154 @@
 
 import React from 'react'
 import Link from 'next/link'
-import { useQueryClient } from '@tanstack/react-query'
-import { Ban, Gauge, Loader2 } from 'lucide-react'
+import { Ban, Gauge, Loader2, ShieldCheck } from 'lucide-react'
 import { client, extractApiError } from '@/lib/api'
 import { buildServiceHref } from '@/lib/navigation'
-import { showToast, showToastWithAction } from '@/lib/toast'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { showToastWithAction } from '@/lib/toast'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import type { components } from '@/types/api.generated'
+import { ValuePicker } from '@/components/ui/value-picker'
+import {
+  BLOCK_CATEGORY_LABELS,
+  THROTTLE_KBPS,
+  describeRule,
+  isRuleCategory,
+  usePolicyActions,
+  type BlockCategory,
+  type EffectivePolicy,
+  type LiveRuleBody,
+  type LiveRuleResult,
+  type RuleMark,
+  modeLabel,
+} from './policyApi'
 
-type BlocksData = components['schemas']['ContentSecurityBlocksResponse']
-export type Block = components['schemas']['ContentSecurityBlock']
-/** One `{category, value}` pair; a block matches only when ALL of its conditions do. */
-export type BlockCondition = components['schemas']['ContentSecurityBlockCondition']
-export type BlockCategory = BlockCondition['category']
+export { BLOCK_CATEGORY_LABELS, THROTTLE_KBPS, describeRule, removeLabel } from './policyApi'
+export type { BlockCategory } from './policyApi'
 
-export const BLOCK_CATEGORY_LABELS: Record<BlockCategory, string> = {
-  country: 'Country',
-  asn: 'ASN',
-  referer: 'Referer',
-  host: 'Host',
-  proxy_type: 'Proxy type',
-  proxy_description: 'Proxy description',
-  subscriber_id: 'Subscriber ID',
-  ip: 'IP address',
+/** One `{category, value}` pair offered by, or passed to, the Block dialog. */
+export interface BlockCondition {
+  category: BlockCategory
+  value: string
 }
 
 /** One pickable value in the Block dialog. `display` is the human label (e.g. a country name). */
-export interface BlockOption {
-  category: BlockCategory
-  value: string
+export interface BlockOption extends BlockCondition {
   display?: string
 }
 
 const CUSTOM = '__custom__'
 
-/** Throttle rates offered in the dialog, in kbps. 0 (Block) is always offered first. */
-export const THROTTLE_KBPS = [128, 256, 512] as const
-
-/** "Blocked" or "Throttled to 256 kbps". */
-export function describeAction(kbps: number) {
-  return kbps === 0 ? 'Blocked' : `Throttled to ${kbps} kbps`
-}
-
-/** Label for reverting a rule: "Unblock" or "Remove throttle". */
-export function removeLabel(kbps: number) {
-  return kbps === 0 ? 'Unblock' : 'Remove throttle'
-}
-
-/** Inline mark beside a value with an active rule: red ban for a block, amber gauge for a throttle. */
-export function BlockMark({ kbps }: { kbps: number }) {
-  const label = describeAction(kbps)
+/** Inline mark beside a value with a rule: red ban (block), amber gauge (throttle) or green shield (allow). */
+export function BlockMark({ rule }: { rule: RuleMark }) {
+  const label = describeRule(rule)
+  const className =
+    rule.action === 'block'
+      ? 'inline-flex shrink-0 text-destructive'
+      : rule.action === 'pace'
+        ? 'inline-flex shrink-0 text-amber-600 dark:text-amber-500'
+        : 'inline-flex shrink-0 text-emerald-700 dark:text-emerald-500'
   return (
-    <span
-      className={kbps === 0 ? 'inline-flex shrink-0 text-destructive' : 'inline-flex shrink-0 text-amber-600 dark:text-amber-500'}
-      title={label}
-    >
-      {kbps === 0 ? <Ban className="h-3.5 w-3.5" aria-hidden="true" /> : <Gauge className="h-3.5 w-3.5" aria-hidden="true" />}
+    <span className={className} title={label}>
+      {rule.action === 'block' ? (
+        <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+      ) : rule.action === 'pace' ? (
+        <Gauge className="h-3.5 w-3.5" aria-hidden="true" />
+      ) : (
+        <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+      )}
       <span className="sr-only">{label}</span>
     </span>
   )
 }
 
-/** Admin-only: the service's active blocks and whether a blocklist URL is configured. */
-export function useBlocklist(activeServiceId: string | null, enabled: boolean) {
-  return useServiceQuery<BlocksData | undefined>(
-    ['content-security', 'blocks', activeServiceId],
-    async ({ signal }) => {
-      const { data, error } = await client.GET('/api/admin/content-security/blocks', { signal })
-      if (error) throw error
-      return data
-    },
-    { enabled },
-  )
+function verb(rule: RuleMark, what: string) {
+  if (rule.action === 'block') return `Blocked ${what}`
+  if (rule.action === 'pace') return `Throttled ${what} to ${rule.kbps} kbps`
+  return `Allowed ${what}`
 }
 
-/** "Country RS" or, for a multi-condition block, "Country RS and Proxy type hosting". */
-export function describeConditions(conditions: BlockCondition[]) {
-  return conditions.map((c) => `${BLOCK_CATEGORY_LABELS[c.category]} ${c.value}`).join(' and ')
-}
-
-export function useBlockActions(activeServiceId: string | null) {
-  const queryClient = useQueryClient()
-  const invalidate = React.useCallback(
-    () => queryClient.invalidateQueries({ queryKey: ['content-security', 'blocks', activeServiceId] }),
-    [queryClient, activeServiceId],
-  )
+/**
+ * Live-rule actions for the Monitor view: add a rule to the policy in effect (the server creates a
+ * Default policy and assignment when none is), and undo or remove one.
+ */
+export function useLiveRuleActions() {
+  const { removeRule, announce, invalidate } = usePolicyActions()
 
   const unblock = React.useCallback(
-    async (block: Block) => {
+    async (policyId: string, category: BlockCategory, value: string, rule: RuleMark) => {
+      const what = `${BLOCK_CATEGORY_LABELS[category]} ${value}`
+      const message =
+        rule.action === 'block'
+          ? `Unblocked ${what}`
+          : rule.action === 'pace'
+            ? `Removed throttle on ${what}`
+            : `Removed allow rule for ${what}`
       // Failures surface through the api client's mutation-error toast.
-      const { error } = await client.DELETE('/api/admin/content-security/blocks/{block_id}', {
-        params: { path: { block_id: block.id } },
-      })
-      await invalidate()
-      if (error) throw error
-      const what = describeConditions(block.conditions)
-      showToast(block.kbps === 0 ? `Unblocked ${what}` : `Removed throttle on ${what}`, 'info')
+      await removeRule(policyId, category, value, message)
     },
-    [invalidate],
+    [removeRule],
   )
 
-  const block = React.useCallback(
-    async (conditions: BlockCondition[], kbps: number) => {
-      const { data, error } = await client.POST('/api/admin/content-security/blocks', { body: { conditions, kbps } })
+  /** Add a rule; an Undo toast for 10 s when it is live, a Retry toast when it is saved but not. */
+  const addRule = React.useCallback(
+    async (body: LiveRuleBody): Promise<LiveRuleResult> => {
+      const { data, error } = await client.POST('/api/admin/content-security/live-rule', { body })
       if (error) throw error
-      await invalidate()
-      const what = describeConditions(data.conditions)
-      showToastWithAction(data.kbps === 0 ? `Blocked ${what}` : `Throttled ${what} to ${data.kbps} kbps`, {
-        actionLabel: 'Undo',
-        kind: 'success',
-        durationMs: 10_000,
-        onAction: () => void unblock(data).catch(() => {}),
-      })
+      const rule: RuleMark = { action: body.action, kbps: body.kbps }
+      const what = `${BLOCK_CATEGORY_LABELS[body.category]} ${body.value}`
+      const message = verb(rule, what) + (data.created_default ? '. Created a Default policy for all content' : '')
+      if (data.publish.status === 'published') {
+        await invalidate()
+        showToastWithAction(message, {
+          actionLabel: 'Undo',
+          kind: 'success',
+          durationMs: 10_000,
+          onAction: () => void unblock(data.policy.id, body.category, body.value, rule).catch(() => {}),
+        })
+      } else {
+        await announce(data.publish, message)
+      }
       return data
     },
-    [invalidate, unblock],
+    [announce, invalidate, unblock],
   )
 
-  return { block, unblock }
+  return { addRule, unblock }
 }
 
-/** Confirm a block: pick the category and value (defaulting to the one clicked), then call the blocklist function. */
+/**
+ * Confirm a rule: pick the category and value (defaulting to the one clicked) and the action, then
+ * add it to the policy in effect for the content being viewed.
+ */
 export function BlockDialog({
   open,
   onOpenChange,
   options,
   initial,
-  configured,
+  effective,
   activeServiceId,
+  contentId,
   onConfirm,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   options: BlockOption[]
   initial: BlockCondition | null
-  /** undefined while the blocks query is loading. */
-  configured: boolean | undefined
+  /** Policy in effect for `contentId`; undefined while loading. */
+  effective: EffectivePolicy | undefined
   activeServiceId: string | null
-  /** kbps 0 blocks; > 0 throttles to that rate. */
-  onConfirm: (conditions: BlockCondition[], kbps: number) => Promise<unknown>
+  /** Content being viewed (null = all content). */
+  contentId: string | null
+  onConfirm: (body: LiveRuleBody) => Promise<unknown>
 }) {
   const categories = React.useMemo(() => [...new Set(options.map((o) => o.category))], [options])
   const [category, setCategory] = React.useState<BlockCategory | null>(initial?.category ?? null)
   const [choice, setChoice] = React.useState<string>(initial?.value ?? '')
   const [custom, setCustom] = React.useState('')
-  const [kbps, setKbps] = React.useState(0)
+  // 'block' | 'exempt' (shown as Allow) | '128' | '256' | '512'
+  const [action, setAction] = React.useState<string>('block')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -162,19 +160,26 @@ export function BlockDialog({
     setCategory(initial?.category ?? categories[0] ?? null)
     setChoice(initial?.value ?? '')
     setCustom('')
-    setKbps(0)
+    setAction('block')
     setError(null)
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [open, initial, categories])
 
+  const individual = category != null && !isRuleCategory(category)
   const valueOptions = options.filter((o) => o.category === category)
   const value = (choice === CUSTOM ? custom : choice).trim()
-  const canConfirm = configured === true && category != null && value !== '' && !busy
+  const configured = effective?.configured
+  const paceKbps = Number(action)
+  const isPace = action !== 'block' && action !== 'exempt'
+  const rateOk = !isPace || (Number.isInteger(paceKbps) && paceKbps > 0)
+  const canConfirm = configured === true && category != null && value !== '' && rateOk && !busy
 
   const changeCategory = (next: BlockCategory) => {
     setCategory(next)
     setChoice(options.find((o) => o.category === next)?.value ?? CUSTOM)
     setCustom('')
+    // Individual rules are block-only.
+    if (!isRuleCategory(next)) setAction('block')
   }
 
   const confirm = async () => {
@@ -182,8 +187,14 @@ export function BlockDialog({
     setBusy(true)
     setError(null)
     try {
-      // The dialog builds one condition today; the API takes the full AND list.
-      await onConfirm([{ category, value }], kbps)
+      const body: LiveRuleBody = {
+        category,
+        value,
+        action: isPace ? 'pace' : (action as 'block' | 'exempt'),
+        kbps: isPace ? paceKbps : 0,
+        content_id: contentId,
+      }
+      await onConfirm(body)
       onOpenChange(false)
     } catch (e) {
       setError(extractApiError(e))
@@ -192,17 +203,21 @@ export function BlockDialog({
     }
   }
 
+  const policy = effective?.policy
+  const assignment = effective?.assignment
+  const scope = contentId ?? 'all content'
+
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <Ban className="h-4 w-4" aria-hidden="true" />
-            Block or throttle access
+            Block, throttle or allow
           </DialogTitle>
           <DialogDescription>
-            Sends the category, value and rate to your blocklist endpoint. You can undo this from the notification or
-            the Blocked &amp; Throttled list.
+            Adds a rule to the policy in effect and publishes it to the blocker. You can undo this from the notification
+            or the Blocked &amp; Throttled list.
           </DialogDescription>
         </DialogHeader>
 
@@ -227,46 +242,82 @@ export function BlockDialog({
 
           <div className="space-y-2">
             <Label id="block-value-label">{category ? BLOCK_CATEGORY_LABELS[category] : 'Value'}</Label>
-            <Select value={choice || undefined} onValueChange={(v) => v && setChoice(v)}>
-              <SelectTrigger aria-labelledby="block-value-label" className="w-full font-mono text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {valueOptions.map((o) => (
-                  <SelectItem key={o.value} value={o.value} className="font-mono text-xs">
-                    {o.display ?? o.value}
-                  </SelectItem>
-                ))}
-                <SelectItem value={CUSTOM}>Custom value…</SelectItem>
-              </SelectContent>
-            </Select>
-            {choice === CUSTOM && (
-              <Input
-                aria-label={`Custom ${category ? BLOCK_CATEGORY_LABELS[category].toLowerCase() : 'value'}`}
-                className="font-mono text-xs"
-                value={custom}
-                onChange={(e) => setCustom(e.target.value)}
-                autoFocus
-              />
-            )}
+            <ValuePicker
+              labelledBy="block-value-label"
+              value={value}
+              options={valueOptions.map((o) => ({
+                value: o.value,
+                label: o.display ?? o.value,
+                detail: o.display && o.display !== o.value ? o.value : undefined,
+              }))}
+              allowCustom
+              mono
+              onChange={(next) => {
+                if (valueOptions.some((o) => o.value === next)) {
+                  setChoice(next)
+                } else {
+                  setChoice(CUSTOM)
+                  setCustom(next)
+                }
+              }}
+              placeholder="Choose or enter a value"
+              searchPlaceholder="Search or type a value…"
+              emptyText="Type a value to use it."
+            />
           </div>
 
           <div className="space-y-2">
             <Label id="block-action-label">Action</Label>
-            <Select value={String(kbps)} onValueChange={(v) => v != null && setKbps(Number(v))}>
+            <Select value={action} onValueChange={(v) => v != null && setAction(v)}>
               <SelectTrigger aria-labelledby="block-action-label" className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="0">Block (no traffic allowed)</SelectItem>
-                {THROTTLE_KBPS.map((rate) => (
-                  <SelectItem key={rate} value={String(rate)}>
-                    {`Throttle to: ${rate} kbps`}
-                  </SelectItem>
-                ))}
+                <SelectItem value="block">Block (no traffic allowed)</SelectItem>
+                {!individual &&
+                  THROTTLE_KBPS.map((rate) => (
+                    <SelectItem key={rate} value={String(rate)}>
+                      {`Throttle to: ${rate} kbps`}
+                    </SelectItem>
+                  ))}
+                {!individual && <SelectItem value="exempt">Allow (skip this policy&apos;s other rules)</SelectItem>}
               </SelectContent>
             </Select>
+            {individual && (
+              <p className="text-[11px] text-muted-foreground">
+                Subscriber ID and IP rules can only block. They also take precedence over Allow rules.
+              </p>
+            )}
           </div>
+
+          {effective && configured !== false && (
+            <div className="space-y-2 rounded-md border bg-muted/40 p-2.5 text-xs">
+              {policy ? (
+                <p>
+                  Adds the rule to <strong>{policy.name}</strong>, the policy in effect for {scope}
+                  {assignment ? ` (${modeLabel(assignment.mode)})` : ''}.
+                </p>
+              ) : (
+                <p>
+                  No policy is in effect for {scope}. A <strong>Default</strong> policy will be created and scheduled for all
+                  content in Enforce mode.
+                </p>
+              )}
+              {policy && effective.shared_with > 0 && (
+                <p role="note" className="text-amber-800 dark:text-amber-400">
+                  This policy is shared: it is also scheduled for {effective.shared_with} other{' '}
+                  {effective.shared_with === 1 ? 'entry' : 'entries'} in this service, and the change applies to
+                  all of them.
+                </p>
+              )}
+              {policy && assignment?.scope_type === 'default' && contentId && (
+                <p role="note" className="text-amber-800 dark:text-amber-400">
+                  {contentId} has no schedule of its own, so this is the all-content policy and the change applies to all
+                  content.
+                </p>
+              )}
+            </div>
+          )}
 
           {configured === false && (
             <p className="text-xs text-muted-foreground">
@@ -288,15 +339,27 @@ export function BlockDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={() => void confirm()} disabled={!canConfirm}>
+          <Button variant={action === 'exempt' ? 'default' : 'destructive'} onClick={() => void confirm()} disabled={!canConfirm}>
             {busy ? (
               <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-            ) : kbps === 0 ? (
+            ) : action === 'block' ? (
               <Ban className="h-3 w-3 mr-1" />
+            ) : action === 'exempt' ? (
+              <ShieldCheck className="h-3 w-3 mr-1" />
             ) : (
               <Gauge className="h-3 w-3 mr-1" />
             )}
-            {kbps === 0 ? (busy ? 'Blocking…' : 'Block') : busy ? 'Throttling…' : 'Throttle'}
+            {action === 'block'
+              ? busy
+                ? 'Blocking…'
+                : 'Block'
+              : action === 'exempt'
+                ? busy
+                  ? 'Allowing…'
+                  : 'Allow'
+                : busy
+                  ? 'Throttling…'
+                  : 'Throttle'}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -71,6 +71,8 @@ _PATH_PARAM_SUBSTITUTIONS = {
     "job_id": "job1",
     "alert_id": "alert1",
     "block_id": "block1",
+    "policy_id": "policy1",
+    "assignment_id": "assignment1",
     "invite_id": "invite1",
     "session_id": "sess1",
     "quarantine_id": "quar1",

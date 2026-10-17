@@ -7,6 +7,7 @@ import { NuqsTestingAdapter, type UrlUpdateEvent } from 'nuqs/adapters/testing'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
+import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 
 // Render-smoke for the streaming page's Quality / Security tabs.
 
@@ -30,6 +31,12 @@ vi.mock('@/app/streaming/_sections/tabs/SecurityTab', () => ({
   default: () => <div data-testid="security-tab" />,
 }))
 
+vi.mock('@/app/streaming/_sections/tabs/PoliciesView', () => ({
+  default: () => <div data-testid="policies-view" />,
+}))
+
+vi.mock('@/hooks/useIsAnalyst', () => ({ useIsAnalyst: vi.fn(() => false) }))
+
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../helpers/page-smoke')).reportLayoutModuleMock({
     startTime: '2026-01-01T00:00:00Z',
@@ -46,6 +53,7 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 beforeEach(() => {
   queryClient.clear()
+  vi.mocked(useIsAnalyst).mockReturnValue(false)
   errorSpy = spyOnConsoleError()
 })
 
@@ -107,4 +115,34 @@ test('the description under the tabs follows the active tab', async () => {
   await userEvent.click(screen.getByRole('tab', { name: /security/i }))
   expect(screen.getByText(/anti-piracy metrics/i)).toBeInTheDocument()
   expect(screen.queryByText(/buffer health, bitrate, throughput/i)).not.toBeInTheDocument()
+})
+
+test('Content Security opens on Monitor, with a Policies view beside it', () => {
+  renderPage('?tab=security')
+  expect(screen.getByRole('tab', { name: 'Monitor' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tab', { name: 'Policies' })).toHaveAttribute('aria-selected', 'false')
+  expect(screen.getByTestId('security-tab')).toBeInTheDocument()
+  expect(screen.queryByTestId('policies-view')).not.toBeInTheDocument()
+})
+
+test('choosing Policies shows the Policies view and writes ?csview=policies', async () => {
+  const onUrlUpdate = vi.fn<(e: UrlUpdateEvent) => void>()
+  renderPage('?tab=security', onUrlUpdate)
+  await userEvent.click(screen.getByRole('tab', { name: 'Policies' }))
+  expect(screen.getByTestId('policies-view')).toBeInTheDocument()
+  expect(screen.queryByTestId('security-tab')).not.toBeInTheDocument()
+  expect(onUrlUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ queryString: '?tab=security&csview=policies' }))
+})
+
+test('?csview=policies deep-links to the Policies view', () => {
+  renderPage('?tab=security&csview=policies')
+  expect(screen.getByRole('tab', { name: 'Policies' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByTestId('policies-view')).toBeInTheDocument()
+})
+
+test('analysts only get Monitor: no Policies view', () => {
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
+  renderPage('?tab=security&csview=policies')
+  expect(screen.queryByRole('tab', { name: 'Policies' })).not.toBeInTheDocument()
+  expect(screen.getByTestId('security-tab')).toBeInTheDocument()
 })

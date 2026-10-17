@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, StringConstraints
 
 from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
 
@@ -96,6 +96,16 @@ class ContentSecurityEnforcementRow(BaseModel):
     bytes: int | None = None
 
 
+class ContentSecurityEnforcementReasonRow(BaseModel):
+    # One row per (policy, deciding rule, status). ``reason`` is a category, ``country_regex``,
+    # ``subscriber_id``, ``ip`` or ``exempt:<category>``; empty when the blocker gave none.
+    policy_id: str
+    reason: str
+    status: str
+    requests: int
+    enforced: int
+
+
 class ContentSecurityEnforcementPoint(BaseModel):
     bucket: str
     status: str
@@ -121,6 +131,7 @@ class ContentSecurityResponse(BaseResponse):
     bandwidth_ts: list[ContentSecurityBandwidthPoint] = []
     enforcement: list[ContentSecurityEnforcementRow] = []
     enforcement_ts: list[ContentSecurityEnforcementPoint] = []
+    enforcement_reasons: list[ContentSecurityEnforcementReasonRow] = []
 
 
 class SubscriberIpsRequest(FilteredRequest):
@@ -151,10 +162,8 @@ class SubscriberIpsResponse(BaseResponse):
 
 # ── Content Security blocklist (admin-only) ──────────────────────────────────
 
+
 # Categories the blocklist HTTP function receives as ``category``.
-BlockCategory = Literal["country", "asn", "referer", "host", "proxy_type", "proxy_description", "subscriber_id", "ip"]
-
-
 class ContentSecuritySettings(BaseModel):
     """Global blocklist config (Admin → Overall Settings → Content Security).
 
@@ -172,32 +181,3 @@ class ContentSecuritySettingsUpdate(BaseModel):
     # Length/format are checked by parse_auth_header, whose errors never echo the
     # value — a model constraint would echo the credential back in the 422 body.
     auth_header: str | None = None
-
-
-class ContentSecurityBlockCondition(BaseModel):
-    category: BlockCategory
-    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
-
-
-class ContentSecurityBlockRequest(BaseModel):
-    # All conditions must match (AND). One per category — two values for the
-    # same category could never both match.
-    conditions: Annotated[list[ContentSecurityBlockCondition], Field(min_length=1, max_length=8)]
-    # 0 blocks matching traffic outright; > 0 throttles it to that many kbps.
-    kbps: Annotated[int, Field(ge=0, le=10_000_000)] = 0
-
-
-class ContentSecurityBlock(BaseModel):
-    id: str
-    conditions: list[ContentSecurityBlockCondition]
-    kbps: int = 0
-    created_at: str
-    created_by: str
-    unblocked_at: str | None = None
-    unblocked_by: str | None = None
-
-
-class ContentSecurityBlocksResponse(BaseModel):
-    # False until an admin sets the blocklist URL — the tab then points them at Admin settings.
-    configured: bool
-    blocks: list[ContentSecurityBlock]

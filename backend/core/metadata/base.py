@@ -532,25 +532,64 @@ _SCHEMA = [
         quarantined_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantine_evidence_fifo ON quarantine_evidence(service_id, quarantined_at, id)",
-    # Streaming → Content Security blocks pushed to the operator's blocklist
-    # HTTP function. ``conditions`` is the canonical JSON list of
-    # {category, value} pairs (sorted by category, compact separators) — all
-    # must match (AND) — so the text itself is the dedupe key. A row is active
-    # until unblocked_at is set; history is kept. ``kbps`` 0 blocks; > 0
-    # throttles matching traffic to that rate (the audit log also records
-    # every call).
-    """CREATE TABLE IF NOT EXISTS content_security_blocklist (
+    # Content Security policies. A policy belongs to one service; it enforces nothing until an
+    # assignment (the service default, or one content ID) points at it. Timestamps are
+    # ISO-8601 Z text. Individual subscriber/IP blocks live in the rules table too
+    # (kind 'block'); the API keeps them apart.
+    """CREATE TABLE IF NOT EXISTS content_security_policies (
         id TEXT PRIMARY KEY,
         service_id TEXT NOT NULL,
-        conditions TEXT NOT NULL,
-        kbps INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        name TEXT NOT NULL,
+        country_regex TEXT,
+        rev INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
         created_by TEXT NOT NULL,
-        unblocked_at TEXT,
-        unblocked_by TEXT
+        updated_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        deleted_at TEXT
     )""",
-    # At most one ACTIVE block per (service, condition set).
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_blocklist_active ON content_security_blocklist(service_id, conditions) WHERE unblocked_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_policies_name ON content_security_policies(service_id, name) WHERE deleted_at IS NULL",
+    """CREATE TABLE IF NOT EXISTS content_security_policy_rules (
+        policy_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        value TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        kbps INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (policy_id, category, value)
+    )""",
+    """CREATE TABLE IF NOT EXISTS content_security_policy_revisions (
+        policy_id TEXT NOT NULL,
+        rev INTEGER NOT NULL,
+        doc TEXT NOT NULL,
+        changed_by TEXT NOT NULL,
+        changed_at TEXT NOT NULL,
+        PRIMARY KEY (policy_id, rev)
+    )""",
+    """CREATE TABLE IF NOT EXISTS content_security_assignments (
+        id TEXT PRIMARY KEY,
+        service_id TEXT NOT NULL,
+        policy_id TEXT NOT NULL,
+        scope_type TEXT NOT NULL,
+        content_id TEXT,
+        mode TEXT NOT NULL,
+        starts_at TEXT,
+        ends_at TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        deleted_at TEXT
+    )""",
+    # One default assignment per service.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_assignments_default ON content_security_assignments(service_id) WHERE scope_type = 'default' AND deleted_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_cs_assignments_content ON content_security_assignments(service_id, content_id) WHERE deleted_at IS NULL",
+    # ``rev`` counts every change to a service's policies/assignments; ``published_rev`` is the
+    # last one the blocker accepted.
+    """CREATE TABLE IF NOT EXISTS content_security_publish_state (
+        service_id TEXT PRIMARY KEY,
+        rev INTEGER NOT NULL DEFAULT 0,
+        published_rev INTEGER NOT NULL DEFAULT 0,
+        last_ok_at TEXT,
+        last_error TEXT
+    )""",
 ]
 
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw

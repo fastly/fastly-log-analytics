@@ -2360,25 +2360,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/content-security/blocks": {
+    "/api/admin/content-security/policies": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Content Security Blocks */
-        get: operations["list_content_security_blocks_api_admin_content_security_blocks_get"];
+        /** List Policies */
+        get: operations["list_policies_api_admin_content_security_policies_get"];
         put?: never;
-        /** Create Content Security Block */
-        post: operations["create_content_security_block_api_admin_content_security_blocks_post"];
+        /** Create Policy */
+        post: operations["create_policy_api_admin_content_security_policies_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/admin/content-security/blocks/{block_id}": {
+    "/api/admin/content-security/policies/{policy_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Policy */
+        get: operations["get_policy_api_admin_content_security_policies__policy_id__get"];
+        /** Replace Policy */
+        put: operations["replace_policy_api_admin_content_security_policies__policy_id__put"];
+        post?: never;
+        /** Delete Policy */
+        delete: operations["delete_policy_api_admin_content_security_policies__policy_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/policies/{policy_id}/rules": {
         parameters: {
             query?: never;
             header?: never;
@@ -2387,9 +2406,160 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Upsert Rule */
+        post: operations["upsert_rule_api_admin_content_security_policies__policy_id__rules_post"];
+        /** Remove Rule */
+        delete: operations["remove_rule_api_admin_content_security_policies__policy_id__rules_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/policies/{policy_id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Policy Revisions */
+        get: operations["policy_revisions_api_admin_content_security_policies__policy_id__revisions_get"];
+        put?: never;
         post?: never;
-        /** Delete Content Security Block */
-        delete: operations["delete_content_security_block_api_admin_content_security_blocks__block_id__delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Assignments */
+        get: operations["list_assignments_api_admin_content_security_assignments_get"];
+        put?: never;
+        /** Create Assignment */
+        post: operations["create_assignment_api_admin_content_security_assignments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/assignments/{assignment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Assignment */
+        put: operations["update_assignment_api_admin_content_security_assignments__assignment_id__put"];
+        post?: never;
+        /** Delete Assignment */
+        delete: operations["delete_assignment_api_admin_content_security_assignments__assignment_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/effective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Effective Policy
+         * @description The policy in effect now for ``content_id`` (its own assignment, else the default).
+         */
+        get: operations["effective_policy_api_admin_content_security_effective_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/live-rule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Live Rule
+         * @description Add a rule to the policy in effect for the content being viewed (creates a Default if none).
+         */
+        post: operations["live_rule_api_admin_content_security_live_rule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish Now
+         * @description Push the service's current policies and assignments to the blocker (retry / Sync now).
+         */
+        post: operations["publish_now_api_admin_content_security_publish_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/sync-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sync Status */
+        get: operations["sync_status_api_admin_content_security_sync_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/content-security/country-regex/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Country Regex Preview
+         * @description Which countries a mass-block regex would block, for the editor's live preview.
+         */
+        get: operations["country_regex_preview_api_admin_content_security_country_regex_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -6094,6 +6264,40 @@ export interface components {
             /** Anchor */
             anchor?: string | null;
         };
+        /** AssignmentBody */
+        AssignmentBody: {
+            /** Policy Id */
+            policy_id: string;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "default" | "content_id";
+            /** Content Id */
+            content_id?: string | null;
+            /**
+             * Mode
+             * @default ENFORCE
+             * @enum {string}
+             */
+            mode: "WARN" | "ENFORCE";
+            /** Starts At */
+            starts_at?: string | null;
+            /** Ends At */
+            ends_at?: string | null;
+        };
+        /** AssignmentResult */
+        AssignmentResult: {
+            assignment: components["schemas"]["ContentSecurityAssignment"];
+            publish: components["schemas"]["PublishResult"];
+        };
+        /** AssignmentsResponse */
+        AssignmentsResponse: {
+            /** Configured */
+            configured: boolean;
+            /** Assignments */
+            assignments: components["schemas"]["ContentSecurityAssignment"][];
+        };
         /**
          * AuthConfigProvider
          * @description One enabled OIDC provider as seen by the unauthenticated login page.
@@ -7064,6 +7268,40 @@ export interface components {
             /** Bytes */
             bytes: number;
         };
+        /** ContentSecurityAssignment */
+        ContentSecurityAssignment: {
+            /** Id */
+            id: string;
+            /** Policy Id */
+            policy_id: string;
+            /** Policy Name */
+            policy_name?: string | null;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "default" | "content_id";
+            /** Content Id */
+            content_id?: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "WARN" | "ENFORCE";
+            /** Starts At */
+            starts_at?: string | null;
+            /** Ends At */
+            ends_at?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "scheduled" | "active" | "ended";
+            /** Created At */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+        };
         /** ContentSecurityBandwidthPoint */
         ContentSecurityBandwidthPoint: {
             /** Bucket */
@@ -7072,53 +7310,6 @@ export interface components {
             edge_bytes: number;
             /** Shield Bytes */
             shield_bytes?: number | null;
-        };
-        /** ContentSecurityBlock */
-        ContentSecurityBlock: {
-            /** Id */
-            id: string;
-            /** Conditions */
-            conditions: components["schemas"]["ContentSecurityBlockCondition"][];
-            /**
-             * Kbps
-             * @default 0
-             */
-            kbps: number;
-            /** Created At */
-            created_at: string;
-            /** Created By */
-            created_by: string;
-            /** Unblocked At */
-            unblocked_at?: string | null;
-            /** Unblocked By */
-            unblocked_by?: string | null;
-        };
-        /** ContentSecurityBlockCondition */
-        ContentSecurityBlockCondition: {
-            /**
-             * Category
-             * @enum {string}
-             */
-            category: "country" | "asn" | "referer" | "host" | "proxy_type" | "proxy_description" | "subscriber_id" | "ip";
-            /** Value */
-            value: string;
-        };
-        /** ContentSecurityBlockRequest */
-        ContentSecurityBlockRequest: {
-            /** Conditions */
-            conditions: components["schemas"]["ContentSecurityBlockCondition"][];
-            /**
-             * Kbps
-             * @default 0
-             */
-            kbps: number;
-        };
-        /** ContentSecurityBlocksResponse */
-        ContentSecurityBlocksResponse: {
-            /** Configured */
-            configured: boolean;
-            /** Blocks */
-            blocks: components["schemas"]["ContentSecurityBlock"][];
         };
         /** ContentSecurityContentId */
         ContentSecurityContentId: {
@@ -7136,6 +7327,19 @@ export interface components {
             /** Requests */
             requests: number;
         };
+        /** ContentSecurityEnforcementReasonRow */
+        ContentSecurityEnforcementReasonRow: {
+            /** Policy Id */
+            policy_id: string;
+            /** Reason */
+            reason: string;
+            /** Status */
+            status: string;
+            /** Requests */
+            requests: number;
+            /** Enforced */
+            enforced: number;
+        };
         /** ContentSecurityEnforcementRow */
         ContentSecurityEnforcementRow: {
             /** Status */
@@ -7148,6 +7352,32 @@ export interface components {
             users?: number | null;
             /** Bytes */
             bytes?: number | null;
+        };
+        /** ContentSecurityPolicy */
+        ContentSecurityPolicy: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Country Regex */
+            country_regex?: string | null;
+            /** Rev */
+            rev: number;
+            rules: components["schemas"]["PolicyRules"];
+            individual: components["schemas"]["PolicyIndividual"];
+            /** Created At */
+            created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Updated At */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+            /**
+             * Used By
+             * @default []
+             */
+            used_by: components["schemas"]["PolicyUse"][];
         };
         /** ContentSecurityRequest */
         ContentSecurityRequest: {
@@ -7280,6 +7510,11 @@ export interface components {
              * @default []
              */
             enforcement_ts: components["schemas"]["ContentSecurityEnforcementPoint"][];
+            /**
+             * Enforcement Reasons
+             * @default []
+             */
+            enforcement_reasons: components["schemas"]["ContentSecurityEnforcementReasonRow"][];
         };
         /**
          * ContentSecuritySettings
@@ -7317,6 +7552,21 @@ export interface components {
             bytes?: number | null;
             /** Last Seen */
             last_seen?: string | null;
+        };
+        /** ContentSecuritySyncStatusResponse */
+        ContentSecuritySyncStatusResponse: {
+            /** Configured */
+            configured: boolean;
+            /** Rev */
+            rev: number;
+            /** Published Rev */
+            published_rev: number;
+            /** In Sync */
+            in_sync: boolean;
+            /** Last Ok At */
+            last_ok_at?: string | null;
+            /** Last Error */
+            last_error?: string | null;
         };
         /** ContentSecurityTopRow */
         ContentSecurityTopRow: {
@@ -7854,6 +8104,20 @@ export interface components {
             query_debug_visibility?: string | null;
             /** Api Call Debug Visibility */
             api_call_debug_visibility?: string | null;
+        };
+        /** EffectivePolicyResponse */
+        EffectivePolicyResponse: {
+            /** Content Id */
+            content_id?: string | null;
+            assignment?: components["schemas"]["ContentSecurityAssignment"] | null;
+            policy?: components["schemas"]["ContentSecurityPolicy"] | null;
+            /**
+             * Shared With
+             * @default 0
+             */
+            shared_with: number;
+            /** Configured */
+            configured: boolean;
         };
         /**
          * ErrorDetail
@@ -9019,6 +9283,37 @@ export interface components {
             total_bytes: number;
             /** Status */
             status: number;
+        };
+        /** LiveRuleBody */
+        LiveRuleBody: {
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "country" | "asn" | "referer" | "host" | "proxy_type" | "proxy_description" | "subscriber_id" | "ip";
+            /** Value */
+            value: string;
+            /**
+             * Action
+             * @default block
+             * @enum {string}
+             */
+            action: "block" | "pace" | "exempt";
+            /**
+             * Kbps
+             * @default 0
+             */
+            kbps: number;
+            /** Content Id */
+            content_id?: string | null;
+        };
+        /** LiveRuleResult */
+        LiveRuleResult: {
+            policy: components["schemas"]["ContentSecurityPolicy"];
+            assignment: components["schemas"]["ContentSecurityAssignment"];
+            /** Created Default */
+            created_default: boolean;
+            publish: components["schemas"]["PublishResult"];
         };
         /**
          * LocalCompactNowResponse
@@ -10560,6 +10855,131 @@ export interface components {
             /** Mask Ips */
             mask_ips: boolean;
         };
+        /** PoliciesResponse */
+        PoliciesResponse: {
+            /** Configured */
+            configured: boolean;
+            /** Policies */
+            policies: components["schemas"]["ContentSecurityPolicy"][];
+        };
+        /** PolicyBody */
+        PolicyBody: {
+            /** Name */
+            name: string;
+            /** Country Regex */
+            country_regex?: string | null;
+            /**
+             * @default {
+             *       "country": [],
+             *       "asn": [],
+             *       "referer": [],
+             *       "host": [],
+             *       "proxy_type": [],
+             *       "proxy_description": []
+             *     }
+             */
+            rules: components["schemas"]["PolicyRules"];
+            /**
+             * @default {
+             *       "subscriber_id": [],
+             *       "ip": []
+             *     }
+             */
+            individual: components["schemas"]["PolicyIndividual"];
+        };
+        /**
+         * PolicyIndividual
+         * @description Individual blocks. Take precedence over exemptions.
+         */
+        PolicyIndividual: {
+            /**
+             * Subscriber Id
+             * @default []
+             */
+            subscriber_id: string[];
+            /**
+             * Ip
+             * @default []
+             */
+            ip: string[];
+        };
+        /** PolicyResult */
+        PolicyResult: {
+            policy: components["schemas"]["ContentSecurityPolicy"];
+            publish: components["schemas"]["PublishResult"];
+        };
+        /** PolicyRuleItem */
+        PolicyRuleItem: {
+            /** Value */
+            value: string;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "block" | "pace" | "exempt";
+            /**
+             * Kbps
+             * @default 0
+             */
+            kbps: number;
+            /** Label */
+            label?: string | null;
+        };
+        /** PolicyRules */
+        PolicyRules: {
+            /**
+             * Country
+             * @default []
+             */
+            country: components["schemas"]["PolicyRuleItem"][];
+            /**
+             * Asn
+             * @default []
+             */
+            asn: components["schemas"]["PolicyRuleItem"][];
+            /**
+             * Referer
+             * @default []
+             */
+            referer: components["schemas"]["PolicyRuleItem"][];
+            /**
+             * Host
+             * @default []
+             */
+            host: components["schemas"]["PolicyRuleItem"][];
+            /**
+             * Proxy Type
+             * @default []
+             */
+            proxy_type: components["schemas"]["PolicyRuleItem"][];
+            /**
+             * Proxy Description
+             * @default []
+             */
+            proxy_description: components["schemas"]["PolicyRuleItem"][];
+        };
+        /** PolicyUse */
+        PolicyUse: {
+            /** Assignment Id */
+            assignment_id: string;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "default" | "content_id";
+            /** Content Id */
+            content_id?: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "WARN" | "ENFORCE";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "scheduled" | "active" | "ended";
+        };
         /** PopHealthItem */
         PopHealthItem: {
             /** Pop */
@@ -11236,6 +11656,18 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** PublishResult */
+        PublishResult: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "published" | "not_configured" | "failed";
+            /** Rev */
+            rev: number;
+            /** Error */
+            error?: string | null;
+        };
         /** QuarantineEvidenceItem */
         QuarantineEvidenceItem: {
             /** Id */
@@ -11471,6 +11903,18 @@ export interface components {
              */
             token: string;
         };
+        /** RegexPreviewResponse */
+        RegexPreviewResponse: {
+            /** Valid */
+            valid: boolean;
+            /** Error */
+            error?: string | null;
+            /**
+             * Matches
+             * @default []
+             */
+            matches: string[];
+        };
         /**
          * ResetLogsRequest
          * @description Body for ``POST /api/admin/reset-logs`` — a destructive wipe of one
@@ -11497,6 +11941,42 @@ export interface components {
              * @default true
              */
             preserve_usage_history: boolean;
+        };
+        /** RevisionItem */
+        RevisionItem: {
+            /** Rev */
+            rev: number;
+            /** Changed By */
+            changed_by: string;
+            /** Changed At */
+            changed_at: string;
+            policy: components["schemas"]["ContentSecurityPolicy"];
+        };
+        /** RevisionsResponse */
+        RevisionsResponse: {
+            /** Revisions */
+            revisions: components["schemas"]["RevisionItem"][];
+        };
+        /** RuleBody */
+        RuleBody: {
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "country" | "asn" | "referer" | "host" | "proxy_type" | "proxy_description" | "subscriber_id" | "ip";
+            /** Value */
+            value: string;
+            /**
+             * Action
+             * @default block
+             * @enum {string}
+             */
+            action: "block" | "pace" | "exempt";
+            /**
+             * Kbps
+             * @default 0
+             */
+            kbps: number;
         };
         /** RumBreakdownPoint */
         RumBreakdownPoint: {
@@ -28253,7 +28733,7 @@ export interface operations {
             };
         };
     };
-    list_content_security_blocks_api_admin_content_security_blocks_get: {
+    list_policies_api_admin_content_security_policies_get: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -28274,7 +28754,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ContentSecurityBlocksResponse"];
+                    "application/json": components["schemas"]["PoliciesResponse"];
                 };
             };
             /** @description Bad request */
@@ -28360,7 +28840,7 @@ export interface operations {
             };
         };
     };
-    create_content_security_block_api_admin_content_security_blocks_post: {
+    create_policy_api_admin_content_security_policies_post: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -28375,7 +28855,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ContentSecurityBlockRequest"];
+                "application/json": components["schemas"]["PolicyBody"];
             };
         };
         responses: {
@@ -28385,7 +28865,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ContentSecurityBlock"];
+                    "application/json": components["schemas"]["PolicyResult"];
                 };
             };
             /** @description Bad request */
@@ -28471,7 +28951,7 @@ export interface operations {
             };
         };
     };
-    delete_content_security_block_api_admin_content_security_blocks__block_id__delete: {
+    get_policy_api_admin_content_security_policies__policy_id__get: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -28482,7 +28962,7 @@ export interface operations {
                 "x-service-id"?: string | null;
             };
             path: {
-                block_id: string;
+                policy_id: string;
             };
             cookie?: never;
         };
@@ -28494,7 +28974,1538 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ContentSecurityBlock"];
+                    "application/json": components["schemas"]["ContentSecurityPolicy"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    replace_policy_api_admin_content_security_policies__policy_id__put: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                policy_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_policy_api_admin_content_security_policies__policy_id__delete: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                policy_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    upsert_rule_api_admin_content_security_policies__policy_id__rules_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                policy_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    remove_rule_api_admin_content_security_policies__policy_id__rules_delete: {
+        parameters: {
+            query: {
+                category: string;
+                value: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                policy_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    policy_revisions_api_admin_content_security_policies__policy_id__revisions_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                policy_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_assignments_api_admin_content_security_assignments_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssignmentsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_assignment_api_admin_content_security_assignments_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignmentBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssignmentResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_assignment_api_admin_content_security_assignments__assignment_id__put: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                assignment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignmentBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssignmentResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_assignment_api_admin_content_security_assignments__assignment_id__delete: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                assignment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssignmentResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    effective_policy_api_admin_content_security_effective_get: {
+        parameters: {
+            query?: {
+                content_id?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EffectivePolicyResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    live_rule_api_admin_content_security_live_rule_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LiveRuleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LiveRuleResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    publish_now_api_admin_content_security_publish_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishResult"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    sync_status_api_admin_content_security_sync_status_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContentSecuritySyncStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    country_regex_preview_api_admin_content_security_country_regex_preview_get: {
+        parameters: {
+            query?: {
+                pattern?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegexPreviewResponse"];
                 };
             };
             /** @description Bad request */

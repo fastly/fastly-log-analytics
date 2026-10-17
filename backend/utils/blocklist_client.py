@@ -1,33 +1,38 @@
-"""Client for the operator's content-security blocklist HTTP function.
+"""Client for the Content Security blocker (the Compute function that enforces policies).
 
-Contract (configured in Admin → Overall Settings → Content Security):
+The backend publishes a service's whole policy set with ``PUT <base>/v2/services/<id>/policy-set``
+(see ``backend/core/content_security_publish.py``); ``GET`` reads it back and ``DELETE`` removes it.
 
-- ``POST <url>`` with JSON ``{"kbps": N, "conditions": [{"category": ..., "value": ...}]}``
-  acts on requests matching ALL conditions (AND): ``kbps`` 0 blocks them,
-  > 0 throttles them to that rate. ``conditions`` is always an array, even
-  for one condition, so receivers handle a single shape.
-- ``DELETE <url>`` with the same JSON body reverts the block.
+An optional operator-configured header (e.g. ``Authorization: Bearer …``) is sent with every call.
+It is a secret: never logged, never returned to the browser.
 
-An optional operator-configured header (e.g. ``Authorization: Bearer …``)
-is sent with both calls. It is a secret: never logged, never returned to the
-browser.
-
-Any 2xx is success. Redirects are not followed — the admin configured this
-exact URL, and following a 3xx would let the function bounce the call (and
-its body) somewhere else.
+Any 2xx is success. Redirects are not followed: the admin configured this exact URL, and
+following a 3xx would let the function bounce the call (and its body) somewhere else.
+A 429/5xx is retried a couple of times, because the blocker's KV store limits writes to one per
+second per key and publishes follow each other closely (several quick edits in a row).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import urlsplit
+import time
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT_S = 10.0
+
+# Statuses worth a retry: rate limited, or a transient failure at the blocker.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ATTEMPTS = 3
+_RETRY_DELAY_S = 1.2
+_REASON_MAX = 200
+
+# Test seam: tests replace this so retries do not sleep.
+_sleep = time.sleep
 
 # Test seam: tests swap in an ``httpx.MockTransport``.
 _TRANSPORT: httpx.BaseTransport | None = None
@@ -82,21 +87,67 @@ def parse_auth_header(raw: str) -> tuple[str, str]:
     return name, value
 
 
-def call_blocklist(url: str, method: str, conditions: list[dict], kbps: int = 0, auth_header: str | None = None) -> int:
-    """Send one block (``POST``) or unblock (``DELETE``) call; return the HTTP status.
+def policy_set_url(url: str, service_id: str) -> str:
+    """The v2 policy-set endpoint for ``service_id`` on the configured blocker.
 
-    Raises :class:`BlocklistCallError` on transport failure or a non-2xx reply.
-    Only the host is logged — the path or query may carry an operator token.
+    The configured URL is the blocker's base URL (a trailing ``/block`` from an old setting is
+    tolerated). Any query string is dropped: the credential is the auth header.
     """
-    host = urlsplit(url).hostname or "?"
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    if path.endswith("/block"):
+        path = path[: -len("/block")]
+    return urlunsplit(
+        (parts.scheme, parts.netloc, f"{path}/v2/services/{quote(service_id, safe='')}/policy-set", "", "")
+    )
+
+
+def _reason(resp: httpx.Response) -> str:
+    """The blocker's own explanation (its JSON ``error`` / ``detail``), short and single-line.
+
+    The blocker is the operator's own function and never returns credentials; control
+    characters are still replaced so the text is safe to show and to log.
+    """
     try:
-        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False, transport=_TRANSPORT) as client:
-            headers = dict([parse_auth_header(auth_header)]) if auth_header else None
-            resp = client.request(method, url, json={"kbps": kbps, "conditions": conditions}, headers=headers)
-    except httpx.HTTPError as exc:
-        logger.warning("blocklist %s to %s failed: %s", method, host, type(exc).__name__)
-        raise BlocklistCallError(f"Could not reach the blocklist endpoint ({type(exc).__name__})") from exc
+        data = resp.json()
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    text = " - ".join(str(data[k]) for k in ("error", "detail") if isinstance(data.get(k), str) and data[k])
+    text = _CONTROL_RE.sub(" ", text).strip()[:_REASON_MAX]
+    return f": {text}" if text else ""
+
+
+def call_policy_set(
+    url: str, service_id: str, method: str, body: dict | None = None, auth_header: str | None = None
+) -> dict:
+    """``PUT`` (publish), ``GET`` (read back) or ``DELETE`` the service's policy set; return the JSON reply.
+
+    Raises :class:`BlocklistCallError` on transport failure or a non-2xx reply (after retrying a
+    429/5xx). The error carries the blocker's reason when it gave one; only the host is logged.
+    """
+    target = policy_set_url(url, service_id)
+    host = urlsplit(url).hostname or "?"
+    headers = dict([parse_auth_header(auth_header)]) if auth_header else None
+    resp: httpx.Response | None = None
+    for attempt in range(_ATTEMPTS):
+        try:
+            with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False, transport=_TRANSPORT) as client:
+                resp = client.request(method, target, json=body if body is not None else None, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning("policy-set %s to %s failed: %s", method, host, type(exc).__name__)
+            raise BlocklistCallError(f"Could not reach the blocklist endpoint ({type(exc).__name__})") from exc
+        if resp.status_code not in _RETRY_STATUSES or attempt == _ATTEMPTS - 1:
+            break
+        logger.info("policy-set %s to %s returned HTTP %d; retrying", method, host, resp.status_code)
+        _sleep(_RETRY_DELAY_S * (attempt + 1))
+    assert resp is not None
     if not 200 <= resp.status_code < 300:
-        logger.warning("blocklist %s to %s returned HTTP %d", method, host, resp.status_code)
-        raise BlocklistCallError(f"Blocklist endpoint returned HTTP {resp.status_code}")
-    return resp.status_code
+        logger.warning("policy-set %s to %s returned HTTP %d", method, host, resp.status_code)
+        raise BlocklistCallError(f"Blocklist endpoint returned HTTP {resp.status_code}{_reason(resp)}")
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}

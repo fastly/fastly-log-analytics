@@ -22,10 +22,7 @@ import {
   VenetianMask,
   X,
 } from 'lucide-react'
-import { client } from '@/lib/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { formatDate } from '@/lib/date'
 import { formatBytes, resolveCountryName } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -41,25 +38,29 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import type { components } from '@/types/api.generated'
 import type { StreamingTabProps } from './QualityTab'
 import { SubscriberIpsDialog } from './SubscriberIpsDialog'
+import { BlockDialog, BlockMark, useLiveRuleActions, type BlockCondition, type BlockOption } from './blocklist'
+import { PolicySyncNotice } from './PolicySyncNotice'
 import {
   BLOCK_CATEGORY_LABELS,
-  BlockDialog,
-  BlockMark,
-  describeConditions,
+  buildRuleLookup,
+  listPolicyRules,
   removeLabel,
-  useBlockActions,
-  useBlocklist,
-  type Block,
+  useEffectivePolicy,
+  usePolicies,
   type BlockCategory,
-  type BlockCondition,
-  type BlockOption,
-} from './blocklist'
+  type EffectivePolicy,
+  type FlatRule,
+  type RuleLookup,
+  type RuleMark,
+  modeLabel,
+} from './policyApi'
+import { TOP_N, useContentSecurityData } from './securityData'
 
-type ContentSecurityData = components['schemas']['ContentSecurityResponse']
 type TopRow = components['schemas']['ContentSecurityTopRow']
 type ContentIdOption = components['schemas']['ContentSecurityContentId']
 type SubscriberRow = components['schemas']['ContentSecuritySubscriberRow']
 type EnforcementRow = components['schemas']['ContentSecurityEnforcementRow']
+type EnforcementReasonRow = components['schemas']['ContentSecurityEnforcementReasonRow']
 
 interface SecurityTabProps extends StreamingTabProps {
   bucketSeconds: number
@@ -67,8 +68,8 @@ interface SecurityTabProps extends StreamingTabProps {
 
 // ?content=<cs_content_id> narrows the whole tab to one piece of content.
 const contentParser = parseAsString.withOptions({ history: 'replace', shallow: true })
-
-const TOP_N = 10
+// ?csview=policies&policy=<id|new> deep-links to the Policies view (and its editor); StreamingClient owns the view.
+const viewParser = parseAsString.withOptions({ history: 'replace', shallow: true })
 
 /**
  * The Referers leaderboard shows domains, but the `referer` column holds full URLs, so a filter on a
@@ -86,10 +87,6 @@ const FIELD_BLOCK_CATEGORY: Record<string, BlockCategory> = {
   p_desc: 'proxy_description',
 }
 
-const blockId = (category: BlockCategory, value: string) => `${category}\u0000${value}`
-
-/** Active single-condition block on exactly this (category, value), if any. */
-type BlockLookup = (category: BlockCategory, value: string) => Block | undefined
 
 const BANDWIDTH_LAYOUT = {
   yaxis: { title: { text: 'Bandwidth' }, tickformat: '.3s', ticksuffix: 'bps', rangemode: 'tozero' as const },
@@ -229,7 +226,7 @@ export function SubscriberTable({
   onSelect,
   onBlock,
   onUnblock,
-  findBlock,
+  findRule,
 }: {
   rows: SubscriberRow[]
   showCountries: boolean
@@ -238,8 +235,8 @@ export function SubscriberTable({
   onSelect?: (subscriberId: string) => void
   /** Admin-only blocklist actions; omitted for analysts. */
   onBlock?: (subscriberId: string) => void
-  onUnblock?: (block: Block) => void
-  findBlock?: BlockLookup
+  onUnblock?: (category: BlockCategory, value: string, rule: RuleMark) => void
+  findRule?: RuleLookup
 }) {
   const showBytes = rows.some((r) => r.bytes != null)
   const showActions = onSelect != null || onBlock != null
@@ -263,7 +260,7 @@ export function SubscriberTable({
       </TableHeader>
       <TableBody>
         {rows.map((row, i) => {
-          const block = findBlock?.('subscriber_id', row.subscriber_id)
+          const rule = findRule?.('subscriber_id', row.subscriber_id)
           return (
           <TableRow
             key={row.subscriber_id}
@@ -289,7 +286,7 @@ export function SubscriberTable({
               ) : (
                 row.subscriber_id
               )}
-              {block && <BlockMark kbps={block.kbps} />}
+              {rule && <BlockMark rule={rule} />}
               </span>
             </TableCell>
             <TableCell className="text-right tabular-nums font-medium">{row.distinct_ips.toLocaleString()}</TableCell>
@@ -326,16 +323,16 @@ export function SubscriberTable({
                         <span>Show IP addresses</span>
                       </DropdownMenuItem>
                     )}
-                    {block && onUnblock ? (
-                      <DropdownMenuItem onClick={() => onUnblock(block)}>
+                    {rule && onUnblock ? (
+                      <DropdownMenuItem onClick={() => onUnblock('subscriber_id', row.subscriber_id, rule)}>
                         <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>{removeLabel(block.kbps)}</span>
+                        <span>{removeLabel(rule)}</span>
                       </DropdownMenuItem>
                     ) : (
                       onBlock && (
                         <DropdownMenuItem onClick={() => onBlock(row.subscriber_id)}>
                           <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Block or throttle…</span>
+                          <span>Block…</span>
                         </DropdownMenuItem>
                       )
                     )}
@@ -359,7 +356,7 @@ function TopTable({
   blockCategory,
   onBlock,
   onUnblock,
-  findBlock,
+  findRule,
 }: {
   rows: TopRow[]
   /** Log field the values come from — clicking a value offers it as a filter on that column. */
@@ -369,8 +366,8 @@ function TopTable({
   /** Admin-only blocklist actions; omitted for analysts. */
   blockCategory?: BlockCategory
   onBlock?: (value: string) => void
-  onUnblock?: (block: Block) => void
-  findBlock?: BlockLookup
+  onUnblock?: (category: BlockCategory, value: string, rule: RuleMark) => void
+  findRule?: RuleLookup
 }) {
   // Users = distinct (subscriber id, IP) pairs, IP alone without a subscriber id.
   const showUsers = rows.some((r) => r.users != null)
@@ -386,20 +383,20 @@ function TopTable({
       </TableHeader>
       <TableBody>
         {rows.map((row) => {
-          const block = blockCategory ? findBlock?.(blockCategory, row.value) : undefined
+          const rule = blockCategory ? findRule?.(blockCategory, row.value) : undefined
           let extraItems: React.ReactNode = null
-          if (block && onUnblock) {
+          if (rule && blockCategory && onUnblock) {
             extraItems = (
-              <DropdownMenuItem onClick={() => onUnblock(block)}>
+              <DropdownMenuItem onClick={() => onUnblock(blockCategory, row.value, rule)}>
                 <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>{removeLabel(block.kbps)}</span>
+                <span>{removeLabel(rule)}</span>
               </DropdownMenuItem>
             )
           } else if (onBlock) {
             extraItems = (
               <DropdownMenuItem onClick={() => onBlock(row.value)}>
                 <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Block or throttle…</span>
+                <span>Block, throttle or allow…</span>
               </DropdownMenuItem>
             )
           }
@@ -415,7 +412,7 @@ function TopTable({
                     extraItems={extraItems}
                   />
                 </span>
-                {block && <BlockMark kbps={block.kbps} />}
+                {rule && <BlockMark rule={rule} />}
               </span>
             </TableCell>
             {showUsers && (
@@ -431,42 +428,75 @@ function TopTable({
   )
 }
 
-/** A block's conditions, one per line; every line must match (AND). */
-function BlockConditionsList({ conditions }: { conditions: BlockCondition[] }) {
+/** Admin-only: which policy is in effect for the content being viewed, and whether it is live. */
+function PolicyBanner({
+  effective,
+  contentId,
+  timezone,
+  activeServiceId,
+  onEdit,
+}: {
+  effective: EffectivePolicy | undefined
+  contentId: string | null
+  timezone: string
+  activeServiceId: string | null
+  onEdit: (policyId: string) => void
+}) {
+  if (!effective) return null
+  const { policy, assignment } = effective
+  const scope = contentId ?? 'all content'
   return (
-    <ul className="space-y-0.5">
-      {conditions.map((c, i) => (
-        <li key={c.category} className="flex min-w-0 items-baseline gap-1.5">
-          {i > 0 && <span className="text-[11px] uppercase text-muted-foreground">and</span>}
-          <span className="shrink-0 text-muted-foreground">{BLOCK_CATEGORY_LABELS[c.category]}</span>
-          <span className="truncate font-mono text-xs" title={c.value}>
-            {c.category === 'country' ? formatCountry(c.value) : c.value}
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+        {policy && assignment ? (
+          <>
+            <span>
+              In effect for <strong>{scope}</strong>: <strong>{policy.name}</strong> ({modeLabel(assignment.mode)})
+              {assignment.scope_type === 'default' && contentId ? (
+                <span className="text-muted-foreground"> · all-content policy; this content has no schedule of its own</span>
+              ) : null}
+            </span>
+            <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => onEdit(policy.id)}>
+              Edit policy
+            </Button>
+          </>
+        ) : (
+          <span className="text-muted-foreground">
+            No policy is in effect for {scope}. Blocking a value creates a Default policy for all content.
           </span>
-        </li>
-      ))}
-    </ul>
+        )}
+      </div>
+      <PolicySyncNotice activeServiceId={activeServiceId} timezone={timezone} compact />
+    </div>
   )
 }
 
-/** Admin-only: every active block or throttle for this service, each with an Unblock / Remove button. */
-function BlockedCard({
-  blocks,
-  configured,
+const ruleActionLabel = (r: FlatRule) =>
+  r.action === 'block' ? 'Block' : r.action === 'pace' ? `Throttle to ${r.kbps} kbps` : 'Allow'
+
+/**
+ * Admin-only: every rule of the policy in effect for the viewed content (blocks, throttles and
+ * exemptions), each with an Unblock / Remove button.
+ */
+function PolicyRulesCard({
+  effective,
+  contentId,
   isLoading,
-  timezone,
-  onUnblock,
+  onRemove,
 }: {
-  blocks: Block[]
-  configured: boolean | undefined
+  effective: EffectivePolicy | undefined
+  contentId: string | null
   isLoading: boolean
-  timezone: string
-  onUnblock: (block: Block) => Promise<void>
+  onRemove: (policyId: string, rule: FlatRule) => Promise<void>
 }) {
   const [pending, setPending] = React.useState<string | null>(null)
-  const unblock = async (block: Block) => {
-    setPending(block.id)
+  const policy = effective?.policy
+  const rules = React.useMemo(() => listPolicyRules(policy), [policy])
+  const remove = async (rule: FlatRule) => {
+    if (!policy) return
+    setPending(`${rule.category}\u0000${rule.value}`)
     try {
-      await onUnblock(block)
+      await onRemove(policy.id, rule)
     } catch {
       // The api client already toasts DELETE failures.
     } finally {
@@ -475,41 +505,67 @@ function BlockedCard({
   }
 
   let body: React.ReactNode
-  if (configured === false) {
+  if (effective?.configured === false) {
     body = (
       <p className="px-2 py-6 text-center text-sm text-muted-foreground">
         Blocking and throttling are off. Set a blocklist endpoint in Admin → Overall Settings → Content Security.
       </p>
     )
-  } else if (!blocks.length) {
+  } else if (!policy) {
+    body = (
+      <p className="px-2 py-6 text-center text-sm text-muted-foreground">
+        No policy is in effect for {contentId ?? 'all content'}, so nothing is blocked or throttled.
+      </p>
+    )
+  } else if (!rules.length && !policy.country_regex) {
     body = <p className="px-2 py-6 text-center text-sm text-muted-foreground">No values are blocked or throttled.</p>
   } else {
     body = (
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Conditions</TableHead>
+            <TableHead>Rule</TableHead>
             <TableHead>Action</TableHead>
-            <TableHead className="text-right">Added</TableHead>
             <TableHead className="w-36">
               <span className="sr-only">Actions</span>
             </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {blocks.map((b) => (
-            <TableRow key={b.id}>
-              <TableCell className="max-w-[28rem]">
-                <BlockConditionsList conditions={b.conditions} />
+          {policy.country_regex && (
+            <TableRow>
+              <TableCell>
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="shrink-0 text-muted-foreground">Country regex</span>
+                  <span className="truncate font-mono text-xs" title={policy.country_regex}>
+                    {policy.country_regex}
+                  </span>
+                </span>
               </TableCell>
               <TableCell className="whitespace-nowrap">
                 <span className="inline-flex items-center gap-1.5">
-                  <BlockMark kbps={b.kbps} />
-                  {b.kbps === 0 ? 'Block' : `Throttle to ${b.kbps} kbps`}
+                  <BlockMark rule={{ action: 'block', kbps: 0 }} />
+                  Block
                 </span>
               </TableCell>
-              <TableCell className="text-right tabular-nums whitespace-nowrap">
-                {formatDate(b.created_at, timezone, 'yyyy-MM-dd HH:mm:ss')}
+              <TableCell className="text-right text-xs text-muted-foreground">Edit the policy to change</TableCell>
+            </TableRow>
+          )}
+          {rules.map((r) => (
+            <TableRow key={`${r.category}\u0000${r.value}`}>
+              <TableCell className="max-w-[28rem]">
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="shrink-0 text-muted-foreground">{BLOCK_CATEGORY_LABELS[r.category]}</span>
+                  <span className="truncate font-mono text-xs" title={r.value}>
+                    {r.category === 'country' ? formatCountry(r.value) : r.category === 'asn' ? (r.label ?? `AS${r.value}`) : r.value}
+                  </span>
+                </span>
+              </TableCell>
+              <TableCell className="whitespace-nowrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <BlockMark rule={r} />
+                  {ruleActionLabel(r)}
+                </span>
               </TableCell>
               <TableCell className="text-right">
                 <Button
@@ -517,15 +573,15 @@ function BlockedCard({
                   size="sm"
                   className="h-7 text-xs"
                   disabled={pending != null}
-                  onClick={() => void unblock(b)}
-                  aria-label={`${removeLabel(b.kbps)} ${describeConditions(b.conditions)}`}
+                  onClick={() => void remove(r)}
+                  aria-label={`${removeLabel(r)} ${BLOCK_CATEGORY_LABELS[r.category]} ${r.value}`}
                 >
-                  {pending === b.id ? (
+                  {pending === `${r.category}\u0000${r.value}` ? (
                     <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                   ) : (
                     <Undo2 className="h-3 w-3 mr-1" />
                   )}
-                  {pending === b.id ? 'Removing…' : removeLabel(b.kbps)}
+                  {pending === `${r.category}\u0000${r.value}` ? 'Removing…' : removeLabel(r)}
                 </Button>
               </TableCell>
             </TableRow>
@@ -538,13 +594,88 @@ function BlockedCard({
   return (
     <AnalyticsCard
       title="Blocked & Throttled"
-      description="Rules sent to your blocklist endpoint for this service."
+      description={
+        policy
+          ? `Rules in ${policy.name}, the policy in effect for ${contentId ?? 'all content'}.`
+          : 'Rules of the policy in effect for the selected content.'
+      }
       icon={<ShieldBan className="h-4 w-4" />}
       isLoading={isLoading}
       className="min-h-[160px]"
     >
       {body}
     </AnalyticsCard>
+  )
+}
+
+/** "country_regex" → "Country regex"; "exempt:asn" → "Allowed: ASN". */
+function reasonLabel(reason: string): string {
+  const exempt = reason.startsWith('exempt:')
+  const key = exempt ? reason.slice('exempt:'.length) : reason
+  const label =
+    key === 'country_regex'
+      ? 'Country regex'
+      : (BLOCK_CATEGORY_LABELS as Record<string, string>)[key] ?? key.replace(/_/g, ' ')
+  return exempt ? `Allowed: ${label}` : label
+}
+
+/**
+ * Enforcement per policy and rule. Only the `enforced` count is what the edge actually stopped;
+ * the remainder of a stopping outcome was WARN-only and was served normally.
+ */
+export function EnforcementByPolicy({
+  rows,
+  policyNames,
+}: {
+  rows: EnforcementReasonRow[]
+  /** policy id → name, when the policies list is available (admin). */
+  policyNames?: Map<string, string>
+}) {
+  const sorted = [...rows].sort(
+    (a, b) =>
+      (policyNames?.get(a.policy_id) ?? a.policy_id).localeCompare(policyNames?.get(b.policy_id) ?? b.policy_id) ||
+      b.requests - a.requests,
+  )
+  return (
+    <div className="space-y-1.5">
+      <h3 className="text-xs font-medium text-muted-foreground">By policy and rule</h3>
+      <div className="max-h-64 overflow-auto">
+        <Table aria-label="Enforcement by policy and rule">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Policy</TableHead>
+              <TableHead>Rule</TableHead>
+              <TableHead>Outcome</TableHead>
+              <TableHead className="text-right">Requests</TableHead>
+              <TableHead className="text-right">Enforced</TableHead>
+              <TableHead className="text-right">Warned</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((r) => {
+              const stops = ENFORCEMENT_STATUSES[r.status]?.stops ?? false
+              const name = policyNames?.get(r.policy_id)
+              return (
+                <TableRow key={`${r.policy_id}\u0000${r.reason}\u0000${r.status}`}>
+                  <TableCell className="max-w-[10rem] truncate" title={r.policy_id}>
+                    {name ?? <span className="font-mono text-xs">{r.policy_id}</span>}
+                  </TableCell>
+                  <TableCell>{reasonLabel(r.reason)}</TableCell>
+                  <TableCell>{enforcementLabel(r.status)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.requests.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums font-medium">
+                    {stops ? r.enforced.toLocaleString() : '—'}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">
+                    {stops ? (r.requests - r.enforced).toLocaleString() : '—'}
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
   )
 }
 
@@ -622,46 +753,42 @@ export default function SecurityTab({
   bucketSeconds,
 }: SecurityTabProps) {
   const [contentId, setContentId] = useQueryState('content', contentParser)
+  const [, setView] = useQueryState('csview', viewParser)
+  const [, setPolicyParam] = useQueryState('policy', viewParser)
   const [selectedSubscriber, setSelectedSubscriber] = React.useState<string | null>(null)
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
 
-  // Blocking is admin-only: analysts never see the actions (and the endpoints 403 them).
+  // Policy rules are admin-only: analysts never see the actions (and the endpoints 403 them).
   const isAdmin = !useIsAnalyst()
-  const blocklist = useBlocklist(activeServiceId, isAdmin)
-  const { block, unblock } = useBlockActions(activeServiceId)
+  const effective = useEffectivePolicy(activeServiceId, contentId, isAdmin)
+  const policies = usePolicies(activeServiceId, isAdmin)
+  const { addRule, unblock } = useLiveRuleActions()
   const [blockRequest, setBlockRequest] = React.useState<{
     options: BlockOption[]
     initial: BlockCondition
   } | null>(null)
-  const activeBlocks = React.useMemo(() => blocklist.data?.blocks ?? [], [blocklist.data?.blocks])
-  const findBlock = React.useMemo<BlockLookup>(() => {
-    // Only single-condition blocks mark a value: a multi-condition (AND) block
-    // doesn't block that value on its own.
-    const index = new Map(
-      activeBlocks
-        .filter((b) => b.conditions.length === 1)
-        .map((b) => [blockId(b.conditions[0].category, b.conditions[0].value), b]),
-    )
-    return (category, value) => index.get(blockId(category, value))
-  }, [activeBlocks])
-  const unblockQuietly = React.useCallback((b: Block) => void unblock(b).catch(() => {}), [unblock])
-
-  const query = useServiceQuery<ContentSecurityData | undefined>(
-    ['cmcd', 'content-security', activeServiceId, rangeKey, anchor, filterPayload, contentId, bucketSeconds],
-    async ({ signal }) => {
-      const { data, error } = await client.POST('/api/cmcd/content-security', {
-        signal,
-        body: {
-          filters: filterPayload,
-          content_id: contentId,
-          bucket_seconds: bucketSeconds,
-          top_n: TOP_N,
-          ...rangeBody,
-        },
-      })
-      if (error) throw error
-      return data
+  const effectivePolicy = effective.data?.policy
+  const findRule = React.useMemo<RuleLookup>(() => buildRuleLookup(effectivePolicy), [effectivePolicy])
+  const policyNames = React.useMemo(
+    () => new Map((policies.data?.policies ?? []).map((p) => [p.id, p.name])),
+    [policies.data?.policies],
+  )
+  const unblockValue = React.useCallback(
+    (category: BlockCategory, value: string, rule: RuleMark) => {
+      if (effectivePolicy) void unblock(effectivePolicy.id, category, value, rule).catch(() => {})
     },
+    [effectivePolicy, unblock],
+  )
+  const editPolicy = React.useCallback(
+    (policyId: string) => {
+      void setView('policies')
+      void setPolicyParam(policyId)
+    },
+    [setView, setPolicyParam],
+  )
+
+  const query = useContentSecurityData(
+    { activeServiceId, filterPayload, startTime, endTime, relativeRange, isAutoRange, anchor, bucketSeconds },
+    contentId,
     { refetchInterval: 30_000 },
   )
 
@@ -772,8 +899,8 @@ export default function SecurityTab({
           formatValue={formatValue}
           {...(isAdmin && {
             blockCategory: FIELD_BLOCK_CATEGORY[field],
-            findBlock,
-            onUnblock: unblockQuietly,
+            findRule,
+            onUnblock: unblockValue,
             onBlock: (value: string) => {
               const category = FIELD_BLOCK_CATEGORY[field]
               setBlockRequest({
@@ -812,6 +939,16 @@ export default function SecurityTab({
         )}
       </div>
 
+      {isAdmin && (
+        <PolicyBanner
+          effective={effective.data}
+          contentId={contentId}
+          timezone={timezone}
+          activeServiceId={activeServiceId}
+          onEdit={editPolicy}
+        />
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {topCard('Countries', <Globe className="h-4 w-4" />, data?.top_countries, 'Country', formatCountry, 'country', 'Geolocation Basic (Group D) fields to be enabled in Fastly logging.')}
         {topCard('ASNs', <Network className="h-4 w-4" />, data?.top_asns, 'ASN', undefined, 'asn', 'the ASN field (Group F) to be enabled in Fastly logging.')}
@@ -845,8 +982,8 @@ export default function SecurityTab({
               onSelect={data.subscribers_masked ? undefined : setSelectedSubscriber}
               {...(isAdmin &&
                 !data.subscribers_masked && {
-                  findBlock,
-                  onUnblock: unblockQuietly,
+                  findRule,
+                  onUnblock: unblockValue,
                   onBlock: (subscriberId: string) =>
                     setBlockRequest({
                       options: data.top_subscribers!.map((r) => ({ category: 'subscriber_id' as const, value: r.subscriber_id })),
@@ -872,12 +1009,11 @@ export default function SecurityTab({
       </AnalyticsCard>
 
       {isAdmin && (
-        <BlockedCard
-          blocks={activeBlocks}
-          configured={blocklist.data?.configured}
-          isLoading={blocklist.isLoading}
-          timezone={timezone}
-          onUnblock={unblock}
+        <PolicyRulesCard
+          effective={effective.data}
+          contentId={contentId}
+          isLoading={effective.isLoading}
+          onRemove={(policyId, rule) => unblock(policyId, rule.category, rule.value, rule)}
         />
       )}
 
@@ -889,7 +1025,12 @@ export default function SecurityTab({
           className="min-h-[200px]"
         >
           {data?.enforcement?.length ? (
-            <EnforcementTable rows={data.enforcement} />
+            <div className="space-y-4">
+              <EnforcementTable rows={data.enforcement} />
+              {data.enforcement_reasons?.length ? (
+                <EnforcementByPolicy rows={data.enforcement_reasons} policyNames={isAdmin ? policyNames : undefined} />
+              ) : null}
+            </div>
           ) : (
             <ChartEmptyState
               requires={
@@ -956,7 +1097,7 @@ export default function SecurityTab({
         anchor={anchor}
         timezone={timezone}
         onBlock={isAdmin ? (options, initial) => setBlockRequest({ options, initial }) : undefined}
-        findBlock={findBlock}
+        findRule={findRule}
       />
 
       {isAdmin && (
@@ -965,9 +1106,10 @@ export default function SecurityTab({
           onOpenChange={(open) => !open && setBlockRequest(null)}
           options={blockRequest?.options ?? []}
           initial={blockRequest?.initial ?? null}
-          configured={blocklist.data?.configured}
+          effective={effective.data}
           activeServiceId={activeServiceId}
-          onConfirm={block}
+          contentId={contentId}
+          onConfirm={addRule}
         />
       )}
     </div>

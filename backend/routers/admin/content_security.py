@@ -1,4 +1,4 @@
-"""Streaming → Content Security blocklist: global settings + per-service blocks.
+"""Streaming → Content Security blocker settings (global).
 
 Admin-only (``/api/admin/*`` is blocked for analysts in ``remote_access``, and
 every route also depends on ``require_admin``). Blocking calls the operator's
@@ -12,27 +12,17 @@ so the active list never claims a block the function rejected.
 from __future__ import annotations
 
 import logging
-from ipaddress import ip_address
 from urllib.parse import urlsplit
 
-import psycopg
 from fastapi import Depends, HTTPException
 
 from backend import config as svcconfig
-from backend.core.metadata import content_security_blocks as blocks_db
-from backend.core.metadata.state import record_audit
-from backend.deps import get_source, require_admin
+from backend.deps import require_admin
 from backend.models.cmcd import (
-    ContentSecurityBlock,
-    ContentSecurityBlockCondition,
-    ContentSecurityBlockRequest,
-    ContentSecurityBlocksResponse,
     ContentSecuritySettings,
     ContentSecuritySettingsUpdate,
 )
 from backend.utils.blocklist_client import (
-    BlocklistCallError,
-    call_blocklist,
     parse_auth_header,
     validate_blocklist_url,
 )
@@ -43,15 +33,6 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 _ACTOR = "admin"
-
-
-def _service_id_from_source(source: dict) -> str:
-    return source.get("service_id") or source.get("name", "")
-
-
-def _require_read_write_source(source: dict) -> None:
-    if source.get("access_level", "read_write") != "read_write":
-        raise HTTPException(status_code=403, detail=make_error("admin_only", "This operation requires admin access."))
 
 
 def _public_settings(cfg: dict) -> dict:
@@ -68,21 +49,6 @@ def _public_settings(cfg: dict) -> dict:
 def _origin(url: str) -> tuple[str, str, int | None]:
     parts = urlsplit(url)
     return parts.scheme, (parts.hostname or "").lower(), parts.port
-
-
-def _blocklist_target_or_409() -> tuple[str, str | None]:
-    """The configured (url, auth header), or 409 when blocking is off."""
-    cfg = svcconfig.load_content_security_config()
-    url = cfg.get("blocklist_url") or ""
-    if not url:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "blocklist_not_configured",
-                "Set the blocklist URL in Admin → Overall Settings → Content Security first.",
-            ),
-        )
-    return url, cfg.get("blocklist_auth_header") or None
 
 
 @router.get("/admin/content-security/settings", response_model=ContentSecuritySettings)
@@ -133,134 +99,3 @@ def update_content_security_settings(
         "set" if header else "none",
     )
     return _public_settings(cfg)
-
-
-@router.get("/admin/content-security/blocks", response_model=ContentSecurityBlocksResponse)
-def list_content_security_blocks(
-    source: dict = Depends(get_source),
-    _admin: None = Depends(require_admin),
-) -> dict:
-    _require_read_write_source(source)
-    return {
-        "configured": bool(svcconfig.load_content_security_config().get("blocklist_url")),
-        "blocks": blocks_db.list_active_blocks(_service_id_from_source(source)),
-    }
-
-
-def _normalize_conditions(conditions: list[ContentSecurityBlockCondition]) -> list[dict]:
-    """Validate per-category values and return the canonical (category-sorted) list."""
-    seen: set[str] = set()
-    out: list[dict] = []
-    for c in conditions:
-        if c.category in seen:
-            raise HTTPException(
-                status_code=422,
-                detail=make_error("duplicate_category", f"Only one condition per category ({c.category})"),
-            )
-        seen.add(c.category)
-        value = c.value
-        if c.category == "ip":
-            try:
-                value = str(ip_address(value))
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=make_error("invalid_ip", "Not a valid IP address")) from exc
-        if c.category == "asn":
-            # Accept "AS7922" / "7922"; the receiver always gets the bare number.
-            digits = value.upper().removeprefix("AS")
-            if not digits.isascii() or not digits.isdigit() or not 0 < int(digits) < 2**32:
-                raise HTTPException(status_code=422, detail=make_error("invalid_asn", "Not a valid ASN"))
-            value = str(int(digits))
-        out.append({"category": c.category, "value": value})
-    return blocks_db.canonical_conditions(out)
-
-
-def _describe(conditions: list[dict]) -> str:
-    return " AND ".join(f"{c['category']}={c['value']}" for c in conditions)
-
-
-def _already(conditions: list[dict], kbps: int) -> dict:
-    state = "blocked" if kbps == 0 else f"throttled to {kbps} kbps"
-    return make_error(
-        "already_blocked",
-        f"{_describe(conditions)} is already {state}. Remove that rule before adding a different one.",
-    )
-
-
-@router.post("/admin/content-security/blocks", response_model=ContentSecurityBlock, status_code=201)
-def create_content_security_block(
-    body: ContentSecurityBlockRequest,
-    source: dict = Depends(get_source),
-    _admin: None = Depends(require_admin),
-) -> dict:
-    _require_read_write_source(source)
-    service_id = _service_id_from_source(source)
-    conditions = _normalize_conditions(body.conditions)
-    kbps = body.kbps
-    # One active rule per condition set: to switch between block and a throttle
-    # rate, remove the existing rule first.
-    existing = blocks_db.find_active_block(service_id, conditions)
-    if existing:
-        raise HTTPException(status_code=409, detail=_already(conditions, existing["kbps"]))
-    url, auth_header = _blocklist_target_or_409()
-
-    try:
-        status = call_blocklist(url, "POST", conditions, kbps, auth_header)
-    except BlocklistCallError as exc:
-        record_audit(
-            service_id,
-            "content_security_block_failed",
-            {"conditions": conditions, "kbps": kbps, "error": str(exc)},
-            actor=_ACTOR,
-        )
-        raise HTTPException(status_code=502, detail=make_error("blocklist_call_failed", str(exc))) from exc
-
-    try:
-        block = blocks_db.insert_block(service_id, conditions, kbps, _ACTOR)
-    except psycopg.errors.UniqueViolation as exc:
-        # A concurrent request recorded the same block between our check and insert.
-        raise HTTPException(status_code=409, detail=_already(conditions, kbps)) from exc
-    record_audit(
-        service_id,
-        "content_security_block",
-        {"block_id": block["id"], "conditions": conditions, "kbps": kbps, "status": status},
-        actor=_ACTOR,
-    )
-    return block
-
-
-@router.delete("/admin/content-security/blocks/{block_id}", response_model=ContentSecurityBlock)
-def delete_content_security_block(
-    block_id: str,
-    source: dict = Depends(get_source),
-    _admin: None = Depends(require_admin),
-) -> dict:
-    _require_read_write_source(source)
-    service_id = _service_id_from_source(source)
-    block = blocks_db.get_block(service_id, block_id)
-    if block is None:
-        raise HTTPException(status_code=404, detail=make_error("not_found", "Block not found"))
-    if block["unblocked_at"] is not None:
-        return block
-    url, auth_header = _blocklist_target_or_409()
-    conditions = block["conditions"]
-
-    try:
-        status = call_blocklist(url, "DELETE", conditions, block["kbps"], auth_header)
-    except BlocklistCallError as exc:
-        record_audit(
-            service_id,
-            "content_security_unblock_failed",
-            {"block_id": block_id, "conditions": conditions, "kbps": block["kbps"], "error": str(exc)},
-            actor=_ACTOR,
-        )
-        raise HTTPException(status_code=502, detail=make_error("blocklist_call_failed", str(exc))) from exc
-
-    updated = blocks_db.mark_unblocked(service_id, block_id, _ACTOR)
-    record_audit(
-        service_id,
-        "content_security_unblock",
-        {"block_id": block_id, "conditions": conditions, "kbps": block["kbps"], "status": status},
-        actor=_ACTOR,
-    )
-    assert updated is not None
-    return updated

@@ -43,6 +43,7 @@ from . import (  # noqa: F401
     clickhouse,
     compaction,
     content_security,
+    content_security_policies,
     debug_settings,
     downloads,
     duckdb,

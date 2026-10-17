@@ -531,7 +531,18 @@ _ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 
 
 # Mirrors backend.provision.token_fields._TOKEN_FIELD_NAMES (core must not import provision).
-_TOKEN_SYSTEM_FIELDS = frozenset({"cs_sub_id", "cs_content_id", "cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps"})
+_TOKEN_SYSTEM_FIELDS = frozenset(
+    {
+        "cs_sub_id",
+        "cs_content_id",
+        "cs_status",
+        "cs_mode",
+        "cs_rl_mode",
+        "cs_pace_kbps",
+        "cs_policy_id",
+        "cs_policy_reason",
+    }
+)
 
 
 def _is_system_field(field_name: str) -> bool:

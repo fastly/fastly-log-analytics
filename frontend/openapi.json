@@ -21564,13 +21564,13 @@
         }
       }
     },
-    "/api/admin/content-security/blocks": {
+    "/api/admin/content-security/policies": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "List Content Security Blocks",
-        "operationId": "list_content_security_blocks_api_admin_content_security_blocks_get",
+        "summary": "List Policies",
+        "operationId": "list_policies_api_admin_content_security_policies_get",
         "parameters": [
           {
             "name": "service",
@@ -21643,7 +21643,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContentSecurityBlocksResponse"
+                  "$ref": "#/components/schemas/PoliciesResponse"
                 }
               }
             }
@@ -21744,8 +21744,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "Create Content Security Block",
-        "operationId": "create_content_security_block_api_admin_content_security_blocks_post",
+        "summary": "Create Policy",
+        "operationId": "create_policy_api_admin_content_security_policies_post",
         "parameters": [
           {
             "name": "service",
@@ -21817,7 +21817,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ContentSecurityBlockRequest"
+                "$ref": "#/components/schemas/PolicyBody"
               }
             }
           }
@@ -21828,7 +21828,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContentSecurityBlock"
+                  "$ref": "#/components/schemas/PolicyResult"
                 }
               }
             }
@@ -21926,21 +21926,21 @@
         }
       }
     },
-    "/api/admin/content-security/blocks/{block_id}": {
-      "delete": {
+    "/api/admin/content-security/policies/{policy_id}": {
+      "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Delete Content Security Block",
-        "operationId": "delete_content_security_block_api_admin_content_security_blocks__block_id__delete",
+        "summary": "Get Policy",
+        "operationId": "get_policy_api_admin_content_security_policies__policy_id__get",
         "parameters": [
           {
-            "name": "block_id",
+            "name": "policy_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Block Id"
+              "title": "Policy Id"
             }
           },
           {
@@ -22014,7 +22014,2576 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContentSecurityBlock"
+                  "$ref": "#/components/schemas/ContentSecurityPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Replace Policy",
+        "operationId": "replace_policy_api_admin_content_security_policies__policy_id__put",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete Policy",
+        "operationId": "delete_policy_api_admin_content_security_policies__policy_id__delete",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/policies/{policy_id}/rules": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Upsert Rule",
+        "operationId": "upsert_rule_api_admin_content_security_policies__policy_id__rules_post",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuleBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Remove Rule",
+        "operationId": "remove_rule_api_admin_content_security_policies__policy_id__rules_delete",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Category"
+            }
+          },
+          {
+            "name": "value",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "title": "Value"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/policies/{policy_id}/revisions": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Policy Revisions",
+        "operationId": "policy_revisions_api_admin_content_security_policies__policy_id__revisions_get",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/assignments": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List Assignments",
+        "operationId": "list_assignments_api_admin_content_security_assignments_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Create Assignment",
+        "operationId": "create_assignment_api_admin_content_security_assignments_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/assignments/{assignment_id}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update Assignment",
+        "operationId": "update_assignment_api_admin_content_security_assignments__assignment_id__put",
+        "parameters": [
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assignment Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete Assignment",
+        "operationId": "delete_assignment_api_admin_content_security_assignments__assignment_id__delete",
+        "parameters": [
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assignment Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/effective": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Effective Policy",
+        "description": "The policy in effect now for ``content_id`` (its own assignment, else the default).",
+        "operationId": "effective_policy_api_admin_content_security_effective_get",
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EffectivePolicyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/live-rule": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Live Rule",
+        "description": "Add a rule to the policy in effect for the content being viewed (creates a Default if none).",
+        "operationId": "live_rule_api_admin_content_security_live_rule_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveRuleBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveRuleResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/publish": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Publish Now",
+        "description": "Push the service's current policies and assignments to the blocker (retry / Sync now).",
+        "operationId": "publish_now_api_admin_content_security_publish_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/sync-status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Sync Status",
+        "operationId": "sync_status_api_admin_content_security_sync_status_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentSecuritySyncStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/content-security/country-regex/preview": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Country Regex Preview",
+        "description": "Which countries a mass-block regex would block, for the editor's live preview.",
+        "operationId": "country_regex_preview_api_admin_content_security_country_regex_preview_get",
+        "parameters": [
+          {
+            "name": "pattern",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "default": "",
+              "title": "Pattern"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegexPreviewResponse"
                 }
               }
             }
@@ -43912,6 +46481,108 @@
         "title": "AssetsRequest",
         "description": "Assets analytics request schema supporting relative-range resolving."
       },
+      "AssignmentBody": {
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "title": "Policy Id"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "default",
+              "content_id"
+            ],
+            "title": "Scope Type"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "WARN",
+              "ENFORCE"
+            ],
+            "title": "Mode",
+            "default": "ENFORCE"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "policy_id",
+          "scope_type"
+        ],
+        "title": "AssignmentBody"
+      },
+      "AssignmentResult": {
+        "properties": {
+          "assignment": {
+            "$ref": "#/components/schemas/ContentSecurityAssignment"
+          },
+          "publish": {
+            "$ref": "#/components/schemas/PublishResult"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assignment",
+          "publish"
+        ],
+        "title": "AssignmentResult"
+      },
+      "AssignmentsResponse": {
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "assignments": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityAssignment"
+            },
+            "type": "array",
+            "title": "Assignments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured",
+          "assignments"
+        ],
+        "title": "AssignmentsResponse"
+      },
       "AuthConfigProvider": {
         "properties": {
           "id": {
@@ -46420,6 +49091,106 @@
         ],
         "title": "CompressionPerformanceRow"
       },
+      "ContentSecurityAssignment": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "policy_id": {
+            "type": "string",
+            "title": "Policy Id"
+          },
+          "policy_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Name"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "default",
+              "content_id"
+            ],
+            "title": "Scope Type"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "WARN",
+              "ENFORCE"
+            ],
+            "title": "Mode"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "scheduled",
+              "active",
+              "ended"
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "policy_id",
+          "scope_type",
+          "mode",
+          "status",
+          "created_at",
+          "created_by"
+        ],
+        "title": "ContentSecurityAssignment"
+      },
       "ContentSecurityBandwidthPoint": {
         "properties": {
           "bucket": {
@@ -46448,140 +49219,6 @@
           "edge_bytes"
         ],
         "title": "ContentSecurityBandwidthPoint"
-      },
-      "ContentSecurityBlock": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "conditions": {
-            "items": {
-              "$ref": "#/components/schemas/ContentSecurityBlockCondition"
-            },
-            "type": "array",
-            "title": "Conditions"
-          },
-          "kbps": {
-            "type": "integer",
-            "title": "Kbps",
-            "default": 0
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          },
-          "created_by": {
-            "type": "string",
-            "title": "Created By"
-          },
-          "unblocked_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unblocked At"
-          },
-          "unblocked_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unblocked By"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "conditions",
-          "created_at",
-          "created_by"
-        ],
-        "title": "ContentSecurityBlock"
-      },
-      "ContentSecurityBlockCondition": {
-        "properties": {
-          "category": {
-            "type": "string",
-            "enum": [
-              "country",
-              "asn",
-              "referer",
-              "host",
-              "proxy_type",
-              "proxy_description",
-              "subscriber_id",
-              "ip"
-            ],
-            "title": "Category"
-          },
-          "value": {
-            "type": "string",
-            "maxLength": 2048,
-            "minLength": 1,
-            "title": "Value"
-          }
-        },
-        "type": "object",
-        "required": [
-          "category",
-          "value"
-        ],
-        "title": "ContentSecurityBlockCondition"
-      },
-      "ContentSecurityBlockRequest": {
-        "properties": {
-          "conditions": {
-            "items": {
-              "$ref": "#/components/schemas/ContentSecurityBlockCondition"
-            },
-            "type": "array",
-            "maxItems": 8,
-            "minItems": 1,
-            "title": "Conditions"
-          },
-          "kbps": {
-            "type": "integer",
-            "maximum": 10000000.0,
-            "minimum": 0.0,
-            "title": "Kbps",
-            "default": 0
-          }
-        },
-        "type": "object",
-        "required": [
-          "conditions"
-        ],
-        "title": "ContentSecurityBlockRequest"
-      },
-      "ContentSecurityBlocksResponse": {
-        "properties": {
-          "configured": {
-            "type": "boolean",
-            "title": "Configured"
-          },
-          "blocks": {
-            "items": {
-              "$ref": "#/components/schemas/ContentSecurityBlock"
-            },
-            "type": "array",
-            "title": "Blocks"
-          }
-        },
-        "type": "object",
-        "required": [
-          "configured",
-          "blocks"
-        ],
-        "title": "ContentSecurityBlocksResponse"
       },
       "ContentSecurityContentId": {
         "properties": {
@@ -46623,6 +49260,39 @@
           "requests"
         ],
         "title": "ContentSecurityEnforcementPoint"
+      },
+      "ContentSecurityEnforcementReasonRow": {
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "title": "Policy Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "enforced": {
+            "type": "integer",
+            "title": "Enforced"
+          }
+        },
+        "type": "object",
+        "required": [
+          "policy_id",
+          "reason",
+          "status",
+          "requests",
+          "enforced"
+        ],
+        "title": "ContentSecurityEnforcementReasonRow"
       },
       "ContentSecurityEnforcementRow": {
         "properties": {
@@ -46668,6 +49338,76 @@
           "enforced"
         ],
         "title": "ContentSecurityEnforcementRow"
+      },
+      "ContentSecurityPolicy": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "country_regex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country Regex"
+          },
+          "rev": {
+            "type": "integer",
+            "title": "Rev"
+          },
+          "rules": {
+            "$ref": "#/components/schemas/PolicyRules"
+          },
+          "individual": {
+            "$ref": "#/components/schemas/PolicyIndividual"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "updated_by": {
+            "type": "string",
+            "title": "Updated By"
+          },
+          "used_by": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyUse"
+            },
+            "type": "array",
+            "title": "Used By",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "rev",
+          "rules",
+          "individual",
+          "created_at",
+          "created_by",
+          "updated_at",
+          "updated_by"
+        ],
+        "title": "ContentSecurityPolicy"
       },
       "ContentSecurityRequest": {
         "properties": {
@@ -46925,6 +49665,14 @@
             "type": "array",
             "title": "Enforcement Ts",
             "default": []
+          },
+          "enforcement_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityEnforcementReasonRow"
+            },
+            "type": "array",
+            "title": "Enforcement Reasons",
+            "default": []
           }
         },
         "type": "object",
@@ -47036,6 +49784,56 @@
           "requests"
         ],
         "title": "ContentSecuritySubscriberRow"
+      },
+      "ContentSecuritySyncStatusResponse": {
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "rev": {
+            "type": "integer",
+            "title": "Rev"
+          },
+          "published_rev": {
+            "type": "integer",
+            "title": "Published Rev"
+          },
+          "in_sync": {
+            "type": "boolean",
+            "title": "In Sync"
+          },
+          "last_ok_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Ok At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured",
+          "rev",
+          "published_rev",
+          "in_sync"
+        ],
+        "title": "ContentSecuritySyncStatusResponse"
       },
       "ContentSecurityTopRow": {
         "properties": {
@@ -48436,6 +51234,55 @@
         },
         "type": "object",
         "title": "DebugSettingsUpdateBody"
+      },
+      "EffectivePolicyResponse": {
+        "properties": {
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "assignment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentSecurityAssignment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentSecurityPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shared_with": {
+            "type": "integer",
+            "title": "Shared With",
+            "default": 0
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured"
+        ],
+        "title": "EffectivePolicyResponse"
       },
       "ErrorDetail": {
         "properties": {
@@ -51589,6 +54436,90 @@
           "status"
         ],
         "title": "LargeUncompressedAssetRow"
+      },
+      "LiveRuleBody": {
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "country",
+              "asn",
+              "referer",
+              "host",
+              "proxy_type",
+              "proxy_description",
+              "subscriber_id",
+              "ip"
+            ],
+            "title": "Category"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Value"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "block",
+              "pace",
+              "exempt"
+            ],
+            "title": "Action",
+            "default": "block"
+          },
+          "kbps": {
+            "type": "integer",
+            "maximum": 100000000.0,
+            "minimum": 0.0,
+            "title": "Kbps",
+            "default": 0
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "category",
+          "value"
+        ],
+        "title": "LiveRuleBody"
+      },
+      "LiveRuleResult": {
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ContentSecurityPolicy"
+          },
+          "assignment": {
+            "$ref": "#/components/schemas/ContentSecurityAssignment"
+          },
+          "created_default": {
+            "type": "boolean",
+            "title": "Created Default"
+          },
+          "publish": {
+            "$ref": "#/components/schemas/PublishResult"
+          }
+        },
+        "type": "object",
+        "required": [
+          "policy",
+          "assignment",
+          "created_default",
+          "publish"
+        ],
+        "title": "LiveRuleResult"
       },
       "LocalCompactNowResponse": {
         "properties": {
@@ -55047,6 +57978,264 @@
         "title": "PiiPolicyPayload",
         "description": "Body for ``PATCH /api/share-admin/invites/{id}/pii`` \u2014 toggle the\ninvite's PII policy (currently just ``mask_ips``) after creation."
       },
+      "PoliciesResponse": {
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "policies": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityPolicy"
+            },
+            "type": "array",
+            "title": "Policies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured",
+          "policies"
+        ],
+        "title": "PoliciesResponse"
+      },
+      "PolicyBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "country_regex": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country Regex"
+          },
+          "rules": {
+            "$ref": "#/components/schemas/PolicyRules",
+            "default": {
+              "country": [],
+              "asn": [],
+              "referer": [],
+              "host": [],
+              "proxy_type": [],
+              "proxy_description": []
+            }
+          },
+          "individual": {
+            "$ref": "#/components/schemas/PolicyIndividual",
+            "default": {
+              "subscriber_id": [],
+              "ip": []
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "PolicyBody"
+      },
+      "PolicyIndividual": {
+        "properties": {
+          "subscriber_id": {
+            "items": {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            "type": "array",
+            "title": "Subscriber Id",
+            "default": []
+          },
+          "ip": {
+            "items": {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            "type": "array",
+            "title": "Ip",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "PolicyIndividual",
+        "description": "Individual blocks. Take precedence over exemptions."
+      },
+      "PolicyResult": {
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ContentSecurityPolicy"
+          },
+          "publish": {
+            "$ref": "#/components/schemas/PublishResult"
+          }
+        },
+        "type": "object",
+        "required": [
+          "policy",
+          "publish"
+        ],
+        "title": "PolicyResult"
+      },
+      "PolicyRuleItem": {
+        "properties": {
+          "value": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Value"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "block",
+              "pace",
+              "exempt"
+            ],
+            "title": "Action"
+          },
+          "kbps": {
+            "type": "integer",
+            "maximum": 100000000.0,
+            "minimum": 0.0,
+            "title": "Kbps",
+            "default": 0
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "value",
+          "action"
+        ],
+        "title": "PolicyRuleItem"
+      },
+      "PolicyRules": {
+        "properties": {
+          "country": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Country",
+            "default": []
+          },
+          "asn": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Asn",
+            "default": []
+          },
+          "referer": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Referer",
+            "default": []
+          },
+          "host": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Host",
+            "default": []
+          },
+          "proxy_type": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Proxy Type",
+            "default": []
+          },
+          "proxy_description": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleItem"
+            },
+            "type": "array",
+            "title": "Proxy Description",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "PolicyRules"
+      },
+      "PolicyUse": {
+        "properties": {
+          "assignment_id": {
+            "type": "string",
+            "title": "Assignment Id"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "default",
+              "content_id"
+            ],
+            "title": "Scope Type"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "WARN",
+              "ENFORCE"
+            ],
+            "title": "Mode"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "scheduled",
+              "active",
+              "ended"
+            ],
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assignment_id",
+          "scope_type",
+          "mode",
+          "status"
+        ],
+        "title": "PolicyUse"
+      },
       "PopHealthItem": {
         "properties": {
           "pop": {
@@ -56780,6 +59969,40 @@
         "type": "object",
         "title": "ProvisionValidateResponse"
       },
+      "PublishResult": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "published",
+              "not_configured",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "rev": {
+            "type": "integer",
+            "title": "Rev"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "rev"
+        ],
+        "title": "PublishResult"
+      },
       "QuarantineEvidenceItem": {
         "properties": {
           "id": {
@@ -57350,6 +60573,38 @@
         "title": "RefreshPopLocationsRequest",
         "description": "Body for ``POST /api/admin/pop-locations/refresh`` \u2014 the Fastly API\nkey used to pull the live POP catalog. Token can also arrive as a\n``?token=`` query param for backward compat with older clients."
       },
+      "RegexPreviewResponse": {
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "matches": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Matches",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "valid"
+        ],
+        "title": "RegexPreviewResponse"
+      },
       "ResetLogsRequest": {
         "properties": {
           "confirm": {
@@ -57376,6 +60631,96 @@
         ],
         "title": "ResetLogsRequest",
         "description": "Body for ``POST /api/admin/reset-logs`` \u2014 a destructive wipe of one\nservice's log data. ``confirm`` must equal the resolved service id\n(belt-and-suspenders alongside the ``x-service-id``/``?service_id``\nresolution) so a stale/mistargeted request fails loud instead of\nsilently wiping the wrong service."
+      },
+      "RevisionItem": {
+        "properties": {
+          "rev": {
+            "type": "integer",
+            "title": "Rev"
+          },
+          "changed_by": {
+            "type": "string",
+            "title": "Changed By"
+          },
+          "changed_at": {
+            "type": "string",
+            "title": "Changed At"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ContentSecurityPolicy"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rev",
+          "changed_by",
+          "changed_at",
+          "policy"
+        ],
+        "title": "RevisionItem"
+      },
+      "RevisionsResponse": {
+        "properties": {
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionItem"
+            },
+            "type": "array",
+            "title": "Revisions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "revisions"
+        ],
+        "title": "RevisionsResponse"
+      },
+      "RuleBody": {
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "country",
+              "asn",
+              "referer",
+              "host",
+              "proxy_type",
+              "proxy_description",
+              "subscriber_id",
+              "ip"
+            ],
+            "title": "Category"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Value"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "block",
+              "pace",
+              "exempt"
+            ],
+            "title": "Action",
+            "default": "block"
+          },
+          "kbps": {
+            "type": "integer",
+            "maximum": 100000000.0,
+            "minimum": 0.0,
+            "title": "Kbps",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "category",
+          "value"
+        ],
+        "title": "RuleBody"
       },
       "RumBreakdownPoint": {
         "properties": {

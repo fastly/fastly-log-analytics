@@ -78,6 +78,8 @@ _OPTIONAL_COLS = (
     "cs_status",
     "cs_mode",
     "cs_rl_mode",
+    "cs_policy_id",
+    "cs_policy_reason",
     *_ALL_VALUES_SECTIONS,
 )
 
@@ -321,6 +323,7 @@ def get_content_security(
         # the request was served, so the report must not claim they were stopped.
         results["enforcement"] = []
         results["enforcement_ts"] = []
+        results["enforcement_reasons"] = []
         if fields["cs_status"]:
             _t = _time.perf_counter()
             enforced_expr = _enforced_expr(fields)
@@ -359,6 +362,27 @@ def get_content_security(
             ).fetchall()
             results["enforcement_ts"] = [{"bucket": r[0], "status": r[1], "requests": r[2]} for r in rows]
             timer.mark("enforcement", _t)
+
+            # Which policy and rule decided each outcome (policy-aware VCL only).
+            if fields["cs_policy_id"]:
+                reason_expr = "COALESCE(cs_policy_reason, '')" if fields["cs_policy_reason"] else "''"
+                rows = runner.execute(
+                    f"""
+                    SELECT cs_policy_id AS policy_id, {reason_expr} AS reason, cs_status AS status,
+                           COUNT(*) AS requests,
+                           COUNT(*) FILTER (WHERE {enforced_expr}) AS enforced
+                    FROM {t}
+                    WHERE {edge_where} AND cs_status IS NOT NULL AND cs_status != ''
+                      AND cs_policy_id IS NOT NULL AND cs_policy_id != ''
+                    GROUP BY 1, 2, 3
+                    ORDER BY requests DESC, policy_id, reason, status
+                    LIMIT 200
+                    """
+                ).fetchall()
+                results["enforcement_reasons"] = [
+                    {"policy_id": r[0], "reason": r[1], "status": r[2], "requests": r[3], "enforced": r[4]}
+                    for r in rows
+                ]
 
         # ── Edge vs shield bandwidth ──────────────────────────────────────
         results["bandwidth_ts"] = []

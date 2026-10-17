@@ -13,7 +13,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import type { components } from '@/types/api.generated'
 import type { StreamingTabProps } from './QualityTab'
-import { BlockMark, type Block, type BlockCategory, type BlockCondition, type BlockOption } from './blocklist'
+import { BlockMark, type BlockCondition, type BlockOption } from './blocklist'
+import type { RuleLookup } from './policyApi'
 
 type SubscriberIpsData = components['schemas']['SubscriberIpsResponse']
 
@@ -63,7 +64,7 @@ type SubscriberIpsDialogProps = StreamingTabProps & {
   onClose: () => void
   /** Admin-only: opens the Block dialog with this subscriber id and its IPs to choose from. */
   onBlock?: (options: BlockOption[], initial: BlockCondition) => void
-  findBlock?: (category: BlockCategory, value: string) => Block | undefined
+  findRule?: RuleLookup
 }
 
 /** Every client IP one subscriber id was seen from in the window (admin-only drill-down). */
@@ -72,7 +73,7 @@ export function SubscriberIpsDialog({
   contentId,
   onClose,
   onBlock,
-  findBlock,
+  findRule,
   activeServiceId,
   filterPayload,
   startTime,
@@ -168,8 +169,8 @@ export function SubscriberIpsDialog({
                     <span className="inline-flex items-center gap-1.5">
                       {row.ip}
                       {(() => {
-                        const block = findBlock?.('ip', row.ip)
-                        return block ? <BlockMark kbps={block.kbps} /> : null
+                        const rule = findRule?.('ip', row.ip)
+                        return rule ? <BlockMark rule={rule} /> : null
                       })()}
                     </span>
                   </TableCell>
@@ -220,7 +221,7 @@ export function SubscriberIpsDialog({
             {onBlock && (
               <Button variant="destructive" onClick={openBlock} disabled={!data}>
                 <Ban className="h-3 w-3 mr-1" aria-hidden="true" />
-                Block or throttle…
+                Block…
               </Button>
             )}
           </div>

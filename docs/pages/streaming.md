@@ -103,68 +103,81 @@ The **Live Log Streaming** page delivers a high-speed, interactive terminal-styl
 
 ---
 
-## 11. Content Security blocklist (admin-only)
+## 11. Content Security policies (admin-only)
 
-The **Content Security** tab (`?tab=security`) lets an admin act on what it shows: push a value to the operator's own blocklist HTTP function, then undo it.
+The **Content Security** tab (`?tab=security`) has two views, chosen with `?csview=`: **Monitor** (the default, the analytics page) and **Policies** (`?csview=policies`). An admin acts on what Monitor shows by adding rules to a **policy**, and decides where a policy applies in the Policies view. Policies are per service; nothing is shared across services.
+
+### Concepts
+- **Policy:** a named rule set. It holds a country mass-block **regex**, per-category rules for countries, referers, ASNs, hosts, proxy types and proxy descriptions (each value is **Block**, **Throttle** to 128, 256 or 512 kbps, or **Allow**), and **individual** subscriber-ID and IP blocks. Individual rules are block-only: they cannot be throttled or allowed, and they take precedence over Allow rules. The regex is block-only too.
+- **Policy schedule:** each entry applies a policy to **all content** (the default) or to one **content ID**, in a **mode** (**Test only** logs and does nothing, **Enforce** blocks and throttles), between an optional start (inclusive) and end (exclusive) time. A service has at most one all-content entry, and one content ID can only be scheduled for one policy at a time (windows may not overlap). The most specific active entry wins: the content ID's own, else the all-content one. A policy that is not scheduled enforces nothing.
+- **Live edits:** editing a policy changes it in place everywhere it is scheduled, immediately. The editor lists those schedule entries and warns before you save.
+- **Sync:** every change is saved first and then published to the operator's blocker as one idempotent whole-service update. If the publish fails, the change is **saved but not yet live**: the UI shows **Not yet live** with a **Retry** (or **Sync now**) action. "Live" means the blocker accepted it; it can take a few seconds to reach every edge.
 
 ### Configuration
-- **Where:** Admin → Overall Settings → **Content Security**. One global URL (not per service), stored in `data/system/content_security.json`. Empty means blocking is off.
+- **Where:** Admin → Overall Settings → **Content Security**. One global URL (not per service), stored in `data/system/content_security.json`. Empty means blocking is off: policies are still saved, but nothing is published or enforced.
 - **Validation:** absolute `http://` or `https://` URL, ≤ 2048 chars, no `user:pass@`. The URL is returned only to admins and never logged (its path or query may carry a token).
-- **Authorization header (optional):** one `Name: value` header (e.g. `Authorization: Bearer <token>`) sent with every `POST` and `DELETE`. It's stored as `blocklist_auth_header` in the same file (written owner-only, `0600`). It is a credential, so:
+- **Authorization header (optional):** one `Name: value` header (e.g. `Authorization: Bearer <token>`) sent with every call to the blocker. It is a credential, so:
   - The settings API returns only `auth_header_name`, never the value, and it's never logged or written to the audit log. Validation errors never echo it.
   - `PUT` `auth_header`: omitted keeps the saved header, `""` removes it, and a value replaces it. In the UI, the masked box starts empty; leaving it blank keeps the saved header, and **Remove** clears it.
   - It must be a single line with a valid header name. `Host`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE` and `Trailer` are rejected (`422 invalid_header`).
   - Changing the URL to a different scheme, host or port without re-entering or removing the header is rejected (`422 auth_header_reentry_required`), so a saved token never silently follows the URL to another server. Clearing the URL also drops the header.
+- **Sync now:** a button in the same card that publishes the active service's policies and shows the result (`published`, `not_configured` or `failed` with the error).
+- Redirects are **not** followed (a 3xx is a failure), and calls time out after 10 s.
 
-### HTTP function contract
-| Action | Request | Success |
-|---|---|---|
-| Block / throttle | `POST <url>` with JSON `{"kbps": <n>, "conditions": [{"category": "<category>", "value": "<value>"}]}` | any 2xx |
-| Revert | `DELETE <url>` with the same JSON body | any 2xx |
+### Policies view
+- **Sync state:** a banner shows whether the blocker has the latest saved revision (**Live**), is behind it (**Not yet live**, with the last error and **Retry**), or has no endpoint configured (with a link to Admin settings).
+- **Policy schedule table:** scope (All content or `Content: <id>`), policy, mode (Test only or Enforce), start, end (shown in UTC; "(always)" and "(none)" when open) and a status chip: **Scheduled**, **Active** or **Ended**, plus **Not yet live** while the blocker is behind. **Schedule a policy**, edit and remove (removing asks first).
+- **Policies table:** name, a rules summary (for example `regex ^(CN|RU)$, 3 countries, 2 ASNs, 1 allowed`), where it is assigned, and when it was updated. **New policy**, edit and delete. A policy that is still assigned cannot be deleted; the server's message is shown.
 
-Example: `{"kbps": 0, "conditions": [{"category": "country", "value": "CN"}]}`.
+### Policy editor
+`?policy=<id>` (or `?policy=new`) opens the editor, so it deep-links.
+- **Name**, unique within the service.
+- **Mass-block countries by regex:** a live preview (debounced) lists the countries it matches, or the server's reason when the pattern is invalid or unsafe.
+- **Tabs** for Countries, Referers, ASNs, Hosts, Proxy types and Proxy descriptions, each with a count badge. Every row is a value with **Block**, **Throttle** (a dropdown of 128, 256 or 512 kbps) or **Allow** (skip this policy's other rules for that value). The add-row suggests values already seen in the Monitor view's top lists. Values are normalized as the server does (country upper-case, ASN as a bare number, others lower-case).
+- **Individuals tab:** subscriber IDs and IP addresses, one per line (blank lines and duplicates are dropped; subscriber IDs are case-sensitive; IPs are checked as IPv4 or IPv6).
+- **Used by:** the schedule entries that use the policy, with the shared-edit warning.
+- **History:** lists each revision with who changed it and when.
+- **Unsaved changes** are guarded: closing asks before discarding, and the browser warns before leaving the page. A server error (for example `name_taken` or `invalid_regex`) is shown inline.
 
-- **`kbps`** sets the action: `0` blocks matching traffic outright, and a positive number throttles (paces) it to that many kbps. It's always present and is repeated on `DELETE`. The dialog offers **Block (no traffic allowed)** and **Throttle to: 128 / 256 / 512 kbps**; the API accepts any integer 0–10,000,000. A condition set has one active rule at a time, so to switch between block and a rate, remove the existing rule first (otherwise `409 already_blocked`).
+### Apply policy to content dialog
+Scope is **All content** (the default) or **Content ID** (suggestions from the content IDs observed in the logs, with request counts; any text is accepted and matched exactly, case-sensitively). Then a policy, a mode (**Enforce** or **Test only**), and optional start and end date-times, entered in your browser's local time with the UTC value that is saved shown beside each. Server errors appear inline, for example that an all-content entry already exists (`assignment_overlap` for an overlapping content-ID window).
 
-- **`conditions` is always an array**, even for one condition, so receivers handle a single shape. **All conditions must match (AND)**: `[{country: RS}, {proxy_type: hosting}]` blocks hosting-proxy traffic from Serbia, not all of Serbia. The UI sends one condition today; the API accepts up to one per category.
-- Conditions are sent sorted by `category`, and the same order is used on `DELETE`.
-- `category` is one of `country`, `asn`, `referer`, `host`, `proxy_type`, `proxy_description`, `subscriber_id`, `ip`. Two conditions on the same category are rejected (`422 duplicate_category`), since they could never both match.
-- **`referer` values are bare domains** (e.g. `example.com`), not URLs. The leaderboard groups by host, and the receiver must compare against the request's `Referer` host only (the reference VCL lowercases and strips scheme, port, path and query before the check).
-
-`ip` values are validated and normalized (e.g. `2001:DB8::0001` → `2001:db8::1`). Redirects are **not** followed (a 3xx is a failure), and calls time out after 10 s.
-
-### Where Block appears
-- **Leaderboards** (Countries, ASNs, Referers, Hosts, Proxy Types, Proxy Descriptions): **Block or throttle…** in each value's menu, below the filter and copy actions.
-- **Subscriber Usage:** a new per-row actions menu (**⋯**) with **Show IP addresses** and **Block or throttle…**.
-- **Subscriber dialog:** a **Block or throttle…** button. This is the only place to block an **IP address**.
-
-### Block dialog
-The dialog defaults to the value that was clicked. The user can pick another value from the same list or enter a **Custom value…**. From the Subscriber dialog the user can also switch **Category** between the subscriber ID and any of its IPs (an IP seen from several countries appears once). Confirm stays disabled while no blocklist URL is configured, and the dialog links to Admin settings.
-
-### After confirming
-- The backend calls the function. **Only a 2xx records the block**, so a rejected call leaves no row; the dialog stays open with the error.
-- A success toast (`Blocked Country US`) offers **Undo** for 10 s; Undo sends the `DELETE`.
-- Values with an active block show a red ban mark, and their menu offers **Unblock** instead of Block.
-- The **Blocked & Throttled** card lists every active rule for the service with its **Action** (Block, or Throttle to N kbps) and an **Unblock** / **Remove throttle** button. Values with a block show a red ban mark; values with a throttle show an amber gauge mark (hover for the rate). If the `DELETE` fails, the block stays active and an error toast is shown.
+### Monitor view
+- **Banner:** names the policy in effect for the selected content (`In effect for ev-123: Playoffs (Enforce)`) with an **Edit policy** link into the Policies view, or says that none is in effect. A **Not yet live** notice appears here too when the blocker is behind.
+- **Where Block appears:** the leaderboards (Countries, ASNs, Referers, Hosts, Proxy Types, Proxy Descriptions) in each value's menu, the Subscriber Usage actions menu (**Block…**, subscriber IDs are block-only), and the Subscriber dialog (the only place to block an **IP address**).
+- **Block dialog:** defaults to the clicked value; pick another from the same list or a **Custom value…**. The action is **Block**, **Throttle to** 128, 256 or 512 kbps, or **Allow** (not offered for subscriber IDs and IPs). The dialog says which policy the rule goes into, warns when that policy is shared with other assignments, and, when no policy is in effect, says a **Default** policy will be created. Confirm stays disabled while no blocker URL is configured, and the dialog links to Admin settings.
+- **After confirming:** the rule is added to the policy in effect for the selected content, or, when none is, a `Default` policy scheduled for all content in Enforce mode is created and the toast says so. A success toast offers **Undo** for 10 s, which removes that rule. If the publish fails the toast says the rule is saved but not yet live and offers **Retry**.
+- **Marks:** values covered by the policy in effect show a red ban (block), amber gauge (throttle, hover for the rate) or green shield (allow); their menu offers **Unblock**, **Remove throttle** or **Remove allow**. Subscriber IDs and IPs blocked individually are marked too.
+- **Blocked & Throttled card:** lists every rule of the policy in effect (the country regex included, with its Allow rules) with a remove button each.
 
 ### Storage & audit
-- Postgres `content_security_blocklist` (`id`, `service_id`, `conditions`, `kbps`, `created_at/by`, `unblocked_at/by`). `conditions` is canonical JSON (sorted by category, compact), so the same set in any order is the same block. Unblocking stamps `unblocked_at` rather than deleting, so history is kept. A partial unique index allows at most one *active* block per (service, condition set), and a duplicate returns `409 already_blocked` without calling the function. A subset is a different, broader block.
-- Only single-condition blocks put the red mark on a leaderboard value; a multi-condition block doesn't block that value on its own. The **Blocked & Throttled** card lists each rule's conditions joined by "and".
-- Every attempt is written to the service's audit log: `content_security_block`, `content_security_unblock`, and `*_failed` variants with the error.
+Policies, rules, revisions, assignments and sync state live in PostgreSQL (ADR-22). Every change is written to the service's audit log, including failed publishes.
 
 ### Endpoints
+All are admin-only and scoped to the active service.
+
 | Method | Path | Notes |
 |---|---|---|
-| `GET` / `PUT` | `/api/admin/content-security/settings` | Global URL |
-| `GET` | `/api/admin/content-security/blocks` | `{configured, blocks}`: active blocks for the active service |
-| `POST` | `/api/admin/content-security/blocks` | `{conditions: [{category, value}]}` → `201` block · `409 blocklist_not_configured` / `already_blocked` · `502 blocklist_call_failed` |
-| `DELETE` | `/api/admin/content-security/blocks/{block_id}` | Reverts; idempotent for an already-reverted block |
+| `GET` / `PUT` | `/api/admin/content-security/settings` | Global URL and auth header |
+| `GET` / `POST` | `/api/admin/content-security/policies` | List / create |
+| `GET` / `PUT` / `DELETE` | `/api/admin/content-security/policies/{id}` | Delete is refused while assigned |
+| `POST` / `DELETE` | `/api/admin/content-security/policies/{id}/rules` | One rule: body `{category, value, action, kbps}` / query `category`, `value` |
+| `GET` | `/api/admin/content-security/policies/{id}/revisions` | History |
+| `GET` / `POST` | `/api/admin/content-security/assignments` | List / create |
+| `PUT` / `DELETE` | `/api/admin/content-security/assignments/{id}` | Update / delete |
+| `GET` | `/api/admin/content-security/effective?content_id=` | The policy in effect now and how many schedule entries share it |
+| `POST` | `/api/admin/content-security/live-rule` | Add a rule to the policy in effect (creates `Default` if none) |
+| `POST` | `/api/admin/content-security/publish` | Retry / Sync now |
+| `GET` | `/api/admin/content-security/sync-status` | Saved vs published revision |
+| `GET` | `/api/admin/content-security/country-regex/preview?pattern=` | Countries a regex matches |
+
+Writes return the saved object plus `publish: {status, rev, error}` where `status` is `published`, `not_configured` or `failed` (saved but not yet live).
 
 ### Roles
 | Role | Behavior |
 |---|---|
-| Admin (`read_write`) | Full block/unblock UI. |
-| Analyst Path B | No block UI and no blocklist query. `/api/admin/*` is blocked by `RemoteAccessMiddleware`, and every route also depends on `require_admin`. |
+| Admin (`read_write`) | Full Monitor actions and the Policies view. |
+| Analyst Path B | Monitor only: no Policies view, no block UI and no policy queries. `/api/admin/*` is blocked by `RemoteAccessMiddleware`, and every route also depends on `require_admin`. |
 | Read-only service (Path A) | Endpoints return `403`. |
 
 ## 12. Content Security enforcement reporting
@@ -176,4 +189,4 @@ The Content Security tab reports what the edge actually did to requests, not jus
 - **Enforcement card:** requests per outcome, split into **Enforced** (mode `ENFORCE`) and **Warned** (mode `WARN`, the request was served normally). Outcomes that don't stop a request (`allowed`, `counted`, `check_failed`) show "—".
 - **Enforcement over time card:** stacked requests per outcome per time bucket.
 - **Availability:** a service without the `cs_status` column shows which Log Settings option to enable. High-scale (ClickHouse) services get no Content Security data.
-
+- **By policy and rule:** under the outcome table, one row per policy, rule (`country_regex`, a category, an individual block, or `exempt:<category>`) and outcome, with **Requests**, **Enforced** and **Warned**. Only requests whose mode was `ENFORCE` count as enforced; the remainder of a stopping outcome was `WARN` only and was served normally. Admins see policy names; a policy that no longer exists shows its id.

@@ -27,6 +27,7 @@ _ALL_COLS = {
 }
 # Opt-in columns (the tests above add/remove their own on _ALL_COLS).
 _ENF_TYPES = {"cs_status": "VARCHAR", "cs_mode": "VARCHAR", "cs_rl_mode": "VARCHAR", "asn": "UINTEGER"}
+_POLICY_TYPES = {"cs_policy_id": "VARCHAR", "cs_policy_reason": "VARCHAR"}
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +40,9 @@ def _clear_cache():
 def _make_table(con, src, rows, cols=None):
     cols = cols or list(_ALL_COLS)
     table = _safe_table(src["name"])
-    con.execute(f"CREATE TABLE {table} ({', '.join(f'{c} {({**_ALL_COLS, **_ENF_TYPES})[c]}' for c in cols)})")
+    con.execute(
+        f"CREATE TABLE {table} ({', '.join(f'{c} {({**_ALL_COLS, **_ENF_TYPES, **_POLICY_TYPES})[c]}' for c in cols)})"
+    )
     for r in rows:
         con.execute(
             f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
@@ -502,3 +505,35 @@ def test_enforcement_is_empty_without_the_status_column(in_memory_duckdb, test_s
     res = _call(in_memory_duckdb, test_service_source)
     assert res["fields"]["cs_status"] is False
     assert res["enforcement"] == [] and res["enforcement_ts"] == []
+
+
+def test_enforcement_reasons_group_by_policy_rule_and_status(in_memory_duckdb, test_service_source):
+    def row(status, mode, policy, reason, **kw):
+        return {**_enf(10, status, mode=mode, **kw), "cs_policy_id": policy, "cs_policy_reason": reason}
+
+    rows = [
+        row("blocked", "ENFORCE", "p1", "country_regex"),
+        row("blocked", "ENFORCE", "p1", "country_regex"),
+        row("blocked", "WARN", "p1", "country_regex"),
+        row("throttled", "ENFORCE", "p1", "asn"),
+        row("allowed", "ENFORCE", "p2", "exempt:country"),
+        row("allowed", "ENFORCE", None, None),  # no policy applied
+        row("blocked", "ENFORCE", "p1", "ip", edge=False),  # shield line: not counted
+    ]
+    _make_table(in_memory_duckdb, test_service_source, rows, cols=[*_ENF_COLS, *_POLICY_TYPES])
+    res = _call(in_memory_duckdb, test_service_source)
+
+    got = {
+        (r["policy_id"], r["reason"], r["status"]): (r["requests"], r["enforced"]) for r in res["enforcement_reasons"]
+    }
+    assert got == {
+        ("p1", "country_regex", "blocked"): (3, 2),
+        ("p1", "asn", "throttled"): (1, 1),
+        ("p2", "exempt:country", "allowed"): (1, 0),
+    }
+
+
+def test_enforcement_reasons_empty_without_policy_columns(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, [_enf(10, "blocked", mode="ENFORCE")], cols=_ENF_COLS)
+    res = _call(in_memory_duckdb, test_service_source)
+    assert res["enforcement_reasons"] == [] and res["enforcement"]

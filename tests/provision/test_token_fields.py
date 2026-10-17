@@ -301,12 +301,17 @@ def test_enforcement_fields_need_token_enabled_and_the_flag():
 
 def test_enforcement_fields_are_deliver_stage_strings_reading_the_operators_headers():
     defs = {cf["name"]: cf for cf in get_token_fields(_ENFORCEMENT)}
-    assert set(defs) == {"cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps"}
+    assert set(defs) == {"cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps", "cs_policy_id", "cs_policy_reason"}
     assert defs["cs_status"]["vcl_log_expression"] == "req.http.cs-status"
     assert defs["cs_rl_mode"]["vcl_log_expression"] == "req.http.cs-rl-mode"
     assert all(cf["collection_stage"] == "deliver" and cf["duckdb_type"] == "VARCHAR" for cf in defs.values())
     # "check_failed" / "rate_limited" are the longest values; the cap must hold them.
     assert defs["cs_status"]["byte_limit"] >= len("check_failed")
+    # A UUID policy id and the longest reason ("exempt:proxy_description") must fit their caps.
+    assert defs["cs_policy_id"]["vcl_log_expression"] == "req.http.cs-policy"
+    assert defs["cs_policy_id"]["byte_limit"] >= 6 * 36
+    assert defs["cs_policy_reason"]["vcl_log_expression"] == "req.http.cs-reason"
+    assert defs["cs_policy_reason"]["byte_limit"] >= 6 * len("exempt:proxy_description")
 
 
 def test_enforcement_fields_follow_token_fields_in_canonical_order():
@@ -319,6 +324,8 @@ def test_enforcement_fields_follow_token_fields_in_canonical_order():
         "cs_mode",
         "cs_rl_mode",
         "cs_pace_kbps",
+        "cs_policy_id",
+        "cs_policy_reason",
     ]
 
 

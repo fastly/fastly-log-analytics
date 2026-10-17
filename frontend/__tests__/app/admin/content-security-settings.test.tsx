@@ -9,7 +9,7 @@ import { showToast } from '@/lib/toast'
 import { createTestQueryClient } from '../../helpers/query'
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), PUT: vi.fn() },
+  client: { GET: vi.fn(), PUT: vi.fn(), POST: vi.fn() },
   extractApiError: vi.fn((e: unknown) => (e instanceof Error ? e.message : String(e))),
 }))
 
@@ -17,6 +17,7 @@ vi.mock('@/lib/toast', () => ({ showToast: vi.fn() }))
 
 const getMock = vi.mocked(client.GET)
 const putMock = vi.mocked(client.PUT)
+const postMock = vi.mocked(client.POST)
 
 function renderPanel() {
   const queryClient = createTestQueryClient({ queries: { retry: false } })
@@ -30,17 +31,18 @@ function renderPanel() {
 beforeEach(() => {
   getMock.mockReset()
   putMock.mockReset()
+  postMock.mockReset()
   vi.mocked(showToast).mockReset()
 })
 
-test('shows the saved blocklist URL and the POST/DELETE contract', async () => {
+test('shows the saved blocklist URL and the policy-set publish contract', async () => {
   getMock.mockResolvedValue({ data: { blocklist_url: 'https://hooks.example.com/block' } } as never)
   renderPanel()
 
   const input = screen.getByLabelText('Content Security')
   await waitFor(() => expect(input).toHaveValue('https://hooks.example.com/block'))
-  expect(screen.getByText(/Blocking sends/)).toHaveTextContent('POST')
-  expect(screen.getByText(/Blocking sends/)).toHaveTextContent('DELETE')
+  expect(screen.getByText(/published as one idempotent/)).toHaveTextContent('PUT')
+  expect(screen.getByText(/published as one idempotent/)).toHaveTextContent('/v2/services/<service>/policy-set')
   // Nothing to save until the value changes.
   expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
 })
@@ -143,4 +145,51 @@ test('Remove sends an empty header', async () => {
       body: { blocklist_url: 'https://hooks.example.com/block', auth_header: '' },
     }),
   )
+})
+
+test('Sync now publishes and reports the result', async () => {
+  getMock.mockResolvedValue({ data: { blocklist_url: 'https://hooks.example.com/block' } } as never)
+  postMock.mockResolvedValue({ data: { status: 'published', rev: 7, error: null } } as never)
+  const user = userEvent.setup()
+  renderPanel()
+
+  await user.click(screen.getByRole('button', { name: 'Sync now' }))
+
+  await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/admin/content-security/publish'))
+  expect(await screen.findByRole('status')).toHaveTextContent('Synced: the blocker now has revision 7.')
+  expect(showToast).toHaveBeenCalledWith('Synced: the blocker now has revision 7.', 'success')
+})
+
+test('Sync now says when the change is saved but not yet live', async () => {
+  getMock.mockResolvedValue({ data: { blocklist_url: 'https://hooks.example.com/block' } } as never)
+  postMock.mockResolvedValue({ data: { status: 'failed', rev: 7, error: 'blocker returned HTTP 502' } } as never)
+  const user = userEvent.setup()
+  renderPanel()
+
+  await user.click(screen.getByRole('button', { name: 'Sync now' }))
+
+  const status = await screen.findByRole('status')
+  expect(status).toHaveTextContent('not yet live')
+  expect(status).toHaveTextContent('HTTP 502')
+  expect(showToast).toHaveBeenCalledWith(expect.stringContaining('HTTP 502'), 'warn')
+})
+
+test('Sync now with no endpoint configured says there is nothing to sync', async () => {
+  getMock.mockResolvedValue({ data: { blocklist_url: '' } } as never)
+  postMock.mockResolvedValue({ data: { status: 'not_configured', rev: 0, error: null } } as never)
+  const user = userEvent.setup()
+  renderPanel()
+
+  await user.click(screen.getByRole('button', { name: 'Sync now' }))
+  expect(await screen.findByRole('status')).toHaveTextContent('no blocklist endpoint is configured')
+})
+
+test('Sync now shows a request failure', async () => {
+  getMock.mockResolvedValue({ data: { blocklist_url: 'https://hooks.example.com/block' } } as never)
+  postMock.mockRejectedValue(new Error('boom'))
+  const user = userEvent.setup()
+  renderPanel()
+
+  await user.click(screen.getByRole('button', { name: 'Sync now' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('boom')
 })

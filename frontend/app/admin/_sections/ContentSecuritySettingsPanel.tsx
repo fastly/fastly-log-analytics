@@ -1,16 +1,26 @@
 'use client'
 import React, { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Loader2, Save, X } from 'lucide-react'
+import { KeyRound, Loader2, RefreshCw, Save, X } from 'lucide-react'
 import { client, extractApiError } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import type { components } from '@/types/api.generated'
 
 const QUERY_KEY = ['content-security-settings']
 
-/** Overall Settings → Content Security: the blocklist HTTP function used by Streaming → Content Security. */
+type PublishResult = components['schemas']['PublishResult']
+
+/** One line saying what a publish did, for the Sync now button. */
+export function describePublish(result: PublishResult): string {
+  if (result.status === 'published') return `Synced: the blocker now has revision ${result.rev}.`
+  if (result.status === 'not_configured') return 'Nothing to sync: no blocklist endpoint is configured.'
+  return `Sync failed (revision ${result.rev} is saved but not yet live): ${result.error ?? 'the blocker rejected the update'}`
+}
+
+/** Overall Settings → Content Security: the blocker used by Streaming → Content Security policies. */
 export function ContentSecuritySettingsPanel() {
   const queryClient = useQueryClient()
   const { data } = useQuery({
@@ -31,6 +41,9 @@ export function ContentSecuritySettingsPanel() {
   const [removeHeader, setRemoveHeader] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<PublishResult | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -53,13 +66,31 @@ export function ContentSecuritySettingsPanel() {
       queryClient.setQueryData(QUERY_KEY, next)
       setHeader('')
       setRemoveHeader(false)
-      // The Content Security tab's "configured" flag rides on the blocks query.
-      queryClient.invalidateQueries({ queryKey: ['content-security', 'blocks'] })
+      // The Content Security tab's "configured" flag and sync state ride on the policy queries.
+      queryClient.invalidateQueries({ queryKey: ['content-security'] })
       showToast(next?.blocklist_url ? 'Blocklist endpoint saved' : 'Blocklist endpoint cleared', 'success')
     } catch (e) {
       setError(extractApiError(e))
     } finally {
       setSaving(false)
+    }
+  }
+
+  /** Push every saved policy and its schedule to the blocker now (also the retry for a "Not yet live" change). */
+  async function syncNow() {
+    setSyncing(true)
+    setSyncError(null)
+    setSyncResult(null)
+    try {
+      const { data: result, error: apiError } = await client.POST('/api/admin/content-security/publish')
+      if (apiError) throw apiError
+      setSyncResult(result)
+      queryClient.invalidateQueries({ queryKey: ['content-security'] })
+      showToast(describePublish(result), result.status === 'published' ? 'success' : 'warn')
+    } catch (e) {
+      setSyncError(extractApiError(e))
+    } finally {
+      setSyncing(false)
     }
   }
 
@@ -78,12 +109,10 @@ export function ContentSecuritySettingsPanel() {
           Content Security
         </Label>
         <p className="text-xs text-muted-foreground">
-          Blocklist endpoint for Streaming → Content Security. Blocking sends{' '}
-          <code className="font-mono">POST</code> with JSON{' '}
-          <code className="font-mono">{'{"kbps": 0, "conditions": [{"category": "country", "value": "CN"}]}'}</code>.
-          All conditions must match; <code className="font-mono">kbps</code> 0 blocks, a positive value throttles to that
-          rate. Undo sends <code className="font-mono">DELETE</code> with the same body. Leave empty
-          to turn blocking off.
+          Blocker endpoint for Streaming → Content Security. Policies are published as one idempotent{' '}
+          <code className="font-mono">PUT</code> of the whole service&apos;s policies and their schedule to{' '}
+          <code className="font-mono">{'<url>/v2/services/<service>/policy-set'}</code> whenever one changes. Leave empty to
+          turn blocking off; policies are still saved, but not enforced.
         </p>
       </div>
       <form
@@ -150,6 +179,23 @@ export function ContentSecuritySettingsPanel() {
           {headerHint}
         </p>
       </form>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => void syncNow()} disabled={syncing}>
+          {syncing ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+          {syncing ? 'Syncing…' : 'Sync now'}
+        </Button>
+        <p className="text-xs text-muted-foreground">Re-publishes this service&apos;s policies to the blocker.</p>
+      </div>
+      {syncResult && (
+        <p role="status" className={syncResult.status === 'failed' ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+          {describePublish(syncResult)}
+        </p>
+      )}
+      {syncError && (
+        <p role="alert" className="text-xs text-destructive">
+          {syncError}
+        </p>
+      )}
       {error && (
         <p id="gs-blocklist-url-error" role="alert" className="text-xs text-destructive">
           {error}

@@ -7,6 +7,8 @@ import { quantizeAnchor } from '@/lib/time-window'
 import { Gauge, Play, ShieldCheck } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { useIsAnalyst } from '@/hooks/useIsAnalyst'
+import PoliciesView from './tabs/PoliciesView'
 import QualityTab from './tabs/QualityTab'
 import SecurityTab from './tabs/SecurityTab'
 
@@ -33,11 +35,22 @@ const tabParser = parseAsStringLiteral(TABS.map((t) => t.id)).withDefault('quali
   shallow: true,
 })
 
+const SECURITY_VIEWS = ['monitor', 'policies'] as const
+
+// ?csview=policies selects Content Security's Policies view; Monitor (the default) is omitted from the URL.
+const securityViewParser = parseAsStringLiteral(SECURITY_VIEWS).withDefault('monitor').withOptions({
+  history: 'replace',
+  shallow: true,
+})
+
 export default function StreamingClient() {
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
   const storeEndTime = useFilterStore((s) => s.endTime)
   const [activeTab, setActiveTab] = useQueryState('tab', tabParser)
+  const [securityView, setSecurityView] = useQueryState('csview', securityViewParser)
+  // Policies are admin-only (the endpoints 403 analysts), so analysts only get Monitor.
+  const isAdmin = !useIsAnalyst()
 
   const anchor = React.useMemo(() => quantizeAnchor(storeEndTime), [storeEndTime])
 
@@ -75,7 +88,22 @@ export default function StreamingClient() {
               <QualityTab {...tabProps} />
             </TabsContent>
             <TabsContent value="security">
-              <SecurityTab {...tabProps} bucketSeconds={bucketSeconds} />
+              {isAdmin ? (
+                <Tabs value={securityView} onValueChange={(v) => setSecurityView(v as (typeof SECURITY_VIEWS)[number])}>
+                  <TabsList variant="line" aria-label="Content Security views">
+                    <TabsTrigger value="monitor">Monitor</TabsTrigger>
+                    <TabsTrigger value="policies">Policies</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="monitor" className="pt-4">
+                    <SecurityTab {...tabProps} bucketSeconds={bucketSeconds} />
+                  </TabsContent>
+                  <TabsContent value="policies" className="pt-4">
+                    <PoliciesView {...tabProps} bucketSeconds={bucketSeconds} />
+                  </TabsContent>
+                </Tabs>
+              ) : (
+                <SecurityTab {...tabProps} bucketSeconds={bucketSeconds} />
+              )}
             </TabsContent>
           </Tabs>
         )

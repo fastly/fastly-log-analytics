@@ -100,7 +100,7 @@ beforeEach(() => {
   postMock.mockReset()
   postMock.mockResolvedValue({ data: FULL_RESPONSE } as never)
   getMock.mockReset()
-  getMock.mockResolvedValue({ data: { configured: true, blocks: [] } } as never)
+  routeGets()
   vi.mocked(client.DELETE).mockReset()
   vi.mocked(showToastWithAction).mockReset()
   vi.mocked(useIsAnalyst).mockReturnValue(false)
@@ -466,152 +466,331 @@ test('masked subscriber ids are not clickable', async () => {
   expect(screen.queryByRole('button', { name: /Show IP addresses/ })).not.toBeInTheDocument()
 })
 
-// ── Blocklist (admin-only) ───────────────────────────────────────────────────
+// ── Policy rules (admin-only) ────────────────────────────────────────────────
 
-const BLOCK = {
-  id: 'blk-1',
-  conditions: [{ category: 'country', value: 'US' }],
-  kbps: 0,
-  created_at: '2026-01-01T00:59:00Z',
-  created_by: 'admin',
-  unblocked_at: null,
-  unblocked_by: null,
+const EMPTY_RULES = { country: [], asn: [], referer: [], host: [], proxy_type: [], proxy_description: [] }
+
+function makePolicy(overrides: Record<string, unknown> = {}, rules: Record<string, unknown[]> = {}) {
+  return {
+    id: 'pol-1',
+    name: 'Playoffs',
+    country_regex: null,
+    rev: 3,
+    rules: { ...EMPTY_RULES, ...rules },
+    individual: { subscriber_id: [], ip: [] },
+    created_at: '2026-01-01T00:00:00Z',
+    created_by: 'admin',
+    updated_at: '2026-01-01T00:30:00Z',
+    updated_by: 'admin',
+    used_by: [],
+    ...overrides,
+  }
 }
 
-/** Route POSTs: the block endpoint echoes a stored block; everything else is the tab's data. */
-function routePosts(extra: Record<string, unknown> = {}) {
-  postMock.mockImplementation(((path: string, init: { body: { conditions: unknown[] } }) => {
-    if (path === '/api/admin/content-security/blocks') {
-      return Promise.resolve({ data: { ...BLOCK, conditions: init.body.conditions } })
+const ASSIGNMENT = {
+  id: 'asg-1',
+  policy_id: 'pol-1',
+  policy_name: 'Playoffs',
+  scope_type: 'content_id',
+  content_id: 'movie-1',
+  mode: 'ENFORCE',
+  starts_at: null,
+  ends_at: null,
+  status: 'active',
+  created_at: '2026-01-01T00:00:00Z',
+  created_by: 'admin',
+}
+
+const PUBLISHED = { status: 'published', rev: 4, error: null }
+
+function effectiveWith(policy: ReturnType<typeof makePolicy> | null, extra: Record<string, unknown> = {}) {
+  return {
+    content_id: null,
+    configured: true,
+    shared_with: 0,
+    policy,
+    assignment: policy ? ASSIGNMENT : null,
+    ...extra,
+  }
+}
+
+/** Route the policy GETs; `overrides` replaces the response for a path. */
+function routeGets(overrides: Record<string, unknown> = {}) {
+  const responses: Record<string, unknown> = {
+    '/api/admin/content-security/effective': effectiveWith(null),
+    '/api/admin/content-security/policies': { configured: true, policies: [] },
+    '/api/admin/content-security/sync-status': {
+      configured: true,
+      rev: 4,
+      published_rev: 4,
+      in_sync: true,
+      last_ok_at: '2026-01-01T00:59:00Z',
+      last_error: null,
+    },
+    ...overrides,
+  }
+  getMock.mockImplementation(((path: string) => Promise.resolve({ data: responses[path] })) as never)
+}
+
+/** Route POSTs: live-rule echoes a policy holding the new rule; everything else is the tab's data. */
+function routePosts(opts: { created_default?: boolean; publish?: Record<string, unknown>; extra?: Record<string, unknown> } = {}) {
+  postMock.mockImplementation(((path: string, init: { body: Record<string, unknown> }) => {
+    if (path === '/api/admin/content-security/live-rule') {
+      const b = init.body as { category: string; value: string; action: string; kbps: number }
+      return Promise.resolve({
+        data: {
+          policy: makePolicy({}, { [b.category]: [{ value: b.value, action: b.action, kbps: b.kbps }] }),
+          assignment: ASSIGNMENT,
+          created_default: opts.created_default ?? false,
+          publish: opts.publish ?? PUBLISHED,
+        },
+      })
     }
-    if (path in extra) return Promise.resolve({ data: extra[path] })
+    if (opts.extra && path in opts.extra) return Promise.resolve({ data: opts.extra[path] })
     return Promise.resolve({ data: FULL_RESPONSE })
   }) as never)
 }
 
-function blockCalls() {
+function liveRuleCalls() {
   return postMock.mock.calls
-    .filter((c) => c[0] === '/api/admin/content-security/blocks')
+    .filter((c) => c[0] === '/api/admin/content-security/live-rule')
     .map((c) => (c[1] as unknown as { body: unknown }).body)
 }
 
+async function openBlockMenu(user: ReturnType<typeof userEvent.setup>, value: string) {
+  await user.click(await screen.findByRole('button', { name: `Filter actions for ${value}` }))
+  await user.click(await screen.findByText('Block, throttle or allow…'))
+  return screen.findByRole('dialog')
+}
+
 test('Block from a leaderboard menu confirms the clicked value, then offers Undo', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(makePolicy()) })
   routePosts()
-  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...BLOCK, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { policy: makePolicy(), publish: PUBLISHED } } as never)
   const user = userEvent.setup()
   renderTab()
 
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-
-  const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText('Block or throttle access')).toBeInTheDocument()
+  const dialog = await openBlockMenu(user, 'US')
+  expect(within(dialog).getByText('Block, throttle or allow')).toBeInTheDocument()
   // One category in a leaderboard: no category picker, the clicked value preselected.
   expect(within(dialog).queryByText('Category')).not.toBeInTheDocument()
   expect(within(dialog).getByRole('combobox', { name: 'Country' })).toHaveTextContent('United States (US)')
+  // The policy in effect is named, and it is not shared.
+  expect(await within(dialog).findByText('Playoffs')).toBeInTheDocument()
+  expect(within(dialog).queryByRole('note')).not.toBeInTheDocument()
 
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }], kbps: 0 }]))
-  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-  expect(showToastWithAction).toHaveBeenCalledWith(
-    'Blocked Country US',
-    expect.objectContaining({ actionLabel: 'Undo' }),
+  await waitFor(() =>
+    expect(liveRuleCalls()).toEqual([{ category: 'country', value: 'US', action: 'block', kbps: 0, content_id: null }]),
   )
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(showToastWithAction).toHaveBeenCalledWith('Blocked Country US', expect.objectContaining({ actionLabel: 'Undo' }))
 
-  // The toast's Undo reverts via DELETE.
+  // The toast's Undo removes the rule from the policy it was added to.
   vi.mocked(showToastWithAction).mock.calls[0][1].onAction()
   await waitFor(() =>
-    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
-      params: { path: { block_id: 'blk-1' } },
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/policies/{policy_id}/rules', {
+      params: { path: { policy_id: 'pol-1' }, query: { category: 'country', value: 'US' } },
     }),
   )
 })
 
-test('an ASN can be blocked from its leaderboard', async () => {
+test('with no policy in effect the dialog says a Default policy will be created, and the toast says it was', async () => {
+  routeGets()
+  routePosts({ created_default: true })
+  const user = userEvent.setup()
+  renderTab()
+
+  const dialog = await openBlockMenu(user, 'US')
+  expect(await within(dialog).findByText((_, el) => el?.tagName === 'P' && /A Default policy will be created/.test(el.textContent ?? ''))).toBeInTheDocument()
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() =>
+    expect(showToastWithAction).toHaveBeenCalledWith(
+      'Blocked Country US. Created a Default policy for all content',
+      expect.objectContaining({ actionLabel: 'Undo' }),
+    ),
+  )
+})
+
+test('the dialog warns when the policy in effect is shared', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(makePolicy(), { shared_with: 2 }) })
   routePosts()
   const user = userEvent.setup()
   renderTab()
 
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for 7922' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
+  const dialog = await openBlockMenu(user, 'US')
+  expect(await within(dialog).findByRole('note')).toHaveTextContent('also scheduled for 2 other entries')
+})
+
+test('a rule is added to the policy in effect for the selected content', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(makePolicy(), { content_id: 'movie-2' }) })
+  routePosts()
+  const user = userEvent.setup()
+  renderTab('?content=movie-2')
+
+  expect(getMock).toHaveBeenCalledWith(
+    '/api/admin/content-security/effective',
+    expect.objectContaining({ params: { query: { content_id: 'movie-2' } } }),
+  )
+  const dialog = await openBlockMenu(user, 'US')
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+  await waitFor(() => expect(liveRuleCalls()[0]).toMatchObject({ content_id: 'movie-2' }))
+})
+
+test('an ASN can be blocked from its leaderboard', async () => {
+  routeGets()
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  const dialog = await openBlockMenu(user, '7922')
   expect(within(dialog).getByRole('combobox', { name: 'ASN' })).toHaveTextContent('Comcast Cable (7922)')
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'asn', value: '7922' }], kbps: 0 }]))
+  await waitFor(() => expect(liveRuleCalls()).toMatchObject([{ category: 'asn', value: '7922', action: 'block' }]))
 })
 
 test('Block dialog lets the user pick a different value from the list', async () => {
+  routeGets()
   routePosts()
   const user = userEvent.setup()
   renderTab()
 
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for hosting' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
-
+  const dialog = await openBlockMenu(user, 'hosting')
   await user.click(within(dialog).getByRole('combobox', { name: 'Proxy type' }))
   await user.click(await screen.findByRole('option', { name: 'anonymous' }))
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'proxy_type', value: 'anonymous' }], kbps: 0 }]))
+  await waitFor(() => expect(liveRuleCalls()).toMatchObject([{ category: 'proxy_type', value: 'anonymous' }]))
 })
 
 test('Block dialog accepts a custom value', async () => {
+  routeGets()
   routePosts()
   const user = userEvent.setup()
   renderTab()
 
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for pirate.example' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
-
-  await user.click(within(dialog).getByRole('combobox', { name: 'Host' }))
-  await user.click(await screen.findByRole('option', { name: 'Custom value…' }))
+  const dialog = await openBlockMenu(user, 'pirate.example')
   const blockButton = within(dialog).getByRole('button', { name: 'Block' })
-  expect(blockButton).toBeDisabled()
-  await user.type(within(dialog).getByRole('textbox', { name: 'Custom host' }), 'mirror.example')
+  await user.click(within(dialog).getByRole('combobox', { name: 'Host' }))
+  await user.type(screen.getByPlaceholderText('Search or type a value…'), 'mirror.example')
+  await user.click(await within(screen.getByRole('listbox')).findByText('Use “mirror.example”'))
+  expect(within(dialog).getByRole('combobox', { name: 'Host' })).toHaveTextContent('mirror.example')
   await user.click(blockButton)
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'host', value: 'mirror.example' }], kbps: 0 }]))
+  await waitFor(() => expect(liveRuleCalls()).toMatchObject([{ category: 'host', value: 'mirror.example' }]))
 })
 
-test('a failed block keeps the dialog open with the error', async () => {
+test('a failed block keeps the dialog open with the server message', async () => {
+  routeGets()
   postMock.mockImplementation(((path: string) =>
-    path === '/api/admin/content-security/blocks'
-      ? Promise.reject(new Error('Blocklist endpoint returned HTTP 500'))
+    path === '/api/admin/content-security/live-rule'
+      ? Promise.reject(new Error('Error: policy limit reached'))
       : Promise.resolve({ data: FULL_RESPONSE })) as never)
   const user = userEvent.setup()
   renderTab()
 
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for vpn' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
+  const dialog = await openBlockMenu(user, 'vpn')
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  expect(await within(dialog).findByRole('alert')).toHaveTextContent('HTTP 500')
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('policy limit reached')
   expect(showToastWithAction).not.toHaveBeenCalled()
 })
 
-test('subscriber rows get an actions menu with Block', async () => {
+test('a block that is saved but not yet live offers Retry instead of Undo', async () => {
+  routeGets()
+  routePosts({ publish: { status: 'failed', rev: 4, error: 'blocker returned HTTP 502' } })
+  const user = userEvent.setup()
+  renderTab()
+
+  const dialog = await openBlockMenu(user, 'US')
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(showToastWithAction).toHaveBeenCalled())
+  const [message, options] = vi.mocked(showToastWithAction).mock.calls[0]
+  expect(message).toContain('Blocked Country US')
+  expect(message).toContain('not yet live')
+  expect(message).toContain('HTTP 502')
+  expect(options).toMatchObject({ actionLabel: 'Retry', kind: 'warn' })
+
+  // Retry re-publishes.
+  postMock.mockResolvedValue({ data: PUBLISHED } as never)
+  options.onAction()
+  await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/admin/content-security/publish'))
+})
+
+test('the dialog can throttle instead of block, offering 128 / 256 / 512 kbps', async () => {
+  routeGets()
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  const dialog = await openBlockMenu(user, 'US')
+  const action = within(dialog).getByRole('combobox', { name: 'Action' })
+  expect(action).toHaveTextContent('Block (no traffic allowed)')
+  await user.click(action)
+  const labels = (await screen.findAllByRole('option')).map((o) => o.textContent)
+  expect(labels).toEqual([
+    'Block (no traffic allowed)',
+    'Throttle to: 128 kbps',
+    'Throttle to: 256 kbps',
+    'Throttle to: 512 kbps',
+    "Allow (skip this policy's other rules)",
+  ])
+  await user.click(screen.getByRole('option', { name: 'Throttle to: 256 kbps' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Throttle' }))
+
+  await waitFor(() =>
+    expect(liveRuleCalls()).toEqual([{ category: 'country', value: 'US', action: 'pace', kbps: 256, content_id: null }]),
+  )
+  expect(showToastWithAction).toHaveBeenCalledWith(
+    'Throttled Country US to 256 kbps',
+    expect.objectContaining({ actionLabel: 'Undo' }),
+  )
+})
+
+test('Allow adds an allow rule', async () => {
+  routeGets()
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  const dialog = await openBlockMenu(user, 'US')
+  await user.click(within(dialog).getByRole('combobox', { name: 'Action' }))
+  await user.click(await screen.findByRole('option', { name: /^Allow/ }))
+  await user.click(within(dialog).getByRole('button', { name: 'Allow' }))
+
+  await waitFor(() => expect(liveRuleCalls()).toMatchObject([{ category: 'country', value: 'US', action: 'exempt', kbps: 0 }]))
+  expect(showToastWithAction).toHaveBeenCalledWith('Allowed Country US', expect.objectContaining({ actionLabel: 'Undo' }))
+})
+
+test('subscriber IDs can only be blocked', async () => {
+  routeGets()
   routePosts()
   const user = userEvent.setup()
   renderTab()
 
   await user.click(await screen.findByRole('button', { name: 'Actions for acct-home' }))
   expect(await screen.findByText('Show IP addresses')).toBeInTheDocument()
-  await user.click(screen.getByText('Block or throttle…'))
+  await user.click(screen.getByText('Block…'))
 
   const dialog = await screen.findByRole('dialog')
   expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-home')
+  await user.click(within(dialog).getByRole('combobox', { name: 'Action' }))
+  expect((await screen.findAllByRole('option')).map((o) => o.textContent)).toEqual(['Block (no traffic allowed)'])
+  await user.keyboard('{Escape}')
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'subscriber_id', value: 'acct-home' }], kbps: 0 }]))
+  await waitFor(() =>
+    expect(liveRuleCalls()).toEqual([{ category: 'subscriber_id', value: 'acct-home', action: 'block', kbps: 0, content_id: null }]),
+  )
 })
 
 test('the subscriber dialog Block button offers the subscriber ID or any of its IPs', async () => {
-  routePosts({ '/api/cmcd/content-security/subscriber': SUBSCRIBER_IPS })
+  routeGets()
+  routePosts({ extra: { '/api/cmcd/content-security/subscriber': SUBSCRIBER_IPS } })
   const user = userEvent.setup()
   renderTab()
 
@@ -623,7 +802,7 @@ test('the subscriber dialog Block button offers the subscriber ID or any of its 
   await user.click(within(ipsDialog).getByRole('button', { name: /Block/ }))
 
   const dialogs = await screen.findAllByRole('dialog')
-  const dialog = dialogs.find((d) => within(d).queryByText('Block or throttle access')) as HTMLElement
+  const dialog = dialogs.find((d) => within(d).queryByText('Block, throttle or allow')) as HTMLElement
   expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-shared')
 
   await user.click(within(dialog).getByRole('combobox', { name: 'Category' }))
@@ -636,135 +815,88 @@ test('the subscriber dialog Block button offers the subscriber ID or any of its 
   await user.click(screen.getByRole('option', { name: '203.0.113.2' }))
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'ip', value: '203.0.113.2' }], kbps: 0 }]))
+  await waitFor(() => expect(liveRuleCalls()).toMatchObject([{ category: 'ip', value: '203.0.113.2', action: 'block' }]))
 })
 
-test('Blocked card lists active blocks; values show a mark and offer Unblock', async () => {
-  getMock.mockResolvedValue({ data: { configured: true, blocks: [BLOCK] } } as never)
-  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...BLOCK, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+test('the banner names the policy in effect and Edit policy opens it in the Policies view', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(makePolicy(), { content_id: 'movie-1' }) })
+  const onUrlUpdate = vi.fn<(e: UrlUpdateEvent) => void>()
+  const user = userEvent.setup()
+  renderTab('?content=movie-1', onUrlUpdate)
+
+  expect(await screen.findByText('Playoffs', { selector: 'strong' })).toBeInTheDocument()
+  expect(screen.getByText(/In effect for/)).toHaveTextContent('In effect for movie-1: Playoffs (Enforce)')
+  await user.click(screen.getByRole('button', { name: 'Edit policy' }))
+
+  expect(onUrlUpdate).toHaveBeenCalledWith(expect.objectContaining({ queryString: expect.stringContaining('csview=policies') }))
+  expect(onUrlUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ queryString: expect.stringContaining('policy=pol-1') }))
+})
+
+test('the banner says when no policy is in effect', async () => {
+  routeGets()
+  renderTab()
+  expect(await screen.findByText(/No policy is in effect for all content/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Edit policy' })).not.toBeInTheDocument()
+})
+
+test('a policy that is not yet live shows a Retry notice in the Monitor view', async () => {
+  routeGets({
+    '/api/admin/content-security/sync-status': {
+      configured: true,
+      rev: 5,
+      published_rev: 4,
+      in_sync: false,
+      last_ok_at: null,
+      last_error: 'blocker returned HTTP 502',
+    },
+  })
+  postMock.mockImplementation(((path: string) =>
+    Promise.resolve({ data: path === '/api/admin/content-security/publish' ? PUBLISHED : FULL_RESPONSE })) as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('Not yet live')
+  expect(alert).toHaveTextContent('HTTP 502')
+  await user.click(within(alert).getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/admin/content-security/publish'))
+})
+
+test('the Blocked card lists the policy rules; values show a mark and offer Unblock', async () => {
+  routeGets({
+    '/api/admin/content-security/effective': effectiveWith(
+      makePolicy({ country_regex: '^(CN|RU)$' }, { country: [{ value: 'US', action: 'block', kbps: 0 }] }),
+    ),
+  })
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { policy: makePolicy(), publish: PUBLISHED } } as never)
   const user = userEvent.setup()
   renderTab()
 
   const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
   expect(await card.findByText('United States (US)')).toBeInTheDocument()
-  expect(card.getByText('2026-01-01 00:59:00')).toBeInTheDocument()
+  // The regex is shown, but only editable from the policy.
+  expect(card.getByText('^(CN|RU)$')).toBeInTheDocument()
 
   const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
   expect(within(usRow).getByTitle('Blocked')).toBeInTheDocument()
   await user.click(within(usRow).getByRole('button', { name: 'Filter actions for US' }))
   expect(await screen.findByText('Unblock')).toBeInTheDocument()
-  expect(screen.queryByText('Block or throttle…')).not.toBeInTheDocument()
+  expect(screen.queryByText('Block, throttle or allow…')).not.toBeInTheDocument()
   await user.keyboard('{Escape}')
 
   await user.click(card.getByRole('button', { name: 'Unblock Country US' }))
   await waitFor(() =>
-    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
-      params: { path: { block_id: 'blk-1' } },
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/policies/{policy_id}/rules', {
+      params: { path: { policy_id: 'pol-1' }, query: { category: 'country', value: 'US' } },
     }),
-  )
-})
-
-test('without a blocklist endpoint the dialog explains and cannot confirm', async () => {
-  getMock.mockResolvedValue({ data: { configured: false, blocks: [] } } as never)
-  const user = userEvent.setup()
-  renderTab()
-
-  expect(await screen.findByText(/Blocking and throttling are off/)).toBeInTheDocument()
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText(/No blocklist endpoint is configured/)).toBeInTheDocument()
-  expect(within(dialog).getByRole('button', { name: 'Block' })).toBeDisabled()
-})
-
-test('analysts get no block actions and never query the blocklist', async () => {
-  vi.mocked(useIsAnalyst).mockReturnValue(true)
-  // The backend always masks subscriber ids for analysts.
-  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, subscribers_masked: true } } as never)
-  const user = userEvent.setup()
-  renderTab()
-
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  expect(await screen.findByText('Copy value')).toBeInTheDocument()
-  expect(screen.queryByText('Block or throttle…')).not.toBeInTheDocument()
-  expect(screen.queryByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === 'Blocked & Throttled')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument()
-  expect(getMock).not.toHaveBeenCalledWith('/api/admin/content-security/blocks', expect.anything())
-})
-
-test('a multi-condition (AND) block is listed with every condition but marks no single value', async () => {
-  const andBlock = {
-    ...BLOCK,
-    id: 'blk-and',
-    conditions: [
-      { category: 'country', value: 'US' },
-      { category: 'proxy_type', value: 'hosting' },
-    ],
-  }
-  getMock.mockResolvedValue({ data: { configured: true, blocks: [andBlock] } } as never)
-  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...andBlock, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
-  const user = userEvent.setup()
-  renderTab()
-
-  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
-  expect(await card.findByText('United States (US)')).toBeInTheDocument()
-  expect(card.getByText('and')).toBeInTheDocument()
-  expect(card.getByText('Proxy type')).toBeInTheDocument()
-
-  // Neither value is blocked on its own, so the leaderboards still offer Block.
-  const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
-  expect(within(usRow).queryByTitle('Blocked')).not.toBeInTheDocument()
-
-  await user.click(card.getByRole('button', { name: 'Unblock Country US and Proxy type hosting' }))
-  await waitFor(() =>
-    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
-      params: { path: { block_id: 'blk-and' } },
-    }),
-  )
-})
-
-test('the dialog can throttle instead of block, and the list shows the rate', async () => {
-  routePosts()
-  postMock.mockImplementation(((path: string, init: { body: { conditions: unknown[]; kbps: number } }) =>
-    Promise.resolve({
-      data:
-        path === '/api/admin/content-security/blocks'
-          ? { ...BLOCK, conditions: init.body.conditions, kbps: init.body.kbps }
-          : FULL_RESPONSE,
-    })) as never)
-  const user = userEvent.setup()
-  renderTab()
-
-  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  await user.click(await screen.findByText('Block or throttle…'))
-  const dialog = await screen.findByRole('dialog')
-
-  const action = within(dialog).getByRole('combobox', { name: 'Action' })
-  expect(action).toHaveTextContent('Block (no traffic allowed)')
-  await user.click(action)
-  const labels = (await screen.findAllByRole('option')).map((o) => o.textContent)
-  expect(labels).toEqual([
-    'Block (no traffic allowed)',
-    'Throttle to: 128 kbps',
-    'Throttle to: 256 kbps',
-    'Throttle to: 512 kbps',
-  ])
-  await user.click(screen.getByRole('option', { name: 'Throttle to: 256 kbps' }))
-  await user.click(within(dialog).getByRole('button', { name: 'Throttle' }))
-
-  await waitFor(() =>
-    expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }], kbps: 256 }]),
-  )
-  expect(showToastWithAction).toHaveBeenCalledWith(
-    'Throttled Country US to 256 kbps',
-    expect.objectContaining({ actionLabel: 'Undo' }),
   )
 })
 
 test('a throttle is listed with its rate and offers Remove throttle', async () => {
-  const throttle = { ...BLOCK, id: 'thr-1', kbps: 512 }
-  getMock.mockResolvedValue({ data: { configured: true, blocks: [throttle] } } as never)
-  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...throttle, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  routeGets({
+    '/api/admin/content-security/effective': effectiveWith(makePolicy({}, { country: [{ value: 'US', action: 'pace', kbps: 512 }] })),
+  })
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { policy: makePolicy(), publish: PUBLISHED } } as never)
   const user = userEvent.setup()
   renderTab()
 
@@ -781,12 +913,128 @@ test('a throttle is listed with its rate and offers Remove throttle', async () =
 
   await user.click(card.getByRole('button', { name: 'Remove throttle Country US' }))
   await waitFor(() =>
-    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
-      params: { path: { block_id: 'thr-1' } },
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/policies/{policy_id}/rules', {
+      params: { path: { policy_id: 'pol-1' }, query: { category: 'country', value: 'US' } },
     }),
   )
 })
 
+test('an ASN rule shows the owner name and number, or AS<number> when it has no name', async () => {
+  routeGets({
+    '/api/admin/content-security/effective': effectiveWith(
+      makePolicy(
+        {},
+        {
+          asn: [
+            { value: '7922', action: 'block', kbps: 0, label: 'Comcast Cable (7922)' },
+            { value: '64500', action: 'block', kbps: 0 },
+          ],
+        },
+      ),
+    ),
+  })
+  renderTab()
+
+  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
+  expect(await card.findByText('Comcast Cable (7922)')).toBeInTheDocument()
+  expect(card.getByText('AS64500')).toBeInTheDocument()
+})
+
+test('an allow rule is marked on its value and can be removed', async () => {
+  routeGets({
+    '/api/admin/content-security/effective': effectiveWith(makePolicy({}, { country: [{ value: 'US', action: 'exempt', kbps: 0 }] })),
+  })
+  const user = userEvent.setup()
+  renderTab()
+
+  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
+  expect(await card.findByText('Allow', { selector: 'span:not(.sr-only)' })).toBeInTheDocument()
+  const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
+  expect(within(usRow).getByTitle('Allowed')).toBeInTheDocument()
+  expect(card.getByRole('button', { name: 'Remove allow Country US' })).toBeInTheDocument()
+  await user.click(within(usRow).getByRole('button', { name: 'Filter actions for US' }))
+  expect(await screen.findByText('Remove allow')).toBeInTheDocument()
+})
+
+test('individual blocks in the policy mark subscriber rows', async () => {
+  routeGets({
+    '/api/admin/content-security/effective': effectiveWith(
+      makePolicy({ individual: { subscriber_id: ['acct-home'], ip: [] } }),
+    ),
+  })
+  renderTab()
+
+  await screen.findByText('acct-shared')
+  await waitFor(() => expect(within(subscriberCard()).getByTitle('Blocked')).toBeInTheDocument())
+})
+
+test('without a blocklist endpoint the dialog explains and cannot confirm', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(null, { configured: false }) })
+  const user = userEvent.setup()
+  renderTab()
+
+  expect(await screen.findByText(/Blocking and throttling are off/)).toBeInTheDocument()
+  const dialog = await openBlockMenu(user, 'US')
+  expect(within(dialog).getByText(/No blocklist endpoint is configured/)).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: 'Block' })).toBeDisabled()
+})
+
+test('analysts get no block actions and never query policies', async () => {
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
+  // The backend always masks subscriber ids for analysts.
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, subscribers_masked: true } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
+  expect(await screen.findByText('Copy value')).toBeInTheDocument()
+  expect(screen.queryByText('Block, throttle or allow…')).not.toBeInTheDocument()
+  expect(screen.queryByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === 'Blocked & Throttled')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument()
+  expect(getMock).not.toHaveBeenCalled()
+})
+
+test('the old flat blocklist endpoints are never called', async () => {
+  routeGets({ '/api/admin/content-security/effective': effectiveWith(makePolicy()) })
+  renderTab()
+  await screen.findByText('pirate.example')
+  const paths = [...getMock.mock.calls, ...postMock.mock.calls, ...vi.mocked(client.DELETE).mock.calls].map((c) => String(c[0]))
+  expect(paths.filter((p) => p.startsWith('/api/admin/content-security/blocks'))).toEqual([])
+})
+
+// ── Enforcement by policy ────────────────────────────────────────────────────
+
+const REASONS = [
+  { policy_id: 'pol-1', reason: 'country_regex', status: 'blocked', requests: 30, enforced: 20 },
+  { policy_id: 'pol-1', reason: 'exempt:asn', status: 'allowed', requests: 100, enforced: 0 },
+  { policy_id: 'pol-gone', reason: 'subscriber_id', status: 'blocked', requests: 5, enforced: 0 },
+]
+
+test('Enforcement breaks down by policy and rule, counting only enforced requests as enforced', async () => {
+  routeGets({
+    '/api/admin/content-security/policies': { configured: true, policies: [makePolicy()] },
+  })
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, enforcement_reasons: REASONS } } as never)
+  renderTab()
+
+  const table = await screen.findByRole('table', { name: 'Enforcement by policy and rule' })
+  await within(table).findAllByText('Playoffs')
+  const rows = within(table).getAllByRole('row').slice(1)
+  const text = rows.map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))
+  // Sorted by policy name then requests; an unknown policy falls back to its id.
+  expect(text).toEqual([
+    ['Playoffs', 'Allowed: ASN', 'Allowed', '100', '—', '—'],
+    ['Playoffs', 'Country regex', 'Blocked', '30', '20', '10'],
+    ['pol-gone', 'Subscriber ID', 'Blocked', '5', '0', '5'],
+  ])
+})
+
+test('the by-policy breakdown is omitted when the backend sends no reasons', async () => {
+  routeGets()
+  renderTab()
+  await screen.findByText('pirate.example')
+  expect(screen.queryByRole('table', { name: 'Enforcement by policy and rule' })).not.toBeInTheDocument()
+})
 
 test('Enforcement splits enforced from warned requests, most severe first', async () => {
   renderTab()
