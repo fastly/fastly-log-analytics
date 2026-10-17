@@ -413,10 +413,9 @@ def fetch_rum_live_events(con, *, where_sql: str, params: list) -> list[tuple]:
 
 
 def get_header_stats(con) -> tuple[int, Any]:
-    """``(distinct beacon count, newest beacon timestamp)`` over vitals + errors for the header badge."""
-    cnt = con.execute(sql_rum.HEADER_STATS_COUNT).fetchone()[0] or 0
-    l_row = con.execute(sql_rum.HEADER_STATS_LATEST).fetchone()
-    return cnt, (l_row[0] if l_row else None)
+    """``(distinct beacon count, newest beacon timestamp)`` over vitals + errors for the header badge (one scan)."""
+    row = con.execute(sql_rum.HEADER_STATS).fetchone()
+    return (row[0] or 0, row[1]) if row else (0, None)
 
 
 def count_aggregate_buckets(con, service_id: str) -> int | None:

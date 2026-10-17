@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-REQUEST_ROW_COUNT = "SELECT COUNT(*) FROM {table}"
-
-REQUEST_LATEST_TS = "SELECT MAX(timestamp) FROM {table}"
+REQUEST_ROW_STATS = "SELECT COUNT(*), MAX(timestamp) FROM {table}"
 
 WAF_FLAG_COUNTS_7D = """
 SELECT SUM(CASE WHEN waf = true THEN 1 ELSE 0 END), COUNT(*)

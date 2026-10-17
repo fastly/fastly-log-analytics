@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import logging
 import time
 
 import duckdb
@@ -20,6 +21,8 @@ from backend.repositories import service_stats as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["bootstrap"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -390,7 +393,7 @@ def _bootstrap_sync(
         except Exception:
             # Banner is non-essential UX; never break /api/bootstrap
             # if the tunnel manager is in a transient state.
-            pass
+            logger.debug("[bootstrap] share banner unavailable", exc_info=True)
 
     timer.call("share_banner", _resolve_share_banner)
 
@@ -494,7 +497,7 @@ def _bootstrap_sync(
                             else:
                                 rum_latest = str(rum_last_dt)
                 except Exception:
-                    pass
+                    logger.warning("[bootstrap] RUM header fallback scan failed; reporting zero", exc_info=True)
 
                 # REQUEST metrics from DuckDB main table
                 try:
@@ -516,7 +519,7 @@ def _bootstrap_sync(
                     finally:
                         duckdb_con.close()
                 except Exception:
-                    pass
+                    logger.warning("[bootstrap] request header fallback scan failed; reporting zero", exc_info=True)
 
                 # Get last sync times for each type. 'sync' is the pre-v3
                 # task name — keep it as a fallback so pre-upgrade history
@@ -537,7 +540,7 @@ def _bootstrap_sync(
                 )
 
             except Exception:
-                pass
+                logger.warning("[bootstrap] header badge fallback failed; reporting zero", exc_info=True)
 
         earliest = cached_status.get("earliest_log_at")
         latest = request_latest if request_payload is not None else request_latest or cached_status.get("latest_log_at")
@@ -627,7 +630,7 @@ def _bootstrap_sync(
         try:
             out["queries_summary"] = _query_registry.summary()
         except Exception:
-            pass
+            logger.debug("[bootstrap] queries_summary seed unavailable", exc_info=True)
         if valid_active_id:
             try:
                 import time as _t
@@ -639,7 +642,7 @@ def _bootstrap_sync(
                     "threshold_ms": 1000.0,
                 }
             except Exception:
-                pass
+                logger.debug("[bootstrap] slow_queries_count seed unavailable", exc_info=True)
             # ``log_accounting`` is intentionally NOT seeded here. Its
             # ``compute_log_accounting`` helper chains up to 3 Fastly
             # Stats API calls on cache miss (~800 ms), which would
@@ -677,7 +680,7 @@ def _bootstrap_sync(
                 "entries": entries,
             }
         except Exception:
-            pass
+            logger.debug("[bootstrap] cron_runs first page unavailable", exc_info=True)
 
     timer.call("cron_runs_first_page", _resolve_cron_runs_first_page)
 
@@ -703,7 +706,7 @@ def _bootstrap_sync(
                 }
         except Exception:
             # Header badge is a UX nicety — never break bootstrap.
-            pass
+            logger.debug("[bootstrap] last_sync unavailable", exc_info=True)
 
     timer.call("last_sync", _resolve_last_sync)
 
@@ -724,7 +727,7 @@ def _bootstrap_sync(
             }
         except Exception:
             # Labels UI is a nicety — never break bootstrap.
-            pass
+            logger.debug("[bootstrap] scoring labels unavailable", exc_info=True)
 
     timer.call("scoring_labels", _resolve_scoring_labels)
 
@@ -748,6 +751,7 @@ def _bootstrap_sync(
         except Exception:
             # Views are a UX nicety, not a correctness gate. A repo error
             # must not break /api/bootstrap.
+            logger.debug("[bootstrap] saved views unavailable", exc_info=True)
             return []
 
     views = timer.call("views", _resolve_views)

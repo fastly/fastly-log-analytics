@@ -11,12 +11,9 @@ from backend.repositories._sql import service_stats as sql
 
 
 def get_request_row_stats(con, table_name: str) -> tuple[int, Any]:
-    """``(total rows, newest timestamp)`` for the request table; newest is ``None`` when empty."""
-    count = con.execute(sql.REQUEST_ROW_COUNT.format(table=table_name)).fetchone()[0]
-    if count <= 0:
-        return count, None
-    row = con.execute(sql.REQUEST_LATEST_TS.format(table=table_name)).fetchone()
-    return count, (row[0] if row else None)
+    """``(total rows, newest timestamp)`` for the request table in one scan; newest is ``None`` when empty."""
+    row = con.execute(sql.REQUEST_ROW_STATS.format(table=table_name)).fetchone()
+    return (row[0], row[1]) if row else (0, None)
 
 
 def get_waf_flag_counts_7d(con, table_name: str) -> tuple[Any, Any] | None:
