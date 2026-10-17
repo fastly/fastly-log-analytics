@@ -95,11 +95,9 @@ services:
       - app-network
 
   frontend:
-    image: fastly-log-analytics-frontend:latest
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    restart: unless-stopped
+    extends:
+      file: docker-compose.common.yml
+      service: frontend
     # Share the backend's network namespace so the frontend's SSR fetches and
     # the Next.js /api rewrite reach the backend on loopback (127.0.0.1:8000) —
     # the address the backend trusts as local admin. No `ports`/`networks` here:
@@ -118,8 +116,9 @@ services:
         condition: service_healthy
 
   caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
+    extends:
+      file: docker-compose.common.yml
+      service: caddy
     # Also joins the backend's namespace: Caddy proxies to 127.0.0.1:3000
     # (frontend) and 127.0.0.1:8000 (backend) over that shared loopback.
     network_mode: "service:backend"
@@ -129,19 +128,14 @@ services:
       - frontend
 
   postgres:
+    extends:
+      file: docker-compose.common.yml
+      service: postgres
     image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      - POSTGRES_USER=fla
-      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
-      - POSTGRES_DB=ducklake
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
-      interval: 10s
       timeout: 5s
-      retries: 5
     networks:
       - app-network
 

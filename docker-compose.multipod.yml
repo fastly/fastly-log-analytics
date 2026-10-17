@@ -99,33 +99,34 @@ services:
     - multipod-data:/app/data
     - multipod-cache:/app/cache
   caddy:
+    extends:
+      file: docker-compose.common.yml
+      service: caddy
     depends_on:
     - backend
-    image: caddy:2-alpine
     networks:
     - app-network
     ports:
     # Loopback-only: local-dev topology (see header comment).
     - 127.0.0.1:80:80
-    restart: unless-stopped
     volumes:
     - ./caddy/Caddyfile.multipod:/etc/caddy/Caddyfile:ro
   frontend:
-    image: fastly-log-analytics-frontend:latest
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+    extends:
+      file: docker-compose.common.yml
+      service: frontend
     environment:
     # SSR talks to the backend service directly — routing it through Caddy
     # would classify server-side requests through the public proxy path.
     - API_PROXY_URL=http://backend:8000
     - NODE_OPTIONS=--max_old_space_size=1024
-    - COMMIT_HASH=${COMMIT_HASH:-unknown}
     - ENV_NAME=multipod-dev
     networks:
     - app-network
-    restart: unless-stopped
   postgres:
+    extends:
+      file: docker-compose.common.yml
+      service: postgres
     image: postgres:17-alpine
     # max_connections raised from the default 100: the metadata pool is sized
     # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker +
@@ -135,21 +136,14 @@ services:
     - postgres
     - -c
     - max_connections=300
-    environment:
-    # Local-dev credentials only (see header comment) — override with
-    # DUCKLAKE_PG_PASSWORD for anything beyond a workstation.
-    - POSTGRES_USER=fla
-    - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
-    - POSTGRES_DB=ducklake
+    # Local-dev credentials only (see header comment; defined in
+    # docker-compose.common.yml) — override with DUCKLAKE_PG_PASSWORD for
+    # anything beyond a workstation.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
-      interval: 10s
       timeout: 3s
-      retries: 5
     networks:
     - app-network
     # No published ports on purpose: pods reach it on the compose network.
-    restart: unless-stopped
     volumes:
     - pgdata:/var/lib/postgresql/data
 
