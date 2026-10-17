@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from backend.models.common import BaseResponse, HasDataMixin
+from backend.models.common import (
+    BaseResponse,
+    FilteredRequest,
+    HasDataMixin,
+    Limit100,
+    Limit200,
+    Limit1440,
+    LimitedRequest,
+    RangeKeyedRequest,
+)
 
 
 class OriginDrilldownResponse(HasDataMixin, BaseResponse):
@@ -91,3 +100,63 @@ class OriginAggregatesResponse(HasDataMixin, BaseResponse):
     path_breakdown: dict[str, Any] = {}
     pop_latency: dict[str, Any] = {}
     ip_health: dict[str, Any] = {}
+
+
+# ── Request models ────────────────────────────────────────────────────────────
+
+# Section selector — names mirror OriginAggregatesResponse fields one-to-one so
+# the FE can request a subset.
+SectionName = Literal[
+    "summary",
+    "timeseries",
+    "slow_urls",
+    "status_codes",
+    "path_breakdown",
+    "pop_latency",
+    "ip_health",
+]
+
+
+class OriginRequest(FilteredRequest):
+    pass
+
+
+class OriginTimeseriesRequest(FilteredRequest):
+    bucket_minutes: Limit1440 = 5
+    split_by_leg: bool = False
+    metric: Literal["ttfb", "ttlb"] = "ttfb"
+    percentile: Literal["p50", "p95", "p99"] = "p95"
+
+
+class OriginSlowUrlsRequest(FilteredRequest):
+    limit: Limit100 = 20
+    min_requests: int = 10
+
+
+class OriginPopLatencyRequest(LimitedRequest):
+    pass
+
+
+class OriginIpHealthRequest(LimitedRequest):
+    pass
+
+
+class OriginShieldingAnalysisRequest(FilteredRequest):
+    limit: Limit200 = 50
+
+
+class OriginDrilldownRequest(FilteredRequest):
+    dimension: Literal["host", "shield_pop", "datacenter", "protocol", "pop", "oip"] = "host"
+    limit: Limit100 = 30
+
+
+class OriginAggregatesRequest(RangeKeyedRequest):
+    bucket_minutes: Limit1440 = 5
+    split_by_leg: bool = False
+    timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
+    timeseries_percentile: Literal["p50", "p95", "p99"] = "p95"
+    slow_urls_limit: Limit100 = 20
+    slow_urls_min_requests: int = 10
+    ip_health_limit: Limit100 = 30
+    pop_latency_limit: Limit100 = 30
+    sections: list[SectionName] | None = None

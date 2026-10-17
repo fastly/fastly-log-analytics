@@ -3,42 +3,40 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
 
 from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
+    OriginAggregatesRequest,
     OriginAggregatesResponse,
+    OriginDrilldownRequest,
     OriginDrilldownResponse,
+    OriginIpHealthRequest,
     OriginIpHealthResponse,
     OriginPathBreakdownResponse,
+    OriginPopLatencyRequest,
     OriginPopLatencyResponse,
+    OriginRequest,
+    OriginShieldingAnalysisRequest,
     OriginShieldingAnalysisResponse,
+    OriginSlowUrlsRequest,
     OriginSlowUrlsResponse,
     OriginStatusCodesResponse,
     OriginSummaryResponse,
+    OriginTimeseriesRequest,
     OriginTimeseriesResponse,
+    SectionName,
 )
 from backend.repositories import origin as repo
 from backend.utils.router_utils import make_section_expander, query_errors
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
-# Section selector — names mirror OriginAggregatesResponse fields one-to-one so
-# the FE can request a subset. Coupling reflects the asyncio.gather partition
+
+# Section coupling (``SectionName`` lives in models/origin.py) reflects the asyncio.gather partition
 # inside get_aggregates so we never split a branch's reads across requests
 # (each branch checks out one pool conn and runs its reads serially on it).
-SectionName = Literal[
-    "summary",
-    "timeseries",
-    "slow_urls",
-    "status_codes",
-    "path_breakdown",
-    "pop_latency",
-    "ip_health",
-]
 
 # Branch 3 of get_aggregates' gather — timeseries + status_codes + path_breakdown
 # all run sequentially on extra_runners[1]. Splitting them across requests would
@@ -51,51 +49,6 @@ _TS_STATUS_PATH_TRIPLE: frozenset[str] = frozenset({"timeseries", "status_codes"
 _POP_IP_PAIR: frozenset[str] = frozenset({"pop_latency", "ip_health"})
 
 _expand_sections = make_section_expander(SectionName, union_groups=(_TS_STATUS_PATH_TRIPLE, _POP_IP_PAIR))
-
-
-class OriginRequest(FilteredRequest):
-    pass
-
-
-class OriginTimeseriesRequest(FilteredRequest):
-    bucket_minutes: Limit1440 = 5
-    split_by_leg: bool = False
-    metric: Literal["ttfb", "ttlb"] = "ttfb"
-    percentile: Literal["p50", "p95", "p99"] = "p95"
-
-
-class OriginSlowUrlsRequest(FilteredRequest):
-    limit: Limit100 = 20
-    min_requests: int = 10
-
-
-class OriginPopLatencyRequest(FilteredRequest):
-    limit: Limit100 = 30
-
-
-class OriginIpHealthRequest(FilteredRequest):
-    limit: Limit100 = 30
-
-
-class OriginShieldingAnalysisRequest(FilteredRequest):
-    limit: Limit200 = 50
-
-
-class OriginDrilldownRequest(FilteredRequest):
-    dimension: Literal["host", "shield_pop", "datacenter", "protocol", "pop", "oip"] = "host"
-    limit: Limit100 = 30
-
-
-class OriginAggregatesRequest(RangeKeyedRequest):
-    bucket_minutes: Limit1440 = 5
-    split_by_leg: bool = False
-    timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
-    timeseries_percentile: Literal["p50", "p95", "p99"] = "p95"
-    slow_urls_limit: Limit100 = 20
-    slow_urls_min_requests: int = 10
-    ip_health_limit: Limit100 = 30
-    pop_latency_limit: Limit100 = 30
-    sections: list[SectionName] | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)

@@ -109,6 +109,12 @@ class RangeKeyedRequest(FilteredRequest):
     anchor: str | None = None
 
 
+class LimitedRequest(FilteredRequest):
+    """``FilteredRequest`` plus a row ``limit`` (clamped to 100, default 30)."""
+
+    limit: Limit100 = 30
+
+
 class PaginationMixin(BaseModel):
     """Mixin for endpoints that page/sort their results.
 
