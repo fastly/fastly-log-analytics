@@ -8,9 +8,10 @@ sparklines on the System Health card.
 
 from __future__ import annotations
 
-from fastapi import Query
+from fastapi import Depends, Query
 
 from backend.core import metric_snapshots
+from backend.deps import require_admin
 from backend.models.admin import MetricHistoryBatchResponse, MetricHistoryPoint
 from backend.utils.date_utils import parse_relative_time_window
 
@@ -19,7 +20,11 @@ from ._router import router
 _MAX_LOOKBACK_DAYS = 30
 
 
-@router.get("/admin/metric-history/batch", response_model=MetricHistoryBatchResponse)
+@router.get(
+    "/admin/metric-history/batch",
+    response_model=MetricHistoryBatchResponse,
+    dependencies=[Depends(require_admin)],
+)
 def metric_history_batch(
     since: str = Query(default="1h", description="Lookback window: 30m, 1h, 24h, 7d, etc."),
 ) -> MetricHistoryBatchResponse:

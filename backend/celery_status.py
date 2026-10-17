@@ -115,9 +115,12 @@ def ingest_ledger_summary() -> dict[str, int]:
             try:
                 con = get_con(sid)
                 cur = con.cursor()
-                cur.execute("SELECT status, count(*) FROM ingest_ledger GROUP BY status")
+                cur.execute(
+                    "SELECT status, count(*) FROM ingest_ledger WHERE service_id = ? GROUP BY status",
+                    (sid,),
+                )
                 for status, count in cur.fetchall():
-                    ledger[status] = ledger.get(status, 0) + count
+                    ledger[status] = ledger.get(status, 0) + int(count)
             except Exception:
                 continue
     except Exception as e:
