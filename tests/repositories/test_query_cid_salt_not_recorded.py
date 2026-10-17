@@ -176,3 +176,23 @@ def test_invalid_window_bounds_fail_before_any_salt_is_bound(raw_con):
                 time_filter=("not-a-date", "also-not"),
             )
     assert raw_con.execute("SELECT count(*) FROM duckdb_tables() WHERE temporary").fetchone()[0] == 0
+
+
+def test_salt_table_is_dropped_even_when_dropping_the_view_fails(raw_con):
+    class _FailViewDrop:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *a, **k):
+            if sql.startswith("DROP VIEW"):
+                raise RuntimeError("interrupted")
+            return self._inner.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    _analyst_query(_FailViewDrop(raw_con), "SELECT cid FROM logs")
+    assert (
+        raw_con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = '_analyst_cid_salt'").fetchone()[0]
+        == 0
+    )

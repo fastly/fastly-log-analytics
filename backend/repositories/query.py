@@ -153,12 +153,12 @@ def execute_query(
         if window_view is not None:
             try:
                 con.execute(f"DROP VIEW IF EXISTS {window_view}")
-                _drop_analyst_cid_salt(con)
             except Exception:
                 # Non-fatal: CREATE OR REPLACE on the next analyst request
                 # refreshes it before use, so a leaked view can't serve stale
                 # data — but log it so a recurring leak is visible.
                 logger.debug("[query] failed to drop analyst window view", exc_info=True)
+            _drop_analyst_cid_salt(con)
 
 
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
