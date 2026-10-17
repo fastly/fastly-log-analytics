@@ -405,8 +405,8 @@ server CA trust setup before Playwright, and the frontend verifier gives the
 client certificate **only to the exact configured admin HTTPS origin**.
 It never sets `ignoreHTTPSErrors`.
 
-The canonical harness exposes gateway-only staged operations **after its
-pushed-HEAD check**:
+The canonical harness (`scripts/dev/deploy_test_all.sh`, a local-only script, gitignored and not in the public repo; a fresh clone will not have it)
+exposes gateway-only staged operations **after its pushed-HEAD check**:
 
 ```sh
 scripts/dev/deploy_test_all.sh --admin-gateway-phase provision

@@ -180,7 +180,8 @@ Allocation is staged through `scripts/deploy_admin_gateway.py`:
    install app credentials and required mode. Use `--dry-run` first.
 
 For the canonical deployment, these stages must be invoked through
-`scripts/dev/deploy_test_all.sh --admin-gateway-phase provision|gateway|activate`,
+`scripts/dev/deploy_test_all.sh --admin-gateway-phase provision|gateway|activate`
+(a local-only script, gitignored and not in the public repo; a fresh clone will not have it),
 which retains the pushed-HEAD guard; direct script invocations above describe
 portable operator tooling/dry-runs, not authorization to bypass the canonical
 harness. The harness also applies standard Compose mTLS overlays through
