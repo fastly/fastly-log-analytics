@@ -22,7 +22,7 @@ import * as React from 'react'
 import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminJson, adminJsonResult } from '@/lib/api'
-import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
@@ -32,6 +32,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page-header'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { extractApiError } from '@/lib/api'
 
@@ -426,10 +427,34 @@ export default function QueryMonitorPage() {
     [shortcutsOpen, confirmKill, detailRow],
   )
 
+  const [isManualRefreshing, setIsManualRefreshing] = React.useState(false)
+  React.useEffect(() => {
+    if (!snapshotQuery.isFetching && !historicalQuery.isFetching && isManualRefreshing) {
+      setIsManualRefreshing(false)
+    }
+  }, [snapshotQuery.isFetching, historicalQuery.isFetching, isManualRefreshing])
+
+  const handleManualRefresh = React.useCallback(() => {
+    setIsManualRefreshing(true)
+    resetPendingRef.current = true
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
+    })
+    if (slowHistoryMode !== 'recent') {
+      void historicalQuery.refetch()
+    }
+  }, [queryClient, slowHistoryMode, historicalQuery])
+
   useKeyboardShortcuts(shortcuts, enabled)
 
+  const isInitialLoading = snapshotQuery.isPending && !bufferedSnapshot
+  const isRefreshingActive = isManualRefreshing && snapshotQuery.isFetching
+  const isRefreshingSlow =
+    (isManualRefreshing && (snapshotQuery.isFetching || historicalQuery.isFetching)) ||
+    (slowHistoryMode !== 'recent' && historicalQuery.isFetching && !!historicalQuery.data)
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="admin-queries-root">
       <PageHeader
         title="Live Query Monitor"
         description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
@@ -449,18 +474,37 @@ export default function QueryMonitorPage() {
 
       {enabled && (
         <>
-          <div className="flex items-center justify-between gap-3">
+          <div
+            data-testid="admin-queries-summary-reservation"
+            className="flex items-center justify-between gap-3 min-h-[36px] [contain-intrinsic-size:auto_36px] [content-visibility:auto]"
+          >
             <SummaryStrip snapshot={bufferedSnapshot} />
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 px-2"
-              onClick={() => setShortcutsOpen(true)}
-              title="Keyboard shortcuts (?)"
-            >
-              <Keyboard className="h-4 w-4 text-muted-foreground" />
-              <span className="sr-only">Show keyboard shortcuts</span>
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                data-testid="admin-queries-refresh-btn"
+                onClick={handleManualRefresh}
+                disabled={snapshotQuery.isFetching}
+                title="Refresh query snapshot"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 mr-1 ${isRefreshingActive ? 'animate-spin' : ''}`}
+                />
+                Refresh
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => setShortcutsOpen(true)}
+                title="Keyboard shortcuts (?)"
+              >
+                <Keyboard className="h-4 w-4 text-muted-foreground" />
+                <span className="sr-only">Show keyboard shortcuts</span>
+              </Button>
+            </div>
           </div>
 
           {actionError && (
@@ -479,241 +523,288 @@ export default function QueryMonitorPage() {
           </Tabs>
 
           {viewMode !== 'past' && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Active &amp; Just-Finished
-                  <Badge variant="secondary">
-                    {/* Count the rows the user can actually see (post-filter),
-                       not the unfiltered totals. The prior version showed
-                       totals and produced a confusing "44 just-finished but
-                       empty table" mismatch when a filter (db / kind) was
-                       hiding everything. */}
-                    {filteredActive.filter((r) => !r._completed).length} active
-                    {filteredActive.some((r) => r._completed) &&
-                      ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
-                  </Badge>
-                  <PollingIndicator
-                    visible={visible}
-                    isFetching={snapshotQuery.isFetching}
-                    isError={snapshotQuery.isError}
-                    paused={paused}
-                  />
-                </CardTitle>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant={paused ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => {
-                      if (paused) {
-                        // Resume → immediately fetch so the user gets fresh
-                        // data on the click rather than waiting up to 300ms.
-                        setPaused(false)
-                        queryClient.invalidateQueries({
-                          queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
-                        })
-                      } else {
-                        setPaused(true)
-                      }
-                    }}
-                    title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
-                  >
-                    {paused ? (
-                      <>
-                        <Play className="h-3 w-3 mr-1" /> Resume
-                      </>
-                    ) : (
-                      <>
-                        <Pause className="h-3 w-3 mr-1" /> Pause
-                      </>
-                    )}
-                  </Button>
-                  <DbFilterChips value={dbFilter} onChange={setDbFilter} />
-                  <FilterChips value={kindFilter} onChange={setKindFilter} />
-                  <Button
-                    variant={groupCrons ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => setGroupCrons((v) => !v)}
-                    title={
-                      groupCrons
-                        ? 'Cron rows from the same run are collapsed. Click to expand.'
-                        : 'Cron rows are shown individually. Click to group by run.'
-                    }
-                  >
-                    <Group className="h-3 w-3 mr-1" />
-                    Group crons
-                  </Button>
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                    <Input
-                      ref={searchInputRef}
-                      placeholder="Filter by SQL or caller…"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      className="h-8 w-64 pl-7 text-sm"
+            <div
+              data-testid="admin-queries-active-reservation"
+              className="min-h-[480px] [contain-intrinsic-size:auto_480px] [content-visibility:auto]"
+            >
+              <Card className="min-h-[480px]">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 gap-2">
+                  <CardTitle className="text-base flex items-center gap-2 whitespace-nowrap shrink-0">
+                    Active &amp; Just-Finished
+                    <Badge variant="secondary" className="whitespace-nowrap">
+                      {/* Count the rows the user can actually see (post-filter),
+                         not the unfiltered totals. The prior version showed
+                         totals and produced a confusing "44 just-finished but
+                         empty table" mismatch when a filter (db / kind) was
+                         hiding everything. */}
+                      {filteredActive.filter((r) => !r._completed).length} active
+                      {filteredActive.some((r) => r._completed) &&
+                        ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
+                    </Badge>
+                    <PollingIndicator
+                      visible={visible}
+                      isFetching={snapshotQuery.isFetching}
+                      isError={snapshotQuery.isError}
+                      paused={paused}
                     />
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0">
-                <ActiveTable
-                  rows={filteredActive}
-                  onRowClick={(row) => setDetailRow(row)}
-                  onKill={requestKill}
-                  cancellingQid={cancelMutation.variables ?? null}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
-          )}
-
-          {viewMode !== 'live' && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Notable Slow Queries
-                  <Badge variant="outline">
-                    {slowHistoryMode === 'recent'
-                      ? slowQueries.length
-                      : (historicalQuery.data?.rows ?? []).length}
-                  </Badge>
-                  <span className="text-xs text-muted-foreground font-normal">
-                    ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
-                    sorted slowest first
-                  </span>
-                  {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
-                    <span className="text-xs text-muted-foreground italic">loading…</span>
-                  )}
-                </CardTitle>
-                <div className="flex items-center gap-1">
-                  {/* History-window toggle. 'recent' is the in-memory
-                      ring buffer (no fetch — what the page already had);
-                      the other two query the persistent slow_queries
-                      SQLite table via /api/admin/slow-queries. */}
-                  <div className="flex items-center gap-1 mr-2">
-                    {(['recent', 'past_1h', 'past_6h', 'past_12h', 'past_24h', 'past_7d'] as const).map((m) => (
-                      <Button
-                        key={m}
-                        variant={slowHistoryMode === m ? 'default' : 'outline'}
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => setSlowHistoryMode(m)}
-                        title={
-                          m === 'recent'
-                            ? 'Live in-memory ring (~10–30 min window, clears on restart)'
-                            : m === 'past_1h'
-                              ? 'Persistent history — last 1 h'
-                              : m === 'past_6h'
-                                ? 'Persistent history — last 6 h'
-                                : m === 'past_12h'
-                                  ? 'Persistent history — last 12 h'
-                                  : m === 'past_24h'
-                                    ? 'Persistent history — last 24 h'
-                                    : 'Persistent history — last 7 d'
-                        }
-                      >
-                        {m === 'recent'
-                          ? 'Recent'
-                          : m === 'past_1h'
-                            ? '1 h'
-                            : m === 'past_6h'
-                              ? '6 h'
-                              : m === 'past_12h'
-                                ? '12 h'
-                                : m === 'past_24h'
-                                  ? '24 h'
-                                  : '7 d'}
-                      </Button>
-                    ))}
-                  </div>
-                  {[100, 500, 1000, 2000, 5000].map((ms) => (
+                  </CardTitle>
+                  <div className="flex items-center gap-2 shrink-0">
                     <Button
-                      key={ms}
-                      variant={slowThresholdMs === ms ? 'default' : 'outline'}
+                      variant={paused ? 'default' : 'outline'}
                       size="sm"
                       className="h-7 px-2 text-xs"
-                      onClick={() => setSlowThresholdMs(ms)}
+                      onClick={() => {
+                        if (paused) {
+                          // Resume → immediately fetch so the user gets fresh
+                          // data on the click rather than waiting up to 300ms.
+                          setPaused(false)
+                          queryClient.invalidateQueries({
+                            queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
+                          })
+                        } else {
+                          setPaused(true)
+                        }
+                      }}
+                      title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
                     >
-                      {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                      {paused ? (
+                        <>
+                          <Play className="h-3 w-3 mr-1" /> Resume
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="h-3 w-3 mr-1" /> Pause
+                        </>
+                      )}
                     </Button>
-                  ))}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
-                    disabled={
-                      (slowHistoryMode === 'recent'
-                        ? slowQueries
-                        : (historicalQuery.data?.rows ?? [])
-                      ).length === 0
-                    }
-                    onClick={handleCopyQueries}
-                    title="Copy slow queries report to clipboard"
-                  >
-                    {copiedQueries ? (
-                      <>
-                        <Check className="h-3 w-3 mr-1 text-emerald-500 animate-in fade-in zoom-in-95 duration-150" />
-                        Copied!
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3 mr-1" />
-                        Copy queries
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0">
-                <CompletedTable
-                  rows={
-                    slowHistoryMode === 'recent'
-                      ? slowQueries
-                      : (historicalQuery.data?.rows ?? [])
-                  }
-                  onRowClick={(row) => setDetailRow(row)}
-                  emptyMessage={
-                    slowHistoryMode === 'recent'
-                      ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
-                      : historicalQuery.isFetching
-                        ? 'Loading…'
-                        : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${
-                            slowHistoryMode === 'past_1h'
-                              ? '1 hour'
-                              : slowHistoryMode === 'past_6h'
-                                ? '6 hours'
-                                : slowHistoryMode === 'past_12h'
-                                  ? '12 hours'
-                                  : slowHistoryMode === 'past_24h'
-                                    ? '24 hours'
-                                    : '7 days'
-                          }.`
-                  }
-                  initialSorting={[{ id: 'duration_ms', desc: true }]}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
+                    <DbFilterChips value={dbFilter} onChange={setDbFilter} />
+                    <FilterChips value={kindFilter} onChange={setKindFilter} />
+                    <Button
+                      variant={groupCrons ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setGroupCrons((v) => !v)}
+                      title={
+                        groupCrons
+                          ? 'Cron rows from the same run are collapsed. Click to expand.'
+                          : 'Cron rows are shown individually. Click to group by run.'
+                      }
+                    >
+                      <Group className="h-3 w-3 mr-1" />
+                      Group crons
+                    </Button>
+                    <div className="relative">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                      <Input
+                        ref={searchInputRef}
+                        placeholder="Filter by SQL or caller…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="h-8 w-48 pl-7 text-sm"
+                      />
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingActive ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  {isInitialLoading ? (
+                    <div data-testid="admin-queries-active-skeleton">
+                      <Skeleton className="h-10 w-full rounded-none" />
+                      <div className="h-[400px] flex items-center justify-center text-xs text-muted-foreground">
+                        Inspecting DuckDB connection pool...
+                      </div>
+                    </div>
+                  ) : (
+                    <ActiveTable
+                      rows={filteredActive}
+                      onRowClick={(row) => setDetailRow(row)}
+                      onKill={requestKill}
+                      cancellingQid={cancelMutation.variables ?? null}
+                      onToggleGroup={toggleGroup}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           )}
 
           {viewMode !== 'live' && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Recently Completed
-                  <Badge variant="outline">{completed.length}</Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <CompletedTable
-                  rows={completed}
-                  onRowClick={(row) => setDetailRow(row)}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
+            <div
+              data-testid="admin-queries-slow-reservation"
+              className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+            >
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Notable Slow Queries
+                    <Badge variant="outline">
+                      {slowHistoryMode === 'recent'
+                        ? slowQueries.length
+                        : (historicalQuery.data?.rows ?? []).length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground font-normal">
+                      ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
+                      sorted slowest first
+                    </span>
+                    {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
+                      <span className="text-xs text-muted-foreground italic">
+                        Loading query telemetry...
+                      </span>
+                    )}
+                  </CardTitle>
+                  <div className="flex items-center gap-1">
+                    {/* History-window toggle. 'recent' is the in-memory
+                        ring buffer (no fetch — what the page already had);
+                        the other options query the persistent slow_queries
+                        PostgreSQL table (METADATA_DSN) via /api/admin/slow-queries. */}
+                    <div className="flex items-center gap-1 mr-2">
+                      {(['recent', 'past_1h', 'past_6h', 'past_12h', 'past_24h', 'past_7d'] as const).map((m) => (
+                        <Button
+                          key={m}
+                          variant={slowHistoryMode === m ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => setSlowHistoryMode(m)}
+                          title={
+                            m === 'recent'
+                              ? 'Live in-memory ring (~10–30 min window, clears on restart)'
+                              : m === 'past_1h'
+                                ? 'Persistent history — last 1 h'
+                                : m === 'past_6h'
+                                  ? 'Persistent history — last 6 h'
+                                  : m === 'past_12h'
+                                    ? 'Persistent history — last 12 h'
+                                    : m === 'past_24h'
+                                      ? 'Persistent history — last 24 h'
+                                      : 'Persistent history — last 7 d'
+                          }
+                        >
+                          {m === 'recent'
+                            ? 'Recent'
+                            : m === 'past_1h'
+                              ? '1 h'
+                              : m === 'past_6h'
+                                ? '6 h'
+                                : m === 'past_12h'
+                                  ? '12 h'
+                                  : m === 'past_24h'
+                                    ? '24 h'
+                                    : '7 d'}
+                        </Button>
+                      ))}
+                    </div>
+                    {[100, 500, 1000, 2000, 5000].map((ms) => (
+                      <Button
+                        key={ms}
+                        variant={slowThresholdMs === ms ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => setSlowThresholdMs(ms)}
+                      >
+                        {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                      </Button>
+                    ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
+                      disabled={
+                        (slowHistoryMode === 'recent'
+                          ? slowQueries
+                          : (historicalQuery.data?.rows ?? [])
+                        ).length === 0
+                      }
+                      onClick={handleCopyQueries}
+                      title="Copy slow queries report to clipboard"
+                    >
+                      {copiedQueries ? (
+                        <>
+                          <Check className="h-3 w-3 mr-1 text-emerald-500 animate-in fade-in zoom-in-95 duration-150" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 mr-1" />
+                          Copy queries
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingSlow ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  {isInitialLoading ? (
+                    <div data-testid="admin-queries-slow-skeleton">
+                      <Skeleton className="h-10 w-full rounded-none" />
+                      <div className="h-24 flex items-center justify-center text-xs text-muted-foreground">
+                        Loading query telemetry...
+                      </div>
+                    </div>
+                  ) : (
+                    <CompletedTable
+                      rows={
+                        slowHistoryMode === 'recent'
+                          ? slowQueries
+                          : (historicalQuery.data?.rows ?? [])
+                      }
+                      onRowClick={(row) => setDetailRow(row)}
+                      emptyMessage={
+                        slowHistoryMode === 'recent'
+                          ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
+                          : historicalQuery.isFetching
+                            ? 'Loading query telemetry...'
+                            : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${
+                                slowHistoryMode === 'past_1h'
+                                  ? '1 hour'
+                                  : slowHistoryMode === 'past_6h'
+                                    ? '6 hours'
+                                    : slowHistoryMode === 'past_12h'
+                                      ? '12 hours'
+                                      : slowHistoryMode === 'past_24h'
+                                        ? '24 hours'
+                                        : '7 days'
+                              }.`
+                      }
+                      initialSorting={[{ id: 'duration_ms', desc: true }]}
+                      onToggleGroup={toggleGroup}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {viewMode !== 'live' && (
+            <div
+              data-testid="admin-queries-completed-reservation"
+              className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+            >
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Recently Completed
+                    <Badge variant="outline">{completed.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingActive ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  <CompletedTable
+                    rows={completed}
+                    onRowClick={(row) => setDetailRow(row)}
+                    onToggleGroup={toggleGroup}
+                  />
+                </CardContent>
+              </Card>
+            </div>
           )}
         </>
       )}

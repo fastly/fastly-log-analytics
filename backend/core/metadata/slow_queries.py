@@ -72,7 +72,7 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
         "attr_request_path": row.get("attr_request_path"),
         "attr_request_id": row.get("attr_request_id"),
         "attr_cron_job": row.get("attr_cron_job"),
-        "attr_cron_run_id": row.get("attr_cron_run_id"),
+        "attr_cron_run_id": (str(row["attr_cron_run_id"]) if row.get("attr_cron_run_id") is not None else None),
         "attr_pool_slot": row.get("attr_pool_slot"),
         "error_type": row.get("error_type"),
         "error_message": row.get("error_message"),
@@ -118,7 +118,7 @@ def _schedule_flush() -> None:
 
 
 def _flush_all(*, only_service: str | None = None) -> None:
-    """Flush buffered slow-query rows to SQLite.
+    """Flush buffered slow-query rows to PostgreSQL (METADATA_DSN).
 
     If *only_service* is given, flush just that service's buffer (used by
     read functions to ensure consistency). Otherwise flush everything.
@@ -260,6 +260,22 @@ def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
     )
     con.commit()
     return cur.rowcount or 0
+
+
+def clear_slow_queries(service_id: str) -> int:
+    """Delete all persisted slow-query rows for *service_id*.
+
+    Used by ``DELETE /api/admin/slow-queries`` for manual operator clearing.
+    Returns the number of rows removed.
+    """
+    _flush_all(only_service=service_id)
+    con = get_con(service_id)
+    cur = con.execute(
+        "DELETE FROM slow_queries WHERE service_id = ?",
+        (service_id,),
+    )
+    con.commit()
+    return int(cur.rowcount or 0)
 
 
 def slow_queries_storage_stats(service_id: str) -> dict[str, Any]:

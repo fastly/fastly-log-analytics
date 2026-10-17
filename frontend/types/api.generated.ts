@@ -4206,9 +4206,9 @@ export interface paths {
         };
         /**
          * List Persisted Slow Queries
-         * @description Persistent slow-SQL history from the per-service ``slow_queries``
-         *     SQLite table — the durable backing store for the Notable Slow
-         *     Queries panel beyond the in-memory ring buffer's ~10-30 min /
+         * @description Persistent slow-SQL history from the PostgreSQL ``slow_queries``
+         *     table (``METADATA_DSN``) — the durable backing store for the Notable
+         *     Slow Queries panel beyond the in-memory ring buffer's ~10-30 min /
          *     restart-bounded window.
          *
          *     Server-side filters keep the response payload small:
@@ -4223,7 +4223,11 @@ export interface paths {
         get: operations["list_persisted_slow_queries_api_admin_slow_queries_get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Clear Persisted Slow Queries
+         * @description Clear persisted slow-SQL history for *service_id* and record an audit entry.
+         */
+        delete: operations["clear_persisted_slow_queries_api_admin_slow_queries_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -19751,6 +19755,16 @@ export interface components {
             shield_lat?: number | null;
             /** Shield Lon */
             shield_lon?: number | null;
+        };
+        /**
+         * SlowQueriesClearResponse
+         * @description Outcome of ``DELETE /api/admin/slow-queries``.
+         */
+        SlowQueriesClearResponse: {
+            /** Deleted */
+            deleted: number;
+            /** Service Id */
+            service_id: string;
         };
         /**
          * SlowQueriesCountResponse
@@ -44853,6 +44867,113 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SlowQueriesResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    clear_persisted_slow_queries_api_admin_slow_queries_delete: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlowQueriesClearResponse"];
                 };
             };
             /** @description Bad request */

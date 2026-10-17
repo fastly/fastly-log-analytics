@@ -141,6 +141,7 @@ from backend.core.metadata.reconciliation import (
 # buffer with durable per-service storage so the Notable Slow Queries
 # panel can show history beyond the 2000-entry / restart window).
 from backend.core.metadata.slow_queries import (
+    clear_slow_queries,
     count_slow_queries,
     flush_slow_query_buffer,
     insert_slow_query,
@@ -271,6 +272,7 @@ __all__ = [
     "get_rum_beacons_avg_per_day",
     "get_rum_beacons_by_date",
     # Persistent slow-SQL history
+    "clear_slow_queries",
     "flush_slow_query_buffer",
     "insert_slow_query",
     "list_slow_queries",

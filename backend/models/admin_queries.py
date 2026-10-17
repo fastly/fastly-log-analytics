@@ -124,7 +124,19 @@ class SlowQueriesResponse(BaseModel):
     threshold_ms: float
 
 
+class SlowQueriesClearResponse(BaseModel):
+    """Outcome of ``DELETE /api/admin/slow-queries``."""
+
+    deleted: int
+    service_id: str
+
+
 class QueryMonitorConfigResponse(BaseModel):
     """Nav-gating flag for the Live Query Monitor tab."""
 
     enabled: bool
+
+
+# Explicit aliases for callers referencing the spec schema names
+QueryDetailResponse = ActiveQueryRow
+SlowQueriesListResponse = SlowQueriesResponse

@@ -39345,7 +39345,7 @@
           "query-monitor"
         ],
         "summary": "List Persisted Slow Queries",
-        "description": "Persistent slow-SQL history from the per-service ``slow_queries``\nSQLite table \u2014 the durable backing store for the Notable Slow\nQueries panel beyond the in-memory ring buffer's ~10-30 min /\nrestart-bounded window.\n\nServer-side filters keep the response payload small:\n``threshold_ms`` is applied at the SQL level (indexed scan),\n``kind`` / ``db_type`` are equality filters on low-cardinality\ncolumns. ``limit`` clamped at 2000 so a runaway client query can't\npage the whole 7-day window in one shot.\n\nSort: ``recent`` (started_at_utc DESC, the panel default) or\n``duration`` (duration_ms DESC, the \"what was slowest\" variant).",
+        "description": "Persistent slow-SQL history from the PostgreSQL ``slow_queries``\ntable (``METADATA_DSN``) \u2014 the durable backing store for the Notable\nSlow Queries panel beyond the in-memory ring buffer's ~10-30 min /\nrestart-bounded window.\n\nServer-side filters keep the response payload small:\n``threshold_ms`` is applied at the SQL level (indexed scan),\n``kind`` / ``db_type`` are equality filters on low-cardinality\ncolumns. ``limit`` clamped at 2000 so a runaway client query can't\npage the whole 7-day window in one shot.\n\nSort: ``recent`` (started_at_utc DESC, the panel default) or\n``duration`` (duration_ms DESC, the \"what was slowest\" variant).",
         "operationId": "list_persisted_slow_queries_api_admin_slow_queries_get",
         "parameters": [
           {
@@ -39396,7 +39396,7 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "pattern": "^(DuckDB|SQLite)$"
+                  "pattern": "^(DuckDB|Postgres|ClickHouse|SQLite)$"
                 },
                 {
                   "type": "null"
@@ -39500,6 +39500,183 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SlowQueriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin",
+          "query-monitor"
+        ],
+        "summary": "Clear Persisted Slow Queries",
+        "description": "Clear persisted slow-SQL history for *service_id* and record an audit entry.",
+        "operationId": "clear_persisted_slow_queries_api_admin_slow_queries_delete",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlowQueriesClearResponse"
                 }
               }
             }
@@ -90018,6 +90195,25 @@
         "type": "object",
         "title": "ShieldingRow",
         "description": "One edge\u2192shield POP pair in the transit map / analysis table.\n\nEvery field is populated by ``origin._enrich_with_distance`` on the\nhappy path (coords resolve to None when a POP is absent from the\npop-location map, but the keys are always present)."
+      },
+      "SlowQueriesClearResponse": {
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "title": "Deleted"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted",
+          "service_id"
+        ],
+        "title": "SlowQueriesClearResponse",
+        "description": "Outcome of ``DELETE /api/admin/slow-queries``."
       },
       "SlowQueriesCountResponse": {
         "properties": {
