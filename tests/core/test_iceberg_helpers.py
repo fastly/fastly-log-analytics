@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1039,51 +1040,76 @@ def test_quarantine_handles_filename_collision(tmp_path):
     assert __import__("os").path.exists(p2)
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
+def _ducklake_source(tmp_path, prefix: str) -> dict:
+    """Source dict backed by a real DuckLake commit target. A unique service_id
+    per call keeps tables from colliding in the shared per-worker catalog."""
+    import uuid
+
+    name = f"{prefix}{uuid.uuid4().hex[:8]}"
+    cache = tmp_path / f"cache-{name}"
+    (cache / "buffer").mkdir(parents=True)
+    return {
+        "name": name,
+        "service_id": name,
+        "fos_local_warehouse": True,
+        "_cache_dir_override": str(cache),
+        "duckdb_path": str(tmp_path / f"{name}.duckdb"),
+    }
+
+
+def _write_buffer_parquet(source: dict, filename: str, rows: int, offset: int = 0):
+    from datetime import UTC, datetime, timedelta
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    base = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+    table = pa.table(
+        {
+            "timestamp": pa.array(
+                [base + timedelta(seconds=offset + i) for i in range(rows)], type=pa.timestamp("us", tz="UTC")
+            ),
+            "ip": pa.array([f"10.0.0.{offset + i}" for i in range(rows)]),
+            "_source_file": pa.array([f"s3://b/raw/{filename}"] * rows),
+        }
+    )
+    path = Path(source["_cache_dir_override"]) / "buffer" / filename
+    pq.write_table(table, str(path))
+    return path
+
+
+def _lake_row_count(source: dict) -> int:
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import ducklake_table_name
+
+    con = get_connection(source)
+    try:
+        row = con.execute(f'SELECT count(*) FROM lake."{ducklake_table_name(source)}"').fetchone()
+        assert row is not None
+        return int(row[0])
+    finally:
+        con.close()
+
+
 def test_commit_buffer_quarantines_unreadable_files_instead_of_skipping(tmp_path):
     """The hot-path integration: commit_buffer encounters a corrupt parquet,
     moves it into .quarantine/, increments the counter, and the good files
-    are still committed normally. The corrupt file is NOT deleted from disk."""
-    import pyarrow as pa
-
+    are still committed normally (into a real DuckLake table). The corrupt
+    file is NOT deleted from disk."""
     from backend.core import iceberg as ice
 
-    cache_root = tmp_path / "cache-root"
-    buffer_dir = cache_root / "bkt" / "buffer"
-    buffer_dir.mkdir(parents=True)
-
-    # Good file
-    good = buffer_dir / "batch_good.parquet"
-    good_table = pa.table({"timestamp": pa.array([1, 2, 3], type=pa.timestamp("us", tz="UTC"))})
-    import pyarrow.parquet as pq
-
-    pq.write_table(good_table, str(good))
-
-    # Bad file (not a valid parquet)
+    source = _ducklake_source(tmp_path, "qh")
+    good = _write_buffer_parquet(source, "batch_good.parquet", rows=3)
+    buffer_dir = good.parent
     bad = buffer_dir / "batch_bad.parquet"
     bad.write_bytes(b"definitely not parquet")
 
-    # Mock the Iceberg side so we don't actually need a catalog.
-    mock_table = MagicMock()
-    mock_table.schema.return_value = MagicMock()
-    mock_table.properties = {"schema.name-mapping.default": "{}"}
-    mock_table.current_snapshot.return_value = MagicMock(snapshot_id=999)
-    mock_table.metadata_location = "s3://x/metadata.json"
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")),
-        patch("backend.core.iceberg._init_iceberg_table_locked", return_value=mock_table),
-        patch("backend.core.iceberg._align_to_schema", side_effect=lambda t, **kw: t),
-        patch("backend.core.iceberg.schema_to_pyarrow", return_value=None, create=True),
-        patch("backend.core.iceberg._set_cached_table"),
-        patch("backend.core.iceberg._update_snapshot_cache_from_delta"),
-        patch("backend.core.iceberg._write_metadata_pointer"),
-    ):
-        result = ice.commit_buffer({"name": "svc"})
+    result = ice.commit_buffer(source)
 
     assert result["files_committed"] == 1
     assert result["quarantined_files"] == 1
     assert result["rows_committed"] == 3
+    assert _lake_row_count(source) == 3
 
     # Good file is committed: the parquet stays on disk (tombstoned for
     # the grace window so any in-flight query bound before the commit
@@ -1102,119 +1128,67 @@ def test_commit_buffer_quarantines_unreadable_files_instead_of_skipping(tmp_path
     assert len(sidecar) == 1
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
 def test_commit_buffer_does_not_retry_quarantined_files_on_next_run(tmp_path):
     """After a corrupt file is quarantined, the next commit_buffer must
     NOT re-encounter it (because buffer_files() ignores the .quarantine
     subdir by way of the standard glob pattern)."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     from backend.core import iceberg as ice
 
-    cache_root = tmp_path / "cache-root"
-    buffer_dir = cache_root / "bkt" / "buffer"
-    buffer_dir.mkdir(parents=True)
-
-    bad = buffer_dir / "batch_bad.parquet"
+    source = _ducklake_source(tmp_path, "qr")
+    bad = Path(source["_cache_dir_override"]) / "buffer" / "batch_bad.parquet"
     bad.write_bytes(b"not parquet")
 
-    mock_table = MagicMock()
-    mock_table.schema.return_value = MagicMock()
-    mock_table.properties = {"schema.name-mapping.default": "{}"}
-    mock_table.current_snapshot.return_value = MagicMock(snapshot_id=1)
-    mock_table.metadata_location = "s3://x/metadata.json"
+    first = ice.commit_buffer(source)
+    assert first["quarantined_files"] == 1
+    assert first["files_committed"] == 0
 
-    patches = [
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")),
-        patch("backend.core.iceberg._init_iceberg_table_locked", return_value=mock_table),
-        patch("backend.core.iceberg._align_to_schema", side_effect=lambda t, **kw: t),
-        patch("backend.core.iceberg._set_cached_table"),
-        patch("backend.core.iceberg._update_snapshot_cache_from_delta"),
-        patch("backend.core.iceberg._write_metadata_pointer"),
-    ]
-    for p in patches:
-        p.start()
-    try:
-        first = ice.commit_buffer({"name": "svc"})
-        assert first["quarantined_files"] == 1
-
-        # Second invocation should see ZERO buffer files — quarantined file
-        # is in .quarantine/ which the glob does not match (only *.parquet
-        # under buffer/, recursive=True would catch them, but the dot-prefix
-        # convention is what we rely on for skip).
-        good = buffer_dir / "batch_good.parquet"
-        pq.write_table(pa.table({"timestamp": pa.array([1], type=pa.timestamp("us", tz="UTC"))}), str(good))
-        second = ice.commit_buffer({"name": "svc"})
-        assert second["quarantined_files"] == 0, (
-            f"quarantined file was re-discovered (count={second['quarantined_files']})"
-        )
-    finally:
-        for p in patches:
-            p.stop()
+    # A later good file commits cleanly and the quarantined one is never
+    # re-discovered (the .quarantine/ dir is outside buffer_files()).
+    _write_buffer_parquet(source, "batch_good.parquet", rows=1)
+    second = ice.commit_buffer(source)
+    assert second["quarantined_files"] == 0, f"quarantined file was re-discovered (count={second['quarantined_files']})"
+    assert second["files_committed"] == 1
+    assert _lake_row_count(source) == 1
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
-def test_commit_buffer_chunks_appends_when_files_exceed_chunk_size(tmp_path, monkeypatch):
-    """With chunk_size=3 and 7 buffer files, commit_buffer must call
-    table.append() exactly 3 times (ceil(7/3)) and delete each chunk's
-    files BEFORE moving to the next — that's the crash-safety
-    invariant. Pinned because regressing to a single concat() would
-    silently restore the OOM risk."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+def test_commit_buffer_chunks_commits_when_files_exceed_chunk_size(tmp_path, monkeypatch):
+    """With chunk_size=3 and 7 buffer files, commit_buffer must open a
+    DuckLake write-attach exactly 3 times (ceil(7/3)) and tombstone every
+    committed file. Pinned because regressing to a single whole-backlog
+    commit would silently restore the OOM / exclusive-attach-starvation
+    risk."""
     from backend.core import iceberg as ice
+    from backend.core.iceberg import buffer as buffer_mod
 
-    monkeypatch.setattr(ice, "_BUFFER_COMMIT_CHUNK_SIZE", 3)
+    monkeypatch.setattr(buffer_mod, "_BUFFER_COMMIT_CHUNK_SIZE", 3)
+    attaches = {"n": 0}
+    orig = buffer_mod._ducklake_write_connection
 
-    cache_root = tmp_path / "cache-root"
-    buffer_dir = cache_root / "bkt" / "buffer"
-    buffer_dir.mkdir(parents=True)
-    paths = []
-    for i in range(7):
-        p = buffer_dir / f"batch_{i:02d}.parquet"
-        pq.write_table(pa.table({"timestamp": pa.array([i], type=pa.timestamp("us", tz="UTC"))}), str(p))
-        paths.append(p)
+    def counting(source):
+        attaches["n"] += 1
+        return orig(source)
 
-    mock_table = MagicMock()
-    mock_table.schema.return_value = MagicMock()
-    mock_table.properties = {"schema.name-mapping.default": "{}"}
-    mock_table.current_snapshot.return_value = MagicMock(snapshot_id=102)
-    mock_table.metadata_location = "s3://x/metadata.json"
+    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", counting)
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")),
-        patch("backend.core.iceberg._init_iceberg_table_locked", return_value=mock_table),
-        patch("backend.core.iceberg._align_to_schema", side_effect=lambda t, **kw: t),
-        patch("backend.core.iceberg.schema_to_pyarrow", return_value=None, create=True),
-        patch("backend.core.iceberg._set_cached_table"),
-        patch("backend.core.iceberg._update_snapshot_cache_from_delta"),
-        patch("backend.core.iceberg._write_metadata_pointer") as write_pointer,
-    ):
-        result = ice.commit_buffer({"name": "svc"})
+    source = _ducklake_source(tmp_path, "ck")
+    paths = [_write_buffer_parquet(source, f"batch_{i:02d}.parquet", rows=1, offset=i) for i in range(7)]
 
-    # 7 files, chunk_size=3 → 3 append() calls (3 + 3 + 1).
-    assert mock_table.append.call_count == 3
-    # Final snapshot id is the last chunk's.
-    assert result["snapshot_id"] == 102
+    result = ice.commit_buffer(source)
+
+    # 7 files, chunk_size=3 -> 3 write-attaches (3 + 3 + 1).
+    assert attaches["n"] == 3
     assert result["files_committed"] == 7
     assert result["rows_committed"] == 7
+    assert _lake_row_count(source) == 7
     # All buffer files were tombstoned — the parquets stay on disk until
     # the grace window elapses (see ``tombstone_buffer_files`` docstring),
     # but each one has a ``.consumed-<ts>`` sidecar and is filtered out
     # of ``buffer_files()`` so the next commit cycle won't re-process them.
-    from backend.core import iceberg as ice_mod
-
     for p in paths:
-        siblings = list(p.parent.glob(p.name + ".consumed-*"))
-        assert siblings, f"{p} should have a tombstone sidecar after commit"
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")):
-        assert ice_mod.buffer_files({"name": "svc"}) == [], (
-            "tombstoned files must NOT appear in buffer_files() — they would be re-processed forever otherwise."
-        )
-    # Pointer write happens ONCE — not per chunk — to keep CDN purges bounded.
-    assert write_pointer.call_count == 1
+        assert list(p.parent.glob(p.name + ".consumed-*")), f"{p} should have a tombstone sidecar after commit"
+    assert ice.buffer_files(source) == [], (
+        "tombstoned files must NOT appear in buffer_files() — they would be re-processed forever otherwise."
+    )
 
 
 # ── _write_table_summary_async (background S3 write) ──────────────────
