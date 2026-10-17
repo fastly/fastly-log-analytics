@@ -37,7 +37,7 @@ from backend.core.fastly.service import (
     get_active_version,
     list_vcl_snippets,
 )
-from backend.provision.draft_version import draft_version
+from backend.provision.draft_version import draft_version, rollback_to_version
 from backend.provision.session_scoring_setup import (
     MATRIX_KEY_NAME,
     MATRIX_RESOURCE_LINK_NAME,
@@ -1201,35 +1201,27 @@ def _clone_swap_snippet(
     ``update_enforce_status_code``: same clone/comment/ensure/validate/
     activate call sequence, only the snippet identity + comment differ.
     Emits NO log lines (callers keep their own info()/ok()/fail()) and does
-    NOT roll back — the caller owns the rollback so it can log fail() in the
-    exact pre-rollback order the originals used. Raises ``RuntimeError`` on a
-    non-``ok`` validate result, matching the inline form.
+    NOT roll back (``rollback=False``) — the caller owns the rollback so it can
+    log fail() in the exact pre-rollback order the originals used. Raises
+    ``RuntimeError`` on a non-``ok`` validate result, matching the inline form.
     """
-    clone = fastly("PUT", f"/service/{sid}/version/{active_ver}/clone", token=token)
-    new_ver = int(clone["number"])
-    fastly(
-        "PUT",
-        f"/service/{sid}/version/{new_ver}",
-        {"comment": comment},
-        token=token,
-    )
-    ensure_vcl_snippet(
-        snippet_name,
-        vcl_type,
-        body,
-        priority,
+    with draft_version(
         sid,
-        new_ver,
         token,
-    )
-    result = fastly("GET", f"/service/{sid}/version/{new_ver}/validate", token=token)
-    if result.get("status") != "ok":
-        raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-    fastly(
-        "PUT",
-        f"/service/{sid}/version/{new_ver}/activate",
-        token=token,
-    )
+        base_version=active_ver,
+        call=fastly,
+        comment=comment,
+        rollback=False,
+    ) as new_ver:
+        ensure_vcl_snippet(
+            snippet_name,
+            vcl_type,
+            body,
+            priority,
+            sid,
+            new_ver,
+            token,
+        )
     return new_ver
 
 
@@ -1315,14 +1307,7 @@ def update_recv_exclusion_regex(
         # Re-activate the prior version so the service isn't left on the
         # half-updated draft. Best-effort — if this fails too, the draft
         # is left for the operator to clean up manually.
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
+        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
         raise
 
     return {
@@ -1409,14 +1394,7 @@ def update_enforce_status_code(
         fail(f"update_enforce_status_code failed: {exc}")
         # Re-activate the prior version so the service isn't left on the
         # half-updated draft. Best-effort.
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
+        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
         raise
 
     return {

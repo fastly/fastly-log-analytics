@@ -208,3 +208,81 @@ def test_teardown_strip_status_messages_report_the_failure():
         with pytest.raises(RuntimeError):
             sso.teardown_scoring_resources(LOG_SVC, meta, TOKEN, status_cb=msgs.append)
     assert any(m.startswith("❌ Could not strip scoring VCL: Validation failed") for m in msgs)
+
+
+# ── update_recv_exclusion_regex / update_enforce_status_code (_clone_swap_snippet) ──
+
+
+def _swap_cfg() -> dict:
+    return {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+
+
+def _swap_fake(**kw) -> _Fastly:
+    return _Fastly(active=300, clone_number=301, **kw)
+
+
+def _run_swap(fn, fake: _Fastly, **fn_kwargs):
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(sso.svcconfig, "load_config", return_value=_swap_cfg()))
+        stack.enter_context(patch.object(sso.svcconfig, "save_config"))
+        stack.enter_context(patch.object(sso, "fastly", fake))
+        stack.enter_context(patch("backend.core.fastly.service.fastly", fake))
+        return fn(LOG_SVC, TOKEN, **fn_kwargs)
+
+
+@pytest.mark.parametrize(
+    ("fn", "kwargs"),
+    [
+        (sso.update_recv_exclusion_regex, {"new_regex": "^/healthz$"}),
+        (sso.update_enforce_status_code, {"new_status_code": 403}),
+    ],
+)
+def test_swap_success_order_is_clone_comment_snippet_validate_activate(fn, kwargs):
+    fake = _swap_fake()
+    _run_swap(fn, fake, **kwargs)
+    order = _order(fake.calls)
+    assert order[0] == "clone"
+    assert order[1] == "comment"
+    assert order[-2:] == ["validate", "activate:301"]
+    assert fake.kwargs_for(lambda m, p: p.endswith("/version/301/activate")) == [{"token": TOKEN}]
+
+
+@pytest.mark.parametrize(
+    ("fn", "kwargs"),
+    [
+        (sso.update_recv_exclusion_regex, {"new_regex": "bad"}),
+        (sso.update_enforce_status_code, {"new_status_code": 403}),
+    ],
+)
+def test_swap_validation_failure_reactivates_previous_version_after_the_failure_line(fn, kwargs, capsys):
+    fake = _swap_fake(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        _run_swap(fn, fake, **kwargs)
+    order = _order(fake.calls)
+    assert order[-2:] == ["validate", "activate:300"]
+    assert "activate:301" not in order
+    assert "failed: Validation failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("fn", "kwargs"),
+    [
+        (sso.update_recv_exclusion_regex, {"new_regex": "bad"}),
+        (sso.update_enforce_status_code, {"new_status_code": 403}),
+    ],
+)
+def test_swap_failed_rollback_is_logged_not_masked(fn, kwargs, caplog):
+    fake = _swap_fake(validate_ok=False, rollback_raises=True)
+    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+        with pytest.raises(RuntimeError, match="Validation failed"):
+            _run_swap(fn, fake, **kwargs)
+    assert any("rollback activation of version 300 failed" in r.getMessage() for r in caplog.records)
+
+
+def test_swap_clone_failure_still_reactivates_previous_version():
+    fake = _swap_fake(fail_on=lambda m, p: p.endswith("/clone"))
+    with pytest.raises(RuntimeError, match="edit rejected"):
+        _run_swap(sso.update_recv_exclusion_regex, fake, new_regex="^/x$")
+    assert _order(fake.calls)[-1] == "activate:300"
