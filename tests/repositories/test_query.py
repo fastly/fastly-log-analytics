@@ -493,3 +493,75 @@ class TestMaxRowsClamp:
         result = execute_query(con, None, "SELECT * FROM logs ORDER BY id", max_rows=10**9, want_explain=False)
         assert result["row_count"] == MAX_QUERY_ROWS
         assert result["truncated"] is True
+
+
+@pytest.mark.security_regression
+class TestCidSaltNeverRecorded:
+    """The per-service cid salt is interpolated into the analyst redaction view SQL.
+    It must not surface in any analyst-reachable output, nor in the SQL text the
+    query registry records (live monitor, slow_queries), while hashes stay identical."""
+
+    SALT = "ZZSALTMARKER" + "ab" * 10
+    SRC = {"name": "svc"}
+    WINDOW = ("2026-06-17T09:45:00+00:00", "2026-06-17T11:00:00+00:00")
+
+    def _con(self):
+        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+
+        raw = duckdb.connect(":memory:")
+        raw.execute("CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, ip VARCHAR, cid VARCHAR, url VARCHAR)")
+        raw.execute("INSERT INTO logs_svc VALUES (TIMESTAMPTZ '2026-06-17T10:00:00+00:00', '1.2.3.4', 'abc', '/p')")
+        return InstrumentedDuckDBConnection(raw, service_id="svc")
+
+    def _run(self, con, sql, explain=False):
+        from unittest.mock import patch
+
+        with patch("backend.core.duckdb.get_or_generate_cid_salt", return_value=self.SALT):
+            return execute_query(
+                con,
+                self.SRC,
+                sql,
+                max_rows=10,
+                want_explain=explain,
+                service_id="svc",
+                time_filter=self.WINDOW,
+                mask_ips=True,
+            )
+
+    def test_hash_is_unchanged(self):
+        import hashlib
+
+        result = self._run(self._con(), "SELECT cid FROM logs")
+        assert result["data"][0]["cid"] == hashlib.sha256((self.SALT + "abc").encode()).hexdigest()
+
+    @pytest.mark.parametrize(
+        "sql,explain",
+        [
+            ("SELECT cid FROM logs", True),
+            ("SELECT cid::INT FROM logs", False),
+            ("SELECT nope FROM logs", False),
+            ("SELECT sql FROM duckdb_views()", False),
+            ("SELECT * FROM information_schema.views", False),
+            ("SELECT * FROM duckdb_temporary_files()", False),
+        ],
+    )
+    def test_no_analyst_visible_channel_carries_the_salt(self, sql, explain):
+        try:
+            blob = repr(self._run(self._con(), sql, explain))
+        except Exception as exc:  # error bodies are an analyst channel too
+            blob = f"{type(exc).__name__}: {exc}"
+        assert self.SALT not in blob
+
+    def test_query_registry_does_not_record_the_salt(self):
+        import gc
+        import json
+
+        from backend.core.query_registry import query_registry
+
+        con = self._con()
+        self._run(con, "SELECT cid FROM logs")
+        gc.collect()
+        snap = query_registry.snapshot(include_completed=True, full_sql=True, all_active=True)
+        blob = json.dumps(snap, default=str)
+        assert "_analyst_window_logs" in blob  # the view DDL really was recorded
+        assert self.SALT not in blob
