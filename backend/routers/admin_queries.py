@@ -21,6 +21,7 @@ to 0 if the registry ever causes load pressure.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import deque
@@ -43,6 +44,8 @@ from backend.models.admin_queries import (
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.router_utils import make_error, not_found
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/admin",
@@ -256,7 +259,7 @@ def clear_persisted_slow_queries(
             actor=admin_id,
         )
     except Exception:
-        pass
+        logger.warning("slow_queries_cleared audit write failed", exc_info=True)
     return SlowQueriesClearResponse(deleted=deleted, service_id=service_id)
 
 
@@ -303,7 +306,7 @@ def cancel_query(qid: int, request: Request) -> CancelResponse:
                 actor=admin_id,
             )
         except Exception:
-            pass
+            logger.warning("query_cancelled audit write failed", exc_info=True)
     return CancelResponse(state=state, query_id=qid)
 
 
