@@ -36,6 +36,10 @@ class WireSafeModel(PassthroughModel):
         return data
 
 
+# One cell of a raw-log row: VARCHAR, the integer/float widths and BOOLEAN pass through; TIMESTAMP
+# columns arrive already serialized to ISO strings.
+ScalarCell = str | int | float | bool | None
+
 # DB/cache-native values (Decimal, tz-aware datetimes, bytes) encode differently under
 # pydantic's JSON mode than under ``jsonable_encoder`` (the pre-typing wire path, e.g.
 # ``+00:00`` vs ``Z``). These aliases keep the old encoding while the OpenAPI schema

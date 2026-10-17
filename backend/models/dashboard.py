@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from backend.models._base import ScalarCell
 from backend.models.common import (
     BaseResponse,
     FilteredRequest,
@@ -242,14 +243,10 @@ class SessionDetailRequest(BaseModel):
     end_time: str | None = None
 
 
-# Every raw-log column is a scalar: VARCHAR, the integer/float widths, BOOLEAN, and TIMESTAMP
-# (which both producers serialize to an ISO string). Custom fields are limited to the same types.
-SessionDetailValue = str | int | float | bool | None
-
-
 class SessionDetailResponse(BaseResponse):
     columns: list[str]
-    data: list[dict[str, SessionDetailValue]]
+    # Raw-log rows: every column is a scalar (custom fields are limited to the same types).
+    data: list[dict[str, ScalarCell]]
 
 
 # ── Query (re-exported from backend.models.query for back-compat) ─────────────

@@ -52,8 +52,11 @@ import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { statusBadgeClass } from '@/lib/status-style'
 
 import { formatCount } from '@/lib/format'
-// Wire rows are flat scalar records (backend `rows: list[dict[str, Any]]`).
-type LogRow = Record<string, string | number | null | undefined>
+import type { LogsQueryResponse } from '@/types/api'
+// One scalar per column; the column set is per-service, so it arrives in `columns` / `schema_columns`.
+type LogRow = NonNullable<LogsQueryResponse['rows']>[number]
+// Booleans (BOOLEAN custom fields) display as text, like every other cell.
+const displayCell = (v: LogRow[string]) => (typeof v === 'boolean' ? String(v) : v)
 
 const SKELETON_ROW_IDS = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
 
@@ -203,7 +206,7 @@ export function RawLogsExplorer({
   }
 
   const totalCount = data?.total_count ?? 0
-  const rows = (data?.rows ?? []) as LogRow[]
+  const rows = data?.rows ?? []
   const hasMore = data?.has_more ?? false
 
   const filteredDetailKeys = useMemo(() => {
@@ -405,7 +408,7 @@ export function RawLogsExplorer({
                     className="hover:bg-muted/50 cursor-pointer transition-colors group"
                   >
                     {selectedColumns.map((col) => {
-                      const val = row[col]
+                      const val = displayCell(row[col])
 
                       if (col === 'timestamp') {
                         const ts = val ? String(val).replace('T', ' ').replace('Z', '') : '—'
@@ -558,7 +561,7 @@ export function RawLogsExplorer({
                       <span
                         className={cn(
                           'px-2 py-0.5 rounded text-xs font-mono font-bold border',
-                          getMethodBadgeVariant(selectedRow.request_method),
+                          getMethodBadgeVariant(displayCell(selectedRow.request_method)),
                         )}
                       >
                         {selectedRow.request_method || 'GET'}
@@ -566,7 +569,7 @@ export function RawLogsExplorer({
                       <span
                         className={cn(
                           'px-2 py-0.5 rounded text-xs font-semibold border',
-                          statusBadgeClass(selectedRow.status),
+                          statusBadgeClass(displayCell(selectedRow.status)),
                         )}
                       >
                         {selectedRow.status || '—'}

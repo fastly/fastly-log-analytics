@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from backend.models._base import ScalarCell
 from backend.models.common import BaseResponse, FilterSpec, Limit500, RangeKeyedRequest, SortDir
 
 
@@ -48,7 +49,9 @@ class LogsQueryRequest(RangeKeyedRequest):
 class LogsQueryResponse(BaseResponse):
     """Response envelope for paginated raw access logs."""
 
-    rows: list[dict[str, Any]] = Field(default_factory=list)
+    # One scalar per column. The column set itself is per-service (custom fields, ``columns``
+    # projection) so it travels in ``columns`` / ``schema_columns`` rather than in the schema.
+    rows: list[dict[str, ScalarCell]] = Field(default_factory=list)
     total_count: int = 0
     has_more: bool = False
     limit: int = 100

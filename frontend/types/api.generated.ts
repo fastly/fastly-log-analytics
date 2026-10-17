@@ -13130,7 +13130,7 @@ export interface components {
             }[];
             /** Rows */
             rows?: {
-                [key: string]: unknown;
+                [key: string]: string | number | boolean | null;
             }[];
             /**
              * Total Count
