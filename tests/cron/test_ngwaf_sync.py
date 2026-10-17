@@ -335,3 +335,51 @@ def test_ngwaf_sync_first_run_watermark_guaranteed_cleanup(fake_cfg):
     mock_finalize.assert_called_once()
     assert mock_finalize.call_args[0][0] == mock_src
     assert mock_finalize.call_args[0][1] == 101
+
+
+def test_ngwaf_sync_lease_held_is_clean_skip(fake_cfg):
+    mock_src = {"name": "test_service", "id": "test_service"}
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("held")),
+        patch("backend.core.duckdb.log_cron_run") as mock_log,
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf.fetch_verified_bots_paged") as mock_fetch,
+        patch("backend.cron_progress.end_progress") as mock_end,
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_log.assert_not_called()
+    mock_fetch.assert_not_called()
+    mock_end.assert_not_called()
+
+
+def test_ngwaf_sync_error_row_matches_legacy_shape(fake_cfg):
+    mock_src = {"name": "test_service", "id": "test_service"}
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", return_value=5),
+        patch("backend.core.duckdb.log_cron_run") as mock_log,
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.fetch_verified_bots_paged", side_effect=RuntimeError("socket reset")),
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_log.assert_called_once()
+    args, kwargs = mock_log.call_args
+    assert args[1] == "ngwaf_sync"
+    assert args[3] == "error"
+    assert kwargs["summary"] == "NGWAF sync failed: socket reset"
+    assert kwargs["error_message"] == "socket reset"
+    assert kwargs["files_downloaded"] == 0
+    assert kwargs["run_id"] == 5
+    assert kwargs["log_output"] is None
