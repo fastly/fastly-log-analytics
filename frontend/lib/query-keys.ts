@@ -13,6 +13,8 @@ import type { FiltersPayload } from '@/types/filters'
 export const queryKeys = {
   bootstrap: () => ['bootstrap'] as const,
 
+  shareBanner: () => ['share-banner'] as const,
+
   rumStatus: (serviceId: string | null | undefined) => ['rum-status', serviceId] as const,
 
   syncStatus: (serviceId: string | null | undefined) => ['sync-status', serviceId] as const,

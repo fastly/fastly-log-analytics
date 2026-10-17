@@ -2,96 +2,77 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
-import type { ShareBanner } from '@/types/api'
+import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 interface Options {
   enabled: boolean
 }
 
-type ShareStatus = ShareBanner
-
 const POLL_MS = 15_000
+
+function toBanner(raw: { [key: string]: unknown } | null | undefined): ShareBanner | null {
+  if (!raw) return null
+  return {
+    sharing_active: !!raw.sharing_active,
+    public_url: typeof raw.public_url === 'string' ? raw.public_url : null,
+  }
+}
+
+function subscribeVisibility(onChange: () => void) {
+  document.addEventListener('visibilitychange', onChange)
+  return () => document.removeEventListener('visibilitychange', onChange)
+}
 
 export function useShareStatusBanner({ enabled }: Options) {
   const router = useRouter()
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  // Seed initial state from bootstrap's share_banner field if it has
-  // landed already (perf audit Phase D-3). Skips the first poll +
-  // RTT on cold load. Polling still runs on the 15s cadence below
-  // for ongoing updates (admin starting/stopping sharing should
-  // reflect in the banner within ~15s, regardless of how stale the
-  // bootstrap entry is).
-  const bootstrapData = queryClient.getQueryData(queryKeys.bootstrap()) as any
-  const seeded: ShareStatus | null = bootstrapData?.share_banner
-    ? {
-        sharing_active: !!bootstrapData.share_banner.sharing_active,
-        public_url: bootstrapData.share_banner.public_url ?? null,
-      }
-    : null
-  const [status, setStatus] = React.useState<ShareStatus | null>(seeded)
+  // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
+  const hidden = React.useSyncExternalStore(
+    subscribeVisibility,
+    () => document.hidden,
+    () => false,
+  )
 
-  React.useEffect(() => {
-    if (!enabled) return
-    let cancelled = false
-    const ac = new AbortController()
-    const tick = async () => {
-      // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
-      if (document.hidden) return
-      try {
-        // Use the lean /api/admin/share/banner endpoint (~80B) instead of
-        // /status (~11KB). The banner only needs sharing_active +
-        // public_url; the full status response carries services / invites
-        // / sessions / audit_logs / telemetry that the banner never reads
-        // and the poll runs every 15s on every page with AppLayout.
-        const { data, response } = await client.GET('/api/admin/share/banner', { signal: ac.signal })
-        if (cancelled) return
-        if (!response.ok) return
-        const body = data as any
-        setStatus({
-          sharing_active: !!body?.sharing_active,
-          public_url: body?.public_url ?? null,
-        })
-      } catch {
-        /* swallow — banner is non-essential UX */
+  const readBootstrapBanner = () =>
+    toBanner(queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.share_banner)
+
+  // Seed from bootstrap's share_banner (perf audit Phase D-3): initialData +
+  // a staleTime equal to the poll cadence means mount does NOT fetch when the
+  // seed is present; the 15s refetchInterval picks up admin start/stop within
+  // one window regardless of how stale the bootstrap entry is.
+  const seeded = readBootstrapBanner()
+  const seededAtRenderRef = React.useRef(seeded !== null)
+
+  const { data: status } = useQuery<ShareBanner | null>({
+    queryKey: queryKeys.shareBanner(),
+    queryFn: async ({ signal }) => {
+      // Bootstrap can resolve between first render and the mount-time fetch;
+      // re-read it once so that window doesn't cost a round trip either.
+      if (!seededAtRenderRef.current) {
+        seededAtRenderRef.current = true
+        const late = readBootstrapBanner()
+        if (late) return late
       }
-    }
-    // Don't fire the immediate poll if we already seeded from
-    // bootstrap — bootstrap's share_banner is at most as stale as
-    // bootstrap's 5-min cache. The 15-s setInterval below picks up
-    // changes within one poll window either way.
-    //
-    // Re-read bootstrap cache HERE (not just from the render-scope
-    // `seeded` closure) — on cold load the bootstrap query may resolve
-    // between this hook's first render and this useEffect, and the
-    // render-time `seeded` snapshot would miss it. Re-reading saves the
-    // RTT on every page mounting AppLayout in that window.
-    const lateBootstrap = queryClient.getQueryData(queryKeys.bootstrap()) as any
-    const lateSeed = lateBootstrap?.share_banner
-      ? {
-          sharing_active: !!lateBootstrap.share_banner.sharing_active,
-          public_url: lateBootstrap.share_banner.public_url ?? null,
-        }
-      : null
-    if (lateSeed) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setStatus(lateSeed)
-    } else {
-      tick()
-    }
-    const id = setInterval(tick, POLL_MS)
-    return () => {
-      cancelled = true
-      ac.abort()
-      clearInterval(id)
-    }
-  }, [enabled])
+      // Lean /api/admin/share/banner (~80B) instead of /status (~11KB): the
+      // banner only needs sharing_active + public_url and this polls every
+      // 15s on every page with AppLayout.
+      const { data } = await client.GET('/api/admin/share/banner', { signal })
+      return toBanner(data)
+    },
+    initialData: seeded ?? undefined,
+    staleTime: POLL_MS,
+    refetchInterval: POLL_MS,
+    refetchIntervalInBackground: false,
+    retry: false,
+    enabled: enabled && !hidden,
+  })
 
   const node = enabled && status?.sharing_active ? (
     <button

@@ -75,8 +75,9 @@ cd "$REPO_ROOT/frontend"
 # 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
 # 799 -> 794: moved buildTrafficData out of app/ into lib/traffic-chart (lint-clean in its new home).
 # 792 -> 791: adminJson/adminJsonResult replaced the remaining adminFetch().json() hand casts.
+# 791 -> 788: useShareStatusBanner moved from an effect/setState poller to useQuery.
 # Drive toward zero.
-CEILING=791
+CEILING=788
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
