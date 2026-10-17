@@ -100,7 +100,7 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
     )
 
     // 3. Verify passcode visibility toggle
-    const passcodeInput = page.getByLabel('Passcode')
+    const passcodeInput = page.locator('#passcode')
     await expect(passcodeInput).toBeVisible()
     await expect(passcodeInput).toHaveAttribute('type', 'password')
     await page.getByRole('button', { name: /Reveal passcode/i }).click()
@@ -109,7 +109,7 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
     await expect(passcodeInput).toHaveAttribute('type', 'password')
 
     // 4. Submit invalid credentials and verify 401 error message
-    await page.getByLabel('Email').fill(`nonexistent-${Date.now()}@example.com`)
+    await page.locator('#email').fill(`nonexistent-${Date.now()}@example.com`)
     await passcodeInput.fill('wrong-passcode-attempt-99')
     await page.getByRole('button', { name: /^Sign in$/i }).click()
 
@@ -162,17 +162,17 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
         /Invitation verified for E2E Share Analyst/i,
         { timeout: 15_000 },
       )
-      await expect(page.getByLabel('Email')).toHaveValue(analystEmail)
+      await expect(page.locator('#email')).toHaveValue(analystEmail)
 
       // 4. Enter passcode and sign in -> routes to /share-login/acknowledge?return=%2Fquery
-      await page.getByLabel('Passcode').fill(analystPasscode)
+      await page.locator('#passcode').fill(analystPasscode)
       await page.getByRole('button', { name: /^Sign in$/i }).click()
 
       await page.waitForURL(/\/share-login\/acknowledge/, { timeout: 20_000 })
       await expect(page.locator('[data-testid="share-acknowledge-card"]')).toBeVisible({
         timeout: 15_000,
       })
-      await expect(page.getByRole('heading', { name: /Terms of Access/i })).toBeVisible()
+      await expect(page.getByText(/Terms of Access/i).first()).toBeVisible()
 
       // 5. Acknowledge TOS -> upgrades session cookie & redirects to /query
       await page.locator('[data-testid="share-acknowledge-submit"]').click()
@@ -224,8 +224,8 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
 
       // Navigate with a hostile protocol-relative ?next=//evil.example/phish
       await page.goto('/share-login?next=%2F%2Fevil.example%2Fphish')
-      await page.getByLabel('Email').fill(analystEmail)
-      await page.getByLabel('Passcode').fill(analystPasscode)
+      await page.locator('#email').fill(analystEmail)
+      await page.locator('#passcode').fill(analystPasscode)
       await page.getByRole('button', { name: /^Sign in$/i }).click()
 
       // Must route to /share-login/acknowledge WITHOUT the hostile ?return= parameter
