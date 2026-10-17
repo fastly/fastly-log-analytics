@@ -422,44 +422,51 @@ def _deploy_wasm_package(
     # domain/backend/resource-links/package).
     versions = fastly("GET", f"/service/{scoring_service_id}/version", token=token) or []
     base = max(int(v["number"]) for v in versions)
-    # Fastly's clone route is PUT (matches every other clone in this codebase).
-    clone = fastly("PUT", f"/service/{scoring_service_id}/version/{base}/clone", token=token)
-    new_ver = int(clone["number"])
+    # Same sequence as before the helper: no /validate call, no rollback (``base`` is the
+    # highest version, which for a fresh service is a never-active v1 draft, so there is no
+    # known-good version to fall back to), and the activate call passes ``expect_empty``.
+    with draft_version(
+        scoring_service_id,
+        token,
+        base_version=base,
+        call=fastly,
+        validate=False,
+        expect_empty_activate=True,
+        rollback=False,
+    ) as new_ver:
+        # Ensure the matrix KV store is linked on this draft. 409/conflict means
+        # it was already inherited from the cloned version — that's success.
+        if matrix_store_id:
+            try:
+                fastly(
+                    "POST",
+                    f"/service/{scoring_service_id}/version/{new_ver}/resource",
+                    {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": matrix_store_id},
+                    token=token,
+                )
+            except RuntimeError as exc:
+                if not ("409" in str(exc) or "conflict" in str(exc).lower() or "already" in str(exc).lower()):
+                    raise
 
-    # Ensure the matrix KV store is linked on this draft. 409/conflict means
-    # it was already inherited from the cloned version — that's success.
-    if matrix_store_id:
-        try:
-            fastly(
-                "POST",
-                f"/service/{scoring_service_id}/version/{new_ver}/resource",
-                {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": matrix_store_id},
-                token=token,
-            )
-        except RuntimeError as exc:
-            if not ("409" in str(exc) or "conflict" in str(exc).lower() or "already" in str(exc).lower()):
-                raise
-
-    # Upload the package (multipart/form-data, field "package") then activate.
-    pkg_bytes = _SCORER_PACKAGE.read_bytes()
-    boundary = "----fos-scorer-package-boundary"
-    body = (
-        (
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="package"; filename="session-scorer.tar.gz"\r\n'
-            "Content-Type: application/octet-stream\r\n\r\n"
-        ).encode()
-        + pkg_bytes
-        + f"\r\n--{boundary}--\r\n".encode()
-    )
-    fastly_raw(
-        "PUT",
-        f"/service/{scoring_service_id}/version/{new_ver}/package",
-        body,
-        content_type=f"multipart/form-data; boundary={boundary}",
-        token=token,
-    )
-    fastly("PUT", f"/service/{scoring_service_id}/version/{new_ver}/activate", token=token, expect_empty=True)
+        # Upload the package (multipart/form-data, field "package") then activate.
+        pkg_bytes = _SCORER_PACKAGE.read_bytes()
+        boundary = "----fos-scorer-package-boundary"
+        body = (
+            (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="package"; filename="session-scorer.tar.gz"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+            + pkg_bytes
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        fastly_raw(
+            "PUT",
+            f"/service/{scoring_service_id}/version/{new_ver}/package",
+            body,
+            content_type=f"multipart/form-data; boundary={boundary}",
+            token=token,
+        )
     ok(f"Deployed scorer package + activated v{new_ver}")
     if status_cb:
         status_cb(f"✅ [Compute] Activated scorer service v{new_ver}")

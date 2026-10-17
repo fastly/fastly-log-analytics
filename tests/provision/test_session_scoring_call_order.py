@@ -286,3 +286,75 @@ def test_swap_clone_failure_still_reactivates_previous_version():
     with pytest.raises(RuntimeError, match="edit rejected"):
         _run_swap(sso.update_recv_exclusion_regex, fake, new_regex="^/x$")
     assert _order(fake.calls)[-1] == "activate:300"
+
+
+# ── _deploy_wasm_package (Compute clone -> link -> upload -> activate) ──────
+
+
+def _run_wasm(fake: _Fastly, tmp_path, *, matrix_store="MATRIX_STORE", raw=None):
+    from contextlib import ExitStack
+
+    pkg = tmp_path / "session-scorer.tar.gz"
+    pkg.write_bytes(b"wasm-bytes")
+    raw = raw if raw is not None else MagicMock(return_value={})
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(sso, "_SCORER_PACKAGE", pkg))
+        stack.enter_context(patch.object(sso, "fastly", fake))
+        stack.enter_context(patch("backend.core.fastly.service.fastly", fake))
+        stack.enter_context(patch.object(sso, "fastly_raw", raw))
+        return sso._deploy_wasm_package(SCORE_SVC, matrix_store, TOKEN), raw
+
+
+def _wasm_fake(**kw) -> _Fastly:
+    return _Fastly(active=5, clone_number=6, **kw)
+
+
+def test_wasm_deploy_order_is_clone_link_upload_activate_with_no_validate_or_comment(tmp_path):
+    order_events: list[str] = []
+    fake = _wasm_fake()
+    raw = MagicMock(side_effect=lambda *a, **k: order_events.append("package") or {})
+    _run_wasm(fake, tmp_path, raw=raw)
+    calls = fake.calls
+    assert ("PUT", f"/service/{SCORE_SVC}/version/5/clone") in calls
+    clone_idx = calls.index(("PUT", f"/service/{SCORE_SVC}/version/5/clone"))
+    link_idx = calls.index(("POST", f"/service/{SCORE_SVC}/version/6/resource"))
+    activate_idx = calls.index(("PUT", f"/service/{SCORE_SVC}/version/6/activate"))
+    assert clone_idx < link_idx < activate_idx
+    assert order_events == ["package"]
+    assert not any(p.endswith("/validate") for _, p in calls), "Compute deploy never called /validate"
+    assert ("PUT", f"/service/{SCORE_SVC}/version/6") not in calls, "Compute deploy never set a comment"
+
+
+def test_wasm_deploy_activate_keeps_expect_empty(tmp_path):
+    fake = _wasm_fake()
+    _run_wasm(fake, tmp_path)
+    assert fake.kwargs_for(lambda m, p: p.endswith("/version/6/activate")) == [{"token": TOKEN, "expect_empty": True}]
+
+
+def test_wasm_deploy_clones_the_highest_version_not_the_active_one(tmp_path):
+    class _Versions(_Fastly):
+        def __call__(self, method, path, body=None, **kwargs):
+            if method == "GET" and path.endswith("/version"):
+                self.calls.append((method, path))
+                self.kwargs.append(kwargs)
+                return [{"number": 3, "active": True}, {"number": 9, "active": False}]
+            return super().__call__(method, path, body, **kwargs)
+
+    fake = _Versions(active=3, clone_number=10)
+    _run_wasm(fake, tmp_path)
+    assert ("PUT", f"/service/{SCORE_SVC}/version/9/clone") in fake.calls
+
+
+def test_wasm_deploy_upload_failure_leaves_the_draft_unactivated_and_makes_no_rollback_call(tmp_path):
+    fake = _wasm_fake()
+    raw = MagicMock(side_effect=RuntimeError("upload failed"))
+    with pytest.raises(RuntimeError, match="upload failed"):
+        _run_wasm(fake, tmp_path, raw=raw)
+    assert not any(p.endswith("/activate") for _, p in fake.calls)
+
+
+def test_wasm_deploy_without_matrix_store_skips_the_resource_link(tmp_path):
+    fake = _wasm_fake()
+    _run_wasm(fake, tmp_path, matrix_store="")
+    assert not any(p.endswith("/resource") for _, p in fake.calls)
+    assert ("PUT", f"/service/{SCORE_SVC}/version/6/activate") in fake.calls
