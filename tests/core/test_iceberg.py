@@ -2,7 +2,6 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
-import pytest
 
 from backend.core import iceberg
 
@@ -44,24 +43,49 @@ def test_warehouse_uri():
     assert iceberg._warehouse_uri(source_no_prefix) == "s3://my-bucket/iceberg"
 
 
-@patch("backend.core.iceberg._get_catalog")
-@pytest.mark.skip(reason="Migrated to ducklake")
-def test_init_iceberg_table_exists(mock_get_catalog):
-    mock_catalog = MagicMock()
-    mock_get_catalog.return_value = mock_catalog
+def _ducklake_source(tmp_path, prefix: str) -> dict:
+    """Source dict backed by a real DuckLake catalog. A unique service_id per
+    call keeps tables from colliding in the shared per-worker Postgres catalog."""
+    import uuid
 
-    source = {"name": "test-svc", "bucket": "b", "prefix": "p"}
+    name = f"{prefix}{uuid.uuid4().hex[:8]}"
+    cache = tmp_path / f"cache-{name}"
+    (cache / "buffer").mkdir(parents=True)
+    return {
+        "name": name,
+        "service_id": name,
+        "fos_local_warehouse": True,
+        "_cache_dir_override": str(cache),
+        "duckdb_path": str(tmp_path / f"{name}.duckdb"),
+    }
 
-    # Mock table already exists
-    mock_table = MagicMock()
-    mock_catalog.load_table.return_value = mock_table
-    mock_table.schema.return_value.fields = iceberg.get_iceberg_schema().fields
 
-    result = iceberg.init_iceberg_table(source)
+def test_init_iceberg_table_attaches_catalog_without_creating_table(tmp_path):
+    """``init_iceberg_table`` only verifies the DuckLake catalog is attachable;
+    the per-service table is created lazily by the first buffer commit (so
+    ``create`` is inert). Calling it repeatedly is a no-op that must neither
+    create a table nor fail."""
+    from backend.core.iceberg.manifest import ducklake_table_exists
 
-    assert result == mock_table
-    mock_catalog.load_table.assert_called_once_with(("default", "logs"))
-    mock_catalog.create_table.assert_not_called()
+    source = _ducklake_source(tmp_path, "init")
+
+    assert iceberg.init_iceberg_table(source) is True
+    assert iceberg.init_iceberg_table(source, create=True) is True
+    assert ducklake_table_exists(source) is False
+
+
+def test_init_iceberg_table_returns_none_when_catalog_unattachable(tmp_path):
+    """A failed attach must surface as ``None`` (not True) so callers can tell
+    "catalog unavailable" from "catalog ready"."""
+    source = _ducklake_source(tmp_path, "initfail")
+    fake_con = MagicMock()
+
+    with (
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=False),
+    ):
+        assert iceberg.init_iceberg_table(source) is None
+    fake_con.close.assert_called_once()
 
 
 def test_buffer_dir():
@@ -2008,239 +2032,126 @@ def test_patched_open_routes_through_iothread_not_stale_cat_file_alias():
         _ice._inflight_async.clear()
 
 
-@__import__("pytest").mark.skip(reason="Migrated to ducklake")
-def test_optimize_table_escapes_single_quotes(monkeypatch):
+def _recording_write_connection(monkeypatch, fail_on: str | None = None):
+    """Swap the DuckLake write-attach for a fake connection that records every
+    SQL statement, so ``optimize_table``'s real control flow runs without a
+    catalog. ``fail_on`` makes statements containing that text raise."""
+    from contextlib import contextmanager
+
+    from backend.core.iceberg import buffer as buffer_mod
+
+    executed: list[str] = []
+
+    class _Result:
+        def fetchall(self):
+            return []
+
+    class _Con:
+        def execute(self, sql, *a, **kw):
+            executed.append(sql)
+            if fail_on and fail_on in sql:
+                raise RuntimeError("simulated optimize failure")
+            return _Result()
+
+    @contextmanager
+    def fake(_source):
+        yield _Con()
+
+    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", fake)
+    monkeypatch.setattr(buffer_mod, "_lake_columns", lambda _con, _tbl: {"timestamp"})
+    return executed
+
+
+def test_optimize_table_hostile_service_id_cannot_break_out_of_call_literal(monkeypatch):
+    """The compaction CALLs interpolate the table name inside a single-quoted
+    SQL literal. ``ducklake_table_name`` must sanitize a hostile service id so
+    a single quote can never terminate that literal (the DuckLake successor of
+    the old read_parquet single-quote escaping guard)."""
+    import re
+
     from backend.core import iceberg as _ice
 
-    source = {
-        "name": "test-optimize-escapes",
-        "bucket": "b",
-        "prefix": "p",
-    }
+    executed = _recording_write_connection(monkeypatch)
+    source = {"name": "svc", "service_id": "O'Brien'); DROP TABLE lake.logs;--"}
 
-    # Mock catalog and table loading
-    fake_catalog = MagicMock()
-    fake_table = MagicMock()
-    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
-    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
+    _ice.optimize_table(source, table_name="logs")
 
-    # Mock scan().plan_files() to return our single-quoted file path
-    mock_file = MagicMock()
-    mock_file.file.partition = (12345,)
-    mock_file.file.file_path = "s3://bucket/O'Brien/logs/data.parquet"
-    fake_table.scan().plan_files.return_value = [mock_file]
-
-    # Mock get_connection to capture executed SQL
-    captured_queries = []
-    fake_con = MagicMock()
-
-    def mock_execute(sql, *args, **kwargs):
-        captured_queries.append(sql)
-        # Raise an exception so it fails after executing read_parquet and doesn't proceed to overwrite
-        raise RuntimeError("Stop simulation")
-
-    fake_con.execute.side_effect = mock_execute
-
-    from backend.core import duckdb as _duckdb
-
-    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
-
-    # Run optimization with min_files_per_partition=0 to ensure it selects the partition
-    _ice.optimize_table(source, min_files_per_partition=0)
-
-    # Assert that DuckDB was called with read_parquet enclosing our escaped single quotes
-    assert captured_queries, "Should have executed DuckDB query"
-    parquet_query = captured_queries[0]
-    assert "read_parquet(['s3://bucket/O''Brien/logs/data.parquet']" in parquet_query
-    assert "s3://bucket/O'Brien/logs/data.parquet" not in parquet_query.replace(
-        "s3://bucket/O''Brien/logs/data.parquet", ""
-    )
+    calls = [q for q in executed if q.startswith("CALL ducklake_merge_adjacent_files")]
+    assert calls, f"merge CALL was never issued: {executed}"
+    for q in executed:
+        if q.startswith("CALL ducklake_merge_adjacent_files") or q.startswith("CALL ducklake_rewrite_data_files"):
+            assert re.fullmatch(r"CALL ducklake_\w+\('lake', '[a-z0-9_]+'\)", q), f"unsafe table literal in: {q}"
+    assert not any("DROP" in q for q in executed)
 
 
-@__import__("pytest").mark.skip(reason="Migrated to ducklake")
-def test_optimize_table_uses_union_by_name(monkeypatch):
-    """Regression for the 2026-06-06 optimize-cron warning: when a partition
-    contains files written before AND after a schema bump (e.g. ``edge_sid``
-    added mid-day), the DuckDB ``read_parquet([...])`` defaults to positional
-    union and raises ``Schema mismatch ... try setting union_by_name=True``.
-    Prod had two partitions (494541, 494542) stuck at 14+ files each since
-    2026-06-01 because every nightly optimize attempt raised here.
+def test_optimize_table_compacts_schema_evolved_files(tmp_path):
+    """Regression for the 2026-06-06 optimize-cron warning: a table holding
+    files written before AND after a schema bump (a column added mid-stream)
+    must compact without error and without losing or corrupting rows —
+    old rows read the new column as NULL, new rows keep their values."""
+    from datetime import UTC, datetime, timedelta
 
-    The fix passes ``union_by_name=true`` so DuckDB merges the column sets
-    and fills missing columns with NULL — matching how Iceberg already
-    presents the merged schema to readers."""
+    import pyarrow.parquet as pq
+
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import ducklake_table_name
+    from backend.core.iceberg.buffer import _commit_buffer_impl
+
+    source = _ducklake_source(tmp_path, "evolve")
+    buffer_dir = os.path.join(source["_cache_dir_override"], "buffer")
+    base = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+
+    def _write(name: str, offset: int, extra: dict | None = None):
+        cols = {
+            "timestamp": pa.array(
+                [base + timedelta(seconds=offset + i) for i in range(2)], type=pa.timestamp("us", tz="UTC")
+            ),
+            "ip": pa.array([f"10.0.0.{offset + i}" for i in range(2)]),
+            "_source_file": pa.array([f"s3://b/raw/{name}"] * 2),
+        }
+        for k, v in (extra or {}).items():
+            cols[k] = pa.array([v] * 2)
+        pq.write_table(pa.table(cols), os.path.join(buffer_dir, name))
+
+    _write("batch_old_schema.parquet", 0)
+    assert _commit_buffer_impl(source)["rows_committed"] == 2
+    _write("batch_new_schema.parquet", 10, extra={"edge_sid": "evolved"})
+    assert _commit_buffer_impl(source)["rows_committed"] == 2
+
+    result = iceberg.optimize_table(source)
+
+    assert not result.get("error"), result
+    assert result["partition_errors"] == [], result["partition_errors"]
+    con = get_connection(source)
+    try:
+        rows = con.execute(f'SELECT ip, edge_sid FROM lake."{ducklake_table_name(source)}" ORDER BY ip').fetchall()
+    finally:
+        con.close()
+    assert rows == [
+        ("10.0.0.0", None),
+        ("10.0.0.1", None),
+        ("10.0.0.10", "evolved"),
+        ("10.0.0.11", "evolved"),
+    ]
+
+
+def test_optimize_table_merge_failure_is_recorded_not_retried_and_rewrite_still_runs(monkeypatch):
+    """A failing compaction step must surface in ``partition_errors`` (so the
+    cron row lands as a warning) without being silently retried, and must not
+    stop the sibling rewrite step. The old Iceberg CAS-retry guard
+    ("unrelated errors are not retried") maps onto this: one attempt, error
+    reported."""
     from backend.core import iceberg as _ice
 
-    source = {"name": "test-optimize-union", "bucket": "b", "prefix": "p"}
+    executed = _recording_write_connection(monkeypatch, fail_on="ducklake_merge_adjacent_files")
 
-    fake_catalog = MagicMock()
-    fake_table = MagicMock()
-    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
-    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
+    result = _ice.optimize_table({"name": "svc", "service_id": "svc-opt"}, table_name="logs")
 
-    mock_file = MagicMock()
-    mock_file.file.partition = (12345,)
-    mock_file.file.file_path = "s3://bucket/data.parquet"
-    fake_table.scan().plan_files.return_value = [mock_file, mock_file]
-
-    captured_queries: list[str] = []
-    fake_con = MagicMock()
-
-    def mock_execute(sql, *args, **kwargs):
-        captured_queries.append(sql)
-        raise RuntimeError("Stop simulation")
-
-    fake_con.execute.side_effect = mock_execute
-
-    from backend.core import duckdb as _duckdb
-
-    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
-
-    _ice.optimize_table(source, min_files_per_partition=0)
-
-    assert captured_queries
-    parquet_query = captured_queries[0]
-    assert "union_by_name=true" in parquet_query, (
-        f"read_parquet must pass union_by_name=true so partitions with "
-        f"schema-evolved files (pre- vs post-schema-bump) can coalesce. "
-        f"Removing this argument re-introduces the 2026-06-06 prod warnings. "
-        f"Got SQL: {parquet_query[:300]}"
-    )
-
-
-@__import__("pytest").mark.skip(reason="Migrated to ducklake")
-def test_optimize_table_retries_on_sequence_number_cas_conflict(monkeypatch):
-    """Regression for the 2026-06-04 sporadic CAS conflict during optimize:
-    ``ValueError: Cannot add snapshot with sequence number 2159 older than
-    last sequence number 2159`` — raised when an ingest commit lands between
-    optimize's plan_files read and its overwrite. The fix wraps overwrite()
-    in a bounded retry that reloads the table head and tries once more.
-
-    This test pins the retry behavior:
-      1. First overwrite() raises the CAS ValueError → caught + reloaded
-      2. Second overwrite() succeeds → loop exits
-      3. Catalog.load_table is invoked exactly once for the reload
-
-    If the retry is removed, the test fails because optimize raises on the
-    first attempt and the partition lands in partition_errors with
-    status='warning' on the cron row."""
-    from backend.core import iceberg as _ice
-
-    source = {"name": "test-optimize-cas-retry", "bucket": "b", "prefix": "p"}
-
-    overwrite_calls = {"n": 0}
-    reload_calls = {"n": 0}
-
-    fake_catalog = MagicMock()
-    initial_table = MagicMock()
-    reloaded_table = MagicMock()
-
-    def _initial_overwrite(*a, **kw):
-        overwrite_calls["n"] += 1
-        raise ValueError("Cannot add snapshot with sequence number 2159 older than last sequence number 2159")
-
-    def _reloaded_overwrite(*a, **kw):
-        overwrite_calls["n"] += 1  # increments the SAME counter so we count total attempts
-
-    initial_table.overwrite.side_effect = _initial_overwrite
-    reloaded_table.overwrite.side_effect = _reloaded_overwrite
-
-    def _catalog_load(ident):
-        reload_calls["n"] += 1
-        return reloaded_table
-
-    fake_catalog.load_table.side_effect = _catalog_load
-
-    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
-    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: initial_table)
-    monkeypatch.setattr(_ice, "_set_cached_table", lambda src, ident, tbl: None)
-    monkeypatch.setattr(_ice, "_write_metadata_pointer", lambda src, loc, table=None: None)
-    monkeypatch.setattr(_ice, "sync_data", lambda src: {"files_cached": 0, "rows_cached": 0})
-
-    mock_file = MagicMock()
-    mock_file.file.partition = (12345,)
-    mock_file.file.file_path = "s3://bucket/data.parquet"
-    initial_table.scan().plan_files.return_value = [mock_file, mock_file]
-    reloaded_table.scan().plan_files.return_value = [mock_file, mock_file]
-
-    fake_con = MagicMock()
-    fake_arrow = MagicMock()
-    fake_con.execute.return_value.to_arrow_table.return_value = fake_arrow
-
-    from backend.core import duckdb as _duckdb
-
-    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
-
-    result = _ice.optimize_table(source, min_files_per_partition=0)
-
-    assert overwrite_calls["n"] == 2, (
-        f"expected exactly 2 overwrite() calls (1 fail + 1 retry success); got {overwrite_calls['n']}"
-    )
-    assert reload_calls["n"] == 1, (
-        f"expected exactly 1 catalog.load_table() reload after the CAS conflict; got {reload_calls['n']}"
-    )
-    # Partition should not appear in partition_errors — the retry succeeded.
-    assert not result.get("partition_errors"), (
-        f"retry should have prevented the partition from landing in partition_errors. "
-        f"Got: {result.get('partition_errors')}"
-    )
-
-
-@__import__("pytest").mark.skip(reason="Migrated to ducklake")
-def test_optimize_table_does_not_retry_unrelated_value_errors(monkeypatch):
-    """The CAS-conflict retry must ONLY catch the specific sequence-number
-    message. Unrelated ValueErrors (e.g. a real schema bug, a corrupted
-    file path) should propagate immediately so they aren't silently
-    retried 3 times before showing up as errors."""
-    from backend.core import iceberg as _ice
-
-    source = {"name": "test-optimize-no-spurious-retry", "bucket": "b", "prefix": "p"}
-
-    overwrite_calls = {"n": 0}
-    reload_calls = {"n": 0}
-
-    def _bad_overwrite(*a, **kw):
-        overwrite_calls["n"] += 1
-        raise ValueError("Some unrelated value error")
-
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.side_effect = lambda ident: (
-        reload_calls.__setitem__("n", reload_calls["n"] + 1),
-        MagicMock(),
-    )[1]
-
-    fake_table = MagicMock()
-    fake_table.overwrite.side_effect = _bad_overwrite
-    mock_file = MagicMock()
-    mock_file.file.partition = (12345,)
-    mock_file.file.file_path = "s3://bucket/data.parquet"
-    fake_table.scan().plan_files.return_value = [mock_file, mock_file]
-
-    monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
-    monkeypatch.setattr(_ice, "_load_table_cached", lambda src, ident, cat: fake_table)
-    monkeypatch.setattr(_ice, "_set_cached_table", lambda src, ident, tbl: None)
-    monkeypatch.setattr(_ice, "_write_metadata_pointer", lambda src, loc, table=None: None)
-    monkeypatch.setattr(_ice, "sync_data", lambda src: {"files_cached": 0, "rows_cached": 0})
-
-    fake_con = MagicMock()
-    fake_con.execute.return_value.to_arrow_table.return_value = MagicMock()
-
-    from backend.core import duckdb as _duckdb
-
-    monkeypatch.setattr(_duckdb, "get_connection", lambda src, **kwargs: fake_con)
-
-    _ice.optimize_table(source, min_files_per_partition=0)
-
-    # The partition_errors path swallows the raised ValueError into
-    # partition_errors — but the IMPORTANT invariant is that overwrite
-    # was only attempted ONCE and reload was NEVER called.
-    assert overwrite_calls["n"] == 1, (
-        f"unrelated ValueErrors must propagate immediately, not trigger CAS retry. "
-        f"Got {overwrite_calls['n']} overwrite calls."
-    )
-    assert reload_calls["n"] == 0, (
-        f"unrelated ValueErrors must NOT trigger table reload. Got {reload_calls['n']} reloads."
-    )
+    merges = [q for q in executed if "ducklake_merge_adjacent_files" in q and q.endswith("'logs_svc_opt')")]
+    rewrites = [q for q in executed if "ducklake_rewrite_data_files" in q and q.endswith("'logs_svc_opt')")]
+    assert len(merges) == 1, f"failed merge must not be retried; saw {len(merges)} attempts"
+    assert len(rewrites) == 1, "rewrite must still run after a merge failure"
+    assert any("merge" in e for e in result["partition_errors"]), result["partition_errors"]
 
 
 # ── Finding 002: view-cache variant fingerprint ──────────────────────────
