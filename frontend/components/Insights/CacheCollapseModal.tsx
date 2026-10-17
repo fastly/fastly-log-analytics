@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 import { formatCount } from '@/lib/format'
+import { statusBadgeClass } from '@/lib/status-style'
 interface CacheCollapseModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
@@ -100,14 +101,6 @@ export function CacheCollapseModal({
   const chartLayout = useMemo(() => ({
     yaxis: { title: { text: 'Hits' } },
   }), [])
-
-  // Helper for HTTP status color badge
-  const getStatusBadgeClass = (status: number | null | undefined) => {
-    if (!status) return 'bg-muted text-muted-foreground'
-    if (status >= 200 && status < 300) return 'bg-green-500/10 text-green-500 border-green-500/20'
-    if (status >= 300 && status < 400) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
-    return 'bg-red-500/10 text-red-500 border-red-500/20'
-  }
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -268,7 +261,7 @@ export function CacheCollapseModal({
                             <td className="py-2 pl-4 text-right whitespace-nowrap">
                               <span className={cn(
                                 "px-1.5 py-0.5 rounded font-mono font-semibold border text-[10px]",
-                                getStatusBadgeClass(e.status)
+                                statusBadgeClass(e.status, 'traffic-light')
                               )}>
                                 {e.status || '—'}
                               </span>
