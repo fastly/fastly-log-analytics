@@ -408,11 +408,8 @@ def reconcile_vcl_state(
                     status_cb("⏳ Validating draft configuration...")
                 validation_errors = _validate_draft(service_id, token, draft_version)
                 if validation_errors:
-                    # Assertion: active version unchanged after validation failure
-                    active_now = _fetch_active_version(service_id, token)
-                    active_before = _fetch_active_version(service_id, token)
-                    if active_before != active_now:
-                        raise RuntimeError("Active version changed during validation failure")
+                    # No active-version guard here: the draft was never activated, and an out-of-band
+                    # activation (e.g. Fastly console) must not mask the validation errors we report.
                     raise VclValidationError(service_id, draft_version, validation_errors)
 
                 result.draft_version = draft_version

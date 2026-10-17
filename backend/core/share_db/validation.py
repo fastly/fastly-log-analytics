@@ -324,6 +324,8 @@ def _mask_ip_scalar(value: str) -> str:
     """
     # Strip surrounding whitespace first: ``ip_address("1.2.3.4\n")`` raises, so an IP
     # padded with a newline/space would otherwise sail through unmasked.
+    # Intentional: the masked value is returned WITHOUT the original padding (and an XFF list is
+    # re-joined with ", "). Pinned by tests/security/test_mask_ip_scalar_padding.py.
     bare = value.strip()
     if _MAYBE_IP_RE.fullmatch(bare):
         try:
