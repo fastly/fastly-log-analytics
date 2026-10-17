@@ -84,3 +84,117 @@ def test_gap_heal_sweep_crash_after_warning_row_overwrites_with_error_row(env, m
     assert kwargs["error_message"] == "sweep died"
     assert kwargs["log_output"] == "LOGTEXT"
     assert env["calls"] == ["end_progress:61", "duration"]
+
+
+def _full_sweep_env(monkeypatch, events=None, raises=None, high_scale=False):
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {})
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: high_scale)
+
+    def fake_ingest(**kwargs):
+        yield from events or []
+        if raises is not None:
+            raise raises
+
+    monkeypatch.setattr("backend.core.ingest.ingest", fake_ingest)
+
+
+def test_full_sweep_lease_held_is_clean_skip(env, monkeypatch):
+    _full_sweep_env(monkeypatch)
+    env["start"].side_effect = RuntimeError("held")
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    env["log"].assert_not_called()
+    assert env["calls"] == []
+
+
+def test_full_sweep_success_row_has_log_output_and_counters(env, monkeypatch):
+    done = {
+        "type": "done",
+        "new_files": 3,
+        "rows_inserted": 0,
+        "corrupt_rows": 0,
+        "deleted_files": 2,
+        "outcome_counters": {"objects_failed": 0},
+    }
+    _full_sweep_env(monkeypatch, events=[done])
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    env["log"].assert_called_once()
+    args, kwargs = env["log"].call_args
+    assert args[1] == "full_sync"
+    assert args[3] == "success"
+    assert kwargs["files_downloaded"] == 3
+    assert kwargs["files_deleted_fos"] == 2
+    assert kwargs["log_output"] == "LOGTEXT"
+    assert kwargs["outcome_counters"] == {"objects_failed": 0}
+    assert kwargs["run_id"] == 61
+    assert "reclaimed 2 raw file(s)" in kwargs["summary"]
+    assert env["calls"] == ["end_progress:61", "duration"]
+
+
+def test_full_sweep_error_event_records_error_row_and_stops(env, monkeypatch):
+    events = [
+        {"type": "file_done", "current": 4, "total_inserted": 40, "total_corrupt": 1},
+        {"type": "error", "message": "s3 down", "outcome_counters": {"objects_failed": 1}},
+        {"type": "done", "new_files": 9},
+    ]
+    _full_sweep_env(monkeypatch, events=events)
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    env["log"].assert_called_once()
+    args, kwargs = env["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Full-sweep failed"
+    assert kwargs["error_message"] == "s3 down"
+    assert (kwargs["files_downloaded"], kwargs["rows_ingested"], kwargs["corrupt_rows"]) == (4, 40, 1)
+    assert kwargs["outcome_counters"] == {"objects_failed": 1}
+    assert kwargs["log_output"] == "LOGTEXT"
+    assert env["calls"][-2:] == ["end_progress:61", "duration"]
+
+
+def test_full_sweep_crash_row_carries_partial_counters(env, monkeypatch):
+    events = [{"type": "file_done", "current": 2, "total_inserted": 7, "total_corrupt": 0}]
+    _full_sweep_env(monkeypatch, events=events, raises=RuntimeError("kaboom"))
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    env["log"].assert_called_once()
+    args, kwargs = env["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Full-sweep crashed"
+    assert kwargs["error_message"] == "kaboom"
+    assert (kwargs["files_downloaded"], kwargs["rows_ingested"], kwargs["corrupt_rows"]) == (2, 7, 0)
+    assert kwargs["log_output"] == "LOGTEXT"
+
+
+def test_full_sweep_high_scale_rows_have_no_log_output(env, monkeypatch):
+    _full_sweep_env(monkeypatch, high_scale=True)
+    discover = MagicMock(return_value=5)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    discover.assert_called_once_with(SID, run_id=61, originating_task="full_sync")
+    env["log"].assert_called_once()
+    args, kwargs = env["log"].call_args
+    assert args[3] == "success"
+    assert kwargs["files_downloaded"] == 5
+    assert kwargs["log_output"] is None
+    assert kwargs["summary"] == "Full-prefix sweep discovered 5 unseen file(s); dispatched to ingest workers"
+
+
+def test_full_sweep_high_scale_failure_row(env, monkeypatch):
+    _full_sweep_env(monkeypatch, high_scale=True)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", MagicMock(side_effect=RuntimeError("list failed")))
+
+    sync_mod._run_full_sweep.__wrapped__(SID)
+
+    env["log"].assert_called_once()
+    args, kwargs = env["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Full-prefix ledger sweep failed"
+    assert kwargs["error_message"] == "list failed"
+    assert kwargs["log_output"] is None
