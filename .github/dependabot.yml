@@ -9,8 +9,6 @@
 #   ranges (`^X.Y.Z`) follow SemVer compatible-update rules. The explicit
 #   `overrides` block (ip-address, postcss) is treated as a pin; Dependabot
 #   only proposes bumps for security advisories on those.
-# - `docker` keeps the digest-pinned base images in each Dockerfile fresh (the
-#   tag is kept in a comment above each FROM line).
 # - `github-actions` keeps action SHAs / version tags fresh in workflows/.
 version: 2
 updates:
@@ -36,34 +34,6 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 3
-
-  - package-ecosystem: "docker"
-    directory: "/backend"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 3
-
-  - package-ecosystem: "docker"
-    directory: "/frontend"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 3
-
-  - package-ecosystem: "docker"
-    directory: "/caddy"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 3
-
-  - package-ecosystem: "docker"
-    directory: "/deploy/admin-gateway"
     schedule:
       interval: "weekly"
       day: "monday"

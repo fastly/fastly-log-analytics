@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import time
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 
 logger = logging.getLogger("backend.scheduler")
 
@@ -26,7 +26,7 @@ def _run_rollup_compact_daily(
     manual: bool = False,
     run_id: int | None = None,
 ) -> dict:
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service, log_cron_run
     from backend.core.rollups import (
         backfill_day_bundles,
         backfill_missing_hour_bundles,
@@ -84,20 +84,28 @@ def _run_rollup_compact_daily(
     except Exception as e:
         logger.warning("[rollup-compact] %s: failed to check disk space: %s", service_id, e)
 
-    if run_id is None:
-        try:
-            run_id = start_cron_run(src, "rollup_compact_daily")
-        except RuntimeError as e:
-            logger.info("⏭️  [rollup-compact] %s: skipping — %s", service_id, str(e))
-            return {"status": "skipped", "service_id": service_id, "summary": str(e)}
-
-    start_time = time.time()
     _display = _display_label(src, service_id)
-    try:
-        from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-        cleanup_progress_and_reap()
-        start_progress(run_id, service_id=service_id, task="rollup_compact")
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_compact_daily",
+        source=src,
+        run_id=run_id,
+        error_summary="Daily rollup compaction failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "summary": str(exc),
+            "errors": [str(exc)],
+        },
+        include_log_output=False,
+        progress_task="rollup_compact",
+        skip_log_prefix="rollup-compact",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return run.result
         logger.info("🏎️  [rollup-compact] %s: Daily rollup compaction started.", _display)
 
         subsystem_errors: list[str] = []
@@ -172,50 +180,22 @@ def _run_rollup_compact_daily(
         except Exception as e:
             logger.warning("[rollup-compact] %s: cleanup pass failed: %s", _display, e)
 
-        duration = time.time() - start_time
-        status = "warning" if subsystem_errors else "success"
-        err_msg = "; ".join(subsystem_errors) if subsystem_errors else None
         summary = (
             f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s); "
             f"retired {retired_files} hourly file(s) ({retired_bytes / 1024:.1f}KB)."
         )
-
-        log_cron_run(
-            src,
-            "rollup_compact_daily",
-            duration,
-            status,
-            summary=summary,
-            error_message=err_msg,
-            run_id=run_id,
-        )
-        return {
+        status = "warning" if subsystem_errors else "success"
+        err_msg = "; ".join(subsystem_errors) if subsystem_errors else None
+        run.record(status, summary=summary, error_message=err_msg)
+        outcome = {
             "status": status,
             "service_id": service_id,
             "rebuilt": rebuilt,
             "bundled": bundled,
             "retired_files": retired_files,
             "retired_bytes": retired_bytes,
-            "duration_s": round(duration, 2),
+            "duration_s": round(run.elapsed(), 2),
             "summary": summary,
             "errors": subsystem_errors if subsystem_errors else None,
         }
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "rollup_compact_daily",
-            duration,
-            "error",
-            error_message=str(e),
-            run_id=run_id,
-        )
-        logger.exception("[rollup-compact] %s: Daily rollup compaction failed: %s", _display, e)
-        return {"status": "error", "service_id": service_id, "summary": str(e), "errors": [str(e)]}
-    finally:
-        try:
-            from backend.cron_progress import end_progress
-
-            end_progress(run_id)
-        except Exception:
-            pass
+    return run.result if run.result is not None else outcome

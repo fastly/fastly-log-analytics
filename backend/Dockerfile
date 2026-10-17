@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.4
 
 # --- Build Stage ---
-# python:3.13-slim-bookworm
-FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -60,8 +59,7 @@ RUN set -eux; \
     falco --version
 
 # --- Production Stage ---
-# python:3.13-slim-bookworm
-FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS runner
+FROM python:3.13-slim-bookworm AS runner
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \

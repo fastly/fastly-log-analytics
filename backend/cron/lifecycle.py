@@ -83,6 +83,11 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         the ``log_output``.
     skip_log_prefix:
         Optional bracketed prefix for the skip log line (defaults to ``task``).
+    progress_task:
+        Label passed to ``start_progress(task=...)`` when it differs from the
+        lease/``cron_runs`` task name (defaults to ``task``). ``rollup_compact``
+        leases as ``rollup_compact_daily`` but reports progress as
+        ``rollup_compact``.
     """
 
     def __init__(
@@ -99,6 +104,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         suppress_exceptions: bool = True,
         include_log_output: bool = True,
         skip_log_prefix: str | None = None,
+        progress_task: str | None = None,
     ) -> None:
         self.service_id = service_id
         self.task = task
@@ -111,6 +117,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         self.suppress_exceptions = suppress_exceptions
         self.include_log_output = include_log_output
         self.skip_log_prefix = skip_log_prefix
+        self.progress_task = progress_task or task
 
         self.result: Any = None
         self.skipped: bool = False
@@ -174,7 +181,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
             from backend.cron_progress import cleanup_progress_and_reap, start_progress
 
             cleanup_progress_and_reap()
-            start_progress(self._run_id, service_id=self.service_id, task=self.task)
+            start_progress(self._run_id, service_id=self.service_id, task=self.progress_task)
         except Exception as exc:
             self._record_exception(exc)
             self.aborted = True
