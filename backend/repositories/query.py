@@ -39,6 +39,13 @@ MAX_QUERY_ROWS = 10_000
 # allowlist), so an analyst can't name it directly.
 _ANALYST_WINDOW_VIEW = "_analyst_window_logs"
 
+# Holds the per-service cid salt for the lifetime of one analyst request. The salt is a secret, so it is
+# bound as a PARAMETER into this one-row temp table and the view reads it via a scalar subquery: no SQL
+# text (live query registry, persisted slow_queries, DuckDB error excerpts, EXPLAIN) ever carries the
+# value. Same reserved-name rules as the view: the SQL validator's table allowlist rejects any user
+# reference to it, and it is dropped in execute_query's finally.
+_ANALYST_CID_SALT_TABLE = "_analyst_cid_salt"
+
 
 def execute_query(
     con: duckdb.DuckDBPyConnection,
@@ -146,6 +153,7 @@ def execute_query(
         if window_view is not None:
             try:
                 con.execute(f"DROP VIEW IF EXISTS {window_view}")
+                _drop_analyst_cid_salt(con)
             except Exception:
                 # Non-fatal: CREATE OR REPLACE on the next analyst request
                 # refreshes it before use, so a leaked view can't serve stale
@@ -238,26 +246,6 @@ def _rebind_table_to_window_view(
     if not has_window and not redact_cols:
         return None
 
-    select_list = "*"
-    if redact_cols:
-        # Escape internal double-quotes so a hostile column name can't break out
-        # of the quoted identifier (SESSION_ID_KEYS are static literals today,
-        # but keep the guard for any future addition — mirrors optional_col in
-        # _base.py). Sorted for a deterministic, testable view definition.
-        repl_list = []
-        for col in sorted(redact_cols):
-            escaped_col = col.replace('"', '""')
-            if col == "cid" and service_id:
-                from backend.core.duckdb import get_or_generate_cid_salt
-
-                salt = get_or_generate_cid_salt(service_id)
-                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE sha256(CONCAT(\'{salt}\', "{escaped_col}")) END AS "{escaped_col}"'
-            else:
-                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE \'[redacted]\' END AS "{escaped_col}"'
-            repl_list.append(expr)
-        replacements = ", ".join(repl_list)
-        select_list = f"* REPLACE ({replacements})"
-
     where_sql = ""
     if has_window:
         # Fail closed: a bound that doesn't parse is a programming error, not a
@@ -272,10 +260,48 @@ def _rebind_table_to_window_view(
             f"AND timestamp < TIMESTAMPTZ '{end_dt.isoformat()}'"
         )
 
-    con.execute(
-        f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS SELECT {select_list} FROM {table_name}{where_sql}"
-    )
+    select_list = "*"
+    if redact_cols:
+        # Escape internal double-quotes so a hostile column name can't break out
+        # of the quoted identifier (SESSION_ID_KEYS are static literals today,
+        # but keep the guard for any future addition — mirrors optional_col in
+        # _base.py). Sorted for a deterministic, testable view definition.
+        repl_list = []
+        for col in sorted(redact_cols):
+            escaped_col = col.replace('"', '""')
+            if col == "cid" and service_id:
+                from backend.core.duckdb import get_or_generate_cid_salt
+
+                con.execute(
+                    f"CREATE OR REPLACE TEMP TABLE {_ANALYST_CID_SALT_TABLE} AS SELECT ?::VARCHAR AS salt",
+                    [get_or_generate_cid_salt(service_id)],
+                )
+                expr = (
+                    f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" '
+                    f'ELSE sha256(CONCAT((SELECT salt FROM {_ANALYST_CID_SALT_TABLE}), "{escaped_col}")) '
+                    f'END AS "{escaped_col}"'
+                )
+            else:
+                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE \'[redacted]\' END AS "{escaped_col}"'
+            repl_list.append(expr)
+        replacements = ", ".join(repl_list)
+        select_list = f"* REPLACE ({replacements})"
+
+    try:
+        con.execute(
+            f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS SELECT {select_list} FROM {table_name}{where_sql}"
+        )
+    except BaseException:
+        _drop_analyst_cid_salt(con)
+        raise
     return _ANALYST_WINDOW_VIEW
+
+
+def _drop_analyst_cid_salt(con: duckdb.DuckDBPyConnection) -> None:
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {_ANALYST_CID_SALT_TABLE}")
+    except Exception:
+        logger.debug("[query] failed to drop analyst cid-salt table", exc_info=True)
 
 
 def _run_validated_query(
