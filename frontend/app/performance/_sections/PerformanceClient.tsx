@@ -19,24 +19,27 @@ import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
 import { useFieldLabel } from '@/hooks/useFieldLabel';
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { FiltersPayload } from '@/types/filters'
+type PerformanceUrlRow = components['schemas']['PerformanceUrlRow']
+type PerformanceAsnRow = components['schemas']['PerformanceAsnRow']
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
-const urlColumns = makeLatencyColumns('url', 'URL', 'url')
-const asnColumns = makeLatencyColumns('label', 'ASN', 'asn')
+const urlColumns = makeLatencyColumns<PerformanceUrlRow>('url', 'URL', 'url')
+const asnColumns = makeLatencyColumns<PerformanceAsnRow>('label', 'ASN', 'asn')
 
 // Module-level so identity is stable across renders — PlotlyChart's React.memo
 // shallow-compares layout, and a fresh object literal each render forces a
 // full re-plot.
-const WATERFALL_LAYOUT = {
+const WATERFALL_LAYOUT: PlotlyLayout = {
   xaxis: { title: 'Latency (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
   yaxis: { autorange: 'reversed' },
   margin: { l: 140, r: 20, t: 20, b: 40 },
   showlegend: false,
 }
-const TTL_DIST_LAYOUT = { yaxis: { title: 'Count' } }
-const SCATTER_LAYOUT = {
+const TTL_DIST_LAYOUT: PlotlyLayout = { yaxis: { title: 'Count' } }
+const SCATTER_LAYOUT: PlotlyLayout = {
   xaxis: { title: 'Origin TTFB (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
   yaxis: { title: 'Edge Processing (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
 }
@@ -125,25 +128,26 @@ function PerformanceBody({
 
   // ── Charts ──────────────────────────────────────────────────────────────
 
-  const ttlDistData = React.useMemo(() => {
-    if (!distData?.ttl_dist?.length) return []
+  const ttlDist = distData?.ttl_dist
+  const ttlDistData = React.useMemo((): PlotlyTrace[] => {
+    if (!ttlDist?.length) return []
     return [{
-      x: distData.ttl_dist.map(d => d.bucket),
-      y: distData.ttl_dist.map(d => d.count),
+      x: ttlDist.map(d => d.bucket),
+      y: ttlDist.map(d => d.count),
       type: 'bar',
       marker: { color: '#6366f1' }
     }]
-  }, [distData?.ttl_dist])
+  }, [ttlDist])
 
-  const scatterData = React.useMemo(() => {
-    if (!coreData?.scatter?.length) return []
-    // `cache` is typed `unknown` in the generated schema and the backend can
-    // legitimately emit null; narrow at runtime so a dirty row falls into MISS
-    // instead of throwing `null.startsWith` during render and crashing the
-    // whole route to the error boundary.
-    const isHit = (c: unknown) => typeof c === 'string' && c.startsWith('HIT')
-    const hit = coreData.scatter.filter(d => isHit(d.cache))
-    const miss = coreData.scatter.filter(d => !isHit(d.cache))
+  const scatterRows = coreData?.scatter
+  const scatterData = React.useMemo((): PlotlyTrace[] => {
+    if (!scatterRows?.length) return []
+    // The backend can legitimately emit a null `cache`; a dirty row falls into MISS
+    // instead of throwing `null.startsWith` during render and crashing the whole
+    // route to the error boundary.
+    const isHit = (c: string | null | undefined) => c?.startsWith('HIT') === true
+    const hit = scatterRows.filter(d => isHit(d.cache))
+    const miss = scatterRows.filter(d => !isHit(d.cache))
     return [
       {
         x: hit.map(d => d.origin),
@@ -162,14 +166,14 @@ function PerformanceBody({
         marker: { color: CHART_COLORS.warning, size: 4, opacity: 0.6 }
       }
     ]
-  }, [coreData?.scatter])
+  }, [scatterRows])
   // One bar per component, each on its own y-row. Averages are additive,
   // but stacking them buries the small components when one (typically
   // origin_wait) dominates. Per-row bars keep every component visible at
   // its true scale on the shared x-axis. The y-axis label identifies each
   // bar, so no legend is needed.
-  const waterfallData = React.useMemo(() => {
-    const avg = coreData?.waterfall?.avg
+  const avg = coreData?.waterfall?.avg
+  const waterfallData = React.useMemo((): PlotlyTrace[] => {
     if (!avg) return []
     return [
       { x: [avg.edge_processing || 0], y: ['Edge Processing'],  type: 'bar', orientation: 'h', marker: { color: '#8b5cf6' }, showlegend: false },
@@ -177,7 +181,7 @@ function PerformanceBody({
       { x: [avg.origin_download || 0], y: ['Origin Download'],  type: 'bar', orientation: 'h', marker: { color: '#ec4899' }, showlegend: false },
       { x: [avg.client_download || 0], y: ['Client Download'],  type: 'bar', orientation: 'h', marker: { color: CHART_COLORS.success }, showlegend: false },
     ]
-  }, [coreData?.waterfall])
+  }, [avg])
 
   return (
     <>

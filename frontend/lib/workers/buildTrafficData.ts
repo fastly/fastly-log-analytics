@@ -1,4 +1,5 @@
 import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
+import type { PlotlyTrace } from '@/types/plotly'
 
 /**
  * Async wrapper around buildTrafficData that runs on a Web Worker
@@ -18,7 +19,7 @@ import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-cha
  */
 const WORKER_THRESHOLD = 2000
 
-export function buildTrafficDataAsync(params: BuildTrafficDataParams): Promise<any[]> {
+export function buildTrafficDataAsync(params: BuildTrafficDataParams): Promise<PlotlyTrace[]> {
   const n = params.aggregates?.time_series?.length ?? 0
 
   // SSR / test path: synchronous. Skip worker.

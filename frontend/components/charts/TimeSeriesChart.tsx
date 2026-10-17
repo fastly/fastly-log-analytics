@@ -4,16 +4,17 @@ import React, { useMemo } from 'react'
 import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 
 interface TimeSeriesChartProps {
-  data: any[]
+  data: PlotlyTrace[]
   startTime?: string | null
   endTime?: string | null
   timezone: string
-  layout?: Record<string, any>
+  layout?: PlotlyLayout
   className?: string
   height?: number | string
-  onRelayout?: (event: any) => void
+  onRelayout?: (event: PlotlyRelayoutEvent) => void
 }
 
 /**
@@ -31,7 +32,7 @@ function TimeSeriesChartImpl({
   onRelayout,
 }: TimeSeriesChartProps) {
   const mergedLayout = useMemo(
-    () => ({
+    (): PlotlyLayout => ({
       ...TIME_HOVER_LAYOUT,
       xaxis: makeTimeXAxis(startTime, endTime, timezone),
       ...layout,

@@ -2,6 +2,7 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
+import type { Map as MapLibreMap } from 'maplibre-gl'
 
 /**
  * Forces the ~1MB maplibre-gl chunk to download AND maplibre's
@@ -31,13 +32,14 @@ const PrewarmMap = dynamic(
     const maplibre = await import('maplibre-gl')
     // Prewarm can create the shared worker pool before any visible map loads.
     maplibre.setWorkerUrl('/maplibre-gl-worker.mjs')
-    const MaplibreMap = maplibre.Map || (maplibre as any).default?.Map
+    const MaplibreMap: typeof MapLibreMap | undefined =
+      maplibre.Map || (maplibre as { default?: { Map?: typeof MapLibreMap } }).default?.Map
 
     function PrewarmInner() {
       const ref = React.useRef<HTMLDivElement>(null)
       React.useEffect(() => {
         if (!ref.current || !MaplibreMap) return
-        let map: any = null
+        let map: MapLibreMap | null = null
         try {
           map = new MaplibreMap({
             container: ref.current,

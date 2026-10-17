@@ -21,6 +21,7 @@ import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
 import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
+import { columnIdOf } from '@/components/DataTable/columnId'
 import type { components } from '@/types/api.generated'
 
 interface TopFlaggedTableProps {
@@ -232,7 +233,7 @@ export function TopFlaggedTable({
     },
   ], [serviceId, labelBySid])
 
-  const columnIds = React.useMemo(() => columns.map((c) => (c.id ?? (c as any).accessorKey) as string), [columns])
+  const columnIds = React.useMemo(() => columns.map(columnIdOf), [columns])
 
   const since = effectiveHours >= 24 ? `${effectiveHours / 24}d` : `${effectiveHours}h`
 

@@ -15,7 +15,9 @@ vi.mock('@/hooks/useMaskIps', () => ({
   useMaskIps: () => false,
 }))
 
-import { makeLatencyColumns } from '@/lib/table-utils'
+import { makeLatencyColumns, type LatencyRow } from '@/lib/table-utils'
+
+type UrlRow = LatencyRow & { url?: string | null }
 
 afterEach(() => cleanup())
 
@@ -30,7 +32,7 @@ function ctx(value: any, originalRow: Record<string, any>) {
 }
 
 describe('makeLatencyColumns — labelField cell', () => {
-  const cols = makeLatencyColumns('url', 'URL', 'url')
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
   const labelCell = cols[0].cell as (info: any) => React.ReactElement
 
   it('renders plain span when filter field is null', () => {
@@ -53,7 +55,7 @@ describe('makeLatencyColumns — labelField cell', () => {
 })
 
 describe('makeLatencyColumns — numeric cells', () => {
-  const cols = makeLatencyColumns('url', 'URL', 'url')
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
   const requestsCell = cols[1].cell as (info: any) => string
   const avgCell = cols[2].cell as (info: any) => string
   const p50Cell = cols[3].cell as (info: any) => string

@@ -42,6 +42,40 @@ function CopyTextButton({ text, label, title, className }: { text: string; label
   )
 }
 
+const ADMIN_ONLY_COLUMNS: ColumnDef<CronRun>[] = [
+      {
+        accessorKey: 'files_deleted_fos',
+        header: 'Log Files Deleted',
+        cell: ({ row }) => {
+          if (row.original.status === 'running' || row.original.task !== 'log_discovery') {
+             return <span className="text-muted-foreground">—</span>
+          }
+          return (
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">
+              {formatCount(row.original.files_deleted_fos || 0)}
+            </span>
+          )
+        }
+      },
+      {
+        id: 'rows_committed',
+        header: 'Rows Committed',
+        cell: ({ row }) => {
+          if (row.original.status === 'running') {
+             return <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
+          }
+          // For commit tasks, rows_ingested holds the rows committed to Iceberg.
+          // For sync tasks, this field holds rows written to the local buffer.
+          const val = row.original.task === 'commit' ? row.original.rows_ingested : null
+          return (
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">
+              {val != null ? formatCount(val) : <span className="text-muted-foreground">—</span>}
+            </span>
+          )
+        }
+      }
+]
+
 export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
   return React.useMemo(() => [
     {
@@ -57,7 +91,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
     {
       id: 'finished_at',
       meta: { label: 'Finished At' },
-      accessorFn: (row: any) => {
+      accessorFn: (row) => {
         if (!row.started_at || row.duration_s == null) return null
         return new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString()
       },
@@ -282,38 +316,6 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
         )
       }
     },
-    ...(isAnalyst ? [] : [
-      {
-        accessorKey: 'files_deleted_fos',
-        header: 'Log Files Deleted',
-        cell: ({ row }: any) => {
-          if (row.original.status === 'running' || row.original.task !== 'log_discovery') {
-             return <span className="text-muted-foreground">—</span>
-          }
-          return (
-            <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {formatCount(row.original.files_deleted_fos || 0)}
-            </span>
-          )
-        }
-      },
-      {
-        id: 'rows_committed',
-        header: 'Rows Committed',
-        cell: ({ row }: any) => {
-          if (row.original.status === 'running') {
-             return <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
-          }
-          // For commit tasks, rows_ingested holds the rows committed to Iceberg.
-          // For sync tasks, this field holds rows written to the local buffer.
-          const val = row.original.task === 'commit' ? row.original.rows_ingested : null
-          return (
-            <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {val !== null ? formatCount(val) : <span className="text-muted-foreground">—</span>}
-            </span>
-          )
-        }
-      }
-    ])
+    ...(isAnalyst ? [] : ADMIN_ONLY_COLUMNS),
   ], [isAnalyst])
 }

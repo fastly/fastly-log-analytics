@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Shield, ShieldAlert, Cpu, Globe, Activity, HelpCircle } from 'lucide-react'
@@ -39,8 +39,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         },
       })
       if (reqErr) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((reqErr as any)?.detail || 'Failed to fetch threat intelligence data')
+        throw new Error(extractApiError(reqErr))
       }
       return res?.data || []
     },

@@ -251,8 +251,8 @@ export function CronTab({
                     <DropdownMenuContent align="end" className="w-auto min-w-[200px]">
                       {table
                         .getAllColumns()
-                        .filter((column: any) => column.getCanHide())
-                        .map((column: any) => {
+                        .filter((column) => column.getCanHide())
+                        .map((column) => {
                           return (
                             <DropdownMenuCheckboxItem
                               key={column.id}

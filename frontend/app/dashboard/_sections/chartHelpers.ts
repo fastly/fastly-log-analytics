@@ -1,4 +1,5 @@
 import { TIME_HOVER_LAYOUT, makeTimeXAxis } from '@/lib/chart-helpers'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { DashboardAggregates, DashboardCatalog } from './types'
 
 // densifyBarSeries now lives in lib/chart-helpers (shared with the scoring
@@ -9,7 +10,7 @@ export { densifyBarSeries } from '@/lib/chart-helpers'
 export { buildTrafficData, getIntervalSeconds, type BuildTrafficDataParams } from '@/lib/traffic-chart'
 
 export interface BuildChartLayoutParams {
-  trafficData: any[]
+  trafficData: PlotlyTrace[]
   aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
   metric: string
   startTime: string | null
@@ -29,7 +30,7 @@ export function buildChartLayout({
   endTime,
   timezone,
   catalog,
-}: BuildChartLayoutParams): any {
+}: BuildChartLayoutParams): PlotlyLayout {
   const actualMetric = aggregates?.metric || metric
   const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
 

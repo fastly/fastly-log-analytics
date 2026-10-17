@@ -12,7 +12,7 @@ function extractText(children: React.ReactNode): string {
     if (typeof child === "string" || typeof child === "number") {
       text += child;
     } else if (React.isValidElement(child)) {
-      text += extractText((child.props as any).children);
+      text += extractText((child.props as { children?: React.ReactNode }).children);
     }
   });
   return text;
@@ -25,7 +25,7 @@ function getLabelsFromChildren(children: React.ReactNode): Record<string, string
     React.Children.forEach(node, (child) => {
       if (!React.isValidElement(child)) return;
 
-      const element = child as React.ReactElement<any>;
+      const element = child as React.ReactElement<{ value?: unknown; children?: React.ReactNode }>;
       if (element.props && element.props.value !== undefined) {
         labels[String(element.props.value)] = extractText(element.props.children);
       }
@@ -66,7 +66,7 @@ const Select = <Value extends string = string>({ children, ...props }: React.Com
 
   return (
     <SelectContext.Provider value={{ labels, registerLabel, unregisterLabel }}>
-      <SelectPrimitive.Root {...props as any}>{children}</SelectPrimitive.Root>
+      <SelectPrimitive.Root {...props}>{children}</SelectPrimitive.Root>
     </SelectContext.Provider>
   );
 }
@@ -97,10 +97,10 @@ const SelectValue = React.forwardRef<
       className={cn("flex flex-1 text-left *:data-[slot=select-value]:line-clamp-1", className)}
       {...props}
     >
-      {(val: any) => {
+      {(val: unknown) => {
         if (val == null || val === '') return (placeholder as React.ReactNode) || null;
         if (children) {
-          return typeof children === 'function' ? (children as any)(val) : children;
+          return typeof children === 'function' ? (children as (value: unknown) => React.ReactNode)(val) : children;
         }
         return ctx?.labels[String(val)] || String(val);
       }}

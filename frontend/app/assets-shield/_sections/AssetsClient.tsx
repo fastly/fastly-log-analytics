@@ -14,20 +14,30 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/comp
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatBytes, formatPercent, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import type { RangeWireArgs } from '@/lib/range-wire'
+import type { FiltersPayload } from '@/types/filters'
+import type { components } from '@/types/api.generated'
+
+type AssetsAggregates = components['schemas']['AssetsAggregatesResponse']
+
+interface AssetsReportContentProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
+  startTime: string | null
+  endTime: string | null
+  activeServiceId: string | null
+  filterPayload: FiltersPayload
+}
 
 export function AssetsReportContent({
   startTime,
   endTime,
-  timezone,
   activeServiceId,
   filterPayload,
-  config,
   relativeRange,
   isAutoRange,
   anchor,
-}: any) {
+}: AssetsReportContentProps) {
   const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const bundle = useServiceQuery(
+  const bundle = useServiceQuery<AssetsAggregates | undefined>(
     ['assets', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
     async ({ signal }) => {
       const { data } = await client.POST('/api/assets/aggregates', {
@@ -37,7 +47,7 @@ export function AssetsReportContent({
           ...rangeBody,
         },
       })
-      return data as any
+      return data
     },
   )
 
@@ -63,7 +73,7 @@ export function AssetsReportContent({
     const fonts = ["*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot"]
     const video = ["*.m3u8", "*.ts", "*.mp4", "*.m4s", "*.webm"]
 
-    let filterPayload: any = {}
+    let filterPayload: FiltersPayload = {}
 
     if (assetType === 'Images') {
       filterPayload = { url: { mode: 'include', values: images } }
@@ -194,7 +204,7 @@ export function AssetsReportContent({
             </p>
           </div>
         ) : (
-          breakdown.map((row: any) => {
+          breakdown.map((row) => {
             let icon = HelpCircle
             if (row.asset_type === 'Images') icon = Layers
             else if (row.asset_type === 'Documents') icon = FileText
@@ -293,10 +303,10 @@ export function AssetsReportContent({
             <>
               <div className="space-y-6">
                 <TooltipProvider delay={100}>
-                  {breakdown.map((row: any) => {
+                  {breakdown.map((row) => {
                     const type = row.asset_type
-                    const typeStatuses = cachePerf.filter((c: any) => c.asset_type === type)
-                    const totalRequests = typeStatuses.reduce((acc: number, curr: any) => acc + curr.requests, 0)
+                    const typeStatuses = cachePerf.filter((c) => c.asset_type === type)
+                    const totalRequests = typeStatuses.reduce((acc, curr) => acc + curr.requests, 0)
 
                     return (
                       <div key={type} className="space-y-2">
@@ -313,7 +323,7 @@ export function AssetsReportContent({
                           </Link>
                         </div>
                         <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
-                          {typeStatuses.map((statusRow: any) => {
+                          {typeStatuses.map((statusRow) => {
                             const pct = totalRequests > 0 ? (statusRow.requests / totalRequests) * 100 : 0
                             if (pct === 0) return null
                             return (
@@ -387,10 +397,10 @@ export function AssetsReportContent({
             <>
               <div className="space-y-6">
                 <TooltipProvider delay={100}>
-                  {breakdown.map((row: any) => {
+                  {breakdown.map((row) => {
                     const type = row.asset_type
-                    const typeComp = compPerf.filter((c: any) => c.asset_type === type)
-                    const totalRequests = typeComp.reduce((acc: number, curr: any) => acc + curr.requests, 0)
+                    const typeComp = compPerf.filter((c) => c.asset_type === type)
+                    const totalRequests = typeComp.reduce((acc, curr) => acc + curr.requests, 0)
 
                     return (
                       <div key={type} className="space-y-2">
@@ -407,7 +417,7 @@ export function AssetsReportContent({
                           </Link>
                         </div>
                         <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
-                          {typeComp.map((compRow: any) => {
+                          {typeComp.map((compRow) => {
                             const pct = totalRequests > 0 ? (compRow.requests / totalRequests) * 100 : 0
                             if (pct === 0) return null
                             return (
@@ -501,8 +511,8 @@ export function AssetsReportContent({
                     </td>
                   </tr>
                 ) : (
-                  largeUncompressed.map((row: any, idx: number) => (
-                    <tr key={idx} className="hover:bg-muted/50 transition-colors">
+                  largeUncompressed.map((row) => (
+                    <tr key={`${row.url}|${row.status}`} className="hover:bg-muted/50 transition-colors">
                       <td className="py-3 px-2 max-w-[200px] truncate font-mono text-xs" title={row.url}>
                         <Link
                           href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=${encodeURIComponent(row.url)}`}
@@ -575,8 +585,8 @@ export function AssetsReportContent({
                     </td>
                   </tr>
                 ) : (
-                  lowTtl.map((row: any, idx: number) => (
-                    <tr key={idx} className="hover:bg-muted/50 transition-colors">
+                  lowTtl.map((row) => (
+                    <tr key={`${row.url}|${row.asset_type}`} className="hover:bg-muted/50 transition-colors">
                       <td className="py-3 px-2 max-w-[200px] truncate font-mono text-xs" title={row.url}>
                         <Link
                           href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=${encodeURIComponent(row.url)}`}

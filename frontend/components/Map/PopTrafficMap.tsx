@@ -9,7 +9,7 @@ import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount, formatCount } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, type MapFillColor } from '@/components/Map/baseLayers'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 type CoordTree = number | CoordTree[]
@@ -264,8 +264,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       }
 
       matchExpression.push(countryFill(theme === 'dark'))
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression as any)
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression as MapFillColor)
     }
 
     updateLayers()

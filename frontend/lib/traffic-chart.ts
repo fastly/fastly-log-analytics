@@ -3,6 +3,7 @@ import { INTERVAL_SECONDS } from '@/lib/constants'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { CHART_COLORS } from '@/lib/chart-colors'
 import type { components } from '@/types/api.generated'
+import type { PlotlyTrace } from '@/types/plotly'
 
 // Only the series metadata is read here (also runs in a Web Worker).
 type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'metric' | 'interval' | 'time_series'>>
@@ -21,7 +22,7 @@ export interface BuildTrafficDataParams {
   timezone: string
   metric: string
   effectiveInterval: string
-  hiddenCategories: Set<string>
+  hiddenCategories: ReadonlySet<string>
   catalog: Catalog | null | undefined
 }
 
@@ -71,7 +72,7 @@ export function buildTrafficData({
   effectiveInterval,
   hiddenCategories,
   catalog,
-}: BuildTrafficDataParams): any[] {
+}: BuildTrafficDataParams): PlotlyTrace[] {
   const time_series = aggregates?.time_series
   if (!time_series?.length) return []
 
@@ -103,7 +104,7 @@ export function buildTrafficData({
     ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
     : time_series
 
-  let traces: any[] = []
+  let traces: PlotlyTrace[] = []
 
   if (hasCategories) {
     const catMap: Record<string, { x: string[], y: number[] }> = {}

@@ -30,6 +30,8 @@ import { CardGrid } from './CardGrid'
 import { buildTrafficData, buildChartLayout } from './chartHelpers'
 import { buildTrafficDataAsync } from '@/lib/workers/buildTrafficData'
 import { COLLAPSED_SECTIONS_KEY } from './categories'
+import { useLocalStorageString } from '@/hooks/useLocalStorageString'
+import type { PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 import type { DashboardBodyProps } from './types'
 
 // P-4 slice 3: mirror the section-selector pattern used by /security and
@@ -86,48 +88,45 @@ function DashboardBody({
   const [metric, setMetric] = React.useState("requests")
   const router = useRouter()
 
-  const [hiddenCategories, setHiddenCategories] = React.useState<Set<string>>(new Set())
+  // Hidden legend categories are scoped to the metric they were hidden under: switching metric
+  // drops them (derived, so no reset effect), and toggling re-scopes the set to the current one.
+  const [hiddenState, setHiddenState] = React.useState<{ metric: string; set: ReadonlySet<string> }>(
+    () => ({ metric: 'requests', set: new Set() }),
+  )
+  const hiddenCategories = React.useMemo<ReadonlySet<string>>(
+    () => (hiddenState.metric === metric ? hiddenState.set : new Set<string>()),
+    [hiddenState, metric],
+  )
 
   const toggleCategory = React.useCallback((cat: string) => {
-    setHiddenCategories(prev => {
-      const next = new Set(prev)
+    setHiddenState((prev) => {
+      const next = new Set(prev.metric === metric ? prev.set : [])
       if (next.has(cat)) next.delete(cat)
       else next.add(cat)
-      return next
+      return { metric, set: next }
     })
-  }, [])
+  }, [metric])
 
   // Collapsed-section state, persisted to localStorage so user's choices stick
   // across reloads. SSR-safe: start EMPTY so the server and the first client
   // render agree (reading localStorage in the initializer diverged the first
   // client render from the server for any user who had collapsed a section →
   // React #418). The persisted set is loaded right after mount.
-  const [collapsedSections, setCollapsedSections] = React.useState<Set<string>>(new Set())
-  React.useEffect(() => {
+  const [collapsedRaw, writeCollapsedRaw] = useLocalStorageString(COLLAPSED_SECTIONS_KEY)
+  const collapsedSections = React.useMemo<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem(COLLAPSED_SECTIONS_KEY)
-      if (raw) setCollapsedSections(new Set<string>(JSON.parse(raw)))
+      return collapsedRaw ? new Set<string>(JSON.parse(collapsedRaw)) : new Set<string>()
     } catch {
-      /* ignore malformed / unavailable storage */
+      return new Set<string>()
     }
-  }, [])
+  }, [collapsedRaw])
 
   const toggleSectionCollapsed = React.useCallback((id: string) => {
-    setCollapsedSections(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      try {
-        localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...next]))
-      } catch { /* ignore quota / private-mode errors */ }
-      return next
-    })
-  }, [])
-
-  // Clear hidden categories when metric changes to avoid confusing states
-  React.useEffect(() => {
-    setHiddenCategories(new Set())
-  }, [metric])
+    const next = new Set(collapsedSections)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    writeCollapsedRaw(JSON.stringify([...next]))
+  }, [collapsedSections, writeCollapsedRaw])
 
   const isReady = useIsDataReady()
 
@@ -236,34 +235,30 @@ function DashboardBody({
     [aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
 
-  const [trafficData, setTrafficData] = React.useState<any[]>(() => buildTrafficData(trafficParams))
-  // True while the worker round-trip for the current trafficParams is in
-  // flight. TrafficChart uses this to keep the skeleton up instead of
-  // flashing "No data available" when the bundle has arrived but the
-  // transform hasn't produced traces yet.
-  const [transformPending, setTransformPending] = React.useState(true)
+  // The traces last produced for a given params object. While the worker round-trip for the
+  // CURRENT trafficParams is in flight, `transformed.params !== trafficParams` — that is the
+  // pending signal TrafficChart uses to keep the skeleton up instead of flashing "No data
+  // available" before the transform has actually produced traces.
+  const [transformed, setTransformed] = React.useState<{ params: typeof trafficParams; traces: PlotlyTrace[] }>(
+    () => ({ params: trafficParams, traces: buildTrafficData(trafficParams) }),
+  )
+  const trafficData = transformed.traces
+  const transformPending = transformed.params !== trafficParams
 
   React.useEffect(() => {
     let cancelled = false
-    setTransformPending(true)
     buildTrafficDataAsync(trafficParams)
       .then((traces) => {
         // Avoid landing a stale result after a fast user filter
         // change: only commit if this effect's params are still the
         // active ones.
-        if (!cancelled) {
-          setTrafficData(traces)
-          setTransformPending(false)
-        }
+        if (!cancelled) setTransformed({ params: trafficParams, traces })
       })
       .catch(() => {
         // Async failure path falls back to sync (matches the
         // worker-construction fallback inside buildTrafficDataAsync
         // for the case where the promise rejected for a real reason).
-        if (!cancelled) {
-          setTrafficData(buildTrafficData(trafficParams))
-          setTransformPending(false)
-        }
+        if (!cancelled) setTransformed({ params: trafficParams, traces: buildTrafficData(trafficParams) })
       })
     return () => {
       cancelled = true
@@ -289,12 +284,17 @@ function DashboardBody({
     })
   }, [addFilter])
 
-  const handleChartRelayout = React.useCallback((event: any) => {
+  const handleChartRelayout = React.useCallback((event: PlotlyRelayoutEvent) => {
     // Skip non-range events (autorange toggle, spike config, etc.)
-    if (event?.['xaxis.autorange'] === true || event?.['xaxis.showspikes'] !== undefined) return
+    if (event['xaxis.autorange'] === true || event['xaxis.showspikes'] !== undefined) return
 
-    const x0 = event?.['xaxis.range[0]'] ?? event?.['xaxis.range']?.[0]
-    const x1 = event?.['xaxis.range[1]'] ?? event?.['xaxis.range']?.[1]
+    const nested = Array.isArray(event['xaxis.range']) ? event['xaxis.range'] : []
+    const bound = (flat: unknown, fallback: unknown): string | number | undefined => {
+      const v = flat ?? fallback
+      return typeof v === 'string' || typeof v === 'number' ? v : undefined
+    }
+    const x0 = bound(event['xaxis.range[0]'], nested[0])
+    const x1 = bound(event['xaxis.range[1]'], nested[1])
 
     if (x0 === undefined || x1 === undefined) return
 

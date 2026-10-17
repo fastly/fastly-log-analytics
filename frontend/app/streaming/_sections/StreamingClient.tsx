@@ -18,33 +18,34 @@ import { StatCard } from '@/components/ui/stat-card'
 import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 
 import { formatCountMaybe } from '@/lib/format'
-const SESSIONS_LAYOUT = {
+const SESSIONS_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Active Viewers' } },
   yaxis2: { title: { text: 'Rebuffer Rate (%)' }, overlaying: 'y', side: 'right' as const, rangemode: 'tozero' },
 }
 
-const SESSION_STARTS_LAYOUT = {
+const SESSION_STARTS_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'New Sessions' } },
   barcornerradius: 3,
 }
 
-const BUFFER_LAYOUT = {
+const BUFFER_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Buffer Length (ms)' } },
   yaxis2: { title: { text: 'Starvation Rate (%)' }, overlaying: 'y', side: 'right' as const },
 }
 
-const BITRATE_LAYOUT = {
+const BITRATE_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Bitrate (kbps)' } },
   yaxis2: { title: { text: 'Utilization Ratio' }, overlaying: 'y', side: 'right' as const },
 }
 
-const THROUGHPUT_LAYOUT = {
+const THROUGHPUT_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Throughput (kbps)' } },
 }
 
-const STARTUP_LAYOUT = {
+const STARTUP_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Startup Ratio (%)' } },
 }
 
@@ -79,10 +80,15 @@ function StreamingBody({
     }
   }, [queryClient])
 
-  const handleChartRelayout = React.useCallback((event: Record<string, unknown>) => {
-    if (event?.['xaxis.autorange'] === true || event?.['xaxis.showspikes'] !== undefined) return
-    const x0 = (event?.['xaxis.range[0]'] ?? (event?.['xaxis.range'] as unknown[])?.[0]) as string | number | undefined
-    const x1 = (event?.['xaxis.range[1]'] ?? (event?.['xaxis.range'] as unknown[])?.[1]) as string | number | undefined
+  const handleChartRelayout = React.useCallback((event: PlotlyRelayoutEvent) => {
+    if (event['xaxis.autorange'] === true || event['xaxis.showspikes'] !== undefined) return
+    const nested = Array.isArray(event['xaxis.range']) ? event['xaxis.range'] : []
+    const bound = (flat: unknown, fallback: unknown): string | number | undefined => {
+      const v = flat ?? fallback
+      return typeof v === 'string' || typeof v === 'number' ? v : undefined
+    }
+    const x0 = bound(event['xaxis.range[0]'], nested[0])
+    const x1 = bound(event['xaxis.range[1]'], nested[1])
     if (x0 === undefined || x1 === undefined) return
     try {
       const toLocalStr = (val: string | number) => {
@@ -118,15 +124,7 @@ function StreamingBody({
   )
 
   const data = cmcdQuery.data
-  const overview = data?.overview as {
-    active_sessions?: number
-    peak_viewers?: number
-    avg_session_duration?: number
-    rebuffer_rate?: number
-    avg_bitrate?: number
-    avg_buffer_length?: number
-    median_throughput?: number
-  } | undefined
+  const overview = data?.overview
 
   // ── Chart data ──────────────────────────────────────────────────────────
 
@@ -135,21 +133,21 @@ function StreamingBody({
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.p50_buffer),
         name: 'p50 Buffer',
         type: 'scatter' as const,
         line: { color: '#6366f1' },
       },
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.p95_buffer),
         name: 'p95 Buffer',
         type: 'scatter' as const,
         line: { color: '#a78bfa', dash: 'dot' },
       },
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.starvation_rate),
         name: 'Starvation Rate',
         type: 'bar' as const,
@@ -162,9 +160,9 @@ function StreamingBody({
   const bitrateData = React.useMemo(() => {
     const ts = data?.bitrate_ts
     if (!ts?.length) return []
-    const traces: Record<string, unknown>[] = [
+    const traces: PlotlyTrace[] = [
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.avg_bitrate),
         name: 'Avg Bitrate',
         type: 'scatter' as const,
@@ -173,7 +171,7 @@ function StreamingBody({
     ]
     if (ts.some((d) => d.utilization_ratio != null)) {
       traces.push({
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.utilization_ratio),
         name: 'Utilization',
         type: 'scatter' as const,
@@ -188,9 +186,9 @@ function StreamingBody({
     const ts = data?.throughput_ts
     if (!ts?.length) return []
     return [
-      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p50), name: 'p50', type: 'scatter' as const, line: { color: '#6366f1' } },
-      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p95), name: 'p95', type: 'scatter' as const, line: { color: '#a78bfa', dash: 'dot' } },
-      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p99), name: 'p99', type: 'scatter' as const, line: { color: '#ec4899', dash: 'dash' } },
+      { x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p50), name: 'p50', type: 'scatter' as const, line: { color: '#6366f1' } },
+      { x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p95), name: 'p95', type: 'scatter' as const, line: { color: '#a78bfa', dash: 'dot' } },
+      { x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p99), name: 'p99', type: 'scatter' as const, line: { color: '#ec4899', dash: 'dash' } },
     ]
   }, [data?.throughput_ts, timezone])
 
@@ -199,7 +197,7 @@ function StreamingBody({
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.startup_ratio),
         type: 'scatter' as const,
         fill: 'tozeroy' as const,
@@ -211,9 +209,9 @@ function StreamingBody({
   const sessionsData = React.useMemo(() => {
     const ts = data?.sessions_ts
     if (!ts?.length) return []
-    const traces: Record<string, unknown>[] = [
+    const traces: PlotlyTrace[] = [
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.concurrent_sessions),
         name: 'Active Viewers',
         type: 'scatter' as const,
@@ -223,7 +221,7 @@ function StreamingBody({
     ]
     if (ts.some((d) => d.rebuffer_session_pct != null)) {
       traces.push({
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.rebuffer_session_pct),
         name: 'Rebuffer Rate',
         type: 'scatter' as const,
@@ -239,7 +237,7 @@ function StreamingBody({
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
+        x: ts.map((d) => formatDate(d.bucket, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.new_sessions),
         name: 'New Sessions',
         type: 'bar' as const,
@@ -266,7 +264,7 @@ function StreamingBody({
     if (!dist?.length) return []
     return [
       {
-        labels: dist.map((d) => cmcdLabel(OBJECT_TYPE_LABELS, d.object_type as string)),
+        labels: dist.map((d) => cmcdLabel(OBJECT_TYPE_LABELS, d.object_type ?? '')),
         values: dist.map((d) => d.request_count),
         type: 'pie' as const,
         hole: 0.4,
@@ -279,7 +277,7 @@ function StreamingBody({
     if (!dist?.length) return []
     return dist.map((d) => ({
       ...d,
-      streaming_format: cmcdLabel(STREAMING_FORMAT_LABELS, d.streaming_format as string),
+      streaming_format: cmcdLabel(STREAMING_FORMAT_LABELS, d.streaming_format ?? ''),
     }))
   }, [data?.streaming_format_dist])
 

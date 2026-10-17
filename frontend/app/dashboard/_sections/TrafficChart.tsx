@@ -14,6 +14,7 @@ import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/constants'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 import type { DashboardAggregates, DashboardCatalog, ReportConfiguration } from './types'
 
 export interface TrafficChartProps {
@@ -24,9 +25,9 @@ export interface TrafficChartProps {
   setTrend: (t: string) => void
   config: ReportConfiguration
   intervalButtons: React.ReactNode
-  trafficData: any[]
-  chartLayout: any
-  hiddenCategories: Set<string>
+  trafficData: PlotlyTrace[]
+  chartLayout: PlotlyLayout
+  hiddenCategories: ReadonlySet<string>
   toggleCategory: (cat: string) => void
   isReady: boolean
   isLoadingAggs: boolean
@@ -36,7 +37,7 @@ export interface TrafficChartProps {
   // before the transform has actually produced traces.
   transformPending: boolean
   aggregates: DashboardAggregates | null | undefined
-  onChartRelayout: (event: any) => void
+  onChartRelayout: (event: PlotlyRelayoutEvent) => void
   startTime: string | null
   endTime: string | null
   timezone: string
@@ -165,20 +166,21 @@ export function TrafficChart({
         <div className="flex items-center gap-2 mb-2 relative z-10 flex-wrap">
           <ButtonGroup>
             {trafficData.filter(t => t.type === 'bar').map(trace => {
-              const isHidden = hiddenCategories.has(trace.name)
+              const name = trace.name ?? ''
+              const isHidden = hiddenCategories.has(name)
               return (
                 <Button
-                  key={trace.name}
+                  key={name}
                   variant={isHidden ? 'ghost' : 'default'}
                   size="sm"
-                  onClick={() => React.startTransition(() => toggleCategory(trace.name))}
+                  onClick={() => React.startTransition(() => toggleCategory(name))}
                   className={cn(
                     "h-9 text-xs px-2 shadow-none transition-colors sm:h-7 sm:text-[11px]",
                     !isHidden ? "bg-primary text-primary-foreground hover:bg-primary/90" : "hover:text-primary hover:bg-muted"
                   )}
                 >
-                  <span className="w-1.5 h-1.5 rounded-full mr-1.5" style={{ backgroundColor: trace.marker.color as string }} />
-                  {trace.name}
+                  <span className="w-1.5 h-1.5 rounded-full mr-1.5" style={{ backgroundColor: String(trace.marker?.color ?? '') }} />
+                  {name}
                 </Button>
               )
             })}

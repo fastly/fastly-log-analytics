@@ -55198,8 +55198,7 @@
           },
           "top_bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/TopBotRow"
             },
             "type": "array",
             "title": "Top Bots",
@@ -56626,19 +56625,16 @@
           "overview": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/CmcdOverview"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Overview"
+            ]
           },
           "buffer_health_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdBufferHealthPoint"
             },
             "type": "array",
             "title": "Buffer Health Ts",
@@ -56646,8 +56642,7 @@
           },
           "bitrate_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdBitratePoint"
             },
             "type": "array",
             "title": "Bitrate Ts",
@@ -56655,8 +56650,7 @@
           },
           "throughput_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdThroughputPoint"
             },
             "type": "array",
             "title": "Throughput Ts",
@@ -56664,8 +56658,7 @@
           },
           "top_content": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdTopContentRow"
             },
             "type": "array",
             "title": "Top Content",
@@ -56673,8 +56666,7 @@
           },
           "rebuffer_by_country": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdRebufferByCountryRow"
             },
             "type": "array",
             "title": "Rebuffer By Country",
@@ -56682,8 +56674,7 @@
           },
           "rebuffer_by_asn": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdRebufferByAsnRow"
             },
             "type": "array",
             "title": "Rebuffer By Asn",
@@ -56691,8 +56682,7 @@
           },
           "object_type_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdObjectTypeRow"
             },
             "type": "array",
             "title": "Object Type Dist",
@@ -56700,8 +56690,7 @@
           },
           "streaming_format_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdStreamingFormatRow"
             },
             "type": "array",
             "title": "Streaming Format Dist",
@@ -56709,8 +56698,7 @@
           },
           "sessions_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdSessionsPoint"
             },
             "type": "array",
             "title": "Sessions Ts",
@@ -56718,8 +56706,7 @@
           },
           "startup_ts": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdStartupPoint"
             },
             "type": "array",
             "title": "Startup Ts",
@@ -56727,8 +56714,7 @@
           },
           "session_duration_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CmcdSessionDurationRow"
             },
             "type": "array",
             "title": "Session Duration Dist",
@@ -56740,6 +56726,89 @@
           "available"
         ],
         "title": "CmcdAggregatesResponse"
+      },
+      "CmcdBitratePoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "avg_bitrate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Bitrate"
+          },
+          "utilization_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Utilization Ratio"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket"
+        ],
+        "title": "CmcdBitratePoint"
+      },
+      "CmcdBufferHealthPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "p50_buffer": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Buffer"
+          },
+          "p95_buffer": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Buffer"
+          },
+          "starvation_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starvation Rate"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket"
+        ],
+        "title": "CmcdBufferHealthPoint"
       },
       "CmcdDisableBody": {
         "properties": {
@@ -56776,6 +56845,216 @@
         },
         "type": "object",
         "title": "CmcdEnableBody"
+      },
+      "CmcdObjectTypeRow": {
+        "properties": {
+          "object_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "request_count"
+        ],
+        "title": "CmcdObjectTypeRow"
+      },
+      "CmcdOverview": {
+        "properties": {
+          "active_sessions": {
+            "type": "integer",
+            "title": "Active Sessions"
+          },
+          "rebuffer_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Rate"
+          },
+          "avg_bitrate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Bitrate"
+          },
+          "avg_buffer_length": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Buffer Length"
+          },
+          "median_throughput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Throughput"
+          },
+          "peak_viewers": {
+            "type": "integer",
+            "title": "Peak Viewers"
+          },
+          "avg_session_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Session Duration"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "active_sessions",
+          "peak_viewers"
+        ],
+        "title": "CmcdOverview"
+      },
+      "CmcdRebufferByAsnRow": {
+        "properties": {
+          "asn": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Asn"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "rebuffer_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Rate"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "avg_bitrate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Bitrate"
+          },
+          "avg_buffer_length": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Buffer Length"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "asn",
+          "label",
+          "session_count"
+        ],
+        "title": "CmcdRebufferByAsnRow"
+      },
+      "CmcdRebufferByCountryRow": {
+        "properties": {
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "rebuffer_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Rate"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "median_throughput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Throughput"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_count"
+        ],
+        "title": "CmcdRebufferByCountryRow"
       },
       "CmcdRequest": {
         "properties": {
@@ -56873,6 +57152,60 @@
         "type": "object",
         "title": "CmcdRequest"
       },
+      "CmcdSessionDurationRow": {
+        "properties": {
+          "duration_bucket": {
+            "type": "string",
+            "title": "Duration Bucket"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "duration_bucket",
+          "session_count"
+        ],
+        "title": "CmcdSessionDurationRow"
+      },
+      "CmcdSessionsPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "concurrent_sessions": {
+            "type": "integer",
+            "title": "Concurrent Sessions"
+          },
+          "rebuffer_session_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Session Pct"
+          },
+          "new_sessions": {
+            "type": "integer",
+            "title": "New Sessions"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket",
+          "concurrent_sessions",
+          "new_sessions"
+        ],
+        "title": "CmcdSessionsPoint"
+      },
       "CmcdSettingsResponse": {
         "properties": {
           "enabled": {
@@ -56906,6 +57239,31 @@
         "type": "object",
         "title": "CmcdSettingsResponse",
         "description": "CMCD feature settings."
+      },
+      "CmcdStartupPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "startup_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startup Ratio"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket"
+        ],
+        "title": "CmcdStartupPoint"
       },
       "CmcdStatusResponse": {
         "properties": {
@@ -56954,6 +57312,136 @@
         ],
         "title": "CmcdStatusResponse",
         "description": "``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off."
+      },
+      "CmcdStreamingFormatRow": {
+        "properties": {
+          "streaming_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Streaming Format"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_count"
+        ],
+        "title": "CmcdStreamingFormatRow"
+      },
+      "CmcdThroughputPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          },
+          "p99": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket"
+        ],
+        "title": "CmcdThroughputPoint"
+      },
+      "CmcdTopContentRow": {
+        "properties": {
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "rebuffer_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Rate"
+          },
+          "avg_bitrate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Bitrate"
+          },
+          "avg_buffer_length": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Buffer Length"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_count"
+        ],
+        "title": "CmcdTopContentRow"
       },
       "ColumnMeta": {
         "properties": {
@@ -61296,6 +61784,53 @@
         ],
         "title": "IOFormatBreakdown"
       },
+      "IOFormatConversionPair": {
+        "properties": {
+          "input_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Format"
+          },
+          "output_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Format"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "avg_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Ratio"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "IOFormatConversionPair"
+      },
       "IOMetrics": {
         "properties": {
           "io_transforms": {
@@ -61401,8 +61936,7 @@
           },
           "optimization_opportunities": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/IOOpportunityRow"
             },
             "type": "array",
             "title": "Optimization Opportunities",
@@ -61432,8 +61966,7 @@
           },
           "io_format_conversion_pairs": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/IOFormatConversionPair"
             },
             "type": "array",
             "title": "Io Format Conversion Pairs",
@@ -61483,6 +62016,47 @@
         },
         "type": "object",
         "title": "IOMetrics"
+      },
+      "IOOpportunityRow": {
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "title": "Total Bytes"
+          },
+          "avg_kb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Kb"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "request_count",
+          "total_bytes"
+        ],
+        "title": "IOOpportunityRow"
       },
       "IcebergCalendarDay": {
         "properties": {
@@ -68692,8 +69266,7 @@
           },
           "top_urls": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/PerformanceUrlRow"
             },
             "type": "array",
             "title": "Top Urls",
@@ -68701,8 +69274,7 @@
           },
           "top_asns": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/PerformanceAsnRow"
             },
             "type": "array",
             "title": "Top Asns",
@@ -68710,8 +69282,7 @@
           },
           "ttl_dist": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/PerformanceTtlBucket"
             },
             "type": "array",
             "title": "Ttl Dist",
@@ -68719,23 +69290,14 @@
           },
           "scatter": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/PerformanceScatterPoint"
             },
             "type": "array",
             "title": "Scatter",
             "default": []
           },
           "waterfall": {
-            "additionalProperties": {
-              "additionalProperties": {
-                "type": "number"
-              },
-              "type": "object"
-            },
-            "type": "object",
-            "title": "Waterfall",
-            "default": {}
+            "$ref": "#/components/schemas/PerformanceWaterfall"
           },
           "_approx": {
             "type": "boolean",
@@ -68745,6 +69307,88 @@
         },
         "type": "object",
         "title": "PerformanceAggregatesResponse"
+      },
+      "PerformanceAsnRow": {
+        "properties": {
+          "asn": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Asn"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "avg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          },
+          "p99": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "asn",
+          "requests"
+        ],
+        "title": "PerformanceAsnRow",
+        "description": "``asn`` is an int on the repository paths and the raw dimension string on the\nhigh-scale path, which also does not resolve a ``label``."
       },
       "PerformanceMetrics": {
         "properties": {
@@ -68904,6 +69548,175 @@
         },
         "type": "object",
         "title": "PerformanceRequest"
+      },
+      "PerformanceScatterPoint": {
+        "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin"
+          },
+          "edge": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge"
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "PerformanceScatterPoint"
+      },
+      "PerformanceTtlBucket": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bucket",
+          "count"
+        ],
+        "title": "PerformanceTtlBucket"
+      },
+      "PerformanceUrlRow": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "avg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          },
+          "p99": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "url",
+          "requests"
+        ],
+        "title": "PerformanceUrlRow"
+      },
+      "PerformanceWaterfall": {
+        "properties": {
+          "avg": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PerformanceWaterfallAvg"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "PerformanceWaterfall",
+        "description": "Empty (``{}``) when scatter/waterfall were not requested or could not be computed."
+      },
+      "PerformanceWaterfallAvg": {
+        "properties": {
+          "edge_processing": {
+            "type": "number",
+            "title": "Edge Processing"
+          },
+          "origin_wait": {
+            "type": "number",
+            "title": "Origin Wait"
+          },
+          "origin_download": {
+            "type": "number",
+            "title": "Origin Download"
+          },
+          "client_download": {
+            "type": "number",
+            "title": "Client Download"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "edge_processing",
+          "origin_wait",
+          "origin_download",
+          "client_download"
+        ],
+        "title": "PerformanceWaterfallAvg"
       },
       "PiiPolicyPayload": {
         "properties": {
@@ -77204,8 +78017,7 @@
           },
           "top_waf_signals": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/WafSignalRow"
             },
             "type": "array",
             "title": "Top Waf Signals",
@@ -80707,6 +81519,31 @@
         "title": "TlsFingerprintRow",
         "description": "Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;\nthe high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``."
       },
+      "TopBotRow": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "TopBotRow"
+      },
       "TopIpHeaderRow": {
         "properties": {
           "ip": {
@@ -82531,6 +83368,31 @@
         ],
         "title": "ViewSaveResponse",
         "description": "Ack from ``POST /api/views/`` \u2014 id of the created row."
+      },
+      "WafSignalRow": {
+        "properties": {
+          "signal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signal"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "WafSignalRow"
       },
       "WebVitalsPayload": {
         "properties": {

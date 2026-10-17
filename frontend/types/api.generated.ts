@@ -7463,9 +7463,7 @@ export interface components {
              * Top Bots
              * @default []
              */
-            top_bots: {
-                [key: string]: unknown;
-            }[];
+            top_bots: components["schemas"]["TopBotRow"][];
         };
         /** BotSourceMeta */
         BotSourceMeta: {
@@ -8084,87 +8082,86 @@ export interface components {
              * @default true
              */
             has_data: boolean;
-            /** Overview */
-            overview?: {
-                [key: string]: unknown;
-            } | null;
+            overview?: components["schemas"]["CmcdOverview"] | null;
             /**
              * Buffer Health Ts
              * @default []
              */
-            buffer_health_ts: {
-                [key: string]: unknown;
-            }[];
+            buffer_health_ts: components["schemas"]["CmcdBufferHealthPoint"][];
             /**
              * Bitrate Ts
              * @default []
              */
-            bitrate_ts: {
-                [key: string]: unknown;
-            }[];
+            bitrate_ts: components["schemas"]["CmcdBitratePoint"][];
             /**
              * Throughput Ts
              * @default []
              */
-            throughput_ts: {
-                [key: string]: unknown;
-            }[];
+            throughput_ts: components["schemas"]["CmcdThroughputPoint"][];
             /**
              * Top Content
              * @default []
              */
-            top_content: {
-                [key: string]: unknown;
-            }[];
+            top_content: components["schemas"]["CmcdTopContentRow"][];
             /**
              * Rebuffer By Country
              * @default []
              */
-            rebuffer_by_country: {
-                [key: string]: unknown;
-            }[];
+            rebuffer_by_country: components["schemas"]["CmcdRebufferByCountryRow"][];
             /**
              * Rebuffer By Asn
              * @default []
              */
-            rebuffer_by_asn: {
-                [key: string]: unknown;
-            }[];
+            rebuffer_by_asn: components["schemas"]["CmcdRebufferByAsnRow"][];
             /**
              * Object Type Dist
              * @default []
              */
-            object_type_dist: {
-                [key: string]: unknown;
-            }[];
+            object_type_dist: components["schemas"]["CmcdObjectTypeRow"][];
             /**
              * Streaming Format Dist
              * @default []
              */
-            streaming_format_dist: {
-                [key: string]: unknown;
-            }[];
+            streaming_format_dist: components["schemas"]["CmcdStreamingFormatRow"][];
             /**
              * Sessions Ts
              * @default []
              */
-            sessions_ts: {
-                [key: string]: unknown;
-            }[];
+            sessions_ts: components["schemas"]["CmcdSessionsPoint"][];
             /**
              * Startup Ts
              * @default []
              */
-            startup_ts: {
-                [key: string]: unknown;
-            }[];
+            startup_ts: components["schemas"]["CmcdStartupPoint"][];
             /**
              * Session Duration Dist
              * @default []
              */
-            session_duration_dist: {
-                [key: string]: unknown;
-            }[];
+            session_duration_dist: components["schemas"]["CmcdSessionDurationRow"][];
+        };
+        /** CmcdBitratePoint */
+        CmcdBitratePoint: {
+            /** Bucket */
+            bucket: string;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Utilization Ratio */
+            utilization_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdBufferHealthPoint */
+        CmcdBufferHealthPoint: {
+            /** Bucket */
+            bucket: string;
+            /** P50 Buffer */
+            p50_buffer?: number | null;
+            /** P95 Buffer */
+            p95_buffer?: number | null;
+            /** Starvation Rate */
+            starvation_rate?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** CmcdDisableBody */
         CmcdDisableBody: {
@@ -8192,6 +8189,64 @@ export interface components {
              * @default 1
              */
             version: number;
+        };
+        /** CmcdObjectTypeRow */
+        CmcdObjectTypeRow: {
+            /** Object Type */
+            object_type?: string | null;
+            /** Request Count */
+            request_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdOverview */
+        CmcdOverview: {
+            /** Active Sessions */
+            active_sessions: number;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
+            /** Median Throughput */
+            median_throughput?: number | null;
+            /** Peak Viewers */
+            peak_viewers: number;
+            /** Avg Session Duration */
+            avg_session_duration?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdRebufferByAsnRow */
+        CmcdRebufferByAsnRow: {
+            /** Asn */
+            asn: number | string;
+            /** Label */
+            label: string;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Session Count */
+            session_count: number;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdRebufferByCountryRow */
+        CmcdRebufferByCountryRow: {
+            /** Country */
+            country?: string | null;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Session Count */
+            session_count: number;
+            /** Median Throughput */
+            median_throughput?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** CmcdRequest */
         CmcdRequest: {
@@ -8223,6 +8278,28 @@ export interface components {
             /** Sections */
             sections?: ("overview" | "sessions_ts" | "buffer_health_ts" | "bitrate_ts" | "throughput_ts" | "top_content" | "rebuffer_by_country" | "rebuffer_by_asn" | "object_type_dist" | "streaming_format_dist" | "startup_ts" | "session_duration_dist")[] | null;
         };
+        /** CmcdSessionDurationRow */
+        CmcdSessionDurationRow: {
+            /** Duration Bucket */
+            duration_bucket: string;
+            /** Session Count */
+            session_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdSessionsPoint */
+        CmcdSessionsPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Concurrent Sessions */
+            concurrent_sessions: number;
+            /** Rebuffer Session Pct */
+            rebuffer_session_pct?: number | null;
+            /** New Sessions */
+            new_sessions: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * CmcdSettingsResponse
          * @description CMCD feature settings.
@@ -8238,6 +8315,15 @@ export interface components {
             /** Version */
             version?: number | null;
         };
+        /** CmcdStartupPoint */
+        CmcdStartupPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Startup Ratio */
+            startup_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * CmcdStatusResponse
          * @description ``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off.
@@ -8251,6 +8337,43 @@ export interface components {
             version?: number | null;
             /** Enabled At */
             enabled_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdStreamingFormatRow */
+        CmcdStreamingFormatRow: {
+            /** Streaming Format */
+            streaming_format?: string | null;
+            /** Session Count */
+            session_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdThroughputPoint */
+        CmcdThroughputPoint: {
+            /** Bucket */
+            bucket: string;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdTopContentRow */
+        CmcdTopContentRow: {
+            /** Content Id */
+            content_id?: string | null;
+            /** Session Count */
+            session_count: number;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -9918,6 +10041,19 @@ export interface components {
             /** Pct */
             pct: number;
         };
+        /** IOFormatConversionPair */
+        IOFormatConversionPair: {
+            /** Input Format */
+            input_format?: string | null;
+            /** Output Format */
+            output_format?: string | null;
+            /** Count */
+            count: number;
+            /** Avg Ratio */
+            avg_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** IOMetrics */
         IOMetrics: {
             /** Io Transforms */
@@ -9953,9 +10089,7 @@ export interface components {
              * Optimization Opportunities
              * @default []
              */
-            optimization_opportunities: {
-                [key: string]: unknown;
-            }[];
+            optimization_opportunities: components["schemas"]["IOOpportunityRow"][];
             /** Io Actual Bandwidth Saved Bytes */
             io_actual_bandwidth_saved_bytes?: number | null;
             /** Io Actual Compression Ratio */
@@ -9964,9 +10098,7 @@ export interface components {
              * Io Format Conversion Pairs
              * @default []
              */
-            io_format_conversion_pairs: {
-                [key: string]: unknown;
-            }[];
+            io_format_conversion_pairs: components["schemas"]["IOFormatConversionPair"][];
             /**
              * Io Compression Time Series
              * @default []
@@ -9978,6 +10110,19 @@ export interface components {
             image_bandwidth_bytes?: number | null;
             /** Estimated Savings Bytes */
             estimated_savings_bytes?: number | null;
+        };
+        /** IOOpportunityRow */
+        IOOpportunityRow: {
+            /** Url */
+            url?: string | null;
+            /** Request Count */
+            request_count: number;
+            /** Total Bytes */
+            total_bytes: number;
+            /** Avg Kb */
+            avg_kb?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** IcebergCalendarDay */
         IcebergCalendarDay: {
@@ -12753,44 +12898,51 @@ export interface components {
              * Top Urls
              * @default []
              */
-            top_urls: {
-                [key: string]: unknown;
-            }[];
+            top_urls: components["schemas"]["PerformanceUrlRow"][];
             /**
              * Top Asns
              * @default []
              */
-            top_asns: {
-                [key: string]: unknown;
-            }[];
+            top_asns: components["schemas"]["PerformanceAsnRow"][];
             /**
              * Ttl Dist
              * @default []
              */
-            ttl_dist: {
-                [key: string]: unknown;
-            }[];
+            ttl_dist: components["schemas"]["PerformanceTtlBucket"][];
             /**
              * Scatter
              * @default []
              */
-            scatter: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Waterfall
-             * @default {}
-             */
-            waterfall: {
-                [key: string]: {
-                    [key: string]: number;
-                };
-            };
+            scatter: components["schemas"]["PerformanceScatterPoint"][];
+            waterfall?: components["schemas"]["PerformanceWaterfall"];
             /**
              * Approx
              * @default false
              */
             _approx: boolean;
+        };
+        /**
+         * PerformanceAsnRow
+         * @description ``asn`` is an int on the repository paths and the raw dimension string on the
+         *     high-scale path, which also does not resolve a ``label``.
+         */
+        PerformanceAsnRow: {
+            /** Asn */
+            asn: number | string;
+            /** Label */
+            label?: string | null;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg?: number | null;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** PerformanceMetrics */
         PerformanceMetrics: {
@@ -12835,6 +12987,65 @@ export interface components {
             sort_by: "avg" | "p50" | "p95" | "p99";
             /** Sections */
             sections?: ("waterfall" | "top_urls" | "top_asns" | "ttl_dist" | "scatter")[] | null;
+        };
+        /** PerformanceScatterPoint */
+        PerformanceScatterPoint: {
+            /** Origin */
+            origin?: number | null;
+            /** Edge */
+            edge?: number | null;
+            /** Cache */
+            cache?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceTtlBucket */
+        PerformanceTtlBucket: {
+            /** Bucket */
+            bucket: string;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceUrlRow */
+        PerformanceUrlRow: {
+            /** Url */
+            url: string;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg?: number | null;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PerformanceWaterfall
+         * @description Empty (``{}``) when scatter/waterfall were not requested or could not be computed.
+         */
+        PerformanceWaterfall: {
+            avg?: components["schemas"]["PerformanceWaterfallAvg"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceWaterfallAvg */
+        PerformanceWaterfallAvg: {
+            /** Edge Processing */
+            edge_processing: number;
+            /** Origin Wait */
+            origin_wait: number;
+            /** Origin Download */
+            origin_download: number;
+            /** Client Download */
+            client_download: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * PiiPolicyPayload
@@ -15681,9 +15892,7 @@ export interface components {
              * Top Waf Signals
              * @default []
              */
-            top_waf_signals: {
-                [key: string]: unknown;
-            }[];
+            top_waf_signals: components["schemas"]["WafSignalRow"][];
         };
         /** SecurityTopBotsResponse */
         SecurityTopBotsResponse: {
@@ -16894,6 +17103,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** TopBotRow */
+        TopBotRow: {
+            /** Name */
+            name?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** TopIpHeaderRow */
         TopIpHeaderRow: {
             /** Ip */
@@ -17550,6 +17768,15 @@ export interface components {
             id: string;
             /** Status */
             status: string;
+        };
+        /** WafSignalRow */
+        WafSignalRow: {
+            /** Signal */
+            signal?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * WebVitalsPayload
