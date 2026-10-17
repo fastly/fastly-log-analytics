@@ -3,7 +3,7 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import NetworkPage from '@/app/network/page'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
-import React from 'react'
+import type { ReactNode } from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
 // R-6: render-smoke for the network analytics page.
@@ -14,16 +14,17 @@ vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/network'))
 
-const mockPost = vi.fn()
-const mockGet = vi.fn()
+type ApiCall = (url: string, opts?: unknown) => Promise<{ data: unknown }>
+const mockPost = vi.fn<ApiCall>()
+const mockGet = vi.fn<ApiCall>()
 
 vi.mock('@/lib/api', () => ({
   client: {
-    GET: (...args: any[]) => mockGet(...args),
-    POST: (...args: any[]) => mockPost(...args),
+    GET: (url: string, opts?: unknown) => mockGet(url, opts),
+    POST: (url: string, opts?: unknown) => mockPost(url, opts),
     use: vi.fn(),
   },
-  extractApiError: vi.fn((e) => String(e)),
+  extractApiError: vi.fn((e: unknown) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
@@ -39,7 +40,7 @@ vi.mock('@/components/DataTable', () => ({
   ColumnVisibilityDropdown: () => null,
 }))
 vi.mock('@/components/AnalyticsCard', () => ({
-  AnalyticsCard: ({ title, children }: any) => (
+  AnalyticsCard: ({ title, children }: { title: ReactNode; children?: ReactNode }) => (
     <div data-testid="analytics-card">
       <h3>{title}</h3>
       {children}

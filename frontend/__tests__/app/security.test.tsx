@@ -23,8 +23,10 @@ vi.mock('@/stores/serviceStore', () => {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector) => selector ? selector(state) : state)
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 
@@ -66,7 +68,7 @@ vi.mock('@/app/security/_sections/NetworkSection', () => ({
 }))
 
 vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: any) => (
+  ReportLayout: ({ children, title }: { children: (args: Record<string, unknown>) => React.ReactNode; title: string }) => (
     <div>
       <h1>{title}</h1>
       {children({

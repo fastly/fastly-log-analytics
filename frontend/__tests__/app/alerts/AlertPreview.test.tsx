@@ -19,13 +19,14 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 // Capture the props handed to PlotlyChart on every render so the trace
 // composition can be asserted from outside.
-const plotlyChartCalls: Array<{ data: any[]; layout: any }> = []
+const plotlyChartCalls: Array<{ data: PlotlyTrace[]; layout: PlotlyLayout | undefined }> = []
 
 vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: { data: any[]; layout: any }) => {
+  PlotlyChart: (props: { data: PlotlyTrace[]; layout?: PlotlyLayout }) => {
     plotlyChartCalls.push({ data: props.data, layout: props.layout })
     return <div data-testid="plotly-chart" />
   },
@@ -171,9 +172,9 @@ describe('AlertPreview', () => {
     // Horizontal line: two-point trace at the parsed threshold on both ends.
     // x endpoints are the tz-converted first/last timestamps (see the current
     // -trace test) so the line spans the same axis range as the data.
-    expect(thresholdTrace.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
-    expect(thresholdTrace.y).toEqual([42, 42])
-    expect(thresholdTrace.line?.dash).toBe('dash')
+    expect(thresholdTrace?.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
+    expect(thresholdTrace?.y).toEqual([42, 42])
+    expect(thresholdTrace?.line?.dash).toBe('dash')
   })
 
   test('locks the x-axis (fixedrange) so the preview has no zoom/pan affordance', () => {
@@ -187,7 +188,7 @@ describe('AlertPreview', () => {
     const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
     // y-axis is locked by PlotlyChart's own default; the preview pins the
     // x-axis here so there's no zoom/pan and no on-hover drag affordance.
-    expect(lastCall.layout.xaxis.fixedrange).toBe(true)
+    expect(lastCall.layout?.xaxis?.fixedrange).toBe(true)
   })
 
   test('emits both baseline and calculated-threshold traces for relative_increase evalType', () => {
@@ -211,12 +212,12 @@ describe('AlertPreview', () => {
     const threshold = lastCall.data.find((t) => t?.name === 'Threshold')
 
     expect(baseline).toBeDefined()
-    expect(baseline.y).toEqual(previewData.hist_values)
+    expect(baseline?.y).toEqual(previewData.hist_values)
 
     expect(threshold).toBeDefined()
     // 100 * 1.1, 200 * 1.1 — compare with tolerance to absorb FP noise.
-    expect(threshold.y).toHaveLength(2)
-    expect(threshold.y[0]).toBeCloseTo(110, 5)
-    expect(threshold.y[1]).toBeCloseTo(220, 5)
+    expect(threshold?.y).toHaveLength(2)
+    expect(threshold?.y?.[0]).toBeCloseTo(110, 5)
+    expect(threshold?.y?.[1]).toBeCloseTo(220, 5)
   })
 })

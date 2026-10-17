@@ -5,18 +5,25 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
-import { client } from '@/lib/api'
-import React from 'react'
+import type { ReactNode } from 'react'
 
 // Mock complicated components. SEVERITY_BADGE_CLASS is a real named export of
 // this module (the section-header severity chips reuse it), so the mock must
 // provide it too or SeverityChips throws on undefined-map indexing.
 vi.mock('@/components/Insights/InsightCard', () => ({
-  InsightCard: ({ insight }: any) => <div data-testid="insight-card">{insight.name || insight.title}</div>,
+  InsightCard: ({ insight }: { insight: { name?: string; title?: string } }) => <div data-testid="insight-card">{insight.name || insight.title}</div>,
   SEVERITY_BADGE_CLASS: { clean: '', info: '', warning: '', critical: '', error: '' },
 }))
 vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title, headerActions }: any) => (
+  ReportLayout: ({
+    children,
+    title,
+    headerActions,
+  }: {
+    children: (ctx: Record<string, unknown>) => ReactNode
+    title: ReactNode
+    headerActions?: ReactNode
+  }) => (
     <div>
       <h1>{title}</h1>
       <div data-testid="header-actions">{headerActions}</div>
@@ -25,13 +32,21 @@ vi.mock('@/components/ReportLayout', () => ({
   ),
 }))
 
+type ApiResult = { data: unknown }
+type PostOpts = { body?: { window_size_hrs?: number; baseline_hours?: number; force_refresh?: boolean } }
+
+const { apiGet, apiPost } = vi.hoisted(() => ({
+  apiGet: vi.fn<(url: string, opts?: unknown) => Promise<ApiResult>>(),
+  apiPost: vi.fn<(url: string, opts?: PostOpts) => Promise<ApiResult>>(),
+}))
+
 vi.mock('@/lib/api', () => ({
   client: {
-    GET: vi.fn(),
-    POST: vi.fn(),
+    GET: apiGet,
+    POST: apiPost,
     use: vi.fn(),
   },
-  extractApiError: vi.fn((e) => String(e)),
+  extractApiError: vi.fn((e: unknown) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
@@ -45,8 +60,8 @@ beforeEach(() => {
 })
 
 test('renders insights page and displays insight cards', async () => {
-  vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+  apiPost.mockResolvedValue({
     data: {
       insights: [
         {
@@ -64,7 +79,7 @@ test('renders insights page and displays insight cards', async () => {
       ],
       computed_at: new Date().toISOString(),
     },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -83,7 +98,7 @@ test('renders insights page and displays insight cards', async () => {
 
 test('adapts the default window/baseline to a service with ~2h of history', async () => {
   // /api/log-extents drives the adaptive default; everything else returns empty.
-  vi.mocked(client.GET).mockImplementation(((url: string) =>
+  apiGet.mockImplementation((url) =>
     url === '/api/log-extents'
       ? Promise.resolve({
           data: {
@@ -91,10 +106,10 @@ test('adapts the default window/baseline to a service with ~2h of history', asyn
             latest_log_at: new Date().toISOString(),
           },
         })
-      : Promise.resolve({ data: { unavailable: [] } })) as any)
-  vi.mocked(client.POST).mockResolvedValue({
+      : Promise.resolve({ data: { unavailable: [] } }))
+  apiPost.mockResolvedValue({
     data: { insights: [], computed_at: new Date().toISOString() },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -106,10 +121,8 @@ test('adapts the default window/baseline to a service with ~2h of history', asyn
   // (instead of the static 7-day baseline that would just say "not enough data").
   await waitFor(
     () => {
-      const sawAdaptive = vi
-        .mocked(client.POST)
-        .mock.calls.some(
-          ([, opts]: any) =>
+      const sawAdaptive = apiPost.mock.calls.some(
+          ([, opts]) =>
             opts?.body?.window_size_hrs === 1 && opts?.body?.baseline_hours === 1,
         )
       expect(sawAdaptive).toBe(true)
@@ -119,8 +132,8 @@ test('adapts the default window/baseline to a service with ~2h of history', asyn
 })
 
 test('renders all 6 category tabs and enforces zero-CLS layout reservation classes', async () => {
-  vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+  apiPost.mockResolvedValue({
     data: {
       insights: [
         {
@@ -133,7 +146,7 @@ test('renders all 6 category tabs and enforces zero-CLS layout reservation class
       ],
       computed_at: new Date().toISOString(),
     },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -160,17 +173,17 @@ test('renders all 6 category tabs and enforces zero-CLS layout reservation class
 })
 
 test('displays unavailable insights alert with link to service-config', async () => {
-  vi.mocked(client.GET).mockResolvedValue({
+  apiGet.mockResolvedValue({
     data: {
       unavailable: [
         { id: 'ja3_anomaly', name: 'JA3 Fingerprint Anomaly', missing_fields: ['ja3_md5'] },
         { id: 'bot_spike', name: 'Bot Cluster Surge', missing_fields: ['bot_score'] },
       ],
     },
-  } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  })
+  apiPost.mockResolvedValue({
     data: { insights: [], computed_at: new Date().toISOString() },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -189,10 +202,10 @@ test('displays unavailable insights alert with link to service-config', async ()
 
 test('renders Re-scan button for Admin and handles force_refresh', async () => {
   useSessionRoleStore.setState({ isRemoteAnalyst: false })
-  vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+  apiPost.mockResolvedValue({
     data: { insights: [], computed_at: new Date().toISOString() },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -208,19 +221,17 @@ test('renders Re-scan button for Admin and handles force_refresh', async () => {
   fireEvent.click(rescanBtn)
 
   await waitFor(() => {
-    const hasForceRefresh = vi
-      .mocked(client.POST)
-      .mock.calls.some(([, opts]: any) => opts?.body?.force_refresh === true)
+    const hasForceRefresh = apiPost.mock.calls.some(([, opts]) => opts?.body?.force_refresh === true)
     expect(hasForceRefresh).toBe(true)
   })
 })
 
 test('hides Re-scan button for Remote Analyst', async () => {
   useSessionRoleStore.setState({ isRemoteAnalyst: true })
-  vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+  apiPost.mockResolvedValue({
     data: { insights: [], computed_at: new Date().toISOString() },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -236,13 +247,13 @@ test('hides Re-scan button for Remote Analyst', async () => {
 })
 
 test('displays clean pass state when a category has no anomalies', async () => {
-  vi.mocked(client.GET).mockResolvedValue({ data: { unavailable: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+  apiPost.mockResolvedValue({
     data: {
       insights: [],
       computed_at: new Date().toISOString(),
     },
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>

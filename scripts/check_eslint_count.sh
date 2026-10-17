@@ -94,7 +94,7 @@ SCOPE=(app components hooks lib stores)
 
 # ESLint exits non-zero when it reports errors; capture the JSON anyway.
 # Test-side ceiling: same gate over the test/e2e dirs. Ratchet to 0.
-TEST_CEILING=398
+TEST_CEILING=0
 TEST_SCOPE=(__tests__ tests e2e vitest.setup.ts)
 
 count_errors() {

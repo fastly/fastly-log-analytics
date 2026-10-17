@@ -8,7 +8,7 @@ vi.mock('next/navigation', () => ({
   usePathname: vi.fn(() => '/network'),
 }))
 vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn((selector?: (s: any) => any) => {
+  useFilterStore: vi.fn((selector?: (s: object) => unknown) => {
     const state = { filters: [], addFilter: vi.fn(), removeFilter: vi.fn(), clearFilters: vi.fn() }
     return selector ? selector(state) : state
   }),
@@ -47,7 +47,7 @@ describe('HealthBadge', () => {
 describe('SHIELDING_COLUMNS', () => {
   // The columns are plain config objects (no react-table runtime needed).
   // Call each `cell` factory directly with a minimal info-shape mock.
-  const makeInfo = (value: any, original: any = {}) => ({ getValue: () => value, row: { original } })
+  const makeInfo = (value: unknown, original: Record<string, unknown> = {}) => ({ getValue: () => value, row: { original } })
   const colById = (id: string) => SHIELDING_COLUMNS.find((c) => c.id === id)!
   const cellOf = (id: string) => colById(id).cell as (info: ReturnType<typeof makeInfo>) => React.ReactNode
 
@@ -56,7 +56,7 @@ describe('SHIELDING_COLUMNS', () => {
     for (const col of SHIELDING_COLUMNS) {
       expect(col.id).toBeTruthy()
       expect((col as { accessorKey?: string }).accessorKey).toBe(col.id)
-      expect((col.meta as any).label).toBeTruthy()
+      expect((col.meta as { label?: string } | undefined)?.label).toBeTruthy()
       expect(typeof col.header).toBe('function')
       expect(typeof col.cell).toBe('function')
     }

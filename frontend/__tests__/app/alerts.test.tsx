@@ -30,7 +30,7 @@ vi.mock('@/components/PlotlyChart', () => ({
 }))
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count?: number }) => ({
     getVirtualItems: () => {
       const count = options.count || 0
       return Array.from({ length: count }).map((_, i) => ({
@@ -106,7 +106,7 @@ const SAMPLE_ALERTS = [
   },
 ]
 
-function installBaseHandlers(alerts: any[] = [], role: 'admin' | 'analyst' = 'admin') {
+function installBaseHandlers(alerts: readonly unknown[] = [], role: 'admin' | 'analyst' = 'admin') {
   server.use(
     http.get(`${API_BASE}/api/bootstrap`, () =>
       HttpResponse.json({

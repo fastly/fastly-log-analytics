@@ -18,7 +18,7 @@ vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).n
 const mockPost = vi.fn()
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), POST: (...args: any[]) => mockPost(...args), use: vi.fn() },
+  client: { GET: vi.fn(), POST: (...args: unknown[]) => mockPost(...args), use: vi.fn() },
   extractApiError: vi.fn((e) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))

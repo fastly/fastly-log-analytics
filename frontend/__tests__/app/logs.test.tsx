@@ -122,7 +122,7 @@ test('logs page mounts and renders title in cron mode', () => {
 test('logs page mounts and renders Raw Logs Explorer in explorer mode', async () => {
   const { useLogsPageState } = await import('@/app/logs/_state')
   vi.mocked(useLogsPageState).mockReturnValueOnce({
-    ...(vi.mocked(useLogsPageState)() as any),
+    ...vi.mocked(useLogsPageState)(),
     activeTab: 'explorer',
   })
 

@@ -17,8 +17,8 @@ const mockGet = vi.fn()
 
 vi.mock('@/lib/api', () => ({
   client: {
-    GET: (...args: any[]) => mockGet(...args),
-    POST: (...args: any[]) => mockPost(...args),
+    GET: (...args: unknown[]) => mockGet(...args),
+    POST: (...args: unknown[]) => mockPost(...args),
     use: vi.fn(),
   },
   extractApiError: vi.fn((e) => String(e)),

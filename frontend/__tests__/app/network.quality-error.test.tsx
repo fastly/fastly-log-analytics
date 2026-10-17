@@ -39,7 +39,7 @@ vi.mock('@/components/DataTable', () => ({
 // AnalyticsCard mock surfaces the `error` prop so we can assert the cards
 // actually render an error surface (the real one is covered by its own spec).
 vi.mock('@/components/AnalyticsCard', () => ({
-  AnalyticsCard: ({ title, error, children }: any) => (
+  AnalyticsCard: ({ title, error, children }: { title: React.ReactNode; error?: unknown; children?: React.ReactNode }) => (
     <div data-testid="analytics-card">
       <h3>{title}</h3>
       {error ? <div role="alert">card error</div> : null}

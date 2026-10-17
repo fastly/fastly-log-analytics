@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { expect, test, vi, beforeEach } from 'vitest'
+import { expect, test, vi } from 'vitest'
 // app/dashboard/page.tsx is now an async RSC shell that SSR-prefetches the
 // bundle and dehydrates into <DashboardClient />; RTL can't render an async
 // component, so the smoke test targets the client component that owns the
@@ -19,8 +19,10 @@ vi.mock('@/stores/serviceStore', () => {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn()
   }
-  const useServiceStore: any = vi.fn((selector) => selector ? selector(state) : state)
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 
@@ -62,11 +64,11 @@ vi.mock('@/components/Map/ChoroplethMap', () => ({ ChoroplethMap: () => <div dat
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
 test('renders dashboard and fetches data', async () => {
-  vi.mocked(apiLib.client.GET).mockImplementation(async (url: any) => {
+  vi.mocked(apiLib.client.GET).mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { data: { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} } } as any
+      return { data: { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} } } as never
     }
-    return { data: {} } as any
+    return { data: {} } as never
   })
 
   vi.mocked(apiLib.client.POST).mockResolvedValue({
@@ -74,7 +76,7 @@ test('renders dashboard and fetches data', async () => {
       summary: { total: 1234 },
       time_series: []
     }
-  } as any)
+  } as never)
 
   render(
     <QueryClientProvider client={queryClient}>

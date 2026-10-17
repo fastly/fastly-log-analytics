@@ -27,28 +27,37 @@
  *     })
  */
 
+import type { MapOptions } from 'maplibre-gl'
+import { stubResizeObserver } from './browser-stubs'
+
+export type MockMapEventPayload = Record<string, unknown>
+export type MockMapListener = (e: MockMapEventPayload) => void
+export type MockMapSource = Record<string, unknown>
+export type MockMapLayer = { id?: string } & Record<string, unknown>
+export type MockMapSourceHandle = MockMapSource & { setData: (data: unknown) => void }
+
 export interface MockMapInstance {
-  container: HTMLElement | undefined
-  listeners: Record<string, ((e: any) => void)[]>
-  sources: Record<string, any>
-  layers: any[]
-  options: any
-  on: (event: string, ...rest: any[]) => void
+  container: string | HTMLElement | undefined
+  listeners: Record<string, MockMapListener[]>
+  sources: Record<string, MockMapSource>
+  layers: MockMapLayer[]
+  options: Partial<MapOptions> | undefined
+  on: (event: string, ...rest: unknown[]) => void
   off: () => void
-  addSource: (id: string, src: any) => void
-  addLayer: (layer: any) => void
+  addSource: (id: string, src: MockMapSource) => void
+  addLayer: (layer: MockMapLayer) => void
   removeLayer: () => void
   removeSource: () => void
-  getSource: (id: string) => any
-  getLayer: (id: string) => any
+  getSource: (id: string) => MockMapSourceHandle
+  getLayer: (id: string) => MockMapLayer | undefined
   setFeatureState: () => void
-  setPaintProperty: (...args: any[]) => void
+  setPaintProperty: (...args: unknown[]) => void
   setLayoutProperty: () => void
   setFilter: () => void
   setStyle: () => void
   isStyleLoaded: () => boolean
-  getStyle: () => { layers: any[] }
-  queryRenderedFeatures: () => any[]
+  getStyle: () => { layers: MockMapLayer[] }
+  queryRenderedFeatures: () => unknown[]
   getCanvas: () => { style: Record<string, string> }
   remove: () => void
   removed: boolean
@@ -56,7 +65,7 @@ export interface MockMapInstance {
   fitBounds: () => void
   setMaxBounds: () => void
   addControl: () => void
-  emit: (event: string, payload?: any) => void
+  emit: (event: string, payload?: MockMapEventPayload) => void
 }
 
 /**
@@ -79,13 +88,13 @@ export const mapInstances: MockMapInstance[] = []
  */
 export function maplibreMockFactory() {
   class MockMap implements MockMapInstance {
-    container: HTMLElement | undefined
-    listeners: Record<string, ((e: any) => void)[]> = {}
-    sources: Record<string, any> = {}
-    layers: any[] = []
-    options: any
+    container: string | HTMLElement | undefined
+    listeners: Record<string, MockMapListener[]> = {}
+    sources: Record<string, MockMapSource> = {}
+    layers: MockMapLayer[] = []
+    options: Partial<MapOptions> | undefined
     removed = false
-    constructor(opts: any) {
+    constructor(opts?: Partial<MapOptions>) {
       this.container = opts?.container
       this.options = opts
       mapInstances.push(this)
@@ -93,28 +102,28 @@ export function maplibreMockFactory() {
       // bootstrap. Tests can `await Promise.resolve()` to flush.
       queueMicrotask(() => this.emit('load'))
     }
-    on(event: string, ...rest: any[]) {
+    on(event: string, ...rest: unknown[]) {
       // maplibre's `on` accepts either (event, handler) OR
       // (event, layerId, handler) — collapse both forms.
-      const fn = rest.length === 2 ? rest[1] : rest[0]
+      const fn = (rest.length === 2 ? rest[1] : rest[0]) as MockMapListener
       this.listeners[event] = this.listeners[event] || []
       this.listeners[event].push(fn)
     }
     off() {}
-    addSource(id: string, src: any) {
+    addSource(id: string, src: MockMapSource) {
       this.sources[id] = src
     }
-    addLayer(layer: any) {
+    addLayer(layer: MockMapLayer) {
       this.layers.push(layer)
     }
     removeLayer() {}
     removeSource() {}
-    getSource(id: string) {
+    getSource(id: string): MockMapSourceHandle {
       const src = this.sources[id]
       if (src) {
         return {
           ...src,
-          setData: (data: any) => {
+          setData: (data: unknown) => {
             src.data = data
           }
         }
@@ -122,7 +131,7 @@ export function maplibreMockFactory() {
       return { setData: () => {} }
     }
     getLayer(id: string) {
-      return this.layers.find((l) => l === id || l?.id === id)
+      return this.layers.find((l) => l.id === id)
     }
     setFeatureState() {}
     setPaintProperty() {}
@@ -135,7 +144,7 @@ export function maplibreMockFactory() {
     getStyle() {
       return { layers: this.layers }
     }
-    queryRenderedFeatures() {
+    queryRenderedFeatures(): unknown[] {
       return []
     }
     getCanvas() {
@@ -150,7 +159,7 @@ export function maplibreMockFactory() {
     fitBounds() {}
     setMaxBounds() {}
     addControl() {}
-    emit(event: string, payload: any = {}) {
+    emit(event: string, payload: MockMapEventPayload = {}) {
       ;(this.listeners[event] || []).forEach((fn) => fn(payload))
     }
   }
@@ -177,12 +186,5 @@ export function maplibreMockFactory() {
  * multiple times — only patches when the global is absent.
  */
 export function installMaplibreSideEffects(): void {
-  if (typeof globalThis !== 'undefined' && !(globalThis as any).ResizeObserver) {
-    class MockResizeObserver {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-    ;(globalThis as any).ResizeObserver = MockResizeObserver
-  }
+  if (!('ResizeObserver' in globalThis)) stubResizeObserver()
 }

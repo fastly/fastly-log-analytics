@@ -19,11 +19,12 @@ vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/performance'))
 
-const mockPost = vi.fn()
+type ApiCall = (url: string, opts?: unknown) => Promise<{ data: unknown }>
+const mockPost = vi.fn<ApiCall>()
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), POST: (...args: any[]) => mockPost(...args), use: vi.fn() },
-  extractApiError: vi.fn((e) => String(e)),
+  client: { GET: vi.fn(), POST: (url: string, opts?: unknown) => mockPost(url, opts), use: vi.fn() },
+  extractApiError: vi.fn((e: unknown) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
