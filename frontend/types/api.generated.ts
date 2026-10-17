@@ -10242,7 +10242,7 @@ export interface components {
             /** Allow Concurrent Sessions */
             allow_concurrent_sessions?: boolean | null;
             /** Auth Method */
-            auth_method?: string | null;
+            auth_method?: ("passcode" | "oauth") | null;
             /** Oauth Provider */
             oauth_provider?: string | null;
             /** Oauth Subject */
@@ -15454,12 +15454,30 @@ export interface components {
              */
             ok: boolean;
         };
+        /**
+         * ShareAuditLogRow
+         * @description One ``remote_share_audit_logs`` row (``SELECT *``).
+         */
+        ShareAuditLogRow: {
+            /** Id */
+            id: number;
+            /** Timestamp */
+            timestamp: string;
+            /** Event Type */
+            event_type: string;
+            /** Email */
+            email: string | null;
+            /** Ip Address */
+            ip_address: string;
+            /** Details */
+            details: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareAuditLogsResponse */
         ShareAuditLogsResponse: {
             /** Audit Logs */
-            audit_logs?: {
-                [key: string]: unknown;
-            }[] | null;
+            audit_logs?: components["schemas"]["ShareAuditLogRow"][] | null;
         } & {
             [key: string]: unknown;
         };
@@ -15512,14 +15530,8 @@ export interface components {
             public_url?: string | null;
             /** Active Session Count */
             active_session_count?: number | null;
-            /** Rate Limits */
-            rate_limits?: {
-                [key: string]: unknown;
-            } | null;
-            /** Telemetry */
-            telemetry?: {
-                [key: string]: unknown;
-            } | null;
+            rate_limits?: components["schemas"]["ShareRateLimits"] | null;
+            telemetry?: components["schemas"]["ShareTelemetry"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -15592,6 +15604,38 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ShareRateLimitFailure */
+        ShareRateLimitFailure: {
+            /** Ip */
+            ip: string;
+            /** Count */
+            count: number;
+            /** Window S */
+            window_s: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareRateLimitLockout */
+        ShareRateLimitLockout: {
+            /** Ip */
+            ip: string;
+            /** Remaining S */
+            remaining_s: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareRateLimits
+         * @description ``LoginRateLimiter.snapshot()``.
+         */
+        ShareRateLimits: {
+            /** Failures */
+            failures: components["schemas"]["ShareRateLimitFailure"][];
+            /** Lockouts */
+            lockouts: components["schemas"]["ShareRateLimitLockout"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareServiceEntry */
         ShareServiceEntry: {
             /** Service Id */
@@ -15604,6 +15648,56 @@ export interface components {
             sharing_domain?: string | null;
             /** Remote Service Id */
             remote_service_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareSessionRecord
+         * @description One live analyst session: ``AnalystSession.to_dict()`` (a dataclass
+         *     ``asdict``, so every key is always present).
+         */
+        ShareSessionRecord: {
+            /** Session Id */
+            session_id: string;
+            /** Invite Id */
+            invite_id: string;
+            /** Name */
+            name: string;
+            /** Email */
+            email: string;
+            /** Ip Address */
+            ip_address: string;
+            /** User Agent */
+            user_agent: string;
+            /** Fingerprint Signature */
+            fingerprint_signature: string;
+            /** Pii Policy */
+            pii_policy: {
+                [key: string]: unknown;
+            };
+            /** Query Window Hours */
+            query_window_hours: number | null;
+            /** Query Start Time */
+            query_start_time: string | null;
+            /** Query End Time */
+            query_end_time: string | null;
+            /** Login Time */
+            login_time: string;
+            /** Last Active Time */
+            last_active_time: string;
+            /** Last Activity */
+            last_activity: string | null;
+            /** Tos Pending */
+            tos_pending: boolean;
+            /** Service Ids */
+            service_ids: string[];
+            /**
+             * Auth Method
+             * @enum {string}
+             */
+            auth_method: "passcode" | "oauth";
+            /** Oauth Provider */
+            oauth_provider: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -15637,10 +15731,7 @@ export interface components {
         };
         /**
          * ShareStatusResponse
-         * @description ``build_share_status()``. The high-churn nested collections
-         *     (sessions / audit_logs / rate_limits / telemetry) stay free dicts:
-         *     their shapes are owned by TunnelManager internals and consumed
-         *     generically.
+         * @description ``build_share_status()``.
          */
         ShareStatusResponse: {
             /** Sharing Active */
@@ -15662,21 +15753,38 @@ export interface components {
             /** Invites */
             invites?: components["schemas"]["InviteRecord"][] | null;
             /** Sessions */
-            sessions?: {
-                [key: string]: unknown;
-            }[] | null;
+            sessions?: components["schemas"]["ShareSessionRecord"][] | null;
             /** Audit Logs */
-            audit_logs?: {
-                [key: string]: unknown;
-            }[] | null;
-            /** Rate Limits */
-            rate_limits?: {
-                [key: string]: unknown;
-            } | null;
-            /** Telemetry */
-            telemetry?: {
-                [key: string]: unknown;
-            } | null;
+            audit_logs?: components["schemas"]["ShareAuditLogRow"][] | null;
+            rate_limits?: components["schemas"]["ShareRateLimits"] | null;
+            telemetry?: components["schemas"]["ShareTelemetry"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareTelemetry
+         * @description ``TunnelManager.get_telemetry()``.
+         */
+        ShareTelemetry: {
+            /** Heartbeat Unauth Count */
+            heartbeat_unauth_count: number;
+            /** Current Uptime S */
+            current_uptime_s: number | null;
+            /** Tunnel Uptime History */
+            tunnel_uptime_history: components["schemas"]["ShareTunnelUptimeEntry"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareTunnelUptimeEntry */
+        ShareTunnelUptimeEntry: {
+            /** Started At */
+            started_at: string;
+            /** Ended At */
+            ended_at: string;
+            /** Duration S */
+            duration_s: number;
+            /** Reason */
+            reason: string;
         } & {
             [key: string]: unknown;
         };

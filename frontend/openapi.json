@@ -62326,7 +62326,11 @@
           "auth_method": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "passcode",
+                  "oauth"
+                ]
               },
               {
                 "type": "null"
@@ -76560,14 +76564,60 @@
         "type": "object",
         "title": "ShareAcknowledgeResponse"
       },
+      "ShareAuditLogRow": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "ip_address": {
+            "type": "string",
+            "title": "Ip Address"
+          },
+          "details": {
+            "type": "string",
+            "title": "Details"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "event_type",
+          "email",
+          "ip_address",
+          "details"
+        ],
+        "title": "ShareAuditLogRow",
+        "description": "One ``remote_share_audit_logs`` row (``SELECT *``)."
+      },
       "ShareAuditLogsResponse": {
         "properties": {
           "audit_logs": {
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/ShareAuditLogRow"
                 },
                 "type": "array"
               },
@@ -76726,26 +76776,22 @@
           "rate_limits": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareRateLimits"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Rate Limits"
+            ]
           },
           "telemetry": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareTelemetry"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Telemetry"
+            ]
           }
         },
         "additionalProperties": true,
@@ -76933,6 +76979,75 @@
         "title": "SharePurgeResponse",
         "description": "``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``."
       },
+      "ShareRateLimitFailure": {
+        "properties": {
+          "ip": {
+            "type": "string",
+            "title": "Ip"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ip",
+          "count",
+          "window_s"
+        ],
+        "title": "ShareRateLimitFailure"
+      },
+      "ShareRateLimitLockout": {
+        "properties": {
+          "ip": {
+            "type": "string",
+            "title": "Ip"
+          },
+          "remaining_s": {
+            "type": "integer",
+            "title": "Remaining S"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ip",
+          "remaining_s"
+        ],
+        "title": "ShareRateLimitLockout"
+      },
+      "ShareRateLimits": {
+        "properties": {
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/ShareRateLimitFailure"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "lockouts": {
+            "items": {
+              "$ref": "#/components/schemas/ShareRateLimitLockout"
+            },
+            "type": "array",
+            "title": "Lockouts"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "failures",
+          "lockouts"
+        ],
+        "title": "ShareRateLimits",
+        "description": "``LoginRateLimiter.snapshot()``."
+      },
       "ShareServiceEntry": {
         "properties": {
           "service_id": {
@@ -76994,6 +77109,149 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ShareServiceEntry"
+      },
+      "ShareSessionRecord": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "invite_id": {
+            "type": "string",
+            "title": "Invite Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "ip_address": {
+            "type": "string",
+            "title": "Ip Address"
+          },
+          "user_agent": {
+            "type": "string",
+            "title": "User Agent"
+          },
+          "fingerprint_signature": {
+            "type": "string",
+            "title": "Fingerprint Signature"
+          },
+          "pii_policy": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Pii Policy"
+          },
+          "query_window_hours": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Window Hours"
+          },
+          "query_start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Start Time"
+          },
+          "query_end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query End Time"
+          },
+          "login_time": {
+            "type": "string",
+            "title": "Login Time"
+          },
+          "last_active_time": {
+            "type": "string",
+            "title": "Last Active Time"
+          },
+          "last_activity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity"
+          },
+          "tos_pending": {
+            "type": "boolean",
+            "title": "Tos Pending"
+          },
+          "service_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Service Ids"
+          },
+          "auth_method": {
+            "type": "string",
+            "enum": [
+              "passcode",
+              "oauth"
+            ],
+            "title": "Auth Method"
+          },
+          "oauth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Provider"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_id",
+          "invite_id",
+          "name",
+          "email",
+          "ip_address",
+          "user_agent",
+          "fingerprint_signature",
+          "pii_policy",
+          "query_window_hours",
+          "query_start_time",
+          "query_end_time",
+          "login_time",
+          "last_active_time",
+          "last_activity",
+          "tos_pending",
+          "service_ids",
+          "auth_method",
+          "oauth_provider"
+        ],
+        "title": "ShareSessionRecord",
+        "description": "One live analyst session: ``AnalystSession.to_dict()`` (a dataclass\n``asdict``, so every key is always present)."
       },
       "ShareSettingsResponse": {
         "properties": {
@@ -77165,8 +77423,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/ShareSessionRecord"
                 },
                 "type": "array"
               },
@@ -77180,8 +77437,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/ShareAuditLogRow"
                 },
                 "type": "array"
               },
@@ -77194,32 +77450,92 @@
           "rate_limits": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareRateLimits"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Rate Limits"
+            ]
           },
           "telemetry": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareTelemetry"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Telemetry"
+            ]
           }
         },
         "additionalProperties": true,
         "type": "object",
         "title": "ShareStatusResponse",
-        "description": "``build_share_status()``. The high-churn nested collections\n(sessions / audit_logs / rate_limits / telemetry) stay free dicts:\ntheir shapes are owned by TunnelManager internals and consumed\ngenerically."
+        "description": "``build_share_status()``."
+      },
+      "ShareTelemetry": {
+        "properties": {
+          "heartbeat_unauth_count": {
+            "type": "integer",
+            "title": "Heartbeat Unauth Count"
+          },
+          "current_uptime_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Uptime S"
+          },
+          "tunnel_uptime_history": {
+            "items": {
+              "$ref": "#/components/schemas/ShareTunnelUptimeEntry"
+            },
+            "type": "array",
+            "title": "Tunnel Uptime History"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "heartbeat_unauth_count",
+          "current_uptime_s",
+          "tunnel_uptime_history"
+        ],
+        "title": "ShareTelemetry",
+        "description": "``TunnelManager.get_telemetry()``."
+      },
+      "ShareTunnelUptimeEntry": {
+        "properties": {
+          "started_at": {
+            "type": "string",
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "title": "Ended At"
+          },
+          "duration_s": {
+            "type": "integer",
+            "title": "Duration S"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "started_at",
+          "ended_at",
+          "duration_s",
+          "reason"
+        ],
+        "title": "ShareTunnelUptimeEntry"
       },
       "SharingDeployRequest": {
         "properties": {
