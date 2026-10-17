@@ -89,11 +89,11 @@ test.describe('Performance Page Contract (/performance)', () => {
     await page.goto('/performance')
     await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
 
-    await expect(page.getByText('End-to-End Latency Waterfall (Average)')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Slowest URLs')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Slowest Networks')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Cache TTL Distribution')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin vs Edge Processing (ms)')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('End-to-End Latency Waterfall (Average)').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Slowest URLs').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Slowest Networks').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Cache TTL Distribution').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Origin vs Edge Processing (ms)').locator('visible=true')).toBeVisible({ timeout: 15_000 })
   })
 
   test('5. Time range presets and adaptive history extents', async ({ page }) => {

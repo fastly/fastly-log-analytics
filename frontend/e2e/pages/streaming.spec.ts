@@ -101,10 +101,10 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
     await expect(page.locator('[data-testid="stream-terminal-container"]')).toBeVisible({ timeout: 30_000 })
 
     // Terminal body should be mounted
-    await expect(page.locator('[data-testid="stream-terminal-body"]')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('[data-testid="stream-terminal-scroll"]')).toBeVisible({ timeout: 10_000 })
 
     // Check for either skeleton/connecting state or streamed rows
-    const rows = page.locator('[data-testid^="stream-row-"]')
+    const rows = page.locator('[data-testid="stream-log-row"]')
     const rowCount = await rows.count()
 
     if (rowCount > 0) {

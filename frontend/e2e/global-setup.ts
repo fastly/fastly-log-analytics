@@ -36,7 +36,11 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
         '--target',
         'local',
         '--rows',
-        '500',
+        '750',
+        // 36h of history: Insights detectors need a full 24h baseline plus the
+        // analysis window (a 24h seed reports "only 24.0h available").
+        '--span-hours',
+        '36',
         '--scenario',
         'diurnal',
         '--no-commit',
@@ -48,7 +52,7 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
         stdio: 'pipe',
       },
     )
-    console.log('[e2e] seeded 500 rows of synthetic traffic into sandbox buffer')
+    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer')
   } catch (err: unknown) {
     const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string }
     const out = e.stdout ? e.stdout.toString() : ''

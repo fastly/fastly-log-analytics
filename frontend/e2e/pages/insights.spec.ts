@@ -124,6 +124,9 @@ test.describe('Insights Page Contract (/insights)', () => {
     const emptyPass = page.locator('[data-testid="insights-empty-pass"]').first()
     const cardsGrid = page.locator('[data-testid="insights-grid"]').first()
 
+    // Wait for the data load to settle into one of the two end states.
+    await expect(emptyPass.or(cardsGrid)).toBeVisible({ timeout: 30_000 })
+
     const hasEmptyPass = await emptyPass.isVisible()
     const hasCardsGrid = await cardsGrid.isVisible()
 

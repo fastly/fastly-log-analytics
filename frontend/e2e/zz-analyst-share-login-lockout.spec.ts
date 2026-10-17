@@ -1,6 +1,11 @@
 /**
  * R-3c journey: analyst share-login.
  *
+ * FILENAME IS LOAD-BEARING: the brute-force test below locks out the loopback
+ * client IP for 5 minutes (per-IP limiter, shared by every spec in the run).
+ * Playwright runs files alphabetically with one worker, so this file is named
+ * `zz-` to run LAST; anything that signs in after it would get a 429.
+ *
  * Two flows pinned here:
  *   1. Brute-force lockout — POST 30+ invalid passcodes from a single
  *      IP and assert the rate-limit at

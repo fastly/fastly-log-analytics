@@ -52,12 +52,14 @@ test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
     await page.goto('/assets-shield')
     await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
 
-    // Verify pre-allocated cards exist with testids
-    await expect(page.locator('[data-testid="assets-overview-grid"]')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('[data-testid="assets-cache-efficiency-card"]')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('[data-testid="assets-compression-card"]')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('[data-testid="assets-uncompressed-card"]')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('[data-testid="assets-low-ttl-card"]')).toBeVisible({ timeout: 15_000 })
+    // Verify pre-allocated cards exist with testids. `:visible` because Next keeps the
+    // previous route tree mounted-but-hidden across a soft navigation (the ?service= replace),
+    // which makes a bare testid locator match two elements.
+    await expect(page.locator('[data-testid="assets-overview-grid"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-cache-efficiency-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-compression-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-uncompressed-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-low-ttl-card"]:visible')).toBeVisible({ timeout: 15_000 })
 
     // Verify intrinsic size reservation classes across cards
     const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
@@ -105,10 +107,10 @@ test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
     await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
 
     // Check main section headings
-    await expect(page.getByText('Cache Efficiency by Asset Type')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Cache Efficiency by Asset Type' })).toBeVisible({ timeout: 15_000 })
     await expect(page.getByRole('heading', { name: 'Payload Compression Efficiency' })).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Large Uncompressed Assets')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Low Cache-TTL Hotspots')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Large Uncompressed Assets' })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Low Cache-TTL Hotspots' })).toBeVisible({ timeout: 15_000 })
   })
 
   test('5. Time range presets switching cleanly (15m, 24h, 7d)', async ({ page }) => {

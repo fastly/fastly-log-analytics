@@ -35,7 +35,7 @@ type SessionsDebugResponse = {
     req_count: number
     is_streaming?: boolean
   }>
-  total_count?: number
+  total?: number
   page?: number
   limit?: number
 }
@@ -82,9 +82,9 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
     const postData = (await postRes.json()) as SessionsDebugResponse
     expect(postData).toBeTruthy()
     expect(postData).toHaveProperty('sessions')
-    expect(postData).toHaveProperty('total_count')
+    expect(postData).toHaveProperty('total')
     expect(Array.isArray(postData.sessions)).toBeTruthy()
-    expect(typeof postData.total_count).toBe('number')
+    expect(typeof postData.total).toBe('number')
 
     // 2. If sessions exist, test POST /api/sessions/detail with sealed token
     if (postData.sessions && postData.sessions.length > 0) {
@@ -145,6 +145,9 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
 
     // Find table rows
     const tableRows = page.locator('[data-testid="sessions-table-container"] tbody tr')
+    // Placeholder/loading rows also match `tbody tr`; wait for a real session
+    // row (it starts with the client IP) before counting and clicking.
+    await expect(tableRows.first()).toContainText(/\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]{6,}/i, { timeout: 30_000 })
     const rowCount = await tableRows.count()
 
     if (rowCount > 0) {
