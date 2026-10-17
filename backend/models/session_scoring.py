@@ -10,7 +10,7 @@ carries a real schema instead of an opaque ``dict``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -314,10 +314,12 @@ class ScoringLabelRow(_ScoringRead):
     # created_at/updated_at are plain SQLite text strings (datetime('now')), so
     # no .isoformat() coercion is needed — they pass through verbatim. id is a
     # UUID string (not an autoincrement int).
-    id: str | None = None
+    # id/sid/label survive the analyst projection and every producer path.
+    id: str
     service_id: str | None = None
-    sid: str | None = None
-    label: str | None = None
+    sid: str
+    # Mirrors the scoring_labels CHECK constraint and labels.ALLOWED_LABELS.
+    label: Literal["good", "bad", "neutral"]
     notes: str | None = None
     flagged_by: str | None = None
     sample_ip: str | None = None
@@ -327,9 +329,16 @@ class ScoringLabelRow(_ScoringRead):
     updated_at: str | None = None
 
 
+class ScoringLabelCounts(_ScoringRead):
+    # labels.counts_by_label always seeds all three keys (0 when unlabeled).
+    good: int
+    bad: int
+    neutral: int
+
+
 class ScoringLabelsListResponse(_ScoringRead):
-    labels: list[ScoringLabelRow] = []
-    counts: dict[str, int] = {}
+    labels: list[ScoringLabelRow]
+    counts: ScoringLabelCounts
 
 
 # ── Response models for the admin endpoints (session_scoring_admin.py) ───────
@@ -583,6 +592,10 @@ class ScoringStatusResponse(_ScoringRead):
 
     enabled: bool | None = None
     scoring_service_id: str | None = None
+    scoring_service_name: str | None = None
+    scoring_domain: str | None = None
+    matrix_version: str | None = None
+    enabled_at: str | None = None
     scoring_active_version: int | None = None
     scoring_activated_at: str | None = None
     scorer_drift: bool | None = None

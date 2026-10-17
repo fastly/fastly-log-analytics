@@ -108,3 +108,68 @@ def test_scoring_label_delete_model_roundtrip():
 
     payload = {"status": "success", "id": "abc"}
     assert ScoringLabelDeleteResponse.model_validate(payload).model_dump(mode="json") == payload
+
+
+def test_scoring_status_declares_config_identity_keys():
+    from backend.models.session_scoring import ScoringStatusResponse
+
+    payload = {
+        "enabled": True,
+        "scoring_service_id": "svc",
+        "scoring_service_name": "n",
+        "scoring_domain": "d.example",
+        "matrix_version": "2026-01-01",
+        "enabled_at": "2026-01-01T00:00:00+00:00",
+    }
+    declared = set(ScoringStatusResponse.model_fields)
+    assert set(payload) <= declared
+    assert ScoringStatusResponse.model_validate(payload).model_dump(mode="json", exclude_unset=True) == payload
+
+
+def test_scoring_labels_list_matches_producer(client, monkeypatch):
+    from backend.scoring import labels as _labels
+
+    rows = [
+        {
+            "id": "a1",
+            "service_id": MOCK_SERVICE_ID,
+            "sid": "s1",
+            "label": lbl,
+            "notes": "n",
+            "flagged_by": "admin",
+            "sample_ip": "",
+            "sample_ua": "",
+            "sample_url": "",
+            "created_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00",
+        }
+        for lbl in ("good", "bad", "neutral")
+    ]
+    counts = {"good": 1, "bad": 1, "neutral": 1}
+    monkeypatch.setattr(_labels, "list_labels", lambda sid, limit=500: rows)
+    monkeypatch.setattr(_labels, "counts_by_label", lambda sid: counts)
+
+    resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/scoring/labels")
+    assert resp.status_code == 200
+    assert _body(resp) == {"labels": rows, "counts": counts}
+    assert list(resp.json()["counts"]) == ["good", "bad", "neutral"]
+
+
+def test_scoring_label_row_rejects_unknown_label():
+    from pydantic import ValidationError
+
+    from backend.models.session_scoring import ScoringLabelRow
+
+    assert ScoringLabelRow.model_validate({"id": "a", "sid": "s", "label": "good"}).label == "good"
+    with pytest.raises(ValidationError):
+        ScoringLabelRow.model_validate({"id": "a", "sid": "s", "label": "maybe"})
+
+
+def test_scoring_label_literal_matches_allowed_labels():
+    import typing
+
+    from backend.models.session_scoring import ScoringLabelRow
+    from backend.scoring.labels import ALLOWED_LABELS
+
+    ann = ScoringLabelRow.model_fields["label"].annotation
+    assert set(typing.get_args(ann)) == set(ALLOWED_LABELS)

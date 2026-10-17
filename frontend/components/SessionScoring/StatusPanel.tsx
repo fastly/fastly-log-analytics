@@ -17,32 +17,7 @@ interface StatusPanelProps {
   serviceId: string
 }
 
-interface ScoringStatus {
-  enabled: boolean
-  scoring_service_id?: string
-  scoring_service_name?: string
-  scoring_domain?: string
-  scoring_backend_name?: string
-  matrix_version?: string
-  enabled_at?: string
-  // Live active version of the scoring Compute service + when it was
-  // activated (best-effort from the Fastly API; absent if unavailable).
-  scoring_active_version?: number
-  scoring_activated_at?: string
-  // True when the scorer build the backend would deploy now differs from
-  // what's live at the edge (a redeploy is needed). drift_detail is
-  // "wasm" | "vcl" | "wasm+vcl" describing which part is stale.
-  scorer_drift?: boolean
-  drift_detail?: string
-  // False when this service was enabled before drift stamping shipped, so
-  // drift is "unknown" rather than a confident "no drift". Drives the soft
-  // "redeploy once to baseline" hint below.
-  drift_known?: boolean
-}
-
-// Generated from the /scoring/evaluation response_model — single source of
-// truth. (ScoringStatus above stays local: /scoring/status returns an untyped
-// dict with no response_model to import.)
+// Generated from the /scoring/evaluation response_model — single source of truth.
 type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
 
 export function StatusPanel({ serviceId }: StatusPanelProps) {
@@ -55,7 +30,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
         { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as ScoringStatus
+      return data
     },
     // No refetchInterval: polling 4 endpoints every 30-60s caused
     // constant .duckdb-wal churn that ate ~1.5GB of mds_stores + VS Code
@@ -311,9 +286,6 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                   </a>
                 }
               />
-            )}
-            {data?.scoring_backend_name && (
-              <Field label="VCL Backend" value={<code className="text-xs">{data.scoring_backend_name}</code>} />
             )}
             {data?.matrix_version && (
               <Field label="Matrix Version" value={<code className="text-xs">{data.matrix_version}</code>} />

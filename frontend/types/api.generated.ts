@@ -14269,6 +14269,17 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ScoringLabelCounts */
+        ScoringLabelCounts: {
+            /** Good */
+            good: number;
+            /** Bad */
+            bad: number;
+            /** Neutral */
+            neutral: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ScoringLabelCreate
          * @description Body for ``POST /scoring/labels``.
@@ -14326,13 +14337,16 @@ export interface components {
         /** ScoringLabelRow */
         ScoringLabelRow: {
             /** Id */
-            id?: string | null;
+            id: string;
             /** Service Id */
             service_id?: string | null;
             /** Sid */
-            sid?: string | null;
-            /** Label */
-            label?: string | null;
+            sid: string;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "good" | "bad" | "neutral";
             /** Notes */
             notes?: string | null;
             /** Flagged By */
@@ -14365,18 +14379,9 @@ export interface components {
         };
         /** ScoringLabelsListResponse */
         ScoringLabelsListResponse: {
-            /**
-             * Labels
-             * @default []
-             */
+            /** Labels */
             labels: components["schemas"]["ScoringLabelRow"][];
-            /**
-             * Counts
-             * @default {}
-             */
-            counts: {
-                [key: string]: number;
-            };
+            counts: components["schemas"]["ScoringLabelCounts"];
         } & {
             [key: string]: unknown;
         };
@@ -14663,6 +14668,14 @@ export interface components {
             enabled?: boolean | null;
             /** Scoring Service Id */
             scoring_service_id?: string | null;
+            /** Scoring Service Name */
+            scoring_service_name?: string | null;
+            /** Scoring Domain */
+            scoring_domain?: string | null;
+            /** Matrix Version */
+            matrix_version?: string | null;
+            /** Enabled At */
+            enabled_at?: string | null;
             /** Scoring Active Version */
             scoring_active_version?: number | null;
             /** Scoring Activated At */

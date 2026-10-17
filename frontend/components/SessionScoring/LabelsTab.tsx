@@ -207,8 +207,8 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                   />
                 </TableCell>
                 <TableCell>{labelBadge(r.label)}</TableCell>
-                <TableCell className="text-xs max-w-[260px] truncate" title={r.notes}>{r.notes || '—'}</TableCell>
-                <TableCell className="hidden lg:table-cell text-xs max-w-[260px] truncate" title={r.sample_url}>{r.sample_url || '—'}</TableCell>
+                <TableCell className="text-xs max-w-[260px] truncate" title={r.notes ?? undefined}>{r.notes || '—'}</TableCell>
+                <TableCell className="hidden lg:table-cell text-xs max-w-[260px] truncate" title={r.sample_url ?? undefined}>{r.sample_url || '—'}</TableCell>
                 <TableCell className="hidden xl:table-cell text-xs font-mono">{r.sample_ip || '—'}</TableCell>
                 <TableCell className="text-xs whitespace-nowrap"><DateTimeCell iso={r.updated_at} /></TableCell>
                 <TableCell className="text-right">

@@ -73026,6 +73026,30 @@
         "title": "ScoringL2EnforceState",
         "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``\nthere for wire-compat; this standalone GET carries the real schema)."
       },
+      "ScoringLabelCounts": {
+        "properties": {
+          "good": {
+            "type": "integer",
+            "title": "Good"
+          },
+          "bad": {
+            "type": "integer",
+            "title": "Bad"
+          },
+          "neutral": {
+            "type": "integer",
+            "title": "Neutral"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "good",
+          "bad",
+          "neutral"
+        ],
+        "title": "ScoringLabelCounts"
+      },
       "ScoringLabelCreate": {
         "properties": {
           "sid": {
@@ -73100,14 +73124,7 @@
       "ScoringLabelRow": {
         "properties": {
           "id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Id"
           },
           "service_id": {
@@ -73122,24 +73139,15 @@
             "title": "Service Id"
           },
           "sid": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Sid"
           },
           "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": "string",
+            "enum": [
+              "good",
+              "bad",
+              "neutral"
             ],
             "title": "Label"
           },
@@ -73223,6 +73231,11 @@
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "id",
+          "sid",
+          "label"
+        ],
         "title": "ScoringLabelRow"
       },
       "ScoringLabelUpdate": {
@@ -73261,20 +73274,18 @@
               "$ref": "#/components/schemas/ScoringLabelRow"
             },
             "type": "array",
-            "title": "Labels",
-            "default": []
+            "title": "Labels"
           },
           "counts": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "type": "object",
-            "title": "Counts",
-            "default": {}
+            "$ref": "#/components/schemas/ScoringLabelCounts"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "labels",
+          "counts"
+        ],
         "title": "ScoringLabelsListResponse"
       },
       "ScoringLatencyRow": {
@@ -74343,6 +74354,50 @@
               }
             ],
             "title": "Scoring Service Id"
+          },
+          "scoring_service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Service Name"
+          },
+          "scoring_domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Domain"
+          },
+          "matrix_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matrix Version"
+          },
+          "enabled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled At"
           },
           "scoring_active_version": {
             "anyOf": [
