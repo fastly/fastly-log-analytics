@@ -247,7 +247,7 @@ function registerErrorListeners(page, browser, contextName) {
         await page.waitForFunction(() => {
           const match = document.body.innerText.match(/total:\s*([\d,]+)/i);
           return match && parseInt(match[1].replace(/,/g, ''), 10) > 0;
-        }, { timeout: 30000 });
+        }, undefined, { timeout: 30000 });
       } catch (e) {
         console.log(`[Dashboard 24h] Warning: timed out waiting for total count to render, proceeding...`);
       }
@@ -344,7 +344,7 @@ function registerErrorListeners(page, browser, contextName) {
     try {
       await page.waitForFunction(() => {
         return document.body.innerText.match(/REQUEST[\s\n]*latest:[\s\n]*[\s\S]*?total:\s*([\d,]+)/i);
-      }, { timeout: 30000 });
+      }, undefined, { timeout: 30000 });
     } catch (e) {
       console.log(`[Dashboard 30d] Warning: timed out waiting for header totals to render, proceeding...`);
     }
@@ -354,7 +354,7 @@ function registerErrorListeners(page, browser, contextName) {
       await page.waitForFunction(() => {
         const text = document.body.innerText;
         return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-      }, { timeout: 90000 });
+      }, undefined, { timeout: 90000 });
     } catch (e) {
       console.log(`[Dashboard 30d] Warning: timed out waiting for "Crunching logs" loading overlays to clear, proceeding...`);
     }
@@ -512,7 +512,7 @@ function registerErrorListeners(page, browser, contextName) {
               const hasRating = text.includes("GOOD") || text.includes("POOR") || text.includes("NEEDS IMP.");
               const failedToLoad = text.includes("Failed to load") && !text.includes("Faro version");
               return hasTitle && hasRating && !failedToLoad;
-            }, { timeout: RUM_RENDER_SETTLE_MS });
+            }, undefined, { timeout: RUM_RENDER_SETTLE_MS });
           } catch (e) {
             // Fall through to read the body and let the outer attempt loop retry.
           }
@@ -557,7 +557,7 @@ function registerErrorListeners(page, browser, contextName) {
           // Poll for the beacon card to paint (returns immediately once rendered)
           // so a slow render under load doesn't read 0 and waste the attempt.
           try {
-            await rumPage.waitForFunction(() => document.body.innerText.includes("TOTAL BEACONS"), { timeout: RUM_RENDER_SETTLE_MS });
+            await rumPage.waitForFunction(() => document.body.innerText.includes("TOTAL BEACONS"), undefined, { timeout: RUM_RENDER_SETTLE_MS });
           } catch (e) {
             // Fall through; the outer attempt loop retries for ingestion/render.
           }
@@ -620,7 +620,7 @@ function registerErrorListeners(page, browser, contextName) {
       await rumPage.waitForFunction(() => {
         const text = document.body.innerText;
         return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-      }, { timeout: 90000 });
+      }, undefined, { timeout: 90000 });
     } catch (e) {
       console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
     }
