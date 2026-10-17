@@ -7,6 +7,7 @@ import os
 import random
 import time
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Event, Thread
 from typing import Any
@@ -22,6 +23,7 @@ from backend.high_scale.deletion import (
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
+from backend.high_scale.fairness import FairScheduler, WorkItem
 from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator, PageRun
 from backend.high_scale.postgres_control import PostgresControlPlane
@@ -39,6 +41,63 @@ class WorkerPageResult:
     error: Exception | None = None
 
 
+class FairPageSelector:
+    """Chooses which (service, domain) pages run each tick through ``FairScheduler``.
+
+    Without a capacity every page runs every tick, in the original service and
+    domain order, so behavior matches a plain nested loop. With a capacity,
+    undispatched pages stay queued and run on a later tick; each service's head
+    page is served first, so every service keeps minimum progress while heavier
+    ``weights`` let a dominant service borrow idle capacity.
+    """
+
+    def __init__(
+        self,
+        pairs: tuple[tuple[str, str], ...],
+        *,
+        capacity: int | None = None,
+        weights: Mapping[str, int] | None = None,
+    ) -> None:
+        services = {service_id for service_id, _ in pairs}
+        if capacity is not None and capacity < 0:
+            raise ValueError("pages per tick must be non-negative")
+        if capacity and capacity < len(services):
+            raise ValueError("pages per tick must be at least the number of services")
+        self._pairs = pairs
+        self._order = {pair: index for index, pair in enumerate(pairs)}
+        self._capacity = capacity or None
+        self._scheduler = FairScheduler()
+        for service_id in sorted(services):
+            self._scheduler.register(service_id, weight=(weights or {}).get(service_id, 1))
+        self._queued: set[tuple[str, str]] = set()
+
+    def select(self) -> list[tuple[str, str]]:
+        for pair in self._pairs:
+            if pair not in self._queued:
+                self._queued.add(pair)
+                self._scheduler.enqueue(WorkItem(service_id=pair[0], cost=1, payload=pair[1]))
+        capacity = self._capacity if self._capacity is not None else len(self._pairs)
+        selected = [(item.service_id, str(item.payload)) for item in self._scheduler.dispatch(capacity)]
+        self._queued.difference_update(selected)
+        selected.sort(key=self._order.__getitem__)
+        if self._queued:
+            logger.info(
+                "high_scale.fair_dispatch",
+                extra={"dispatched": len(selected), "deferred": len(self._queued), "capacity": capacity},
+            )
+        return selected
+
+
+def _weights_from_env() -> dict[str, int]:
+    weights: dict[str, int] = {}
+    for entry in _csv_env("HIGH_SCALE_SERVICE_WEIGHTS"):
+        service_id, sep, raw = entry.partition("=")
+        if not sep or not service_id.strip() or not raw.strip().isdigit() or int(raw) <= 0:
+            raise ValueError("HIGH_SCALE_SERVICE_WEIGHTS entries must look like service=positive_integer")
+        weights[service_id.strip()] = int(raw)
+    return weights
+
+
 class HighScaleWorkerLoop:
     """Runs bounded source pages without coupling high-scale work to APScheduler."""
 
@@ -53,6 +112,8 @@ class HighScaleWorkerLoop:
         sleeper: Any = time.sleep,
         deletion_sweeper: HighScaleDeletionSweeper | None = None,
         deletion_sweep_limit: int = 100,
+        pages_per_tick: int | None = None,
+        service_weights: Mapping[str, int] | None = None,
     ) -> None:
         if not service_ids:
             raise ValueError("at least one high-scale service is required")
@@ -70,21 +131,25 @@ class HighScaleWorkerLoop:
         self._deletion_sweep_limit = deletion_sweep_limit
         self._deletion_thread: Thread | None = None
         self._last_system_cleanup = 0.0
+        self._selector = FairPageSelector(
+            tuple((service_id, domain) for service_id in service_ids for domain in domains),
+            capacity=pages_per_tick,
+            weights=service_weights,
+        )
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
         results: list[WorkerPageResult] = []
-        for service_id in self._service_ids:
-            for domain in self._domains:
-                try:
-                    page = self._coordinator.run_page(service_id=service_id, domain=domain)
-                except Exception as exc:
-                    logger.exception(
-                        "high-scale worker page failed",
-                        extra={"service_id": service_id, "domain": domain},
-                    )
-                    results.append(WorkerPageResult(service_id, domain, None, exc))
-                else:
-                    results.append(WorkerPageResult(service_id, domain, page))
+        for service_id, domain in self._selector.select():
+            try:
+                page = self._coordinator.run_page(service_id=service_id, domain=domain)
+            except Exception as exc:
+                logger.exception(
+                    "high-scale worker page failed",
+                    extra={"service_id": service_id, "domain": domain},
+                )
+                results.append(WorkerPageResult(service_id, domain, None, exc))
+            else:
+                results.append(WorkerPageResult(service_id, domain, page))
         self._run_deletion_sweeps()
         self._run_system_cleanups()
         return tuple(results)
@@ -280,6 +345,8 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         deletion_sweep_limit=deletion_sweep_limit,
         domains=domains,
         interval_seconds=interval_seconds,
+        pages_per_tick=int(os.getenv("HIGH_SCALE_PAGES_PER_TICK", "0") or "0") or None,
+        service_weights=_weights_from_env(),
     )
 
 
@@ -292,6 +359,8 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         interval_seconds: float,
         deletion_sweepers: tuple[tuple[str, HighScaleDeletionSweeper | None], ...] = (),
         deletion_sweep_limit: int = 100,
+        pages_per_tick: int | None = None,
+        service_weights: Mapping[str, int] | None = None,
     ) -> None:
         self._coordinators = coordinators
         self._domains = domains
@@ -302,21 +371,26 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         self._deletion_sweep_limit = deletion_sweep_limit
         self._deletion_thread: Thread | None = None
         self._last_system_cleanup = 0.0
+        self._selector = FairPageSelector(
+            tuple((service_id, domain) for service_id, _ in coordinators for domain in domains),
+            capacity=pages_per_tick,
+            weights=service_weights,
+        )
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
         results: list[WorkerPageResult] = []
-        for service_id, coordinator in self._coordinators:
-            for domain in self._domains:
-                try:
-                    page = coordinator.run_page(service_id=service_id, domain=domain)
-                except Exception as exc:
-                    logger.exception(
-                        "high-scale worker page failed",
-                        extra={"service_id": service_id, "domain": domain},
-                    )
-                    results.append(WorkerPageResult(service_id, domain, None, exc))
-                else:
-                    results.append(WorkerPageResult(service_id, domain, page))
+        coordinators = dict(self._coordinators)
+        for service_id, domain in self._selector.select():
+            try:
+                page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
+            except Exception as exc:
+                logger.exception(
+                    "high-scale worker page failed",
+                    extra={"service_id": service_id, "domain": domain},
+                )
+                results.append(WorkerPageResult(service_id, domain, None, exc))
+            else:
+                results.append(WorkerPageResult(service_id, domain, page))
         self._run_deletion_sweeps()
         self._run_system_cleanups()
         return tuple(results)
