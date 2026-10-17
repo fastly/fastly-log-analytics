@@ -6,6 +6,7 @@ import argparse
 import json
 from dataclasses import asdict
 from datetime import timedelta
+from pathlib import Path
 from typing import cast
 
 from backend import config as app_config
@@ -14,6 +15,7 @@ from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHousePublication, PostgresBatchManifestStore
 from backend.high_scale.recovery import rebuild_origin_projections_from_fos
+from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
 
@@ -23,9 +25,21 @@ def main() -> int:
     parser.add_argument("--service-id", required=True)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--rebuild-id")
+    parser.add_argument(
+        "--capacity-json",
+        type=Path,
+        help="measured RecoveryCapacityMeasurement fields; exit 3 when the rebuild completes but the claim is invalid",
+    )
     args = parser.parse_args()
     if args.days <= 0:
         parser.error("--days must be positive")
+    capacity = None
+    if args.capacity_json is not None:
+        try:
+            capacity = RecoveryCapacityMeasurement(**json.loads(args.capacity_json.read_text()))
+            capacity.validate()
+        except (OSError, TypeError, ValueError) as exc:
+            parser.error(f"--capacity-json is invalid: {exc}")
 
     settings = app_config.load_clickhouse_config()
     if settings is None:
@@ -49,9 +63,12 @@ def main() -> int:
             service_id=args.service_id,
             window=timedelta(days=args.days),
             rebuild_id=args.rebuild_id,
+            capacity=capacity,
         )
         print(json.dumps(asdict(report), sort_keys=True))
-        return 0 if report.full_rebuild_complete else 1
+        if not report.full_rebuild_complete:
+            return 1
+        return 3 if report.recovery_claim_valid is False else 0
     finally:
         client.close()
 

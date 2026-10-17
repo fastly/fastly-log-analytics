@@ -16,10 +16,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
+import structlog
+
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.publication import ClickHousePublication
+from backend.high_scale.recovery_capacity import (
+    RecoveryCapacityMeasurement,
+    RecoveryCapacityReport,
+    evaluate_recovery_capacity,
+)
 from backend.high_scale.replay import replay_manifest, replay_origin_projections
+
+logger = structlog.get_logger(__name__)
 
 
 class ArchiveManifestCatalog(Protocol):
@@ -49,6 +58,44 @@ class RecoveryReport:
     # Pass back into a resumed call (rebuild_id=report.rebuild_id) to retry
     # this SAME attempt idempotently; omit to start a genuinely new one.
     rebuild_id: str
+    # Capacity gate (docs/runbooks/high-scale-capacity-and-recovery.md,
+    # "Recovery qualification"): populated only when the caller supplies a
+    # measured profile. A recovery CLAIM is valid only when the slowest stage
+    # sustains the required replay rate AND the rebuild completed; None means
+    # no measurement was supplied, not "feasible".
+    capacity: RecoveryCapacityReport | None = None
+    recovery_claim_valid: bool | None = None
+
+
+def _evaluate_capacity_gate(
+    measurement: RecoveryCapacityMeasurement | None,
+    *,
+    service_id: str,
+    domain: str,
+    rebuild_id: str,
+) -> RecoveryCapacityReport | None:
+    """Evaluate the measured profile before any replay work starts.
+
+    An invalid measurement raises ``ValueError`` here (operator error, nothing
+    replayed yet). An infeasible one never blocks recovery: restoring data
+    matters more than the claim, so it is logged and carried on the report.
+    """
+
+    if measurement is None:
+        return None
+    report = evaluate_recovery_capacity(measurement)
+    log = logger.info if report.feasible else logger.warning
+    log(
+        "high_scale.recovery_capacity_gate",
+        service_id=service_id,
+        domain=domain,
+        rebuild_id=rebuild_id,
+        feasible=report.feasible,
+        limiting_stage=report.limiting_stage,
+        limiting_events_per_second=report.limiting_events_per_second,
+        required_events_per_second=report.required_events_per_second,
+    )
+    return report
 
 
 def rebuild_serving_state_from_fos(
@@ -62,6 +109,7 @@ def rebuild_serving_state_from_fos(
     recent_window: timedelta = timedelta(hours=24),
     warm_window: timedelta = timedelta(days=30),
     rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
 ) -> RecoveryReport:
     if recent_window <= timedelta(0):
         raise ValueError("recent_window must be positive")
@@ -86,6 +134,9 @@ def rebuild_serving_state_from_fos(
     # fresh, un-deduplicated rebuild scope, appropriate only for a genuinely
     # new recovery attempt.
     resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain=domain, rebuild_id=resolved_rebuild_id
+    )
 
     recent_manifests = _sorted(catalog.manifests_covering(service_id, domain, recent_start, observed))
     warm_manifests = _sorted(catalog.manifests_covering(service_id, domain, warm_start, recent_start))
@@ -107,6 +158,10 @@ def rebuild_serving_state_from_fos(
         rows_replayed=recent_rows + warm_rows,
         errors=tuple(recent_errors) + tuple(warm_errors),
         rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=(
+            None if capacity_report is None else capacity_report.feasible and triage_available and warm_available
+        ),
     )
 
 
@@ -119,11 +174,15 @@ def rebuild_origin_projections_from_fos(
     now: datetime | None = None,
     window: timedelta = timedelta(days=30),
     rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
 ) -> RecoveryReport:
     if window <= timedelta(0):
         raise ValueError("window must be positive")
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
+    )
     manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
     rows = 0
     replayed = 0
@@ -152,6 +211,8 @@ def rebuild_origin_projections_from_fos(
         rows_replayed=rows,
         errors=tuple(errors),
         rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
     )
 
 
