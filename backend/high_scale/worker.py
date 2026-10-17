@@ -240,6 +240,17 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     high_scale_config = from_environment()
     if not high_scale_config.enabled:
         raise RuntimeError("high-scale worker requires HIGH_SCALE_ENABLED=1")
+    topology = high_scale_config.topology_profile()
+    logger.info(
+        "high_scale.topology_profile",
+        extra={
+            "profile": topology.name,
+            "clickhouse_replicas_per_shard": topology.clickhouse_replicas_per_shard,
+            "keeper_members": topology.keeper_members,
+            "production_ha": topology.production_ha,
+            "shard_count": topology.shard_count,
+        },
+    )
     service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
     if not service_ids:
         service_ids = tuple(

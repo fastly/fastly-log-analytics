@@ -280,9 +280,18 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         from backend import config as _hs_cfg
 
         if _hs_cfg.is_high_scale_mode():
+            from dataclasses import asdict
+
+            from backend.high_scale.config import topology_from_environment
             from backend.high_scale.disk_sampler import disk_snapshot_payload
 
-            out["high_scale"] = {"disk": disk_snapshot_payload()}
+            topology: dict | None
+            try:
+                topology = asdict(topology_from_environment())
+            except ValueError:
+                logger.warning("health snapshot: HIGH_SCALE_PROFILE is not a known topology profile")
+                topology = None
+            out["high_scale"] = {"disk": disk_snapshot_payload(), "topology": topology}
     except Exception:
         logger.warning("health snapshot: high-scale block failed", exc_info=True)
 

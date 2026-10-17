@@ -9158,6 +9158,7 @@ export interface components {
          */
         HealthHighScale: {
             disk?: components["schemas"]["HealthHighScaleDisk"] | null;
+            topology?: components["schemas"]["HealthHighScaleTopology"] | null;
         };
         /**
          * HealthHighScaleDisk
@@ -9181,6 +9182,24 @@ export interface components {
             reasoning: string;
             /** Sample Age S */
             sample_age_s: number;
+        };
+        /**
+         * HealthHighScaleTopology
+         * @description Configured portable topology profile (what production HA claims rest on).
+         */
+        HealthHighScaleTopology: {
+            /** Name */
+            name: string;
+            /** Clickhouse Replicas Per Shard */
+            clickhouse_replicas_per_shard: number;
+            /** Keeper Members */
+            keeper_members: number;
+            /** Persistent Serving Storage */
+            persistent_serving_storage: boolean;
+            /** Production Ha */
+            production_ha: boolean;
+            /** Shard Count */
+            shard_count: number;
         };
         /** HealthInFlightRun */
         HealthInFlightRun: {

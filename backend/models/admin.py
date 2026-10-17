@@ -143,10 +143,22 @@ class HealthHighScaleDisk(BaseModel):
     sample_age_s: float
 
 
+class HealthHighScaleTopology(BaseModel):
+    """Configured portable topology profile (what production HA claims rest on)."""
+
+    name: str
+    clickhouse_replicas_per_shard: int
+    keeper_members: int
+    persistent_serving_storage: bool
+    production_ha: bool
+    shard_count: int
+
+
 class HealthHighScale(BaseModel):
     """High-scale-only health block; absent from the payload in standard mode."""
 
     disk: HealthHighScaleDisk | None = None
+    topology: HealthHighScaleTopology | None = None
 
 
 class HealthSnapshotResponse(BaseModel):

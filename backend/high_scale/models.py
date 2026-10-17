@@ -63,8 +63,7 @@ class HighScaleSizing:
             raise ValueError("warm retention must be at least hot retention")
         if self.shard_count <= 0 or self.replicas_per_shard <= 0:
             raise ValueError("shard and replica counts must be positive")
-        if self.profile not in {"local", "portable-production"}:
-            raise ValueError("high-scale profile must be local or portable-production")
+        self.topology_profile()
         if self.quotas.max_concurrent_queries <= 0:
             raise ValueError("query concurrency quota must be positive")
         if self.quotas.max_query_rows <= 0:
@@ -73,6 +72,9 @@ class HighScaleSizing:
             raise ValueError("export quota must be positive")
         if self.quotas.max_export_rows_per_hour <= 0 or self.quotas.max_export_bytes_per_hour <= 0:
             raise ValueError("export limits must be positive")
+
+    def topology_profile(self) -> TopologyProfile:
+        return _resolve_topology_profile(self.profile)
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,9 @@ class HighScaleConfig:
 
         return from_environment()
 
+    def topology_profile(self) -> TopologyProfile:
+        return _resolve_topology_profile(self.profile)
+
     def validate(self) -> None:
         if not self.enabled:
             return
@@ -135,8 +140,17 @@ class HighScaleConfig:
             raise ValueError("high-scale mode requires a durable worker queue URL")
         if not self.persistent_storage:
             raise ValueError("high-scale mode requires persistent serving storage")
-        if self.profile not in {"local", "portable-production"}:
-            raise ValueError("high-scale profile must be local or portable-production")
+        self.topology_profile()
+
+
+def _resolve_topology_profile(profile_name: str) -> TopologyProfile:
+    """Single source of truth for profile names and replica/Keeper expectations."""
+    from backend.high_scale.topology import build_topology_profile
+
+    try:
+        return build_topology_profile(profile_name)
+    except ValueError:
+        raise ValueError("high-scale profile must be local or portable-production") from None
 
 
 def recommend_retention(
@@ -186,10 +200,13 @@ def recommend_high_scale_sizing(sizing: HighScaleSizing) -> HighScaleRecommendat
     warnings: list[str] = []
     if required > available:
         warnings.append("requested hot and warm retention exceed available storage")
-    if sizing.profile == "local" and sizing.replicas_per_shard > 1:
-        warnings.append("local profile does not provide replicated serving storage")
-    if sizing.profile == "portable-production" and sizing.replicas_per_shard < 2:
-        warnings.append("portable-production normally requires at least two replicas per shard")
+    topology = sizing.topology_profile()
+    if not topology.production_ha and sizing.replicas_per_shard > topology.clickhouse_replicas_per_shard:
+        warnings.append(f"{topology.name} profile does not provide replicated serving storage")
+    if topology.production_ha and sizing.replicas_per_shard < topology.clickhouse_replicas_per_shard:
+        warnings.append(
+            f"{topology.name} normally requires at least {topology.clickhouse_replicas_per_shard} replicas per shard"
+        )
     return HighScaleRecommendation(
         service_id=sizing.service_id,
         profile=sizing.profile,

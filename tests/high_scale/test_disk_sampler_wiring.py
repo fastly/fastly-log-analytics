@@ -131,7 +131,7 @@ def test_health_snapshot_high_scale_block_is_empty_before_the_first_sample(clien
     with patch("backend.config.is_high_scale_mode", return_value=True):
         body = client.get("/api/admin/health-snapshot").json()
 
-    assert body["high_scale"] == {"disk": None}
+    assert body["high_scale"]["disk"] is None
 
 
 def test_health_snapshot_omits_the_high_scale_key_in_standard_mode(client) -> None:

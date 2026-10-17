@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import os
 
-from backend.high_scale.models import HighScaleConfig
+from backend.high_scale.models import HighScaleConfig, TopologyProfile
+from backend.high_scale.topology import build_topology_profile
 
 
 def _optional_env(name: str) -> str | None:
     value = os.getenv(name, "").strip()
     return value or None
+
+
+def topology_from_environment() -> TopologyProfile:
+    """The configured profile without requiring the full opt-in contract (serving pods)."""
+    return build_topology_profile(os.getenv("HIGH_SCALE_PROFILE", "local").strip().lower())
 
 
 def from_environment() -> HighScaleConfig:

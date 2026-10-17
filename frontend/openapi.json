@@ -59324,6 +59324,16 @@
                 "type": "null"
               }
             ]
+          },
+          "topology": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthHighScaleTopology"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -59379,6 +59389,45 @@
         ],
         "title": "HealthHighScaleDisk",
         "description": "Latest serving-volume disk-guard evaluation (high-scale topology only)."
+      },
+      "HealthHighScaleTopology": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "clickhouse_replicas_per_shard": {
+            "type": "integer",
+            "title": "Clickhouse Replicas Per Shard"
+          },
+          "keeper_members": {
+            "type": "integer",
+            "title": "Keeper Members"
+          },
+          "persistent_serving_storage": {
+            "type": "boolean",
+            "title": "Persistent Serving Storage"
+          },
+          "production_ha": {
+            "type": "boolean",
+            "title": "Production Ha"
+          },
+          "shard_count": {
+            "type": "integer",
+            "title": "Shard Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "clickhouse_replicas_per_shard",
+          "keeper_members",
+          "persistent_serving_storage",
+          "production_ha",
+          "shard_count"
+        ],
+        "title": "HealthHighScaleTopology",
+        "description": "Configured portable topology profile (what production HA claims rest on)."
       },
       "HealthInFlightRun": {
         "properties": {

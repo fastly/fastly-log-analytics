@@ -29,7 +29,7 @@ what each wiring deliberately does **not** do. It extends
 | `fairness` | `HighScaleWorkerLoop.run_once` work selection in `backend/high_scale/worker.py` | worker process (`HIGH_SCALE_ENABLED=1`) | Schedules (service, domain) pages through `FairScheduler` with optional per-tick page capacity and per-service weights |
 | `projections` | `HighScaleIngestController` request-domain projection step in `backend/high_scale/ingest_controller.py` | high-scale ingest controller | Publishes `project_cmcd` rows to `cmcd_projection_facts` for request events that carry CMCD fields |
 | `recovery_capacity` | `rebuild_serving_state_from_fos` / `rebuild_origin_projections_from_fos` in `backend/high_scale/recovery.py`, driven by `scripts/backfill_high_scale_origin.py --capacity-json` | explicit measurement supplied by the operator | Evaluates the recovery claim and records it on the `RecoveryReport`; recovery itself is never blocked |
-| `topology` | `HighScaleConfig.validate()` / `HighScaleConfig.topology_profile()` in `backend/high_scale/models.py` (worker startup, health snapshot) and `recommend_high_scale_sizing` | high-scale config | Single source of truth for profile names and replica/Keeper expectations; startup log and health snapshot expose the profile |
+| `topology` | `HighScaleConfig.validate()` / `HighScaleConfig.topology_profile()` in `backend/high_scale/models.py` (worker startup), `topology_from_environment` in `backend/high_scale/config.py` (health snapshot) and `recommend_high_scale_sizing` | high-scale config | Single source of truth for profile names and replica/Keeper expectations; startup log and health snapshot expose the profile |
 
 ## `disk_guard`: periodic sampler, surfaced mode
 
@@ -150,9 +150,11 @@ topology but must not claim production availability).
   `build_topology_profile`, and `HighScaleConfig.validate()` uses it instead of
   a duplicated name list, so an unknown profile fails at worker startup.
 - `recommend_high_scale_sizing` derives its replica warnings from the profile
-  (replica count and `production_ha`) with unchanged messages.
+  (expected replicas per shard and `production_ha`), so the warning text and
+  thresholds follow the profile instead of a second copy of the numbers.
 - The worker logs `high_scale.topology_profile` at startup, and the health
-  snapshot reports the configured profile under `high_scale.topology`.
+  snapshot reports the profile named by `HIGH_SCALE_PROFILE` under
+  `high_scale.topology` (`null`, with a warning log, when the name is unknown).
 
 ## Verification
 
