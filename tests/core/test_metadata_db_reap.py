@@ -12,6 +12,8 @@ reap is age-gated (60 minutes), which is too long for a stuck UI.
 
 from __future__ import annotations
 
+import pytest
+
 from backend.core import metadata as metadata_db
 
 
@@ -117,92 +119,59 @@ def test_reap_custom_reason_is_recorded():
 # ── time-machine: pin the start_cron_run 60-minute orphan boundary ──────────
 
 
-@__import__("pytest").mark.skip(reason="Migrated to job_runs")
-def test_start_cron_run_reaps_rows_exactly_at_orphan_threshold():
-    """``start_cron_run`` reaps rows older than ``_ORPHAN_THRESHOLD_MINS``
-    (60 min) but leaves younger rows alone.
+def _seed_lease(sid: str, task: str, heartbeat_at: float, ttl_s: int = 60) -> None:
+    """Insert the ``job_runs`` lease that ``start_cron_run`` consults. The reap is
+    heartbeat-driven now: a 'running' cron_runs row is an orphan only when no
+    lease row with ``heartbeat_at + lease_ttl_s >= now`` backs it."""
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO job_runs (service_id, job_name, started_at, heartbeat_at, lease_ttl_s, status) "
+        "VALUES (?, ?, ?, ?, ?, 'running')",
+        (sid, task, heartbeat_at, heartbeat_at, ttl_s),
+    )
+    con.commit()
 
-    Pinning this boundary deterministically requires time-travel: stamp
-    a row's ``started_at`` at T=0, jump 61 min forward, call
-    ``start_cron_run`` and verify the OLD row got reaped while a
-    YOUNGER (59 min) row stays. Without freezing the clock the test
-    either:
-      (a) waits 61 real minutes (intolerable), or
-      (b) backdates the row insert by ALREADY 61 min, which exercises
-          the SQL but bypasses the production code path where the
-          ``time_cutoff`` is computed from ``datetime.now(UTC)`` in
-          backend/core/metadata/cron_log.py:29.
 
-    time-machine swaps Python's ``datetime.now`` at the C-extension
-    layer so the cron_log.py code observes the travelled time without
-    any instrumentation of the SUT. Note that SQLite's ``datetime('now')``
-    is NOT affected — so we stamp ``started_at`` via Python's
-    ``iso_z_now()`` (matches what production cron_log.py does), not via
-    raw SQL ``datetime('now')``.
+def test_start_cron_run_reaps_rows_exactly_at_lease_expiry():
+    """``start_cron_run`` reaps a 'running' cron row once its job_runs lease
+    (heartbeat + ttl) has lapsed, and refuses to start while the lease is live.
+
+    Pins the boundary deterministically with time-machine: a lease heartbeating
+    at T=0 with a 60 s ttl still blocks a start at T+59 s (the row must stay
+    'running'), but is reaped at T+61 s so the new run starts. A different
+    task's live lease is never touched (cross-task isolation).
     """
     import datetime as _dt
 
     import time_machine
 
-    from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS
-    from backend.utils.date_utils import iso_z_now
-
-    sid = "svc-reap-boundary"
-    threshold = _dt.timedelta(minutes=_ORPHAN_THRESHOLD_MINS)
+    sid = "svc-lease-boundary"
     t0 = _dt.datetime(2026, 6, 16, 12, 0, 0, tzinfo=_dt.UTC)
 
-    def _seed_at_python_now(task: str) -> int:
-        con = metadata_db.get_con(sid)
-        cur = con.execute(
-            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys) "
-            "VALUES (?, ?, ?, 0.0, 'running', '[]')",
-            (sid, task, iso_z_now()),
-        )
-        con.commit()
-        return int(cur.lastrowid or 0)
+    old_id = _seed_running_at(sid, "commit", t0)
+    _seed_lease(sid, "commit", t0.timestamp(), ttl_s=60)
+    cross_id = _seed_running_at(sid, "optimize", t0)
+    _seed_lease(sid, "optimize", t0.timestamp() + 3600, ttl_s=60)
 
-    # The reap is task-scoped (WHERE task = ? AND started_at < cutoff).
-    # Use 'commit' here — a task that keeps the 60-min DEFAULT cutoff (the
-    # 'sync' task now overrides to 10 min, covered by its own tests below).
-    # Seed BOTH boundary rows under the SAME task — what we're really
-    # pinning is the timestamp boundary, not cross-task behavior. A third
-    # row under a DIFFERENT task proves the reap doesn't cross tasks.
-
-    # T=0 → will be 61 min old after travel.
-    with time_machine.travel(t0, tick=False):
-        old_id = _seed_at_python_now("commit")
-    # T+2min → will be only 59 min old after travel; same task.
-    with time_machine.travel(t0 + _dt.timedelta(minutes=2), tick=False):
-        young_same_task_id = _seed_at_python_now("commit")
-    # T+2min → DIFFERENT task; must NEVER be touched (cross-task isolation).
-    with time_machine.travel(t0 + _dt.timedelta(minutes=2), tick=False):
-        cross_task_id = _seed_at_python_now("optimize")
-
-    # Travel past the 60-min threshold for the OLD commit row only.
-    with time_machine.travel(t0 + threshold + _dt.timedelta(minutes=1), tick=False):
-        # ``start_cron_run`` reaps orphans for the SAME task it's
-        # starting. The young 'commit' row is exactly 59 min old → keep.
-        # The old 'commit' row is 61 min old → reap. The 'optimize' row is
-        # a different task → must not be touched even though it would be
-        # young anyway.
-        # The young commit row is still 'running', so start_cron_run will
-        # raise (already running) — catch and inspect cron_runs state.
-        with __import__("pytest").raises(RuntimeError, match="already running"):
+    # T+59s: lease still live -> refused, nothing reaped.
+    with time_machine.travel(t0 + _dt.timedelta(seconds=59), tick=False):
+        with pytest.raises(RuntimeError, match="already running"):
             metadata_db.start_cron_run(sid, "commit")
 
     con = metadata_db.get_con(sid)
-    rows = con.execute(
-        "SELECT id, task, status FROM cron_runs WHERE id IN (?, ?, ?) ORDER BY id",
-        (old_id, young_same_task_id, cross_task_id),
-    ).fetchall()
-    assert len(rows) == 3
-    by_id = {r["id"]: r["status"] for r in rows}
-    assert by_id[old_id] == "error", f"commit row at t0 (61 min before reap) should be reaped; got {by_id[old_id]!r}"
-    assert by_id[young_same_task_id] == "running", (
-        f"commit row at t0+2min (59 min before reap) should NOT be reaped; got {by_id[young_same_task_id]!r}"
-    )
-    assert by_id[cross_task_id] == "running", (
-        f"different-task row should not be touched by commit reap; got {by_id[cross_task_id]!r}"
+    assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (old_id,)).fetchone()["status"] == "running"
+
+    # T+61s: lease lapsed -> the orphan row is reaped and a fresh run starts.
+    with time_machine.travel(t0 + _dt.timedelta(seconds=61), tick=False):
+        new_id = metadata_db.start_cron_run(sid, "commit")
+
+    assert new_id and new_id != old_id
+    old = con.execute("SELECT status, error_message FROM cron_runs WHERE id = ?", (old_id,)).fetchone()
+    assert old["status"] == "error"
+    assert "heartbeat lost" in (old["error_message"] or "")
+    assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (new_id,)).fetchone()["status"] == "running"
+    assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (cross_id,)).fetchone()["status"] == "running", (
+        "a different task's live lease must not be reaped by this task's start"
     )
 
 
@@ -254,41 +223,49 @@ def test_sync_orphan_threshold_is_short_and_reaps_at_10_min():
     assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (new_id,)).fetchone()["status"] == "running"
 
 
-@__import__("pytest").mark.skip(reason="Migrated to job_runs")
-def test_sync_row_under_threshold_still_blocks():
-    """A 'sync' row only 9 min old (< 10-min cutoff) is NOT reaped, so a
-    concurrent start is correctly refused — proving the cutoff didn't go
-    to zero and start double-running healthy syncs."""
+def test_live_lease_blocks_start_even_when_cron_row_is_old():
+    """The orphan decision is the lease heartbeat, not the cron row's age: a
+    'sync' row started 11 minutes ago whose lease heartbeated 30 s ago is a
+    healthy long-running sync, so a concurrent start is refused. This is what
+    stops the heartbeat model from double-running healthy syncs."""
     import datetime as _dt
 
-    import pytest
     import time_machine
 
-    sid = "svc-sync-under"
+    sid = "svc-sync-live-lease"
     t0 = _dt.datetime(2026, 6, 19, 3, 40, 0, tzinfo=_dt.UTC)
-    _seed_running_at(sid, "sync", t0)
+    row_id = _seed_running_at(sid, "sync", t0)
+    now = t0 + _dt.timedelta(minutes=11)
+    _seed_lease(sid, "sync", (now - _dt.timedelta(seconds=30)).timestamp(), ttl_s=60)
 
-    with time_machine.travel(t0 + _dt.timedelta(minutes=9), tick=False):
+    with time_machine.travel(now, tick=False):
         with pytest.raises(RuntimeError, match="already running"):
             metadata_db.start_cron_run(sid, "sync")
 
+    status = metadata_db.get_con(sid).execute("SELECT status FROM cron_runs WHERE id = ?", (row_id,)).fetchone()
+    assert status["status"] == "running"
 
-@__import__("pytest").mark.skip(reason="Migrated to job_runs")
-def test_non_sync_task_keeps_60_min_default():
-    """Tasks without a per-task override keep the 60-min cutoff: a 'commit'
-    row 11 min old is NOT reaped (would be, under sync's 10-min rule)."""
+
+@pytest.mark.parametrize("task", ["sync", "commit"])
+def test_lease_less_running_row_is_reaped_immediately_for_any_task(task):
+    """A 'running' cron row with NO backing lease is an orphan (its owner died
+    without a heartbeat) and is reaped on the next start regardless of age or
+    task — there is no per-task 10/60-minute age cutoff any more."""
     import datetime as _dt
 
-    import pytest
     import time_machine
 
-    sid = "svc-commit-default"
+    sid = f"svc-no-lease-{task}"
     t0 = _dt.datetime(2026, 6, 19, 3, 40, 0, tzinfo=_dt.UTC)
-    _seed_running_at(sid, "commit", t0)
+    old_id = _seed_running_at(sid, task, t0)
 
-    with time_machine.travel(t0 + _dt.timedelta(minutes=11), tick=False):
-        with pytest.raises(RuntimeError, match="already running"):
-            metadata_db.start_cron_run(sid, "commit")
+    with time_machine.travel(t0 + _dt.timedelta(seconds=5), tick=False):
+        new_id = metadata_db.start_cron_run(sid, task)
+
+    con = metadata_db.get_con(sid)
+    assert new_id and new_id != old_id
+    assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (old_id,)).fetchone()["status"] == "error"
+    assert con.execute("SELECT status FROM cron_runs WHERE id = ?", (new_id,)).fetchone()["status"] == "running"
 
 
 # ── finalize_cron_run_if_running: idempotent terminal backstop ───────────────
