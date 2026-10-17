@@ -20,7 +20,7 @@ import { useScoringLabels } from '@/hooks/useScoringLabels'
 import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
 import { useScoringQuery } from './useScoringQuery'
-import type { Expect, WireParity } from '@/types/api'
+import type { DropNull, Expect, Simplify, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 interface TopFlaggedTableProps {
@@ -33,20 +33,10 @@ interface TopFlaggedTableProps {
 // the repository SQL always emits timestamp/edge_sid/edge_score (row
 // identity); the rest depend on masking + which log fields are enabled.
 // Key/type drift against the wire schema fails on the parity guard below.
-interface FlaggedRow {
-  timestamp: string
-  edge_sid: string
-  edge_score: number
-  edge_score_l1?: number
-  edge_score_l2?: number
-  edge_cookie_compliance?: string
-  edge_score_reason?: string
-  ip?: string
-  ua?: string
-  url?: string
-  status?: number
-  country?: string
-}
+type FlaggedRow = Simplify<
+  Omit<DropNull<components['schemas']['ScoringTopFlaggedRow']>, 'timestamp' | 'edge_sid' | 'edge_score'> &
+    Required<Pick<DropNull<components['schemas']['ScoringTopFlaggedRow']>, 'timestamp' | 'edge_sid' | 'edge_score'>>
+>
 export type _FlaggedRowParity = Expect<WireParity<FlaggedRow, components['schemas']['ScoringTopFlaggedRow']>>
 
 function scoreBadge(score: number) {

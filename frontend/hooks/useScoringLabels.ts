@@ -4,21 +4,20 @@ import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
+import type { DropNull, Expect, Simplify, WireParity, components } from '@/types/api'
 
 export type LabelValue = 'good' | 'bad' | 'neutral'
 
-export interface LabelRow {
-  id: string
-  sid: string
-  label: LabelValue
-  notes?: string
-  sample_ip?: string
-  sample_ua?: string
-  sample_url?: string
-  flagged_by?: string
-  created_at?: string
-  updated_at?: string
-}
+// The wire `label` is a bare string; the backend only ever writes these three.
+export type LabelRow = Simplify<
+  Omit<DropNull<components['schemas']['ScoringLabelRow']>, 'id' | 'sid' | 'label'> & {
+    id: string
+    sid: string
+    label: LabelValue
+  }
+>
+
+export type _LabelRowParity = Expect<WireParity<LabelRow, components['schemas']['ScoringLabelRow']>>
 
 export interface ScoringLabelsResult {
   labels: LabelRow[]

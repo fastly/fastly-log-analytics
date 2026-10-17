@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from './useSyncStatus'
 import { client } from '@/lib/api'
+import type { WithRequiredNullable } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
@@ -14,11 +15,11 @@ const SEED_KEYS = [queryKeys.lastSync] as const
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 
-export interface LastSyncInfo {
-  started_at: string | null
-  status: string | null   // 'running' | 'success' | 'error' | 'partial_success' | null
-  duration_s: number | null
-}
+// status: 'running' | 'success' | 'error' | 'partial_success' | null
+export type LastSyncInfo = Pick<
+  WithRequiredNullable<components['schemas']['CronRunEntry'], 'started_at' | 'status' | 'duration_s'>,
+  'started_at' | 'status' | 'duration_s'
+>
 
 /**
  * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,

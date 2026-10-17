@@ -8,7 +8,9 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
 
-export type LabelValue = 'good' | 'bad' | 'neutral'
+import type { LabelValue } from '@/hooks/useScoringLabels'
+
+export type { LabelValue }
 
 interface FlagSessionPopoverProps {
   serviceId: string

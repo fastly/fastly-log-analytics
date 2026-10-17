@@ -5,16 +5,12 @@ import { Check, Loader2, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
-import type { Expect, WireParity, components } from '@/types/api'
+import type { Expect, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 
-interface StatusCodeMeta {
-  current: number | null
-  default: number
-  effective: number
-  min: number
-  max: number
-  is_default: boolean
-}
+type StatusCodeMeta = WithRequired<
+  WithRequiredNullable<components['schemas']['ScoringEnforceStatusCodeState'], 'current'>,
+  'default' | 'effective' | 'min' | 'max' | 'is_default'
+>
 
 export type _StatusCodeMetaParity = Expect<WireParity<StatusCodeMeta, components['schemas']['ScoringEnforceStatusCodeState']>>
 

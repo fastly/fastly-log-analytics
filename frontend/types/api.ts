@@ -34,7 +34,7 @@ export type Expect<T extends true> = T
 
 /** Drop the `[key: string]: unknown` index signature the extra=allow models
  *  generate, keeping only the declared keys. */
-type StripIndex<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] }
+export type StripIndex<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] }
 
 /** StripIndex applied through arrays and nested objects, so interface-typed
  *  local fields stay assignable to their (index-signature-carrying) wire
@@ -56,6 +56,25 @@ export type WireParity<Local, Wire, W = StripIndex<Wire>> =
         : 'local field type is not assignable to its wire type'
       : { keys_not_on_wire: Exclude<keyof Local, keyof W> }
     : { wire_keys_missing_from_local: Exclude<keyof W, keyof Local> }
+
+/** Flatten an intersection into a single object type for readable tooltips. */
+export type Simplify<T> = { [K in keyof T]: T[K] } & {}
+
+/** Wire models generated from `extra=allow` Pydantic classes are all-optional
+ *  and nullable. Mark `K` required and non-null where the producer always
+ *  emits a value, so consumers get the narrowed type while the key set and
+ *  value types stay derived from the generated schema. */
+export type WithRequired<T, K extends keyof StripIndex<T>> = Simplify<
+  Omit<StripIndex<T>, K> & { [P in K]-?: NonNullable<StripIndex<T>[P]> }
+>
+
+/** Strip `null` from every value while keeping each key's optionality. */
+export type DropNull<T> = Simplify<{ [K in keyof StripIndex<T>]: NonNullable<StripIndex<T>[K]> }>
+
+/** Like WithRequired but keeps `null` in the value (key always present, value may be null). */
+export type WithRequiredNullable<T, K extends keyof StripIndex<T>> = Simplify<
+  Omit<StripIndex<T>, K> & { [P in K]-?: Exclude<StripIndex<T>[P], undefined> }
+>
 
 // ── Shared request/response primitives ───────────────────────────────────────
 
@@ -98,6 +117,11 @@ export type InsightsResponse = components['schemas']['InsightsResponse']
 export type InsightAvailabilityResponse = components['schemas']['InsightsAvailabilityResponse']
 
 export type Session = components['schemas']['Session']
+
+export type ShareBanner = WithRequiredNullable<
+  WithRequired<components['schemas']['ShareBannerResponse'], 'sharing_active'>,
+  'public_url'
+>
 
 export type SessionsResponse = components['schemas']['SessionsResponse']
 

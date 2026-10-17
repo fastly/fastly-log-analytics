@@ -20,9 +20,9 @@ import React from 'react'
 
 import { SessionDetail } from '@/app/sessions/_sections/SessionDetail'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 // --- mocks --------------------------------------------------------------
 

@@ -10,20 +10,23 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 
-import { ThresholdMatrix } from './Matrix'
+import { ThresholdMatrix, type BucketCounts } from './Matrix'
 import { ThresholdPreviewStats } from './Preview'
 import { ThresholdSliderControls } from './Slider'
-import type { Expect, WireParity, components } from '@/types/api'
+import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 
-interface ThresholdPreviewResponse {
-  threshold: number
-  since_hours: number
-  total_scored_sessions: number
-  flagged: { total: number; good: number; bad: number; unlabeled: number }
-  passed: { good: number; bad: number; unlabeled: number }
-  precision: number | null
-  recall: number | null
-}
+type ThresholdPreviewResponse = Simplify<
+  Omit<
+    WithRequiredNullable<
+      WithRequired<
+        components['schemas']['ScoringThresholdPreviewResponse'],
+        'threshold' | 'since_hours' | 'total_scored_sessions'
+      >,
+      'precision' | 'recall'
+    >,
+    'flagged' | 'passed'
+  > & { flagged: BucketCounts; passed: Omit<BucketCounts, 'total'> }
+>
 
 export type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
 

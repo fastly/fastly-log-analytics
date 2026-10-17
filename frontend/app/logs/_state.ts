@@ -9,15 +9,12 @@ import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useSSE } from '@/hooks/useSSE'
+import type { WithRequired, components } from '@/types/api'
 
-export type BackgroundCronToast = {
-  id: number
-  task: string
-  status: string
-  started_at: string
-  duration_s?: number
-  rows_ingested?: number
-} | null
+export type BackgroundCronToast = Pick<
+  WithRequired<components['schemas']['CronRunEntry'], 'id' | 'task' | 'status' | 'started_at'>,
+  'id' | 'task' | 'status' | 'started_at' | 'duration_s' | 'rows_ingested'
+> | null
 
 /**
  * Orchestrates all state, data queries, and side-effects for the

@@ -21,9 +21,9 @@ import React from 'react'
 
 import { SessionsTable } from '@/app/sessions/_sections/SessionsTable'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: (options: any) => ({

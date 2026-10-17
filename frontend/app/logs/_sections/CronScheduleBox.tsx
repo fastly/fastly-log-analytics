@@ -13,6 +13,7 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
+import type { WithRequired, components } from '@/types/api'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 
 export function LiveTimer({ startedAt }: { startedAt: string }) {
@@ -32,12 +33,10 @@ function NextRunCountdown({ when }: { when: string | null | undefined }) {
   return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
 }
 
-type CronSchedule = {
-  task: string
-  disabled_reason?: string | null
-  last_run_time?: string | null
-  next_run_time?: string | null
-}
+type CronSchedule = Pick<
+  WithRequired<components['schemas']['CronScheduleEntry'], 'task'>,
+  'task' | 'disabled_reason' | 'last_run_time' | 'next_run_time'
+>
 
 type ActiveCronJob = {
   id: number | string

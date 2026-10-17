@@ -1,15 +1,13 @@
 'use client'
 
 import * as React from 'react'
-import type { Expect, WireParity, components } from '@/types/api'
+import type { Expect, WireParity, WithRequired, components } from '@/types/api'
 
 import { formatCount } from '@/lib/format'
-interface BucketCounts {
-  total: number
-  good: number
-  bad: number
-  unlabeled: number
-}
+export type BucketCounts = WithRequired<
+  components['schemas']['ScoringThresholdBucket'],
+  'total' | 'good' | 'bad' | 'unlabeled'
+>
 
 export type _BucketCountsParity = Expect<WireParity<BucketCounts, components['schemas']['ScoringThresholdBucket']>>
 

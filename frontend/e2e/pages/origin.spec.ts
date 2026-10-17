@@ -14,16 +14,11 @@
  */
 
 import { expect, test } from '@playwright/test'
+import type { DebugQuery } from '../_types'
 
 type LayoutShiftEntry = PerformanceEntry & {
   hadRecentInput?: boolean
   value?: number
-}
-
-type DebugQuery = {
-  sql?: string
-  params?: unknown
-  time_ms?: number
 }
 
 type OriginDebugResponse = {

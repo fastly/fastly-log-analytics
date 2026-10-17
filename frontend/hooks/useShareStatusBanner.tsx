@@ -8,15 +8,13 @@ import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
+import type { ShareBanner } from '@/types/api'
 
 interface Options {
   enabled: boolean
 }
 
-type ShareStatus = {
-  sharing_active: boolean
-  public_url: string | null
-}
+type ShareStatus = ShareBanner
 
 const POLL_MS = 15_000
 
