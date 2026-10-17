@@ -262,6 +262,23 @@ class BootstrapService(PassthroughModel):
     analyst_path_a_reason: str | None = None
 
 
+class BootstrapPopGeo(WireSafeModel):
+    """One PoP's label parts, parsed from the cached ``/datacenters`` list
+    (``get_pop_location_map``); any part may be an empty string."""
+
+    city: str
+    region: str
+    country: str
+
+
+class BootstrapDebugState(WireSafeModel):
+    """Debug-visibility settings folded into bootstrap (admin only)."""
+
+    debug_responses_enabled: bool
+    query_debug_visibility: str
+    api_call_debug_visibility: str
+
+
 class BootstrapResponse(BaseResponse):
     active_service_id: str | None
     services: list[BootstrapService]
@@ -278,7 +295,7 @@ class BootstrapResponse(BaseResponse):
     # ("DEN (Denver, CO - USA)"). Parsed from the cached /datacenters list;
     # the frontend formats + renders it (see frontend/lib/pop.ts). Separate
     # from `pops` (lat/lon) so the world-map consumer is untouched.
-    pop_geo: dict[str, dict[str, str]] | None = None
+    pop_geo: dict[str, BootstrapPopGeo] | None = None
     settings: dict[str, str | bool | None] | None = None
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
@@ -322,7 +339,7 @@ class BootstrapResponse(BaseResponse):
     # toggles on first paint instead of paying a separate
     # /api/debug/state round-trip. ADMIN ONLY — analysts never see
     # the diagnostics panel and the toggles aren't user-facing.
-    debug_state: dict | None = None
+    debug_state: BootstrapDebugState | None = None
     # Seed for the OperationsOverview admin cards:
     # ``{queries_summary, log_accounting, slow_queries_count}``.
     # The card-level useQueries (10-s poll, same queryKeys) hit cache

@@ -15,6 +15,7 @@ import {
   type DomainStatus,
   type FosStatus,
   type JoinPhase,
+  type LakeInfo,
   type ProvisionConfig,
   type ProvisionService,
   type Step,
@@ -118,7 +119,7 @@ export function useWizardState(
   const [ngwafDebugRaw, setNgwafDebugRaw] = useState("");
 
   // Analyst Flow state
-  const [lakeInfo, setLakeInfo] = useState<any>(null);
+  const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [importMode, setImportMode] = useState<"all" | "range">("all");
   const [importRange, setImportRange] = useState<{
@@ -204,7 +205,7 @@ export function useWizardState(
         err.code = (error as { detail?: { error?: string } })?.detail?.error;
         throw err;
       }
-      return data as any;
+      return data ?? [];
     },
     enabled: !!submittedToken,
     retry: false,
@@ -226,7 +227,7 @@ export function useWizardState(
     queryKey: ["services", "catalog"],
     queryFn: async () => {
       const { data } = await client.GET("/api/log-fields/catalog");
-      return data as any;
+      return data;
     },
     enabled: step === "fields",
   });
@@ -406,7 +407,7 @@ export function useWizardState(
         if (end && dateStr > end.split("T")[0]) continue;
       }
 
-      total += (stats as any).size_bytes || 0;
+      total += stats.size_bytes;
     }
     return total;
   }, [lakeInfo, importMode, importRange]);

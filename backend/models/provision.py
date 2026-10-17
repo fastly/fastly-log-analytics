@@ -7,9 +7,9 @@ canonical home for them.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.models._base import PassthroughModel
 
@@ -230,7 +230,8 @@ class ProvisionTokenInfo(_ProvisionRead):
     id: str | None = None
     name: str | None = None
     user_id: str | None = None
-    type: str | None = None
+    # ``"user"`` when the token carries a user_id, else ``"automation"``.
+    type: Literal["user", "automation"] | None = None
 
 
 class ProvisionDefaults(_ProvisionRead):
@@ -279,17 +280,33 @@ class ProvisionLakeInfoCalendarDay(_ProvisionRead):
     size_bytes: int
 
 
+class ProvisionLakeInfoTable(_ProvisionRead):
+    """``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset)."""
+
+    table_name: str | None = None
+    snapshots: int | None = None
+    data_files: int | None = None
+    size_bytes: int | None = None
+    latest_snapshot_at: str | None = None
+    buffer_files: int | None = None
+    buffer_size_bytes: int | None = None
+    table_location: str | None = None
+    region: str | None = None
+    min_timestamp: str | None = None
+    max_timestamp: str | None = None
+
+
 class ProvisionLakeInfoResponse(_ProvisionRead):
-    """``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when
-    the table exists; the table-info block (row counts / extents) varies by
-    layout and rides through ``extra``."""
+    """``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present
+    only when the table exists."""
 
     ok: bool | None = None
     table_exists: bool | None = None
     message: str | None = None
     error: str | None = None
-    range: ProvisionLakeInfoRange | None = None
+    info: ProvisionLakeInfoTable | None = None
     calendar: dict[str, ProvisionLakeInfoCalendarDay] | None = None
+    range: ProvisionLakeInfoRange | None = None
 
 
 class ProvisionIngestResponse(_ProvisionRead):
@@ -298,13 +315,14 @@ class ProvisionIngestResponse(_ProvisionRead):
 
 
 class ProvisionCheckConfigItem(_ProvisionRead):
-    ok: bool | None = None
-    details: str | None = None
+    ok: bool
+    details: str
 
 
 class ProvisionCheckConfigResponse(_ProvisionRead):
-    logging_service: ProvisionCheckConfigItem | None = None
-    cdn_service: ProvisionCheckConfigItem | None = None
+    # ``provision_check_config`` always seeds both blocks before probing.
+    logging_service: ProvisionCheckConfigItem
+    cdn_service: ProvisionCheckConfigItem
 
 
 class NgwafWorkspace(_ProvisionRead):
@@ -317,6 +335,9 @@ class NgwafWorkspacesResponse(_ProvisionRead):
     note: str | None = None
     error: str | None = None
     message: str | None = None
+    error_hint: str | None = None
+    # Raw upstream request/response excerpt the wizard shows when a lookup comes back empty.
+    debug_raw: str | None = Field(default=None, alias="_debug_raw")
 
 
 class NgwafWorkspaceSetResponse(_ProvisionRead):

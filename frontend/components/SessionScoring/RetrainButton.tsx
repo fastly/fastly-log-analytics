@@ -16,7 +16,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
@@ -46,20 +46,19 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RetrainResult> => {
-      const { data, response } = await client.POST(
-        '/api/services/{service_id}/scoring/retrain' as any,
+      const { data, error: errBody, response } = await client.POST(
+        '/api/services/{service_id}/scoring/retrain',
         {
           params: {
             path: { service_id: serviceId },
             query: { since_days: sinceDays },
           },
-        } as any,
+        },
       )
-      if (!response.ok) {
-        const err = (data as any)?.detail?.error ?? `status ${response.status}`
-        throw new Error(err)
+      if (!response.ok || !data) {
+        throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
       }
-      return data as RetrainResult
+      return data
     },
     onSuccess: (data) => {
       setResult(data)

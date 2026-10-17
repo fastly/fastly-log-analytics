@@ -203,8 +203,8 @@ test('enforces zero-CLS layout reservations and renders schema sidebar in Raw SQ
       return {
         data: {
           schema: [
-            { column: 'timestamp', type: 'TIMESTAMP' },
-            { column: 'client_ip', type: 'VARCHAR' },
+            { name: 'timestamp', type: 'TIMESTAMP' },
+            { name: 'client_ip', type: 'VARCHAR' },
           ],
         },
       } as any

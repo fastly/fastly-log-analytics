@@ -130,7 +130,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     queryKey: ['usage-log', 'head', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
     queryFn: async ({ signal }) => {
       const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 50 } as any },
+        params: { query: { ...baseQuery, page_size: 50 } },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
@@ -145,7 +145,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     queryKey: ['usage-log', 'full', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
     queryFn: async ({ signal }) => {
       const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 500 } as any },
+        params: { query: { ...baseQuery, page_size: 500 } },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
@@ -177,7 +177,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     setPurging(true)
     try {
       await client.DELETE('/api/admin/usage-log', {
-        params: { query: { service_id: activeServiceId || '' } as any },
+        params: { query: { service_id: activeServiceId || '' } },
       })
       setPurgeOpen(false)
       refetch()

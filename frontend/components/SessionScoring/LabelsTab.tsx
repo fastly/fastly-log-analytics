@@ -79,10 +79,10 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
       await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: row.id } },
         body: { label: editLabel, notes: editNotes },
-      } as any)
+      })
       setEditingId(null)
       qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to update label')
     } finally {
       setBusyId(null)
@@ -103,9 +103,9 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
       try {
         await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
           params: { path: { service_id: serviceId, label_id: id } },
-        } as any)
+        })
         qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
-      } catch (e: any) {
+      } catch (e) {
         setPendingDeleteIds((prev) => {
           const next = new Set(prev)
           next.delete(id)

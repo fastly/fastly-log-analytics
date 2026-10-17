@@ -11,7 +11,7 @@ import { useIsDataReady } from '@/hooks/useIsDataReady'
 export function useServiceQuery<T>(
   queryKey: unknown[],
   queryFn: (context: QueryFunctionContext) => Promise<T>,
-  options?: Omit<UseQueryOptions<T, Error, T, any>, 'queryKey' | 'queryFn' | 'placeholderData'>
+  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>
 ) {
   const isReady = useIsDataReady()
   return useQuery<T, Error, T>({

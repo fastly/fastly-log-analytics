@@ -17,7 +17,7 @@
  */
 
 import * as React from 'react'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef, Row } from '@tanstack/react-table'
 import { ChevronDown, ChevronRight, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -33,13 +33,16 @@ import type {
 
 // ── Shared cell renderers ─────────────────────────────────────────────────
 
+/** What the shared Source / Caller cells read off a row (active and completed rows both carry it). */
+type AttributedRow = Pick<ActiveRow, 'attribution'> & Pick<ActiveOrPromotedRow, '_groupedCount' | '_isGroupHead' | '_expandedChild'>
+
 /** Build the Source cell renderer with cron-group toggle support. The cell
  *  shows: kind badge + label + (when a cron group) a chevron-prefixed
  *  ``×N`` badge that toggles per-run expansion via ``onToggleGroup``.
  *  Expanded sibling rows render with an inset chevron in place of the
  *  badge so the visual grouping is clear. */
 function buildSourceCell(onToggleGroup: (runId: string) => void) {
-  return function SourceCell({ row }: { row: any }) {
+  return function SourceCell<T extends AttributedRow>({ row }: { row: Row<T> }) {
     const attr = row.original.attribution
     const groupCount: number | undefined = row.original._groupedCount
     const isGroupHead: boolean = !!row.original._isGroupHead
@@ -81,7 +84,7 @@ function buildSourceCell(onToggleGroup: (runId: string) => void) {
 }
 
 /** Caller cell: qualname primary, file:line secondary at 60% opacity. */
-function callerCell({ row }: { row: any }) {
+function callerCell<T extends AttributedRow>({ row }: { row: Row<T> }) {
   const attr = row.original.attribution
   return (
     <div className="font-mono text-xs text-muted-foreground" title={`${attr.caller_qualname}\n${attr.caller_file}`}>
@@ -102,7 +105,7 @@ const STUCK_LIVE_MS = 30_000
 /** Duration cell that shows a pulsing dot for live rows + the outcome
  *  text for promoted (just-finished) rows. Live rows past STUCK_LIVE_MS
  *  pulse red across the whole cell, not just the dot. */
-function activeDurationCell({ row }: { row: any }) {
+function activeDurationCell({ row }: { row: Row<ActiveOrPromotedRow> }) {
   const r: ActiveOrPromotedRow = row.original
   const isCancelled = r.cancelled_at !== null
   const promoted = !!r._completed
@@ -128,7 +131,7 @@ function buildActionsCell(
   onKill: (row: ActiveRow) => void,
   cancellingQid: number | null,
 ) {
-  return ({ row }: { row: any }) => {
+  return ({ row }: { row: Row<ActiveOrPromotedRow> }) => {
     const r: ActiveOrPromotedRow = row.original
     const isCancelled = r.cancelled_at !== null
     const promoted = !!r._completed

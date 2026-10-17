@@ -324,7 +324,7 @@ function DashboardBody({
   }, [addFilter])
 
   const visibleCardList = React.useMemo(
-    () => allCards.filter((c: any) => visibleCards.has(c.id)),
+    () => allCards.filter((c) => visibleCards.has(c.id)),
     [allCards, visibleCards]
   )
 
@@ -465,8 +465,8 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
 
   const { visibleCards, toggleCard, showAll, reset: resetCards } = useCardVisibility(
     'dashboard_cards',
-    allCards.map((c: any) => c.id),
-    allCards.filter((c: any) => c.inActiveFormat).map((c: any) => c.id),
+    allCards.map((c) => c.id),
+    allCards.filter((c) => c.inActiveFormat).map((c) => c.id),
   )
 
   // Time-range wire inputs (lib/range-wire.ts; resolved inside useDashboardBundle
@@ -492,7 +492,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
   // the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 

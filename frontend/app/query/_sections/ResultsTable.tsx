@@ -7,9 +7,10 @@ import { Clock, Database } from 'lucide-react'
 
 import { formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 
 interface ResultsTableProps {
-  data: any
+  data: components['schemas']['QueryResponse']
   isPending: boolean
   isStructured: boolean
   columns: ColumnDef<Record<string, unknown>>[]

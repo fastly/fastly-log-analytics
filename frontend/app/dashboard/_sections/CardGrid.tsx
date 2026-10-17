@@ -7,16 +7,21 @@ import { CardErrorState } from '@/components/CardErrorState'
 import { ChevronDown, ChevronRight, Bot } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT } from './categories'
+import type { DashboardCard } from '@/hooks/useDashboardCards'
+import type { components } from '@/types/api.generated'
+import type { DashboardAggregates } from './types'
+
+type TopBots = components['schemas']['SecurityTopBotsResponse']
 
 export interface CardGridProps {
-  visibleCardList: any[]
+  visibleCardList: DashboardCard[]
   isReady: boolean
   isLoadingAggs: boolean
   isFetchingAggs: boolean
-  aggregates: any
-  compareAggregates: any
+  aggregates: DashboardAggregates | null | undefined
+  compareAggregates: DashboardAggregates | null | undefined
   compareMode: boolean
-  topBotsData: any
+  topBotsData: TopBots | null | undefined
   topBotsError?: unknown
   onRetryTopBots?: () => void
   compareError?: unknown
@@ -97,7 +102,7 @@ export function CardGrid({
     )
   }
 
-  const visibleById = new Map(visibleCardList.map((c: any) => [c.id, c]))
+  const visibleById = new Map(visibleCardList.map((c) => [c.id, c]))
   // Wrap each card in LazyMount so the FIRST dashboard paint
   // only mounts the cards above the fold (~5-10) instead of
   // all 86. Off-screen cards land as the user scrolls — the
@@ -107,7 +112,7 @@ export function CardGrid({
   // TopTenTable mount cycles on first render. The loading
   // placeholder branch is NOT wrapped — it's already cheap
   // and we want every "Initializing..." tile visible.
-  const renderCard = (card: any) => {
+  const renderCard = (card: DashboardCard) => {
     // Show "Loading…" whenever aggregates haven't arrived yet — covers the
     // gap between catalog-loaded (visibleCardList populated) and the aggs
     // query actually firing (isLoadingAggs is false but data is still
@@ -154,8 +159,8 @@ export function CardGrid({
             field="_bot_name"
             inActiveFormat={card.inActiveFormat}
             data={{
-              total: topBotsData?.bots?.reduce((acc: number, b: any) => acc + b.request_count, 0) || 0,
-              top: (topBotsData?.bots ?? []).map((b: any) => ({ value: b.id, label: b.name, count: b.request_count }))
+              total: topBotsData?.bots?.reduce((acc, b) => acc + b.request_count, 0) || 0,
+              top: (topBotsData?.bots ?? []).map((b) => ({ value: b.id ?? b.name, label: b.name, count: b.request_count }))
             }}
             compareData={undefined}
             onRowClick={onRowClick}
@@ -171,8 +176,8 @@ export function CardGrid({
             field="_ngwaf_bot_name"
             inActiveFormat={card.inActiveFormat}
             data={{
-              total: (topBotsData?.ngwaf_bots ?? []).reduce((acc: number, b: any) => acc + b.request_count, 0),
-              top: (topBotsData?.ngwaf_bots ?? []).map((b: any) => ({ value: b.name, label: b.name, count: b.request_count }))
+              total: (topBotsData?.ngwaf_bots ?? []).reduce((acc, b) => acc + b.request_count, 0),
+              top: (topBotsData?.ngwaf_bots ?? []).map((b) => ({ value: b.name, label: b.name, count: b.request_count }))
             }}
             compareData={undefined}
             onRowClick={onRowClick}
@@ -196,10 +201,10 @@ export function CardGrid({
 
   const sections = CARD_CATEGORIES.map(cat => ({
     ...cat,
-    cards: cat.cardIds.map(id => visibleById.get(id)).filter(Boolean),
+    cards: cat.cardIds.flatMap(id => visibleById.get(id) ?? []),
   })).filter(s => s.cards.length > 0)
 
-  const customCards = visibleCardList.filter((c: any) => !CATEGORIZED_CARD_IDS.has(c.id))
+  const customCards = visibleCardList.filter((c) => !CATEGORIZED_CARD_IDS.has(c.id))
   if (customCards.length > 0) {
     sections.push({ id: 'custom', label: 'Custom', cardIds: [], cards: customCards, tint: CUSTOM_TINT })
   }
@@ -252,7 +257,7 @@ export function CardGrid({
                 id={`section-${section.id}-cards`}
                 className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 px-4 pb-4 pt-1"
               >
-                {section.cards.map((card: any) => renderCard(card))}
+                {section.cards.map((card) => renderCard(card))}
               </div>
             )}
           </section>

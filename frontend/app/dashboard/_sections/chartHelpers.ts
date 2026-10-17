@@ -1,4 +1,5 @@
 import { TIME_HOVER_LAYOUT, makeTimeXAxis } from '@/lib/chart-helpers'
+import type { DashboardAggregates, DashboardCatalog } from './types'
 
 // densifyBarSeries now lives in lib/chart-helpers (shared with the scoring
 // charts). Re-exported so existing importers (and chartHelpers.test.ts) keep
@@ -9,12 +10,12 @@ export { buildTrafficData, getIntervalSeconds, type BuildTrafficDataParams } fro
 
 export interface BuildChartLayoutParams {
   trafficData: any[]
-  aggregates: any
+  aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
   metric: string
   startTime: string | null
   endTime: string | null
   timezone: string
-  catalog: any
+  catalog: DashboardCatalog | null | undefined
 }
 
 /**
@@ -30,7 +31,7 @@ export function buildChartLayout({
   catalog,
 }: BuildChartLayoutParams): any {
   const actualMetric = aggregates?.metric || metric
-  const metricField = catalog?.fields?.find((f: any) => f.id === actualMetric)
+  const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
 
   return {
     ...TIME_HOVER_LAYOUT,

@@ -78,11 +78,11 @@ export function useDashboardCards(): DashboardCard[] {
     // the default dashboard (per-request IDs, raw WAF tag blob).
     const FORCE_HIDDEN = new Set(['rid', 'prid', 'waf_sig', 'waf_req_id'])
 
-    const activeIds = new Set<string>(((bootstrap as any).active_log_field_ids || []) as string[])
+    const activeIds = new Set<string>(bootstrap.active_log_field_ids ?? [])
 
     const standardCards: DashboardCard[] = catalog.fields
       .filter(f => {
-        if (excludedGroups.includes(f.group) || excludedIds.includes(f.id)) {
+        if ((f.group != null && excludedGroups.includes(f.group)) || excludedIds.includes(f.id)) {
           return false
         }
 

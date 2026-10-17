@@ -90,10 +90,10 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
           const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
           const { data, response } = await client.GET('/api/admin/share/audit-logs', {
             params: { query: params },
-          } as any)
+          })
           if (!response.ok) throw new Error(`status ${response.status}`)
-          setFilteredLogs((data as any).audit_logs || [])
-        } catch (e: any) {
+          setFilteredLogs(data?.audit_logs || [])
+        } catch (e) {
           onError(extractApiError(e))
         } finally {
           setLoading(false)
@@ -119,10 +119,10 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       if (filters.until) params.until = filters.until
       const { data, response } = await client.GET('/api/admin/share/audit-logs', {
         params: { query: params },
-      } as any)
+      })
       if (!response.ok) throw new Error(`status ${response.status}`)
-      setFilteredLogs((data as any).audit_logs || [])
-    } catch (e: any) {
+      setFilteredLogs(data?.audit_logs || [])
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setLoading(false)

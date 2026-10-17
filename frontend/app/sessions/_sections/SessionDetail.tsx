@@ -82,14 +82,14 @@ export function SessionDetail({
     enabled: !!activeServiceId && !!selectedSession
   })
 
-  const detailColumns: ColumnDef<any>[] = React.useMemo(() => {
+  const detailColumns: ColumnDef<Record<string, unknown>>[] = React.useMemo(() => {
     if (!detailData?.columns) return []
     return detailData.columns.map(col => ({
       id: col,
       accessorFn: (row) => row[col],
       meta: { label: getFieldLabel(col) },
       header: getFieldLabel(col),
-      cell: ({ row }: { row: any }) => {
+      cell: ({ row }) => {
         const value = row.original[col]
         if (col === 'timestamp') return (
           <TooltipProvider>

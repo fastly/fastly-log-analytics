@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
+import type { ChartInterval, ReportConfiguration } from '@/hooks/useReportConfig'
 import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
@@ -73,18 +74,17 @@ function UsagePageContent({
   startTime: string | null
   endTime: string | null
   activeServiceId: string | null
-  config: any
-  setChartInterval: (interval: any) => void
+  config: ReportConfiguration
+  setChartInterval: (interval: ChartInterval) => void
   intervalButtons: React.ReactNode
-  [key: string]: any
 }) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
   const router = useRouter()
   const services = useServiceStore(s => s.services);
-        const activeSvc = services.find((s: any) => s.id === activeServiceId)
-        const isAnalyst = (activeSvc as any)?.accessLevel === 'read_only'
-        const isRumEnabled = (activeSvc as any)?.rum_enabled ?? false
+        const activeSvc = services.find((s) => s.id === activeServiceId)
+        const isAnalyst = activeSvc?.accessLevel === 'read_only'
+        const isRumEnabled = activeSvc?.rum_enabled ?? false
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
 
@@ -250,9 +250,9 @@ function UsagePageContent({
   }), [])
 
   // ── Ops chart ──────────────────────────────────────────────────────────────
-  const opsDates = ops?.data.map((d: any) => d.date) ?? []
-  const opsClassA = ops?.data.map((d: any) => d.class_a) ?? []
-  const opsClassB = ops?.data.map((d: any) => d.class_b) ?? []
+  const opsDates = ops?.data.map((d) => d.date) ?? []
+  const opsClassA = ops?.data.map((d) => d.class_a) ?? []
+  const opsClassB = ops?.data.map((d) => d.class_b) ?? []
 
   const opsData = useMemo(() => [
     { type: 'bar', name: 'Class A', x: opsDates, y: opsClassA, marker: { color: accent }, hovertemplate: 'Class A: %{y:,}<extra></extra>' },
@@ -261,8 +261,8 @@ function UsagePageContent({
   const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 
   // ── Bandwidth chart ────────────────────────────────────────────────────────
-  const bwTimes = bw?.data.map((p: any) => p.time) ?? []
-  const bwBytes = bw?.data.map((p: any) => p.bandwidth_bytes ?? 0) ?? []
+  const bwTimes = bw?.data.map((p) => p.time) ?? []
+  const bwBytes = bw?.data.map((p) => p.bandwidth_bytes ?? 0) ?? []
   const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
 
   let bwDiv = 1
@@ -493,7 +493,7 @@ function UsagePageContent({
           contentClassName="p-2"
           helpContent={<FosOperationsHelp note={ops?.note} />}
         >
-          <PlotlyChart data={opsData as any[]} layout={opsLayout} height="100%" />
+          <PlotlyChart data={opsData} layout={opsLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -507,7 +507,7 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={bwData as any[]} layout={bwLayout} height="100%" />
+          <PlotlyChart data={bwData} layout={bwLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -521,7 +521,7 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={costChartData as any[]} layout={costLayout} height="100%" />
+          <PlotlyChart data={costChartData} layout={costLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -535,7 +535,7 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
+          <PlotlyChart data={logProcData} layout={baseLayout} height="100%" />
         </AnalyticsCard>
 
         {isRumEnabled && rumBreakdown && (

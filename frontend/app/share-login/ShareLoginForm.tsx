@@ -222,8 +222,8 @@ export function ShareLoginForm() {
         // sees stale needs_login=true and bounces back here).
         window.location.assign(returnTarget ?? data.redirect ?? '/dashboard')
       }
-    } catch (err: any) {
-      setError(err?.message || 'Network error reaching the server.')
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')
     } finally {
       setBusy(false)
     }

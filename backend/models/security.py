@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
 
 
@@ -53,9 +54,25 @@ class SecurityAggregatesResponse(BaseResponse):
     active_clients: list[ActiveClientItem] = []
 
 
+class SecurityBotRow(WireSafeModel):
+    """One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows
+    don't (the rollup/direct-join variants only emit name/category/request_count,
+    the high-scale one adds the verification counters)."""
+
+    id: str | None = None
+    name: str
+    category: str | None = None
+    request_count: int
+    verified_count: int | None = None
+    impersonator_count: int | None = None
+    unverified_count: int | None = None
+    verification_coverage: float | None = None
+    pending_count: int | None = None
+
+
 class SecurityTopBotsResponse(BaseResponse):
-    bots: list[dict[str, Any]] = []
-    ngwaf_bots: list[dict[str, Any]] = []
+    bots: list[SecurityBotRow] = []
+    ngwaf_bots: list[SecurityBotRow] = []
 
 
 class SecurityProxiesRequest(RangeKeyedRequest):

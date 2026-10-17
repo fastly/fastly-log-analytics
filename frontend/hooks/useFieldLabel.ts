@@ -15,7 +15,7 @@ import { useLogFieldsCatalog } from './useLogFieldsCatalog'
 export function useFieldLabel(): (colId: string) => string {
   const { data } = useLogFieldsCatalog()
   return useCallback(
-    (colId: string) => data?.fields?.find((f: any) => f.id === colId)?.label ?? colId,
+    (colId: string) => data?.fields?.find((f) => f.id === colId)?.label ?? colId,
     [data],
   )
 }

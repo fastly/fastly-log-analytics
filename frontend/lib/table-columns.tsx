@@ -1,20 +1,21 @@
 import { ColumnDef } from '@tanstack/react-table'
+import type { components } from '@/types/api.generated'
 import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
 import { formatBytes, formatCount } from '@/lib/format'
-export const ingestedFilesColumns: ColumnDef<unknown>[] = [
+export const ingestedFilesColumns: ColumnDef<components['schemas']['IngestedFile']>[] = [
   {
     accessorKey: 'file_name',
     id: 'file_name',
     meta: { label: 'File Name' },
     header: 'File Name',
-    cell: ({ row }) => <span className="font-mono text-xs">{(row.original as { file_name: string }).file_name}</span>,
+    cell: ({ row }) => <span className="font-mono text-xs">{row.original.file_name}</span>,
   },
   {
     accessorKey: 'ingested_at',
     id: 'ingested_at',
     meta: { label: 'Ingested At' },
     header: 'Ingested At',
-    cell: ({ row }) => <DateTimeCell iso={(row.original as { ingested_at: string }).ingested_at} />,
+    cell: ({ row }) => <DateTimeCell iso={row.original.ingested_at} />,
   },
   {
     accessorKey: 'row_count',
@@ -23,7 +24,7 @@ export const ingestedFilesColumns: ColumnDef<unknown>[] = [
     header: 'Rows',
     cell: ({ row }) => (
       <span className="font-mono text-muted-foreground tabular-nums text-xs">
-        {formatCount((row.original as { row_count?: number }).row_count || 0)}
+        {formatCount(row.original.row_count || 0)}
       </span>
     ),
   },
@@ -33,7 +34,7 @@ export const ingestedFilesColumns: ColumnDef<unknown>[] = [
     meta: { label: 'Size' },
     header: 'Size',
     cell: ({ row }) => {
-      const bytes = (row.original as { file_size_bytes?: number }).file_size_bytes
+      const bytes = row.original.file_size_bytes
       return (
         <span className="font-mono text-muted-foreground tabular-nums text-xs">
           {bytes ? formatBytes(bytes) : '—'}

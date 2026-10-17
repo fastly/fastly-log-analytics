@@ -134,7 +134,7 @@ export function MetadataStorageCard() {
         ingested_files_days: Math.max(0, parseInt(draft.ingested_files_days, 10) || 0),
         cron_runs_days: Math.max(0, parseInt(draft.cron_runs_days, 10) || 0),
       }
-      const { data } = await client.PATCH('/api/admin/metadata-retention', { body } as any)
+      const { data } = await client.PATCH('/api/admin/metadata-retention', { body })
       return data
     },
     onSuccess: () => {

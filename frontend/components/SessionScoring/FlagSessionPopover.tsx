@@ -14,13 +14,14 @@ export type { LabelValue }
 
 interface FlagSessionPopoverProps {
   serviceId: string
-  sid: string
+  // ``null`` for a cookieless request — the popover renders disabled.
+  sid: string | null
   // Optional metadata captured at flag time — denormalized into the label
   // row so the Labels tab can show "what this session looked like" without
   // re-querying the logs.
-  sampleIp?: string
-  sampleUa?: string
-  sampleUrl?: string
+  sampleIp?: string | null
+  sampleUa?: string | null
+  sampleUrl?: string | null
   // Currently-applied label (from the labels API). Undefined means we
   // don't know / haven't checked.
   currentLabel?: LabelValue | null
@@ -69,6 +70,7 @@ export function FlagSessionPopover({
   const disabled = !sid
 
   const submit = async (label: LabelValue) => {
+    if (!sid) return
     setBusy(label)
     setError('')
     try {
@@ -78,15 +80,16 @@ export function FlagSessionPopover({
           sid,
           label,
           notes,
-          sample_ip: sampleIp,
-          sample_ua: sampleUa,
-          sample_url: sampleUrl,
+          flagged_by: 'admin',
+          sample_ip: sampleIp ?? '',
+          sample_ua: sampleUa ?? '',
+          sample_url: sampleUrl ?? '',
         },
-      } as any)
+      })
       setOpen(false)
       setNotes('')
       onFlagged?.()
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to save label')
     } finally {
       setBusy(null)
@@ -100,10 +103,10 @@ export function FlagSessionPopover({
     try {
       await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: currentLabelId } },
-      } as any)
+      })
       setOpen(false)
       onFlagged?.()
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to clear label')
     } finally {
       setClearing(false)

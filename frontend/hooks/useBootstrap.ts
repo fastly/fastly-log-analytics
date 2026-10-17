@@ -7,7 +7,6 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { useDebugStore } from '@/stores/debugStore'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
-import type { PopGeo } from '@/lib/pop'
 import { useEffect } from 'react'
 import { toService } from '@/types/api'
 
@@ -21,7 +20,7 @@ export function useBootstrap() {
       // ADMIN_SHARED_SECRET is unset on the backend, or when bootstrap
       // is hit on the analyst branch) so the fetch interceptor in
       // lib/api.ts can inject X-Admin-Token on subsequent admin calls.
-      const adminToken = (data as any)?.settings?.admin_token
+      const adminToken = data?.settings?.admin_token
       const nextToken = typeof adminToken === 'string' && adminToken ? adminToken : null
       const prevToken = useAdminTokenStore.getState().token
       useAdminTokenStore.getState().setToken(nextToken)
@@ -57,17 +56,17 @@ export function useBootstrap() {
       // here closes that race.
       if (data?.active_service_id) {
         const sid = data.active_service_id
-        const seededViews = (data as any).views
+        const seededViews = data.views
         if (Array.isArray(seededViews)) {
           queryClient.setQueryData(['views', sid], seededViews)
         }
-        const seededCatalog = (data as any).log_fields_catalog
+        const seededCatalog = data.log_fields_catalog
         if (seededCatalog) {
           queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
         }
-        queryClient.setQueryData(queryKeys.syncStatus(sid), (data as any).sync_status ?? null)
+        queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status ?? null)
         // Available to both admin and analyst.
-        const seededLogExtents = (data as any).log_extents
+        const seededLogExtents = data.log_extents
         if (seededLogExtents) {
           queryClient.setQueryData(['log-extents', sid], seededLogExtents)
         }
@@ -75,8 +74,8 @@ export function useBootstrap() {
         // status cache has a real schema list, so a cold-start bootstrap
         // (empty schema) still falls through to /api/schema's live
         // get_schema fallback instead of caching an empty payload.
-        const seededSchemaList = (data as any).schema
-        const seededTableName = (data as any).table_name
+        const seededSchemaList = data.schema
+        const seededTableName = data.table_name
         if (Array.isArray(seededSchemaList) && seededSchemaList.length > 0 && typeof seededTableName === 'string') {
           queryClient.setQueryData(queryKeys.admin.schema(sid), { schema: seededSchemaList, table_name: seededTableName })
         }
@@ -85,18 +84,18 @@ export function useBootstrap() {
         // cron tab refetches GET /api/cron-schedule on mount, so the tab
         // self-populates with one round-trip. The tab-independent recent-
         // runs delta below stays seeded (cheap, with_total=False).
-        const seededCronRunsFirstPage = (data as any).cron_runs_first_page
+        const seededCronRunsFirstPage = data.cron_runs_first_page
         if (seededCronRunsFirstPage) {
           queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), seededCronRunsFirstPage)
         }
         // Always seed ['last-sync', sid] so the cache entry exists before
         // SyncStatusBadge's useLastSync() subscribes (prevents mid-render
         // QueryCache.build → notify race).
-        queryClient.setQueryData(queryKeys.lastSync(sid), (data as any).last_sync ?? null)
+        queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync ?? null)
         // /scoring/labels seed — TopFlaggedTable + admin Labels tab +
         // dashboard Flag column all read from ['scoring-labels', sid].
         // Skipping the standalone fetch on cold load.
-        const seededScoringLabels = (data as any).scoring_labels
+        const seededScoringLabels = data.scoring_labels
         if (seededScoringLabels) {
           queryClient.setQueryData(['scoring-labels', sid], seededScoringLabels)
         }
@@ -110,7 +109,7 @@ export function useBootstrap() {
       // /api/services returns {services, _section_timings} — bootstrap
       // exposes the same enriched list. Seed ServicesTable's queryKey
       // so /admin's cold-load round-trip evaporates.
-      const seededServices = (data as any)?.services
+      const seededServices = data?.services
       if (Array.isArray(seededServices)) {
         queryClient.setQueryData(['services'], { services: seededServices, _section_timings: [] })
       }
@@ -169,11 +168,15 @@ export function useBootstrap() {
     // Seed the PoP geo map for the shared <PopLabel> (city/state/country
     // shown next to PoP codes everywhere). Parsed server-side from the
     // /datacenters cache; empty when the cache isn't populated.
-    usePopGeoStore.getState().setMap((query.data.pop_geo ?? {}) as unknown as Record<string, PopGeo>)
+    usePopGeoStore.getState().setMap(query.data.pop_geo ?? {})
 
-    const popsRaw = (query.data as unknown as Record<string, Record<string, [number, number]>>).pops
+    const popsRaw = query.data.pops
     if (popsRaw) {
-      usePopGeoStore.getState().setLocations(popsRaw)
+      const locations: Record<string, [number, number]> = {}
+      for (const [code, [lat, lon]] of Object.entries(popsRaw)) {
+        if (lat != null && lon != null) locations[code] = [lat, lon]
+      }
+      usePopGeoStore.getState().setLocations(locations)
     }
 
     // Phase Q + RSC race fix: the SSR HydrationBoundary pre-populates
@@ -190,7 +193,7 @@ export function useBootstrap() {
     // from the network or from the SSR-hydrated cache. The queryFn
     // copy stays as the first-render fast path for the no-SSR
     // (pure-CSR) case.
-    const adminToken = (query.data as any)?.settings?.admin_token
+    const adminToken = query.data?.settings?.admin_token
     useAdminTokenStore.getState().setToken(
       typeof adminToken === 'string' && adminToken ? adminToken : null,
     )
@@ -203,8 +206,8 @@ export function useBootstrap() {
 
     // Synchronize client-side debugStore with the backend-defined debug settings
     const isAnalyst = query.data?.settings?.is_remote_analyst === true
-    const queryVis = (query.data as any)?.debug_state?.query_debug_visibility ?? 'disabled'
-    const apiVis = (query.data as any)?.debug_state?.api_call_debug_visibility ?? 'disabled'
+    const queryVis = query.data?.debug_state?.query_debug_visibility ?? 'disabled'
+    const apiVis = query.data?.debug_state?.api_call_debug_visibility ?? 'disabled'
 
     const queryDebugEnabled = isAnalyst
       ? (queryVis === 'analysts' || queryVis === 'both')

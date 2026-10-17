@@ -162,10 +162,10 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
     queryFn: async () => {
-      const endpoint = type === 'iceberg' ? "/api/admin/iceberg-tree" : "/api/admin/raw-tree"
-      const { data } = await client.GET(endpoint as any, {
-        params: { query: { prefix: prefix || undefined } }
-      })
+      const init = { params: { query: { prefix: prefix || undefined } } }
+      const { data } = type === 'iceberg'
+        ? await client.GET("/api/admin/iceberg-tree", init)
+        : await client.GET("/api/admin/raw-tree", init)
       return data
     },
     enabled: !!activeServiceId,
@@ -187,7 +187,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
     )
   }
 
-  const nodes = (data as any)?.nodes || []
+  const nodes = data.nodes
 
   if (nodes.length === 0) {
     return (

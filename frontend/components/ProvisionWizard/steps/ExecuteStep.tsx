@@ -23,21 +23,6 @@ import { formatBytes } from "@/lib/format"
 import type { WizardState } from "../useWizardState";
 import { REGION_LABELS, SHIELD_LABELS } from "../types";
 
-interface CatalogGroup {
-  id: string;
-  locked?: boolean;
-}
-
-interface CatalogPreset {
-  groups?: string[];
-  label?: string;
-}
-
-interface FieldCatalog {
-  groups?: CatalogGroup[];
-  presets?: Record<string, CatalogPreset>;
-}
-
 export function ExecuteStep({ s }: { s: WizardState }) {
   const { config, catalog, selectedService } = s;
   return (
@@ -269,14 +254,14 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                         for (const [key, preset] of Object.entries(
                           catalog.presets,
                         )) {
-                          const presetGroups = (preset as any).groups || [];
+                          const presetGroups = preset.groups;
                           if (
                             presetGroups.length === enabledGroupsSet.size &&
-                            presetGroups.every((g: string) =>
+                            presetGroups.every((g) =>
                               enabledGroupsSet.has(g),
                             )
                           ) {
-                            bestPresetName = (preset as any).label || key;
+                            bestPresetName = preset.label || key;
                             break;
                           }
                         }
@@ -284,8 +269,8 @@ export function ExecuteStep({ s }: { s: WizardState }) {
 
                       const disabledCount =
                         catalog?.groups?.filter(
-                          (g: CatalogGroup) =>
-                            !(g.locked || enabledGroupsSet.has(g.id)),
+                          (g) =>
+                            !(g.locked || (g.id != null && enabledGroupsSet.has(g.id))),
                         ).length || 0;
 
                       if (bestPresetName) {
@@ -308,9 +293,9 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                           <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
                             Custom Configuration
                           </div>
-                          {catalog?.groups.map((g: any) => {
+                          {catalog?.groups?.map((g) => {
                             const isEnabled =
-                              g.locked || enabledGroupsSet.has(g.id);
+                              g.locked || (g.id != null && enabledGroupsSet.has(g.id));
                             if (!isEnabled) return null;
                             return (
                               <div
@@ -345,17 +330,17 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-3 pt-1">
-                    {(catalog as any)?.insights?.map((insight: any) => {
-                      const enabledGroups = new Set<any>([
+                    {catalog?.insights?.map((insight) => {
+                      const enabledGroups = new Set<string | null>([
                         null,
                         ...(config.log_fields?.groups || []),
                       ]);
                       // Also include dependencies
-                      const catalogGroups = (catalog as any)?.groups || [];
+                      const catalogGroups = catalog.groups || [];
                       let changed = true;
                       while (changed) {
                         changed = false;
-                        catalogGroups.forEach((g: any) => {
+                        catalogGroups.forEach((g) => {
                           if (
                             enabledGroups.has(g.id) &&
                             g.requires &&
@@ -367,8 +352,8 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                         });
                       }
 
-                      const isEnabled = insight.required_groups?.every(
-                        (rg: any) => enabledGroups.has(rg),
+                      const isEnabled = insight.required_groups.every(
+                        (rg) => enabledGroups.has(rg),
                       );
                       return (
                         <div

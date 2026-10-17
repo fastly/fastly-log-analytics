@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import type { components } from '@/types/api.generated'
 import {
   RefreshCw,
   ChevronDown,
@@ -36,8 +37,8 @@ export function ServiceHistoryTab({
   setEventFilter,
   activeServiceId,
 }: {
-  auditColumns: ColumnDef<any>[]
-  auditLogs: any
+  auditColumns: ColumnDef<components['schemas']['AuditLogEntry']>[]
+  auditLogs: components['schemas']['AuditLogsResponse'] | undefined
   isLoadingAudit: boolean
   isFetchingAudit: boolean
   eventFilter: string

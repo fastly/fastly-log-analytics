@@ -23,7 +23,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { VisibilityState } from '@tanstack/react-table'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 
 type Alert = components["schemas"]["Alert"]
@@ -72,9 +72,9 @@ export function AlertsList({
     await queryClient.cancelQueries({ queryKey })
 
     const previous = queryClient.getQueryData(queryKey)
-    queryClient.setQueryData(queryKey, (old: any) => ({
+    queryClient.setQueryData(queryKey, (old: { data?: Alert[] } | undefined) => ({
       ...old,
-      data: old?.data?.map((a: Alert) =>
+      data: old?.data?.map((a) =>
         a.id === alert.id ? { ...a, enabled: newEnabled } : a
       ),
     }))
@@ -125,26 +125,26 @@ export function AlertsList({
     }
   }, [activeServiceId])
 
-  const columns = React.useMemo(() => [
+  const columns = React.useMemo<ColumnDef<Alert>[]>(() => [
     {
       accessorKey: 'name',
       header: 'Alert Name',
-      cell: (info: any) => <span className="font-medium">{info.getValue()}</span>
+      cell: (info) => <span className="font-medium">{info.row.original.name}</span>
     },
     {
       accessorKey: 'category',
       header: 'Category',
-      cell: (info: any) => (
+      cell: (info) => (
         <Badge variant="secondary" className="capitalize">
-          {info.getValue()?.replace('_', ' ') || 'Reliability'}
+          {info.row.original.category?.replace('_', ' ') || 'Reliability'}
         </Badge>
       )
     },
     {
       accessorKey: 'metric',
       header: 'Metric',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: (info) => {
+        const val = info.row.original.metric
         const codes = info.row.original.status_codes
         const scope = info.row.original.evaluation_scope
         let display = val.replace(/_/g, ' ')
@@ -172,7 +172,7 @@ export function AlertsList({
     {
       id: 'condition',
       header: 'Condition',
-      cell: (info: any) => {
+      cell: (info) => {
         const a = info.row.original
         const windowStr = a.window_min < 1 ? `${Math.round(a.window_min * 60)}s` : `${a.window_min}m`
         const evalType = a.evaluation_type || 'absolute'
@@ -207,8 +207,8 @@ export function AlertsList({
     {
       accessorKey: 'last_triggered_at',
       header: 'Last Triggered',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: (info) => {
+        const val = info.row.original.last_triggered_at
         if (!val) return <span className="text-muted-foreground text-xs italic">Never</span>
         const alert = info.row.original
 
@@ -221,7 +221,7 @@ export function AlertsList({
         params.set('end_time', end.toISOString())
 
         // Map alert metric to dashboard metric
-        let dashboardMetric = alert.metric
+        let dashboardMetric: string = alert.metric
         if (alert.metric === '5xx_rate') dashboardMetric = '5xx'
         if (alert.metric === '4xx_rate') dashboardMetric = '4xx'
         if (alert.metric === 'specific_status_rate') dashboardMetric = 'requests'
@@ -278,7 +278,7 @@ export function AlertsList({
     {
       accessorKey: 'enabled',
       header: 'Enabled?',
-      cell: (info: any) => {
+      cell: (info) => {
         const isPending = togglingId === info.row.original.id
         // Analysts get a read-only display: the PATCH /enabled endpoint
         // 403s for them, so showing an active Switch invites a click
@@ -286,17 +286,17 @@ export function AlertsList({
         if (isAnalyst) {
           return (
             <Badge
-              variant={info.getValue() ? 'secondary' : 'outline'}
+              variant={info.row.original.enabled ? 'secondary' : 'outline'}
               className="text-[10px]"
               data-testid={`analyst-alert-enabled-${info.row.original.id}`}
             >
-              {info.getValue() ? 'On' : 'Off'}
+              {info.row.original.enabled ? 'On' : 'Off'}
             </Badge>
           )
         }
         return (
           <Switch
-            checked={info.getValue()}
+            checked={info.row.original.enabled}
             onCheckedChange={(checked) => toggleEnabled(info.row.original, checked)}
             disabled={isPending}
             data-testid={`toggle-alert-${info.row.original.id}`}
@@ -311,7 +311,7 @@ export function AlertsList({
       : [{
         id: 'actions',
         header: '',
-        cell: (info: any) => (
+        cell: (info) => (
           <div className="flex items-center gap-1">
             <Button
               variant="ghost"
@@ -342,14 +342,14 @@ export function AlertsList({
               aria-label="Delete alert"
               data-testid={`delete-alert-${info.row.original.id}`}
               className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={() => onDelete(info.row.original.id)}
+              onClick={() => { const id = info.row.original.id; if (id) onDelete(id) }}
               title="Delete alert"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>
         )
-      }])
+      } satisfies ColumnDef<Alert>])
   ], [togglingId, testingId, relative, full, abbr, toggleEnabled, testNotification, onEdit, onDelete, isAnalyst, activeServiceId])
 
   return (

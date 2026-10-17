@@ -4,12 +4,12 @@ import React from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
-import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
+import type { ServiceConfig, LogFieldsConfig, components } from '@/types/api'
 
 
 interface ReviewStepProps {
   service: ServiceConfig
-  catalog: any
+  catalog: components['schemas']['LogFieldsCatalogResponse'] | undefined
   config: LogFieldsConfig
   period: string
   sampleRate: number
@@ -72,15 +72,15 @@ export function ReviewStep({
 
                 if (catalog?.presets && !hasOverrides) {
                   for (const [key, preset] of Object.entries(catalog.presets)) {
-                    const presetGroups = (preset as any).groups || [];
-                    if (presetGroups.length === enabledGroupsSet.size && presetGroups.every((g: string) => enabledGroupsSet.has(g))) {
-                      bestPresetName = (preset as any).label || key;
+                    const presetGroups = preset.groups;
+                    if (presetGroups.length === enabledGroupsSet.size && presetGroups.every((g) => enabledGroupsSet.has(g))) {
+                      bestPresetName = preset.label || key;
                       break;
                     }
                   }
                 }
 
-                const disabledCount = (catalog?.groups || []).filter((g: any) => !(g.locked || enabledGroupsSet.has(g.id))).length || 0;
+                const disabledCount = (catalog?.groups || []).filter((g) => !(g.locked || (g.id != null && enabledGroupsSet.has(g.id)))).length;
 
                 if (bestPresetName) {
                   return (
@@ -102,8 +102,8 @@ export function ReviewStep({
                     <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
                       Custom Configuration
                     </div>
-                    {(catalog?.groups || []).map((g: any) => {
-                      const isEnabled = g.locked || enabledGroupsSet.has(g.id);
+                    {(catalog?.groups || []).map((g) => {
+                      const isEnabled = g.locked || (g.id != null && enabledGroupsSet.has(g.id));
                       if (!isEnabled) return null;
                       return (
                         <div key={g.id || "core"} className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20">
@@ -125,13 +125,13 @@ export function ReviewStep({
 
         {/* Custom Fields Summary */}
         {(() => {
-           const customFields = (catalog?.fields || []).filter((f: any) => f.is_custom);
+           const customFields = (catalog?.fields || []).filter((f) => f.is_custom);
            if (customFields.length === 0) return null;
            return (
              <div className="p-4 border rounded-lg bg-muted/20 space-y-3">
                <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Custom Fields ({customFields.length})</p>
                <div className="flex flex-wrap gap-2">
-                 {customFields.map((cf: any) => (
+                 {customFields.map((cf) => (
                     <div key={cf.id} className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-background border text-xs shadow-sm">
                        <span className="font-medium">{cf.label}</span>
                        <span className="text-[10px] text-muted-foreground font-mono">({cf.id})</span>
@@ -149,13 +149,13 @@ export function ReviewStep({
             <span className="text-[10px] normal-case font-medium">Derived from logs</span>
           </p>
           <div className="grid grid-cols-2 gap-3">
-            {(catalog as any)?.insights?.map((insight: any) => {
-              const enabledGroups = new Set([null, ...(config.groups || [])]);
-              const catalogGroups = (catalog as any)?.groups || [];
+            {catalog?.insights?.map((insight) => {
+              const enabledGroups = new Set<string | null>([null, ...(config.groups || [])]);
+              const catalogGroups = catalog.groups || [];
               let changed = true;
               while (changed) {
                 changed = false;
-                catalogGroups.forEach((g: any) => {
+                catalogGroups.forEach((g) => {
                   if (enabledGroups.has(g.id) && g.requires && !enabledGroups.has(g.requires)) {
                     enabledGroups.add(g.requires);
                     changed = true;
@@ -163,12 +163,12 @@ export function ReviewStep({
                 });
               }
 
-              const isEnabled = insight.required_groups?.every((rg: any) => enabledGroups.has(rg));
+              const isEnabled = insight.required_groups.every((rg) => enabledGroups.has(rg));
               return (
                 <div key={insight.id} className={cn("flex items-start gap-3 border rounded-lg p-2.5 bg-background shadow-sm transition-all", isEnabled ? "border-primary/20 bg-primary/5" : "opacity-50 grayscale bg-muted/50")}>
                   <div className={cn("w-2 h-2 mt-1.5 rounded-full shrink-0", isEnabled ? "bg-primary" : "bg-muted-foreground")} />
                   <div className="space-y-1 overflow-hidden">
-                    <h4 className="text-xs font-semibold tracking-tight truncate" title={insight.name}>{insight.name}</h4>
+                    <h4 className="text-xs font-semibold tracking-tight truncate" title={insight.title}>{insight.title}</h4>
                     <p className="text-[10px] text-muted-foreground line-clamp-2 leading-snug">{insight.description}</p>
                   </div>
                 </div>

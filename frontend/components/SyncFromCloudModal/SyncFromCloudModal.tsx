@@ -98,9 +98,9 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
       } else {
         setLakeError(data.error || data.message || "Failed to analyze data lake.");
       }
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to analyze data lake:", e);
-      setLakeError(e.message || "Connection error while analyzing data lake.");
+      setLakeError(e instanceof Error && e.message ? e.message : "Connection error while analyzing data lake.");
     } finally {
       setIsAnalyzing(false);
     }

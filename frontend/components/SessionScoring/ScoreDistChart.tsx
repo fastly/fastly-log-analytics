@@ -9,17 +9,15 @@ import { ScoreDistHelp } from '@/components/SessionScoring/help-content'
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
 import { useScoringQuery } from './useScoringQuery'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import { client } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
 interface ScoreDistChartProps {
   serviceId: string
   sinceHours?: number
 }
 
-interface DistRow {
-  hour: string
-  bucket: string
-  count: number
-}
+type DistRow = components['schemas']['ScoringDistributionRow']
 
 // Bucket order + color map. Higher buckets = redder. Fixed order preserved
 // via categoryOrder so the stack always reads low→high bottom-to-top.
@@ -32,11 +30,10 @@ const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = {
 }
 
 export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartProps) {
-  const { data, isLoading, isFetching, isError, error, refetch } = useScoringQuery<{ rows: DistRow[] }>(
-    ['scoring-score-dist', serviceId, sinceHours],
-    serviceId,
-    'score-distribution',
-    { since_hours: sinceHours },
+  const { data, isLoading, isFetching, isError, error, refetch } = useScoringQuery(['scoring-score-dist', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/score-distribution', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   if (isError) {

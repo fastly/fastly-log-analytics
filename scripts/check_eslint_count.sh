@@ -78,8 +78,10 @@ cd "$REPO_ROOT/frontend"
 # 791 -> 788: useShareStatusBanner moved from an effect/setState poller to useQuery.
 # 788 -> 786: scoring label rows and /scoring/labels read typed from the generated schema.
 # 786 -> 785: lake-info range/calendar typed on the response model; SyncFromCloudModal lost its any cast.
+# 785 -> 328: response/request bodies, catalog, bootstrap, scoring, share, provision, logs, alerts and query pages
+# derive from the generated schema instead of any casts.
 # Drive toward zero.
-CEILING=785
+CEILING=328
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

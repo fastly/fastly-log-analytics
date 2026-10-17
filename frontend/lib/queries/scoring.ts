@@ -25,8 +25,8 @@ export const scoringAnalyticsCompositeOptions = (serviceId: string | null | unde
         },
         signal,
       })
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as Record<string, unknown>
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
   })
 
@@ -38,7 +38,7 @@ export const scoringConfigCompositeOptions = (serviceId: string | null | undefin
         params: { path: { service_id: serviceId ?? '' } },
         signal,
       })
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as Record<string, unknown>
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
   })

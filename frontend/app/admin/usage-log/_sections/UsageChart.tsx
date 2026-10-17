@@ -86,24 +86,24 @@ export function LogAccountingPanel() {
 
   const chartData = useMemo(() => ([
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.fastly_requests),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.fastly_requests),
       type: 'scatter',
       mode: 'lines',
       name: 'Fastly requests',
       line: { color: CHART_COLORS.info, width: 2 },
     },
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.our_rows),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.our_rows),
       type: 'scatter',
       mode: 'lines',
       name: 'We ingested (rows)',
       line: { color: CHART_COLORS.success, width: 2, dash: 'dot' },
     },
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.file_count),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.file_count),
       type: 'scatter',
       mode: 'lines',
       name: 'Files ingested',

@@ -12,6 +12,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { panelDialogHeaderSolid } from '@/lib/panel-dialog'
+import type { SSELine, SSEStatus } from '@/hooks/useSSE'
 import { SSEProgressView } from '@/components/SSEModal'
 
 export function SSEModal({
@@ -26,11 +27,11 @@ export function SSEModal({
 }: {
   isSSEModalOpen: boolean
   setIsSSEModalOpen: (open: boolean) => void
-  sseStatus: any
+  sseStatus: SSEStatus
   sseTitle: string
-  sseError: any
+  sseError: string | null
   sseDescription: string
-  lines: any
+  lines: SSELine[]
   stop: () => void
 }) {
   const queryClient = useQueryClient()

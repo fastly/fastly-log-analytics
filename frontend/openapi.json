@@ -53625,14 +53625,9 @@
                 "$ref": "#/components/schemas/AlertPreviewData"
               },
               {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
                 "type": "null"
               }
-            ],
-            "title": "Data"
+            ]
           },
           "error": {
             "anyOf": [
@@ -54184,6 +54179,54 @@
         "title": "AssetsRequest",
         "description": "Assets analytics request schema supporting relative-range resolving."
       },
+      "AuditLogEntry": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Details"
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "event_type",
+          "details",
+          "actor",
+          "source"
+        ],
+        "title": "AuditLogEntry",
+        "description": "One ``metadata.get_audit_logs`` row (``details`` is the json-decoded payload)."
+      },
       "AuditLogsResponse": {
         "properties": {
           "total": {
@@ -54200,8 +54243,7 @@
           },
           "entries": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/AuditLogEntry"
             },
             "type": "array",
             "title": "Entries"
@@ -54694,6 +54736,56 @@
         ],
         "title": "Body_backup_import_api_admin_share_backup_import_post"
       },
+      "BootstrapDebugState": {
+        "properties": {
+          "debug_responses_enabled": {
+            "type": "boolean",
+            "title": "Debug Responses Enabled"
+          },
+          "query_debug_visibility": {
+            "type": "string",
+            "title": "Query Debug Visibility"
+          },
+          "api_call_debug_visibility": {
+            "type": "string",
+            "title": "Api Call Debug Visibility"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "debug_responses_enabled",
+          "query_debug_visibility",
+          "api_call_debug_visibility"
+        ],
+        "title": "BootstrapDebugState",
+        "description": "Debug-visibility settings folded into bootstrap (admin only)."
+      },
+      "BootstrapPopGeo": {
+        "properties": {
+          "city": {
+            "type": "string",
+            "title": "City"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "country": {
+            "type": "string",
+            "title": "Country"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "city",
+          "region",
+          "country"
+        ],
+        "title": "BootstrapPopGeo",
+        "description": "One PoP's label parts, parsed from the cached ``/datacenters`` list\n(``get_pop_location_map``); any part may be an empty string."
+      },
       "BootstrapResponse": {
         "properties": {
           "_debug_queries": {
@@ -54839,10 +54931,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object"
+                  "$ref": "#/components/schemas/BootstrapPopGeo"
                 },
                 "type": "object"
               },
@@ -54965,14 +55054,12 @@
           "debug_state": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BootstrapDebugState"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Debug State"
+            ]
           },
           "ops_overview": {
             "anyOf": [
@@ -57408,36 +57495,15 @@
       "CronRunEntry": {
         "properties": {
           "id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Id"
           },
           "task": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Task"
           },
           "started_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Started At"
           },
           "duration_s": {
@@ -57561,6 +57627,12 @@
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "id",
+          "task",
+          "started_at",
+          "status"
+        ],
         "title": "CronRunEntry",
         "description": "One row of GET /api/cron-runs.\n\n``extra=\"allow\"`` passes any future cron_runs column through verbatim, and\nthe field order mirrors ``metadata.cron_log.get_cron_runs`` so the\nserialized key order is byte-identical. Types match the producer exactly to\navoid any coercion of the wire bytes: ``duration_s`` is a float (writers\nstore ``0.0``), the count columns are ints, ``parquet_keys`` is the\njson.loads'd list."
       },
@@ -57615,14 +57687,7 @@
       "CronScheduleEntry": {
         "properties": {
           "task": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Task"
           },
           "next_run_time": {
@@ -57694,6 +57759,10 @@
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "task",
+          "next_run_time"
+        ],
         "title": "CronScheduleEntry",
         "description": "One row of GET /api/cron-schedule (``build_cron_schedule_payload``).\n``disabled_reason`` appears only on synthesized disabled rows; the\nlast_run_* trio only when a run has been recorded."
       },
@@ -63136,36 +63205,15 @@
             "title": "Group"
           },
           "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Label"
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Description"
           },
           "duckdb_type": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Duckdb Type"
           },
           "typical_bytes": {
@@ -63340,7 +63388,11 @@
         "additionalProperties": true,
         "type": "object",
         "required": [
-          "id"
+          "id",
+          "group",
+          "label",
+          "description",
+          "duckdb_type"
         ],
         "title": "LogFieldCatalogEntry"
       },
@@ -63358,36 +63410,15 @@
             "title": "Id"
           },
           "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Label"
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Description"
           },
           "locked": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Locked"
           },
           "requires": {
@@ -63427,33 +63458,30 @@
             "title": "Recommended With"
           },
           "total_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Total Bytes"
           },
           "fields": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
             "title": "Fields"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "id",
+          "label",
+          "description",
+          "locked",
+          "requires",
+          "note",
+          "recommended_with",
+          "total_bytes",
+          "fields"
+        ],
         "title": "LogFieldCatalogGroup"
       },
       "LogFieldInsightDefinition": {
@@ -63463,115 +63491,69 @@
             "title": "Id"
           },
           "category": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Category"
           },
           "title": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Title"
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Description"
           },
           "required_fields": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
             "title": "Required Fields"
           },
           "required_groups": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
             "title": "Required Groups"
           }
         },
         "additionalProperties": true,
         "type": "object",
         "required": [
-          "id"
+          "id",
+          "category",
+          "title",
+          "description",
+          "required_fields",
+          "required_groups"
         ],
         "title": "LogFieldInsightDefinition"
       },
       "LogFieldPreset": {
         "properties": {
           "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Label"
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Description"
           },
           "groups": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
             "title": "Groups"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "label",
+          "description",
+          "groups"
+        ],
         "title": "LogFieldPreset"
       },
       "LogFieldsCatalogResponse": {
@@ -65458,6 +65440,28 @@
               }
             ],
             "title": "Message"
+          },
+          "error_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Hint"
+          },
+          "_debug_raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Debug Raw"
           }
         },
         "additionalProperties": true,
@@ -68376,57 +68380,37 @@
       "ProvisionCheckConfigItem": {
         "properties": {
           "ok": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Ok"
           },
           "details": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Details"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "ok",
+          "details"
+        ],
         "title": "ProvisionCheckConfigItem"
       },
       "ProvisionCheckConfigResponse": {
         "properties": {
           "logging_service": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProvisionCheckConfigItem"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/ProvisionCheckConfigItem"
           },
           "cdn_service": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProvisionCheckConfigItem"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/ProvisionCheckConfigItem"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "logging_service",
+          "cdn_service"
+        ],
         "title": "ProvisionCheckConfigResponse"
       },
       "ProvisionCheckDomainResponse": {
@@ -69258,10 +69242,10 @@
             ],
             "title": "Error"
           },
-          "range": {
+          "info": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ProvisionLakeInfoRange"
+                "$ref": "#/components/schemas/ProvisionLakeInfoTable"
               },
               {
                 "type": "null"
@@ -69281,12 +69265,151 @@
               }
             ],
             "title": "Calendar"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionLakeInfoRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": true,
         "type": "object",
         "title": "ProvisionLakeInfoResponse",
-        "description": "``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when\nthe table exists; the table-info block (row counts / extents) varies by\nlayout and rides through ``extra``."
+        "description": "``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present\nonly when the table exists."
+      },
+      "ProvisionLakeInfoTable": {
+        "properties": {
+          "table_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Name"
+          },
+          "snapshots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshots"
+          },
+          "data_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Files"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "latest_snapshot_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Snapshot At"
+          },
+          "buffer_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buffer Files"
+          },
+          "buffer_size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buffer Size Bytes"
+          },
+          "table_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Location"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "min_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Timestamp"
+          },
+          "max_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Timestamp"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionLakeInfoTable",
+        "description": "``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset)."
       },
       "ProvisionReconcileRequest": {
         "properties": {
@@ -69434,7 +69557,11 @@
           "type": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "user",
+                  "automation"
+                ]
               },
               {
                 "type": "null"
@@ -71761,47 +71888,19 @@
       "SavedViewRecord": {
         "properties": {
           "id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Id"
           },
           "service_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Service Id"
           },
           "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Name"
           },
           "filters_json": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Filters Json"
           },
           "time_range_type": {
@@ -71862,6 +71961,12 @@
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "id",
+          "service_id",
+          "name",
+          "filters_json"
+        ],
         "title": "SavedViewRecord",
         "description": "Wire-safe read shape for ``GET /api/views/{service_id}`` rows.\n\nDistinct from the strict ``SavedView`` request body: all-Optional +\n``extra=\"allow\"`` so a partial row (or a future column) can never 500\nthe read path; ``response_model_exclude_unset`` keeps the emitted key\nset byte-identical to the producer's."
       },
@@ -71943,12 +72048,86 @@
         ],
         "title": "SchemaColumn"
       },
+      "SchemaColumnRow": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max"
+          },
+          "approx_unique": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Unique"
+          },
+          "null_percentage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Null Percentage"
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "title": "SchemaColumnRow",
+        "description": "One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path."
+      },
       "SchemaResponse": {
         "properties": {
           "schema": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SchemaColumnRow"
             },
             "type": "array",
             "title": "Schema"
@@ -72220,41 +72399,25 @@
       "ScoringComplianceRow": {
         "properties": {
           "hour": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Hour"
           },
           "compliance": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Compliance"
           },
           "count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Count"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "hour",
+          "compliance",
+          "count"
+        ],
         "title": "ScoringComplianceRow"
       },
       "ScoringConfigCompositeResponse": {
@@ -72645,41 +72808,25 @@
       "ScoringDistributionRow": {
         "properties": {
           "hour": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Hour"
           },
           "bucket": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Bucket"
           },
           "count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Count"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "hour",
+          "bucket",
+          "count"
+        ],
         "title": "ScoringDistributionRow"
       },
       "ScoringEnforceStatusCodeBody": {
@@ -72776,63 +72923,36 @@
             "title": "Current"
           },
           "default": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Default"
           },
           "effective": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Effective"
           },
           "min": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Min"
           },
           "max": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Max"
           },
           "is_default": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Is Default"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "current",
+          "default",
+          "effective",
+          "min",
+          "max",
+          "is_default"
+        ],
         "title": "ScoringEnforceStatusCodeState"
       },
       "ScoringEnforceThresholdPutResponse": {
@@ -72900,30 +73020,21 @@
             "title": "Threshold"
           },
           "enforced": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Enforced"
           },
           "key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Key"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "threshold",
+          "enforced",
+          "key"
+        ],
         "title": "ScoringEnforceThresholdResponse"
       },
       "ScoringEvaluationResponse": {
@@ -73167,52 +73278,30 @@
       "ScoringExcludeRegexState": {
         "properties": {
           "current": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Current"
           },
           "is_default": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Is Default"
           },
           "default": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Default"
           },
           "effective": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Effective"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "current",
+          "is_default",
+          "default",
+          "effective"
+        ],
         "title": "ScoringExcludeRegexState"
       },
       "ScoringExcludeRegexValidateResponse": {
@@ -73511,25 +73600,11 @@
       "ScoringL2EnforceState": {
         "properties": {
           "available": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Available"
           },
           "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Enabled"
           },
           "l2_enabled_at": {
@@ -73555,25 +73630,11 @@
             "title": "Days Since Optin"
           },
           "ramp_progress": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "number",
             "title": "Ramp Progress"
           },
           "fully_ramped": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Fully Ramped"
           },
           "warmup_days_remaining": {
@@ -73610,41 +73671,34 @@
             "title": "Deployment Age Days"
           },
           "ready": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Ready"
           },
           "ramp_days": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "number",
             "title": "Ramp Days"
           },
           "readiness_days": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "number",
             "title": "Readiness Days"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "available",
+          "enabled",
+          "l2_enabled_at",
+          "days_since_optin",
+          "ramp_progress",
+          "fully_ramped",
+          "warmup_days_remaining",
+          "scoring_enabled_at",
+          "deployment_age_days",
+          "ready",
+          "ramp_days",
+          "readiness_days"
+        ],
         "title": "ScoringL2EnforceState",
         "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``\nthere for wire-compat; this standalone GET carries the real schema)."
       },
@@ -75258,19 +75312,17 @@
             "title": "Set At"
           },
           "enforced": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "boolean",
             "title": "Enforced"
           }
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "threshold",
+          "set_at",
+          "enforced"
+        ],
         "title": "ScoringThresholdState",
         "description": "GET and PUT /scoring/threshold both return this exact shape."
       },
@@ -75315,14 +75367,7 @@
       "ScoringTopFlaggedRow": {
         "properties": {
           "timestamp": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Timestamp"
           },
           "edge_sid": {
@@ -75337,14 +75382,7 @@
             "title": "Edge Sid"
           },
           "edge_score": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
             "title": "Edge Score"
           },
           "edge_score_l1": {
@@ -75449,6 +75487,11 @@
         },
         "additionalProperties": true,
         "type": "object",
+        "required": [
+          "timestamp",
+          "edge_sid",
+          "edge_score"
+        ],
         "title": "ScoringTopFlaggedRow"
       },
       "SecurityAggregatesRequest": {
@@ -75754,6 +75797,103 @@
         "type": "object",
         "title": "SecurityAggregatesResponse"
       },
+      "SecurityBotRow": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          },
+          "verified_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Count"
+          },
+          "impersonator_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impersonator Count"
+          },
+          "unverified_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unverified Count"
+          },
+          "verification_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Coverage"
+          },
+          "pending_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "request_count"
+        ],
+        "title": "SecurityBotRow",
+        "description": "One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows\ndon't (the rollup/direct-join variants only emit name/category/request_count,\nthe high-scale one adds the verification counters)."
+      },
       "SecurityMetrics": {
         "properties": {
           "waf_blocked": {
@@ -75868,8 +76008,7 @@
           },
           "bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SecurityBotRow"
             },
             "type": "array",
             "title": "Bots",
@@ -75877,8 +76016,7 @@
           },
           "ngwaf_bots": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SecurityBotRow"
             },
             "type": "array",
             "title": "Ngwaf Bots",

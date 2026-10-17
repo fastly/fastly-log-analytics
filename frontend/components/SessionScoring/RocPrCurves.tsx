@@ -64,7 +64,7 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
         <CardErrorState
           icon={<Info className="h-4 w-4" />}
           title="Failed to load ROC + PR curves"
-          message={(error as any)?.message || 'Unknown error'}
+          message={error?.message || 'Unknown error'}
           onRetry={() => refetch()}
         />
       ) : isLoading || !data ? (

@@ -1,7 +1,7 @@
 'use client'
 import React, { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -103,9 +103,9 @@ export function NgwafDialog({ service, onClose }: Props) {
                         params: { query: { service_id: service.service_id } },
                         headers: { Authorization: `Bearer ${ngwafApiToken}` }
                       })
-                      setNgwafWorkspaces((data as any)?.workspaces || [])
-                    } catch (e: any) {
-                      setNgwafFetchError(e?.message || 'Could not load workspaces')
+                      setNgwafWorkspaces((data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : [])))
+                    } catch (e) {
+                      setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
                     } finally {
                       setNgwafFetching(false)
                     }
@@ -169,12 +169,12 @@ export function NgwafDialog({ service, onClose }: Props) {
                         path: { service_id: service.service_id },
                       },
                       headers: { Authorization: `Bearer ${ngwafApiToken}` },
-                      body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null } as any,
+                      body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null },
                     })
                     setNgwafSaved(true)
                     queryClient.invalidateQueries({ queryKey: ['services'] })
-                  } catch (e: any) {
-                    setNgwafFetchError(e?.message || 'Failed to save')
+                  } catch (e) {
+                    setNgwafFetchError(extractApiError(e) || 'Failed to save')
                   } finally {
                     setNgwafSaving(false)
                   }

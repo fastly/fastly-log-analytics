@@ -9,6 +9,7 @@ import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
 import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
+import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'
 interface ScoringHealthCardProps {
@@ -54,11 +55,10 @@ function Metric({
 }
 
 export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthCardProps) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<HealthResponse>(
-    ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/health', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   if (isError) {

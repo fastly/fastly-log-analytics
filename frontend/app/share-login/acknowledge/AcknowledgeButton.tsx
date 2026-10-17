@@ -51,8 +51,8 @@ export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps)
         returnTo ?? search?.get('return') ?? search?.get('next'),
       )
       window.location.assign(safeTarget ?? '/dashboard')
-    } catch (err: any) {
-      setError(err?.message || 'Network error.')
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Network error.')
     } finally {
       setBusy(false)
     }

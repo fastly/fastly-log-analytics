@@ -11,9 +11,10 @@ import { useTimeLayout } from '@/lib/chart-helpers'
 import { formatDate } from '@/lib/date'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { components } from '@/types/api.generated'
 
 interface AlertPreviewProps {
-  previewData: any
+  previewData: components['schemas']['AlertPreviewData'] | null
   isPreviewLoading: boolean
   lookbackHours: number
   setLookbackHours: (h: number) => void

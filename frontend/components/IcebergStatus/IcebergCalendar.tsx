@@ -31,7 +31,7 @@ export function IcebergCalendar() {
     queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/iceberg-calendar")
-      return data as any
+      return data
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,
@@ -70,7 +70,9 @@ export function IcebergCalendar() {
           <>
             <div className="flex flex-wrap gap-1">
               {days.map((date) => {
-                const dayData = (calendar as any)?.[date]
+                const entry = calendar?.[date]
+                // The open-keyed payload also carries array-valued debug-envelope keys.
+                const dayData = Array.isArray(entry) ? undefined : entry
                 const hasData = !!dayData
 
                 return (

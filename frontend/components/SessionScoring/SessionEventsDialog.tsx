@@ -19,7 +19,6 @@ import type { components } from '@/types/api.generated'
 import { formatLocalDateTime } from '@/lib/date'
 
 type SessionEvent = components['schemas']['ScoringSessionEvent']
-type SessionEventsResponse = components['schemas']['ScoringSessionEventsResponse']
 
 interface SessionEventsDialogProps {
   serviceId: string
@@ -55,16 +54,16 @@ export function SessionEventsDialog({
     enabled: open,
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/sessions/{sid}/events' as any,
+        '/api/services/{service_id}/scoring/sessions/{sid}/events',
         {
           params: {
             path: { service_id: serviceId, sid },
             query: { since_days: 30 },
           },
-        } as any,
+        },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as SessionEventsResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 30_000,
   })

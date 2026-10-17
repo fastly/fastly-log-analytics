@@ -102,8 +102,8 @@ function CreateInviteDialogInner({
     try {
       const { data, response } = await client.GET('/api/admin/share/wordphrase', {})
       if (!response.ok) throw new Error(`status ${response.status}`)
-      setPasscode((data as any).passcode)
-    } catch (e: any) {
+      setPasscode(data?.passcode ?? '')
+    } catch (e) {
       setError(extractApiError(e))
     }
   }
@@ -128,10 +128,10 @@ function CreateInviteDialogInner({
           query_window_hours: queryWindow || null,
           allow_concurrent_sessions: allowConcurrent,
         },
-      } as any)
+      })
       await onCreated()
       onOpenChange(false)
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e))
     } finally {
       setCreating(false)

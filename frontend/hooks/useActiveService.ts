@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useQueryClient } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { queryKeys } from '@/lib/query-keys'
+import type { BootstrapResponse } from '@/types/api'
 
 /**
  * Active service selection. Subscribe here when a component cares about
@@ -31,10 +32,10 @@ export function useActiveServiceCmcdEnabled(activeServiceId: string | null): boo
   }
 
   // Fallback to preloaded bootstrap cache on first paint
-  const bootstrap = queryClient.getQueryData(queryKeys.bootstrap()) as any
+  const bootstrap = queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())
   const bootstrapServices = bootstrap?.services
   if (Array.isArray(bootstrapServices)) {
-    const activeService = bootstrapServices.find((s: any) => s.service_id === activeServiceId)
+    const activeService = bootstrapServices.find((s) => s.service_id === activeServiceId)
     return !!activeService?.cmcd_enabled
   }
 

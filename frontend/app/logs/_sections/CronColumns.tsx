@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 import { LiveTimer } from './CronScheduleBox'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import type { CronRun } from '../_state'
 
 import { formatCount } from '@/lib/format'
 function CopyTextButton({ text, label, title, className }: { text: string; label: string; title: string; className: string }) {
@@ -41,7 +42,7 @@ function CopyTextButton({ text, label, title, className }: { text: string; label
   )
 }
 
-export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
+export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
   return React.useMemo(() => [
     {
       accessorKey: 'started_at',
@@ -126,7 +127,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         if (val === 'success' && (!row.original.corrupt_rows || row.original.corrupt_rows === 0)) {
           return <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Success</Badge>
         }
-        if (val === 'partial_success' || (val === 'success' && row.original.corrupt_rows > 0)) {
+        if (val === 'partial_success' || (val === 'success' && (row.original.corrupt_rows ?? 0) > 0)) {
           return <Badge variant="warning" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Partial Success</Badge>
         }
         return (
@@ -158,6 +159,9 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       header: 'Duration',
       cell: ({ row }) => {
         const s = row.original.duration_s
+        if (s == null) {
+          return <span className="font-mono text-muted-foreground tabular-nums text-xs">—</span>
+        }
         if (row.original.status === 'running') {
           // Use a simple localized timer component for running jobs
           return <LiveTimer startedAt={row.original.started_at} />

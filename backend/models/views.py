@@ -27,10 +27,11 @@ class SavedViewRecord(PassthroughModel):
     the read path; ``response_model_exclude_unset`` keeps the emitted key
     set byte-identical to the producer's."""
 
-    id: str | None = None
-    service_id: str | None = None
-    name: str | None = None
-    filters_json: str | None = None
+    # ``metadata.list_views`` selects these four NOT NULL columns on every row.
+    id: str
+    service_id: str
+    name: str
+    filters_json: str
     time_range_type: str | None = None
     start_time: str | None = None
     end_time: str | None = None

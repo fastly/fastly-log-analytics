@@ -63,7 +63,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
     .filter(id => !(maskIps && isIpFamilyField(id)))
     .map(id => ({
       value: id,
-      label: catalog?.fields?.find((f: any) => f.id === id)?.label ?? id,
+      label: catalog?.fields?.find((f) => f.id === id)?.label ?? id,
     }))
 
   const addFilter = useFilterStore(s => s.addFilter)
@@ -86,7 +86,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const handleSelectSuggestion = (val: string | number) => {
+  const handleSelectSuggestion = (val: unknown) => {
     setValue(String(val))
     // We don't automatically add, let the user confirm or edit
   }
@@ -110,7 +110,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
             <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               Filter Type
             </Label>
-            <Tabs value={mode} onValueChange={(v: any) => setMode(v)} className="w-full">
+            <Tabs value={mode} onValueChange={(v) => { if (v === 'include' || v === 'exclude') setMode(v) }} className="w-full">
               <TabsList className="grid w-full grid-cols-2 h-9">
                 <TabsTrigger value="include" className="text-xs gap-1.5">
                   <Check className="h-3 w-3 text-green-500" /> Include
@@ -170,7 +170,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
               <div className="mt-1 border rounded-md bg-background shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                 <ScrollArea className={cn("max-h-[160px]", suggestions.values.length > 5 ? "h-[160px]" : "")}>
                   <div className="p-1">
-                    {suggestions.values.map((v: any, i: number) => (
+                    {suggestions.values.map((v, i) => (
                       <button
                         key={i}
                         type="button"

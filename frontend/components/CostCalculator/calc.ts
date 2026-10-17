@@ -116,8 +116,8 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         bpl = p.estimated_bytes_per_line
       }
 
-      const rawZone = (p as any).billing_zone as BillingZone | undefined
-      const resolvedZone: BillingZone = (rawZone && BILLING_ZONE_RATES[rawZone] !== undefined) ? rawZone : state.billingZone
+      const rawZone = p.billing_zone
+      const resolvedZone: BillingZone = (rawZone && rawZone in BILLING_ZONE_RATES) ? (rawZone as BillingZone) : state.billingZone
       const resolvedEgress = p.cdn_egress_rate_per_gb !== undefined && p.cdn_egress_rate_per_gb !== null
         ? p.cdn_egress_rate_per_gb
         : (BILLING_ZONE_RATES[resolvedZone] ?? state.rateEgress)

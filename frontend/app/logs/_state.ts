@@ -12,6 +12,8 @@ import { useSSE } from '@/hooks/useSSE'
 import type { WithRequired, components } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
+export type CronRun = components['schemas']['CronRunEntry']
+
 export type BackgroundCronToast = Pick<
   WithRequired<components['schemas']['CronRunEntry'], 'id' | 'task' | 'status' | 'started_at'>,
   'id' | 'task' | 'status' | 'started_at' | 'duration_s' | 'rows_ingested'
@@ -70,12 +72,12 @@ export function useLogsPageState(initialTab?: string) {
           query: {
             page: 1,
             per_page: 500,
-            task: taskFilter === 'all' ? undefined : taskFilter as any,
-            status: statusFilter === 'all' ? undefined : statusFilter as any
+            task: taskFilter === 'all' ? undefined : taskFilter,
+            status: statusFilter === 'all' ? undefined : statusFilter
           }
         }
       })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     // Primary update path is the /api/admin/events/stream cron-runs channel
@@ -113,7 +115,7 @@ export function useLogsPageState(initialTab?: string) {
           }
         }
       })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId, // Tab independent polling!
     // Primary update path is the /api/admin/events/stream cron-runs channel
@@ -130,7 +132,7 @@ export function useLogsPageState(initialTab?: string) {
     const entries = recentCrons?.entries
     if (!entries) return { entries: [] }
     return {
-      entries: entries.filter((e: any) => e.status === 'running')
+      entries: entries.filter((e) => e.status === 'running')
     }
   }, [recentCrons?.entries])
 
@@ -148,31 +150,31 @@ export function useLogsPageState(initialTab?: string) {
   // Accumulate running and completed jobs, pruning older runs of the same task type
   // to prevent historical clutter. We only keep the active running job and the single
   // most recent completed job (last run) for each task.
-  const [displayedJobs, setDisplayedJobs] = useState<any[]>([])
+  const [displayedJobs, setDisplayedJobs] = useState<CronRun[]>([])
   useEffect(() => {
     if (!runningCrons?.entries) return
     setDisplayedJobs(prev => {
       // 1. Identify which tasks are currently running in the poll response
-      const runningTasks = new Set(runningCrons.entries.map((j: any) => j.task))
+      const runningTasks = new Set(runningCrons.entries.map((j) => j.task))
 
       // 2. Filter out completed jobs of the tasks that are now running a new instance
-      const filtered = prev.filter((j: any) => {
-        const isRunningNow = runningCrons.entries.some((rc: any) => rc.id === j.id)
+      const filtered = prev.filter((j) => {
+        const isRunningNow = runningCrons.entries.some((rc) => rc.id === j.id)
         return isRunningNow || !runningTasks.has(j.task)
       })
 
       // 3. Keep only the single most recent completed job per task to prevent history clutter
-      const jobsByTask: Record<string, any[]> = {}
+      const jobsByTask: Record<string, CronRun[]> = {}
       filtered.forEach(j => {
         if (!jobsByTask[j.task]) jobsByTask[j.task] = []
         jobsByTask[j.task].push(j)
       })
 
-      const pruned: any[] = []
+      const pruned: CronRun[] = []
       Object.keys(jobsByTask).forEach(task => {
         const taskJobs = jobsByTask[task]
-        const running = taskJobs.filter(j => runningCrons.entries.some((rc: any) => rc.id === j.id))
-        const completed = taskJobs.filter(j => !runningCrons.entries.some((rc: any) => rc.id === j.id))
+        const running = taskJobs.filter(j => runningCrons.entries.some((rc) => rc.id === j.id))
+        const completed = taskJobs.filter(j => !runningCrons.entries.some((rc) => rc.id === j.id))
 
         if (running.length > 0) {
           pruned.push(...running.map(j => ({ ...j, status: 'running' })))
@@ -189,8 +191,8 @@ export function useLogsPageState(initialTab?: string) {
       // 4. Merge in brand new running jobs
       const prunedIds = new Set(pruned.map(j => j.id))
       const brandNew = runningCrons.entries
-        .filter((j: any) => !prunedIds.has(j.id))
-        .map((j: any) => ({ ...j, status: 'running' }))
+        .filter((j) => !prunedIds.has(j.id))
+        .map((j) => ({ ...j, status: 'running' }))
 
       const nextJobs = [...pruned, ...brandNew]
 
@@ -213,13 +215,13 @@ export function useLogsPageState(initialTab?: string) {
   }, [runningCrons?.entries])
 
   const removeDisplayedJob = useCallback((id: number) => {
-    setDisplayedJobs(prev => prev.filter((j: any) => j.id !== id))
+    setDisplayedJobs(prev => prev.filter((j) => j.id !== id))
   }, [])
 
   // Effect to monitor recent crons and detect newly started or completed runs (even if they ran very fast)
   useEffect(() => {
     if (!recentCrons?.entries || recentCrons.entries.length === 0) return
-    const ids = recentCrons.entries.map((e: any) => e.id)
+    const ids = recentCrons.entries.map((e) => e.id)
     const maxId = Math.max(...ids)
 
     if (maxSeenIdRef.current === null) {
@@ -227,16 +229,16 @@ export function useLogsPageState(initialTab?: string) {
       maxSeenIdRef.current = maxId
 
       // Eagerly capture any running crons at load time and display them as running with live streams
-      const runningRuns = recentCrons.entries.filter((e: any) => e.status === 'running')
-      runningRuns.forEach((run: any) => {
+      const runningRuns = recentCrons.entries.filter((e) => e.status === 'running')
+      runningRuns.forEach((run) => {
         setDisplayedJobs(prev => {
-          if (prev.some((j: any) => j.id === run.id)) return prev
+          if (prev.some((j) => j.id === run.id)) return prev
           return [...prev, { ...run, status: run.status }]
         })
         setBackgroundCronToast({
           id: run.id,
           task: run.task,
-          status: run.status,
+          status: run.status ?? 'unknown',
           started_at: run.started_at,
           duration_s: run.duration_s,
           rows_ingested: run.rows_ingested
@@ -247,16 +249,16 @@ export function useLogsPageState(initialTab?: string) {
 
     // On subsequent polls, check if we have any brand new runs!
     if (maxId > maxSeenIdRef.current) {
-      const newRuns = recentCrons.entries.filter((e: any) => e.id > (maxSeenIdRef.current || 0))
+      const newRuns = recentCrons.entries.filter((e) => e.id > (maxSeenIdRef.current || 0))
 
       // Update max seen ID
       maxSeenIdRef.current = maxId
 
       // Processes new runs and queue notifications/console placement
-      newRuns.forEach((run: any) => {
+      newRuns.forEach((run) => {
         // Automatically add it to displayedJobs so it appears in the Console Terminal dock
         setDisplayedJobs(prev => {
-          if (prev.some((j: any) => j.id === run.id)) return prev
+          if (prev.some((j) => j.id === run.id)) return prev
           return [...prev, { ...run, status: run.status }]
         })
 
@@ -264,7 +266,7 @@ export function useLogsPageState(initialTab?: string) {
         setBackgroundCronToast({
           id: run.id,
           task: run.task,
-          status: run.status,
+          status: run.status ?? 'unknown',
           started_at: run.started_at,
           duration_s: run.duration_s,
           rows_ingested: run.rows_ingested
@@ -276,12 +278,12 @@ export function useLogsPageState(initialTab?: string) {
   // Effect to update an active running toast when that specific run completes
   useEffect(() => {
     if (!backgroundCronToast || backgroundCronToast.status !== 'running' || !recentCrons?.entries) return
-    const updatedRun = recentCrons.entries.find((e: any) => e.id === backgroundCronToast.id)
+    const updatedRun = recentCrons.entries.find((e) => e.id === backgroundCronToast.id)
     if (updatedRun && updatedRun.status !== 'running') {
       setBackgroundCronToast({
         id: updatedRun.id,
         task: updatedRun.task,
-        status: updatedRun.status,
+        status: updatedRun.status ?? 'unknown',
         started_at: updatedRun.started_at,
         duration_s: updatedRun.duration_s,
         rows_ingested: updatedRun.rows_ingested
@@ -316,7 +318,7 @@ export function useLogsPageState(initialTab?: string) {
     queryKey: queryKeys.admin.cronSchedule(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/cron-schedule", { signal })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     // Freshness via useAdminEventStream (wired in SyncStatusBadge):
@@ -364,7 +366,7 @@ export function useLogsPageState(initialTab?: string) {
     // analyst tile reads naturally), which created a confusing duplicate
     // tile both labelled "sync" once the whitelist was lifted.
     const adminExcluded = new Set(['metadata_sync'])
-    const source = (cronSchedule?.schedules ?? []) as Array<{ task: string }>
+    const source = cronSchedule?.schedules ?? []
     const hasNgwaf = !!status?.ngwaf_workspace_id
     const filtered = isAnalyst
       ? source.filter((s) => analystAllowed.has(s.task))
@@ -391,10 +393,10 @@ export function useLogsPageState(initialTab?: string) {
     if (!catalog) return { groups: {}, fields: {} }
     const groups: Record<string, { label: string, description: string }> = {}
     const fields: Record<string, { label: string, description: string }> = {}
-    catalog.groups?.forEach((g: any) => {
+    catalog.groups?.forEach((g) => {
       groups[g.id === null ? "null" : String(g.id)] = { label: g.label, description: g.description }
     })
-    catalog.fields?.forEach((f: any) => {
+    catalog.fields?.forEach((f) => {
       fields[f.id] = { label: f.label, description: f.description }
     })
     return { groups, fields }
@@ -412,7 +414,7 @@ export function useLogsPageState(initialTab?: string) {
           }
         }
       })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && activeTab === 'service_history',
     // Kept fresh by useAdminEventStream (invalidates ['admin','audit-logs',svc]
@@ -426,7 +428,7 @@ export function useLogsPageState(initialTab?: string) {
     queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/ingested-files", { signal })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && activeTab === 'ingestion',
     // Freshness via useAdminEventStream (invalidates
@@ -439,7 +441,7 @@ export function useLogsPageState(initialTab?: string) {
     queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/schema", { signal })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && activeTab === 'schema',
     // Freshness via useAdminEventStream (invalidates ['admin','schema',svc]

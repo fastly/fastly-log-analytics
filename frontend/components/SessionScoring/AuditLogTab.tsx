@@ -26,7 +26,6 @@ interface AuditLogTabProps {
 }
 
 type AuditRow = components['schemas']['ScoringAuditRow']
-type AuditResponse = components['schemas']['ScoringAuditListResponse']
 
 const AUDIT_LIMIT = 200
 
@@ -46,20 +45,20 @@ function truncate(s: string, max: number) {
 }
 
 export function AuditLogTab({ serviceId }: AuditLogTabProps) {
-  const query = useQuery<AuditResponse>({
+  const query = useQuery({
     queryKey: ['scoring-audit', serviceId, AUDIT_LIMIT],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/audit' as any,
+        '/api/services/{service_id}/scoring/audit',
         {
           params: {
             path: { service_id: serviceId },
             query: { limit: AUDIT_LIMIT },
           },
-        } as any,
+        },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as AuditResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 30_000,
   })
@@ -78,7 +77,7 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
             <span className="text-sm font-medium">Failed to load audit log</span>
           </div>
           <p className="text-xs text-muted-foreground">
-            {(query.error as any)?.message || 'Unknown error'}
+            {query.error?.message || 'Unknown error'}
           </p>
           <Button size="sm" variant="outline" onClick={() => query.refetch()}>
             Retry

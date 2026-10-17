@@ -14,3 +14,8 @@ export function recordOrNull<T extends object>(v: T | null | undefined): T | nul
 export function arrayOrEmpty<T>(v: readonly T[] | null | undefined): T[] {
   return Array.isArray(v) ? [...v] : []
 }
+
+/** Narrow a plain string (e.g. a Select's value) to one member of a generated string-enum union. */
+export function oneOf<T extends string>(allowed: readonly T[], value: string | null | undefined): T | undefined {
+  return allowed.find((a) => a === value)
+}

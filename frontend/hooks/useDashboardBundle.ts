@@ -6,6 +6,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
 import { resolveRangeWire } from '@/lib/range-wire'
 import type { FiltersPayload } from '@/types/filters'
+import type { ChartMetric } from '@/types/api'
 
 /**
  * Composite dashboard fetch — /api/dashboard/bundle returns the two
@@ -101,7 +102,7 @@ export function useDashboardBundle({
           // only matter if the token isn't recognized — see lib/range-wire.ts).
           // Custom mode → {start_time, end_time} only.
           filters: filterPayload,
-          chart_metric: metric as any,
+          chart_metric: metric as ChartMetric,
           chart_interval: interval,
           fields: fields,
           sections: sections,

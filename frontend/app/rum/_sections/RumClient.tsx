@@ -56,14 +56,36 @@ type RumAnalytics = WithRequired<
   'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'
 >
 
+// Edge-log blob attached to each beacon. The keys read by the table are typed;
+// whatever else the producer (or a Faro payload) carries rides the index signature.
+interface RumRawLog {
+  city?: string;
+  region?: string;
+  country?: string;
+  pop?: string;
+  tls?: string;
+  ttfb?: number | string | null;
+  faro_payload?: unknown;
+  meta?: unknown;
+  measurements?: unknown;
+  events?: unknown;
+  [key: string]: unknown;
+}
+
 type RumLiveEvent = {
   time: string;
   type: string;
   path: string;
   desc: string;
-  browser: string;
-  os: string;
-  raw_log?: any;
+  // Legacy payloads carried ``{ name }`` objects here instead of plain strings.
+  browser: string | { name?: string };
+  os: string | { name?: string };
+  raw_log?: RumRawLog;
+}
+
+function envName(v: string | { name?: string } | null | undefined): string {
+  if (typeof v === 'object' && v) return v.name || 'Unknown';
+  return v || 'Unknown';
 }
 
 function getLcpColors(p75: number | null | undefined): CwvColors {
@@ -165,15 +187,13 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     {
       id: 'environment',
       accessorFn: (row) => {
-        const b = typeof row.browser === 'object' && row.browser ? ((row.browser as any).name || 'Unknown') : (row.browser || 'Unknown');
-        const o = typeof row.os === 'object' && row.os ? ((row.os as any).name || 'Unknown') : (row.os || 'Unknown');
-        return `${b} on ${o}`;
+        return `${envName(row.browser)} on ${envName(row.os)}`;
       },
       meta: { label: 'Environment' },
       header: 'Environment',
       cell: ({ row }) => {
-        const b = typeof row.original.browser === 'object' && row.original.browser ? ((row.original.browser as any).name || 'Unknown') : (row.original.browser || 'Unknown');
-        const o = typeof row.original.os === 'object' && row.original.os ? ((row.original.os as any).name || 'Unknown') : (row.original.os || 'Unknown');
+        const b = envName(row.original.browser);
+        const o = envName(row.original.os);
         return (
           <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={`${b} on ${o}`}>
             {b} on {o}
@@ -231,7 +251,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       id: 'ttfb',
       accessorFn: (row) => {
         const raw = row.raw_log || {};
-        return raw.ttfb != null ? parseFloat(raw.ttfb) : null;
+        return raw.ttfb != null ? parseFloat(String(raw.ttfb)) : null;
       },
       meta: { label: 'TTFB (Edge)' },
       header: 'TTFB (Edge)',
@@ -761,8 +781,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
           </DialogHeader>
 
           {selectedEvent && (() => {
-            let faroPayload: any = null;
-            let edgeMetadata: any = null;
+            let faroPayload: unknown = null;
+            let edgeMetadata: Record<string, unknown> | null = null;
 
             const rawLog = selectedEvent.raw_log;
             if (rawLog) {
@@ -805,7 +825,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                   </div>
                   <div>
                     <span className="text-muted-foreground block mb-1">Client Platform</span>
-                    <span>{selectedEvent.browser} on {selectedEvent.os}</span>
+                    <span>{envName(selectedEvent.browser)} on {envName(selectedEvent.os)}</span>
                   </div>
                   <div className="col-span-2">
                     <span className="text-muted-foreground block mb-1">Description</span>
@@ -815,7 +835,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                   </div>
                 </div>
 
-                {faroPayload && (
+                {faroPayload != null && (
                   <div className="space-y-2">
                     <span className="text-muted-foreground font-semibold block">Client Faro JSON Payload (Full)</span>
                     <div className="bg-emerald-950/5 dark:bg-emerald-950/15 border border-emerald-500/15 rounded-lg p-4 overflow-auto max-h-[250px] font-mono text-[11px] leading-relaxed text-foreground">

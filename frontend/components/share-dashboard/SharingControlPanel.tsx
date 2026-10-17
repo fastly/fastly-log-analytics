@@ -47,7 +47,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
   const activeService = React.useMemo(() => {
-    return status?.services?.find((s: any) => s.service_id === activeServiceId)
+    return status?.services?.find((s) => s.service_id === activeServiceId)
   }, [status?.services, activeServiceId])
 
   React.useEffect(() => {
@@ -90,15 +90,15 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
           public_endpoint: publicEndpoint,
           forward_port: 3000,
         },
-      } as any),
+      }),
     )
   }
 
-  const handleStop = () => run(() => client.POST('/api/admin/share/stop', {} as any))
+  const handleStop = () => run(() => client.POST('/api/admin/share/stop', {}))
 
   const handlePanic = () => {
     if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops sharing.')) return
-    run(() => client.POST('/api/admin/share/panic', {} as any))
+    run(() => client.POST('/api/admin/share/panic', {}))
   }
 
   const handlePreviewInNewTab = () => {
@@ -117,11 +117,11 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     try {
       await client.PATCH('/api/admin/share/settings', {
         body: { max_concurrent_analyst_sessions: n },
-      } as any)
+      })
       await onRefresh()
       // Drop back to mirroring the (now-updated) server value.
       setCapDraft(null)
-    } catch (e: any) {
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setCapBusy(false)

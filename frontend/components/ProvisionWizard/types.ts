@@ -5,6 +5,10 @@ import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { components } from "@/types/api.generated";
 
 export type ProvisionService = components["schemas"]["ProvisionService"];
+export type LakeInfo = components["schemas"]["ProvisionLakeInfoResponse"];
+export type LogFieldsCatalog = components["schemas"]["LogFieldsCatalogResponse"];
+type LogFieldsConfig = components["schemas"]["LogFieldsConfig"];
+type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
 
 export const WIZARD_DRAFT_VERSION = 1;
 
@@ -61,7 +65,7 @@ export interface ProvisionConfig {
   delete_after: boolean;
   commit_interval_mins: number;
   enable_cron_compact: boolean;
-  log_fields: any;
+  log_fields: LogFieldsConfig;
   ngwaf_workspace_id: string;
   cmcd_enabled: boolean;
   cmcd_mode: string;
@@ -102,7 +106,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   delete_after: true,
   commit_interval_mins: 5,
   enable_cron_compact: true,
-  log_fields: { groups: [], field_overrides: {} } as any,
+  log_fields: { groups: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
   cmcd_mode: "query_string",
@@ -281,7 +285,7 @@ export interface WizardState {
   // Analyst Flow
   analystPathASupported: boolean;
   analystPathAReason: string | null;
-  lakeInfo: any;
+  lakeInfo: LakeInfo | null;
   isAnalyzing: boolean;
   importMode: "all" | "range";
   setImportMode: (m: "all" | "range") => void;
@@ -308,7 +312,7 @@ export interface WizardState {
   setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
 
   // Catalog
-  catalog: any;
+  catalog: LogFieldsCatalog | undefined;
   isLoadingCatalog: boolean;
 
   // Field helpers
@@ -324,14 +328,14 @@ export interface WizardState {
   estimatedBytes: number;
 
   // Services list
-  servicesData: any;
+  servicesData: ProvisionService[] | undefined;
   servicesError: Error | null;
   isLoadingServices: boolean;
-  filteredServices: any[];
+  filteredServices: ProvisionService[];
 
   // Handlers
   handleTokenSubmit: () => Promise<void>;
-  validateMutation: ReturnType<typeof useMutation<any, any, string>>;
+  validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>;
   handleServiceSelect: (service: ProvisionService) => void;
   handleCheckFos: (vals?: {
     bucket?: string;

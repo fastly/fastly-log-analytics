@@ -92,10 +92,10 @@ export default function AlertsClient() {
   React.useEffect(() => {
     if (typeof window === 'undefined') return
     const cb = () => setLogSettingsIdle(true)
-    const ric = (window as any).requestIdleCallback
+    const ric = window.requestIdleCallback
     if (typeof ric === 'function') {
       const id = ric(cb)
-      return () => { try { (window as any).cancelIdleCallback?.(id) } catch {} }
+      return () => { try { window.cancelIdleCallback?.(id) } catch {} }
     }
     const id = window.setTimeout(cb, 200)
     return () => window.clearTimeout(id)
@@ -125,7 +125,7 @@ export default function AlertsClient() {
     staleTime: 5 * 60_000,
   })
 
-  const logPeriodSeconds = (loggingSettings as any)?.period || 30
+  const logPeriodSeconds = loggingSettings?.period || 30
 
   const { data: alertsRes, isLoading, isFetching, refetch, error: alertsError } = useQuery({
     queryKey: ['alerts', activeServiceId],

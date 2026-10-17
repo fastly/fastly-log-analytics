@@ -50,7 +50,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     run(() =>
       client.POST('/api/admin/share/sessions/{session_id}/boot', {
         params: { path: { session_id: sid } },
-      } as any),
+      }),
     )
 
   const sessions = status?.sessions || []

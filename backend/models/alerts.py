@@ -68,7 +68,7 @@ class AlertPreviewData(BaseModel):
 
 
 class AlertPreviewResponse(BaseResponse):
-    data: AlertPreviewData | dict | None = None
+    data: AlertPreviewData | None = None
     error: str | None = None
 
 

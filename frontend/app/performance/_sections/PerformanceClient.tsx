@@ -19,6 +19,7 @@ import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
 import { useFieldLabel } from '@/hooks/useFieldLabel';
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { FiltersPayload } from '@/types/filters'
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
@@ -56,7 +57,7 @@ const SCATTER_LAYOUT = {
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
-  filterPayload: any
+  filterPayload: FiltersPayload
   // startTime/endTime feed the custom-absolute-range scan window (lib/range-wire).
   startTime: string | null
   endTime: string | null
@@ -352,7 +353,7 @@ export default function PerformanceClient({ nowServerStr }: { nowServerStr?: str
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 

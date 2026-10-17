@@ -23,13 +23,40 @@ import {
 import { DateTimeCell } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
+
+type AuditLogEntry = components['schemas']['AuditLogEntry']
+
+// ``details`` is a free-form payload whose shape depends on ``event_type``;
+// this lists the keys the detail dialogs below read.
+interface AuditDetails {
+  bucket?: string
+  fos_bucket_name?: string
+  prefix?: string
+  fos_prefix?: string
+  region?: string
+  fos_region?: string
+  sample_rate?: number | string
+  log_period?: number | string
+  edge_only?: boolean
+  cdn_url?: string
+  enable_cron_sync?: boolean
+  log_retention_days?: number
+  delete_after?: boolean
+  log_fields?: { groups?: string[]; field_overrides?: Record<string, boolean> }
+  log_fields_deployed?: boolean
+  groups_before?: string[]
+  groups_after?: string[]
+  fields_added?: string[]
+  fields_removed?: string[]
+}
 
 type CatalogMaps = {
   groups: Record<string, { label: string, description: string }>
   fields: Record<string, { label: string, description: string }>
 }
 
-export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
+export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEntry>[] {
   return React.useMemo(() => [
     {
       accessorKey: 'timestamp',
@@ -73,7 +100,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
       meta: { label: 'Details' },
       header: 'Details',
       cell: ({ row }) => {
-        const details = row.original.details
+        const details: AuditDetails = row.original.details
         if (!details || typeof details !== 'object' || Object.keys(details).length === 0) {
           return <span className="text-muted-foreground italic text-[10px]">No details available</span>
         }
@@ -185,7 +212,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                         <div>
                           <div className="text-[10px] font-medium text-muted-foreground mb-2 uppercase">Selected Groups</div>
                           <div className="flex flex-wrap gap-1.5">
-                            {details.log_fields.groups?.map((id: string) => {
+                            {details.log_fields.groups?.map((id) => {
                               const g = catalogMaps.groups[id === null ? "null" : String(id)]
                               return (
                                 <Badge key={id} variant="outline" className="text-[10px] py-0 font-normal bg-background/50">
@@ -234,8 +261,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                       {Object.entries(details).map(([key, val]) => {
                         if (key === 'log_fields_deployed') return null;
                         const label = key.replace(/_/g, ' ');
-                        const from = (val as any).from;
-                        const to = (val as any).to;
+                        const { from, to } = val as { from?: unknown; to?: unknown };
                         return (
                           <div key={key} className="flex justify-between items-center text-xs">
                             <span className="text-muted-foreground capitalize">{label}</span>
@@ -272,7 +298,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                         <div>
                           <div className="text-[10px] font-medium text-muted-foreground mb-1 uppercase">Groups</div>
                           <div className="flex flex-col gap-1">
-                            {details.groups_before.map((id: string) => {
+                            {details.groups_before.map((id) => {
                               const g = catalogMaps.groups[id === null ? "null" : String(id)]
                               return <div key={id} className="text-xs font-mono text-foreground/80 break-words">{g ? `${g.label}` : id}</div>
                             })}
@@ -288,7 +314,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                         <div>
                           <div className="text-[10px] font-medium text-muted-foreground mb-1 uppercase">Groups</div>
                           <div className="flex flex-col gap-1">
-                            {details.groups_after.map((id: string) => {
+                            {details.groups_after.map((id) => {
                               const g = catalogMaps.groups[id === null ? "null" : String(id)]
                               return <div key={id} className="text-xs font-mono text-foreground/80 break-words">{g ? `${g.label}` : id}</div>
                             })}
@@ -299,12 +325,12 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                     </div>
                   </div>
 
-                  {(details.fields_added?.length > 0 || details.fields_removed?.length > 0) && (
+                  {((details.fields_added?.length ?? 0) > 0 || (details.fields_removed?.length ?? 0) > 0) && (
                     <div className="grid grid-cols-2 gap-4 mt-2">
                       <div className="border rounded-md p-3 border-red-200 dark:border-red-900/30">
                         <div className="text-[10px] font-medium text-red-600 mb-1 uppercase flex items-center gap-1.5"><X className="w-3 h-3" /> Fields Removed</div>
                         <div className="flex flex-col gap-1">
-                          {details.fields_removed?.map((id: string) => {
+                          {details.fields_removed?.map((id) => {
                             const f = catalogMaps.fields[id]
                             return <div key={id} className="text-xs font-mono text-red-600/90 break-words" title={f?.description}>- {f ? f.label : id}</div>
                           })}
@@ -314,7 +340,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<any>[] {
                       <div className="border rounded-md p-3 border-green-200 dark:border-green-900/30">
                         <div className="text-[10px] font-medium text-green-600 mb-1 uppercase flex items-center gap-1.5"><Check className="w-3 h-3" /> Fields Added</div>
                         <div className="flex flex-col gap-1">
-                          {details.fields_added?.map((id: string) => {
+                          {details.fields_added?.map((id) => {
                             const f = catalogMaps.fields[id]
                             return <div key={id} className="text-xs font-mono text-green-600/90 break-words" title={f?.description}>+ {f ? f.label : id}</div>
                           })}

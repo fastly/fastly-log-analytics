@@ -36,7 +36,7 @@ interface InvitationsPanelProps {
 }
 
 function buildShareCard(
-  invite: any,
+  invite: Invite,
   publicUrl: string | null,
   allServices: Array<{ service_id: string; name?: string }> = []
 ): string {
@@ -128,11 +128,11 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     run(() =>
       client.DELETE('/api/admin/share/invites/{invite_id}', {
         params: { path: { invite_id: id } },
-      } as any),
+      }),
     )
   }
 
-  const openEditServices = (invite: any) => {
+  const openEditServices = (invite: Invite) => {
     setEditingServicesFor(invite.id)
     setEditingServicesDraft(invite.service_ids || [])
     setEditingMaskIps(!!invite.pii_policy?.mask_ips)
@@ -146,7 +146,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       await client.PATCH('/api/admin/share/invites/{invite_id}/services', {
         params: { path: { invite_id: inviteId } },
         body: { service_ids: editingServicesDraft },
-      } as any)
+      })
       await client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
         params: { path: { invite_id: inviteId } },
         body: { mask_ips: editingMaskIps },
@@ -157,14 +157,14 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       })
       setEditingServicesFor(null)
       await onRefresh()
-    } catch (e: any) {
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setSavingServices(false)
     }
   }
 
-  const openEditPasscode = (invite: any) => {
+  const openEditPasscode = (invite: Invite) => {
     setEditingPasscodeFor(invite.id)
     setPasscodeDraft('')
     setPasscodeVisible(false)
@@ -178,13 +178,13 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       await client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
         params: { path: { invite_id: inviteId } },
         body: { passcode: passcodeDraft },
-      } as any)
+      })
       setEditingPasscodeFor(null)
       setPasscodeDraft('')
       setPasscodeSavedFor(inviteId)
       setTimeout(() => setPasscodeSavedFor((id) => (id === inviteId ? null : id)), 2000)
       await onRefresh()
-    } catch (e: any) {
+    } catch (e) {
       // Show validation errors inline (weak passcode etc.); don't push to the
       // top-level toast since the popover is the natural place to fix it.
       setPasscodeError(extractApiError(e))
@@ -193,7 +193,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     }
   }
 
-  const handleCopyShareCard = (invite: any) => {
+  const handleCopyShareCard = (invite: Invite) => {
     navigator.clipboard.writeText(
       buildShareCard(invite, status?.public_url ?? null, services)
     )

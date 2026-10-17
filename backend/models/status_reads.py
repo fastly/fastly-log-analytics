@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import Field
 
-from backend.models._base import JsonRows, WireSafeModel
+from backend.models._base import WireSafeModel
 
 
 class DebugStateResponse(WireSafeModel):
@@ -15,11 +15,34 @@ class DebugStateResponse(WireSafeModel):
     debug_responses_enabled: bool
 
 
+class SchemaColumnRow(WireSafeModel):
+    """One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path."""
+
+    name: str
+    type: str
+    min: str | None = None
+    max: str | None = None
+    approx_unique: int | None = None
+    null_percentage: float | None = None
+    count: int | None = None
+
+
 class SchemaResponse(WireSafeModel):
     """``GET /api/schema``: cached or live column list plus the safe table name."""
 
-    schema_: list[dict[str, Any]] = Field(alias="schema")
+    schema_: list[SchemaColumnRow] = Field(alias="schema")
     table_name: str
+
+
+class AuditLogEntry(WireSafeModel):
+    """One ``metadata.get_audit_logs`` row (``details`` is the json-decoded payload)."""
+
+    id: int
+    timestamp: str
+    event_type: str
+    details: dict[str, Any]
+    actor: str | None
+    source: str
 
 
 class AuditLogsResponse(WireSafeModel):
@@ -28,7 +51,7 @@ class AuditLogsResponse(WireSafeModel):
     total: int
     page: int
     per_page: int
-    entries: JsonRows
+    entries: list[AuditLogEntry]
 
 
 class CmcdStatusResponse(WireSafeModel):

@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from './useSyncStatus'
 import { client } from '@/lib/api'
-import type { WithRequiredNullable } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
@@ -13,13 +12,9 @@ import { queryKeys } from '@/lib/query-keys'
 
 const SEED_KEYS = [queryKeys.lastSync] as const
 
-type CronRunsResponse = components['schemas']['CronRunsResponse']
-
 // status: 'running' | 'success' | 'error' | 'partial_success' | null
-export type LastSyncInfo = Pick<
-  WithRequiredNullable<components['schemas']['CronRunEntry'], 'started_at' | 'status' | 'duration_s'>,
-  'started_at' | 'status' | 'duration_s'
->
+type CronRunEntry = components['schemas']['CronRunEntry']
+export type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
 /**
  * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,
@@ -50,9 +45,9 @@ export function useLastSync() {
         // entries[0] and never touches `total`, so the count was a
         // 200-330 ms wasted scan per call on a busy service.
         params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
-      } as never)
+      })
       if (error) throw error
-      const e = (data as CronRunsResponse | undefined)?.entries?.[0]
+      const e = data?.entries?.[0]
       return {
         started_at: e?.started_at ?? null,
         status: e?.status ?? null,

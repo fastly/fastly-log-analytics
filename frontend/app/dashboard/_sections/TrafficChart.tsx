@@ -14,10 +14,10 @@ import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/constants'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
-import type { ReportConfiguration } from './types'
+import type { DashboardAggregates, DashboardCatalog, ReportConfiguration } from './types'
 
 export interface TrafficChartProps {
-  catalog: any
+  catalog: DashboardCatalog | undefined
   metric: string
   setMetric: (m: string) => void
   trend: string
@@ -35,7 +35,7 @@ export interface TrafficChartProps {
   // flight. Gates the "No data available" branch so it can't appear
   // before the transform has actually produced traces.
   transformPending: boolean
-  aggregates: any
+  aggregates: DashboardAggregates | null | undefined
   onChartRelayout: (event: any) => void
   startTime: string | null
   endTime: string | null
@@ -75,7 +75,7 @@ export function TrafficChart({
           <div className="flex flex-row items-center gap-2">
             <ButtonGroup>
               {(() => {
-                const metricsFields = catalog?.fields?.filter((f: any) => f.group === 'METRICS') || []
+                const metricsFields = catalog?.fields?.filter((f) => f.group === 'METRICS') || []
                 const shortLabels: Record<string, string> = {
                   'requests': 'Reqs',
                   'hit_rate': 'CHR',
@@ -91,14 +91,14 @@ export function TrafficChart({
 
                 // We want to group latencies into a dropdown
                 const latencyIds = ['p50_latency', 'p95_latency', 'p99_latency']
-                const otherMetrics = metricsFields.filter((f: any) => !latencyIds.includes(f.id))
+                const otherMetrics = metricsFields.filter((f) => !latencyIds.includes(f.id))
 
                 // Re-order to match desired UI layout: Reqs, 5xx, 4xx, CHR, Latency, ...
                 const order = ['requests', '5xx', '4xx', 'hit_rate']
                 const orderedMetrics = [
-                  ...order.map(id => otherMetrics.find((f: any) => f.id === id)).filter(Boolean),
-                  ...otherMetrics.filter((f: any) => !order.includes(f.id))
-                ] as any[]
+                  ...order.map(id => otherMetrics.find((f) => f.id === id)).filter((f) => f != null),
+                  ...otherMetrics.filter((f) => !order.includes(f.id))
+                ]
 
                 const elements = orderedMetrics.map(m => (
                   <Button

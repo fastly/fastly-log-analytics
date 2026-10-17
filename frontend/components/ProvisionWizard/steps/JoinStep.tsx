@@ -181,7 +181,7 @@ export function JoinStep({ s }: { s: WizardState }) {
                 <Select
                   value={s.selectedService?.id || ""}
                   onValueChange={(id) => {
-                    const svc = (s.servicesData as any[]).find(
+                    const svc = (s.servicesData ?? []).find(
                       (svc) => svc.id === id,
                     );
                     if (svc) s.setSelectedService(svc);
@@ -191,7 +191,7 @@ export function JoinStep({ s }: { s: WizardState }) {
                     <SelectValue placeholder="Select logging service..." />
                   </SelectTrigger>
                   <SelectContent>
-                    {(s.servicesData as any[])?.map((svc) => (
+                    {(s.servicesData ?? []).map((svc) => (
                       <SelectItem key={svc.id} value={svc.id}>
                         {svc.name} ({svc.id})
                       </SelectItem>
@@ -224,7 +224,7 @@ export function JoinStep({ s }: { s: WizardState }) {
                 <Select
                   value={s.selectedCdnService?.id || ""}
                   onValueChange={(id) => {
-                    const svc = (s.servicesData as any[]).find(
+                    const svc = (s.servicesData ?? []).find(
                       (svc) => svc.id === id,
                     );
                     if (svc) s.setSelectedCdnService(svc);
@@ -234,7 +234,7 @@ export function JoinStep({ s }: { s: WizardState }) {
                     <SelectValue placeholder="Select CDN service..." />
                   </SelectTrigger>
                   <SelectContent>
-                    {(s.servicesData as any[])?.map((svc) => (
+                    {(s.servicesData ?? []).map((svc) => (
                       <SelectItem key={svc.id} value={svc.id}>
                         {svc.name} ({svc.id})
                       </SelectItem>

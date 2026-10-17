@@ -20,7 +20,7 @@ import { useScoringLabels } from '@/hooks/useScoringLabels'
 import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
 import { useScoringQuery } from './useScoringQuery'
-import type { DropNull, Expect, Simplify, WireParity } from '@/types/api'
+import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 interface TopFlaggedTableProps {
@@ -29,15 +29,7 @@ interface TopFlaggedTableProps {
   onSinceHoursChange?: (hours: number) => void
 }
 
-// Deliberate narrowing of the all-optional generated ScoringTopFlaggedRow:
-// the repository SQL always emits timestamp/edge_sid/edge_score (row
-// identity); the rest depend on masking + which log fields are enabled.
-// Key/type drift against the wire schema fails on the parity guard below.
-type FlaggedRow = Simplify<
-  Omit<DropNull<components['schemas']['ScoringTopFlaggedRow']>, 'timestamp' | 'edge_sid' | 'edge_score'> &
-    Required<Pick<DropNull<components['schemas']['ScoringTopFlaggedRow']>, 'timestamp' | 'edge_sid' | 'edge_score'>>
->
-export type _FlaggedRowParity = Expect<WireParity<FlaggedRow, components['schemas']['ScoringTopFlaggedRow']>>
+type FlaggedRow = components['schemas']['ScoringTopFlaggedRow']
 
 function scoreBadge(score: number) {
   if (score >= 75) return <Badge className="bg-rose-600 hover:bg-rose-600">{score}</Badge>
@@ -95,11 +87,10 @@ export function TopFlaggedTable({
   const effectiveHours = onSinceHoursChange ? sinceHours : localHours
   const setHours = onSinceHoursChange ?? setLocalHours
 
-  const flagged = useScoringQuery<{ rows: FlaggedRow[]; since_hours: number }>(
-    ['scoring-top-flagged', serviceId, effectiveHours],
-    serviceId,
-    'top-flagged',
-    { since_hours: effectiveHours, limit: 200 },
+  const flagged = useScoringQuery(['scoring-top-flagged', serviceId, effectiveHours], () =>
+    client.GET('/api/services/{service_id}/scoring/top-flagged', {
+      params: { path: { service_id: serviceId }, query: { since_hours: effectiveHours, limit: 200 } },
+    }),
   )
 
   const { labelBySid } = useScoringLabels(serviceId)
@@ -232,7 +223,7 @@ export function TopFlaggedTable({
               sampleIp={r.ip}
               sampleUa={r.ua}
               sampleUrl={r.url}
-              currentLabel={labelBySid.get(r.edge_sid) ?? null}
+              currentLabel={r.edge_sid ? (labelBySid.get(r.edge_sid) ?? null) : null}
               onFlagged={onFlagged}
             />
           </div>

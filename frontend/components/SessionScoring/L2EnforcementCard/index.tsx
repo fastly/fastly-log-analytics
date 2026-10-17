@@ -13,7 +13,6 @@ import { Switch } from '@/components/ui/switch'
 import { client } from '@/lib/api'
 
 import { useScoringQuery } from '../useScoringQuery'
-import type { Expect, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
 /**
@@ -32,20 +31,6 @@ import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/q
  * the readiness gauge is not yet green.
  */
 
-type L2EnforceState = WithRequired<
-  WithRequiredNullable<
-    components['schemas']['ScoringL2EnforceState'],
-    'l2_enabled_at' | 'days_since_optin' | 'warmup_days_remaining' | 'scoring_enabled_at' | 'deployment_age_days'
-  >,
-  'available' | 'enabled' | 'ramp_progress' | 'fully_ramped' | 'ready' | 'ramp_days' | 'readiness_days'
->
-
-export type _L2EnforceStateParity = Expect<WireParity<L2EnforceState, components['schemas']['ScoringL2EnforceState']>>
-
-interface HealthForL2 {
-  matrix_staleness?: { l2_high_pct: number; l2_evaluated: number }
-}
-
 interface L2EnforcementCardProps {
   serviceId: string
   sinceHours?: number
@@ -62,21 +47,23 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   // null = dialog closed; true/false = pending target enabled-state under confirm.
   const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
 
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<L2EnforceState>(
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-l2-enforce', serviceId],
-    serviceId,
-    'l2-enforce',
-    {},
+    () =>
+      client.GET('/api/services/{service_id}/scoring/l2-enforce', {
+        params: { path: { service_id: serviceId } },
+      }),
     { staleTime: 30_000 },
   )
 
   // "What L2 would flag" (l2_high_pct) rides the health query the page already
   // fetches + seeds — read the same key so we don't fire a second request.
-  const { data: health } = useScoringQuery<HealthForL2>(
+  const { data: health } = useScoringQuery(
     ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+    () =>
+      client.GET('/api/services/{service_id}/scoring/health', {
+        params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+      }),
     { staleTime: 30_000 },
   )
 

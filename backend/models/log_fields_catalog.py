@@ -14,10 +14,12 @@ from backend.models._base import WireSafeModel
 
 class LogFieldCatalogEntry(WireSafeModel):
     id: str
-    group: str | None = None
-    label: str | None = None
-    description: str | None = None
-    duckdb_type: str | None = None
+    # ``None`` for the base-group built-ins; ``"custom"`` for custom fields.
+    group: str | None
+    label: str
+    description: str
+    duckdb_type: str
+    # Built-in entries only.
     typical_bytes: int | None = None
     required_by: list[str] | None = None
     formatter: str | None = None
@@ -37,30 +39,31 @@ class LogFieldCatalogEntry(WireSafeModel):
 
 
 class LogFieldCatalogGroup(WireSafeModel):
-    id: str | None = None
-    label: str | None = None
-    description: str | None = None
-    locked: bool | None = None
-    requires: str | None = None
-    note: str | None = None
-    recommended_with: list[str] | None = None
-    total_bytes: int | None = None
-    fields: list[str] | None = None
+    # ``get_groups_for_api`` emits every key for every group; the base group's id is ``None``.
+    id: str | None
+    label: str
+    description: str
+    locked: bool
+    requires: str | None
+    note: str | None
+    recommended_with: list[str] | None
+    total_bytes: int
+    fields: list[str]
 
 
 class LogFieldInsightDefinition(WireSafeModel):
     id: str
-    category: str | None = None
-    title: str | None = None
-    description: str | None = None
-    required_fields: list[str] | None = None
-    required_groups: list[str] | None = None
+    category: str
+    title: str
+    description: str
+    required_fields: list[str]
+    required_groups: list[str]
 
 
 class LogFieldPreset(WireSafeModel):
-    label: str | None = None
-    description: str | None = None
-    groups: list[str] | None = None
+    label: str
+    description: str
+    groups: list[str]
 
 
 class LogFieldsCatalogResponse(WireSafeModel):

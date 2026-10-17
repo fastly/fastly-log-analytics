@@ -46,7 +46,7 @@ export function useLogFieldsCatalog(serviceId?: string) {
         // header lookup — got the global catalog without custom labels.
         params: { query: { service_id: sid } },
       })
-      return data as { fields?: any[]; groups?: any[]; insights?: any[]; presets?: any } | undefined
+      return data
     },
     staleTime: Infinity,
     enabled: !bootstrapPending,

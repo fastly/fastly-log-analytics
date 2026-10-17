@@ -6904,10 +6904,7 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Data */
-            data?: components["schemas"]["AlertPreviewData"] | {
-                [key: string]: unknown;
-            } | null;
+            data?: components["schemas"]["AlertPreviewData"] | null;
             /** Error */
             error?: string | null;
         };
@@ -7140,6 +7137,28 @@ export interface components {
             anchor?: string | null;
         };
         /**
+         * AuditLogEntry
+         * @description One ``metadata.get_audit_logs`` row (``details`` is the json-decoded payload).
+         */
+        AuditLogEntry: {
+            /** Id */
+            id: number;
+            /** Timestamp */
+            timestamp: string;
+            /** Event Type */
+            event_type: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Actor */
+            actor: string | null;
+            /** Source */
+            source: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * AuditLogsResponse
          * @description ``GET /api/audit-logs``. ``_debug_calls`` rides along as an extra.
          */
@@ -7151,9 +7170,7 @@ export interface components {
             /** Per Page */
             per_page: number;
             /** Entries */
-            entries: {
-                [key: string]: unknown;
-            }[];
+            entries: components["schemas"]["AuditLogEntry"][];
         } & {
             [key: string]: unknown;
         };
@@ -7294,6 +7311,35 @@ export interface components {
              */
             mode: string;
         };
+        /**
+         * BootstrapDebugState
+         * @description Debug-visibility settings folded into bootstrap (admin only).
+         */
+        BootstrapDebugState: {
+            /** Debug Responses Enabled */
+            debug_responses_enabled: boolean;
+            /** Query Debug Visibility */
+            query_debug_visibility: string;
+            /** Api Call Debug Visibility */
+            api_call_debug_visibility: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BootstrapPopGeo
+         * @description One PoP's label parts, parsed from the cached ``/datacenters`` list
+         *     (``get_pop_location_map``); any part may be an empty string.
+         */
+        BootstrapPopGeo: {
+            /** City */
+            city: string;
+            /** Region */
+            region: string;
+            /** Country */
+            country: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** BootstrapResponse */
         BootstrapResponse: {
             /** Debug Queries */
@@ -7340,9 +7386,7 @@ export interface components {
             } | null;
             /** Pop Geo */
             pop_geo?: {
-                [key: string]: {
-                    [key: string]: string;
-                };
+                [key: string]: components["schemas"]["BootstrapPopGeo"];
             } | null;
             /** Settings */
             settings?: {
@@ -7380,10 +7424,7 @@ export interface components {
             log_extents?: {
                 [key: string]: unknown;
             } | null;
-            /** Debug State */
-            debug_state?: {
-                [key: string]: unknown;
-            } | null;
+            debug_state?: components["schemas"]["BootstrapDebugState"] | null;
             /** Ops Overview */
             ops_overview?: {
                 [key: string]: unknown;
@@ -8420,15 +8461,15 @@ export interface components {
          */
         CronRunEntry: {
             /** Id */
-            id?: number | null;
+            id: number;
             /** Task */
-            task?: string | null;
+            task: string;
             /** Started At */
-            started_at?: string | null;
+            started_at: string;
             /** Duration S */
             duration_s?: number | null;
             /** Status */
-            status?: string | null;
+            status: string | null;
             /** Error Message */
             error_message?: string | null;
             /** Files Downloaded */
@@ -8477,9 +8518,9 @@ export interface components {
          */
         CronScheduleEntry: {
             /** Task */
-            task?: string | null;
+            task: string;
             /** Next Run Time */
-            next_run_time?: string | null;
+            next_run_time: string | null;
             /** Last Run Time */
             last_run_time?: string | null;
             /** Last Run Status */
@@ -10535,13 +10576,13 @@ export interface components {
             /** Id */
             id: string;
             /** Group */
-            group?: string | null;
+            group: string | null;
             /** Label */
-            label?: string | null;
+            label: string;
             /** Description */
-            description?: string | null;
+            description: string;
             /** Duckdb Type */
-            duckdb_type?: string | null;
+            duckdb_type: string;
             /** Typical Bytes */
             typical_bytes?: number | null;
             /** Required By */
@@ -10578,23 +10619,23 @@ export interface components {
         /** LogFieldCatalogGroup */
         LogFieldCatalogGroup: {
             /** Id */
-            id?: string | null;
+            id: string | null;
             /** Label */
-            label?: string | null;
+            label: string;
             /** Description */
-            description?: string | null;
+            description: string;
             /** Locked */
-            locked?: boolean | null;
+            locked: boolean;
             /** Requires */
-            requires?: string | null;
+            requires: string | null;
             /** Note */
-            note?: string | null;
+            note: string | null;
             /** Recommended With */
-            recommended_with?: string[] | null;
+            recommended_with: string[] | null;
             /** Total Bytes */
-            total_bytes?: number | null;
+            total_bytes: number;
             /** Fields */
-            fields?: string[] | null;
+            fields: string[];
         } & {
             [key: string]: unknown;
         };
@@ -10603,26 +10644,26 @@ export interface components {
             /** Id */
             id: string;
             /** Category */
-            category?: string | null;
+            category: string;
             /** Title */
-            title?: string | null;
+            title: string;
             /** Description */
-            description?: string | null;
+            description: string;
             /** Required Fields */
-            required_fields?: string[] | null;
+            required_fields: string[];
             /** Required Groups */
-            required_groups?: string[] | null;
+            required_groups: string[];
         } & {
             [key: string]: unknown;
         };
         /** LogFieldPreset */
         LogFieldPreset: {
             /** Label */
-            label?: string | null;
+            label: string;
             /** Description */
-            description?: string | null;
+            description: string;
             /** Groups */
-            groups?: string[] | null;
+            groups: string[];
         } & {
             [key: string]: unknown;
         };
@@ -11378,6 +11419,10 @@ export interface components {
             error?: string | null;
             /** Message */
             message?: string | null;
+            /** Error Hint */
+            error_hint?: string | null;
+            /** Debug Raw */
+            _debug_raw?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -12703,16 +12748,16 @@ export interface components {
         /** ProvisionCheckConfigItem */
         ProvisionCheckConfigItem: {
             /** Ok */
-            ok?: boolean | null;
+            ok: boolean;
             /** Details */
-            details?: string | null;
+            details: string;
         } & {
             [key: string]: unknown;
         };
         /** ProvisionCheckConfigResponse */
         ProvisionCheckConfigResponse: {
-            logging_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
-            cdn_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
+            logging_service: components["schemas"]["ProvisionCheckConfigItem"];
+            cdn_service: components["schemas"]["ProvisionCheckConfigItem"];
         } & {
             [key: string]: unknown;
         };
@@ -12984,9 +13029,8 @@ export interface components {
         };
         /**
          * ProvisionLakeInfoResponse
-         * @description ``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when
-         *     the table exists; the table-info block (row counts / extents) varies by
-         *     layout and rides through ``extra``.
+         * @description ``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present
+         *     only when the table exists.
          */
         ProvisionLakeInfoResponse: {
             /** Ok */
@@ -12997,11 +13041,42 @@ export interface components {
             message?: string | null;
             /** Error */
             error?: string | null;
-            range?: components["schemas"]["ProvisionLakeInfoRange"] | null;
+            info?: components["schemas"]["ProvisionLakeInfoTable"] | null;
             /** Calendar */
             calendar?: {
                 [key: string]: components["schemas"]["ProvisionLakeInfoCalendarDay"];
             } | null;
+            range?: components["schemas"]["ProvisionLakeInfoRange"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ProvisionLakeInfoTable
+         * @description ``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset).
+         */
+        ProvisionLakeInfoTable: {
+            /** Table Name */
+            table_name?: string | null;
+            /** Snapshots */
+            snapshots?: number | null;
+            /** Data Files */
+            data_files?: number | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /** Latest Snapshot At */
+            latest_snapshot_at?: string | null;
+            /** Buffer Files */
+            buffer_files?: number | null;
+            /** Buffer Size Bytes */
+            buffer_size_bytes?: number | null;
+            /** Table Location */
+            table_location?: string | null;
+            /** Region */
+            region?: string | null;
+            /** Min Timestamp */
+            min_timestamp?: string | null;
+            /** Max Timestamp */
+            max_timestamp?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -13106,7 +13181,7 @@ export interface components {
             /** User Id */
             user_id?: string | null;
             /** Type */
-            type?: string | null;
+            type?: ("user" | "automation") | null;
         } & {
             [key: string]: unknown;
         };
@@ -13972,13 +14047,13 @@ export interface components {
          */
         SavedViewRecord: {
             /** Id */
-            id?: string | null;
+            id: string;
             /** Service Id */
-            service_id?: string | null;
+            service_id: string;
             /** Name */
-            name?: string | null;
+            name: string;
             /** Filters Json */
-            filters_json?: string | null;
+            filters_json: string;
             /** Time Range Type */
             time_range_type?: string | null;
             /** Start Time */
@@ -14015,14 +14090,34 @@ export interface components {
             count?: number | null;
         };
         /**
+         * SchemaColumnRow
+         * @description One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path.
+         */
+        SchemaColumnRow: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+            /** Min */
+            min?: string | null;
+            /** Max */
+            max?: string | null;
+            /** Approx Unique */
+            approx_unique?: number | null;
+            /** Null Percentage */
+            null_percentage?: number | null;
+            /** Count */
+            count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * SchemaResponse
          * @description ``GET /api/schema``: cached or live column list plus the safe table name.
          */
         SchemaResponse: {
             /** Schema */
-            schema: {
-                [key: string]: unknown;
-            }[];
+            schema: components["schemas"]["SchemaColumnRow"][];
             /** Table Name */
             table_name: string;
         } & {
@@ -14107,11 +14202,11 @@ export interface components {
         /** ScoringComplianceRow */
         ScoringComplianceRow: {
             /** Hour */
-            hour?: string | null;
+            hour: string;
             /** Compliance */
-            compliance?: string | null;
+            compliance: string;
             /** Count */
-            count?: number | null;
+            count: number;
         } & {
             [key: string]: unknown;
         };
@@ -14201,11 +14296,11 @@ export interface components {
         /** ScoringDistributionRow */
         ScoringDistributionRow: {
             /** Hour */
-            hour?: string | null;
+            hour: string;
             /** Bucket */
-            bucket?: string | null;
+            bucket: string;
             /** Count */
-            count?: number | null;
+            count: number;
         } & {
             [key: string]: unknown;
         };
@@ -14238,17 +14333,17 @@ export interface components {
         /** ScoringEnforceStatusCodeState */
         ScoringEnforceStatusCodeState: {
             /** Current */
-            current?: number | null;
+            current: number | null;
             /** Default */
-            default?: number | null;
+            default: number;
             /** Effective */
-            effective?: number | null;
+            effective: number;
             /** Min */
-            min?: number | null;
+            min: number;
             /** Max */
-            max?: number | null;
+            max: number;
             /** Is Default */
-            is_default?: boolean | null;
+            is_default: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -14268,11 +14363,11 @@ export interface components {
         /** ScoringEnforceThresholdResponse */
         ScoringEnforceThresholdResponse: {
             /** Threshold */
-            threshold?: number | null;
+            threshold: number | null;
             /** Enforced */
-            enforced?: boolean | null;
+            enforced: boolean;
             /** Key */
-            key?: string | null;
+            key: string;
         } & {
             [key: string]: unknown;
         };
@@ -14340,13 +14435,13 @@ export interface components {
         /** ScoringExcludeRegexState */
         ScoringExcludeRegexState: {
             /** Current */
-            current?: string | null;
+            current: string;
             /** Is Default */
-            is_default?: boolean | null;
+            is_default: boolean;
             /** Default */
-            default?: string | null;
+            default: string;
             /** Effective */
-            effective?: string | null;
+            effective: string;
         } & {
             [key: string]: unknown;
         };
@@ -14443,29 +14538,29 @@ export interface components {
          */
         ScoringL2EnforceState: {
             /** Available */
-            available?: boolean | null;
+            available: boolean;
             /** Enabled */
-            enabled?: boolean | null;
+            enabled: boolean;
             /** L2 Enabled At */
-            l2_enabled_at?: number | null;
+            l2_enabled_at: number | null;
             /** Days Since Optin */
-            days_since_optin?: number | null;
+            days_since_optin: number | null;
             /** Ramp Progress */
-            ramp_progress?: number | null;
+            ramp_progress: number;
             /** Fully Ramped */
-            fully_ramped?: boolean | null;
+            fully_ramped: boolean;
             /** Warmup Days Remaining */
-            warmup_days_remaining?: number | null;
+            warmup_days_remaining: number | null;
             /** Scoring Enabled At */
-            scoring_enabled_at?: number | null;
+            scoring_enabled_at: number | null;
             /** Deployment Age Days */
-            deployment_age_days?: number | null;
+            deployment_age_days: number | null;
             /** Ready */
-            ready?: boolean | null;
+            ready: boolean;
             /** Ramp Days */
-            ramp_days?: number | null;
+            ramp_days: number;
             /** Readiness Days */
-            readiness_days?: number | null;
+            readiness_days: number;
         } & {
             [key: string]: unknown;
         };
@@ -14937,11 +15032,11 @@ export interface components {
          */
         ScoringThresholdState: {
             /** Threshold */
-            threshold?: number | null;
+            threshold: number | null;
             /** Set At */
-            set_at?: string | null;
+            set_at: string | null;
             /** Enforced */
-            enforced?: boolean | null;
+            enforced: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -14975,11 +15070,11 @@ export interface components {
         /** ScoringTopFlaggedRow */
         ScoringTopFlaggedRow: {
             /** Timestamp */
-            timestamp?: string | null;
+            timestamp: string;
             /** Edge Sid */
-            edge_sid?: string | null;
+            edge_sid: string | null;
             /** Edge Score */
-            edge_score?: number | null;
+            edge_score: number;
             /** Edge Score L1 */
             edge_score_l1?: number | null;
             /** Edge Score L2 */
@@ -15180,6 +15275,34 @@ export interface components {
              */
             active_clients: components["schemas"]["ActiveClientItem"][];
         };
+        /**
+         * SecurityBotRow
+         * @description One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows
+         *     don't (the rollup/direct-join variants only emit name/category/request_count,
+         *     the high-scale one adds the verification counters).
+         */
+        SecurityBotRow: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name: string;
+            /** Category */
+            category?: string | null;
+            /** Request Count */
+            request_count: number;
+            /** Verified Count */
+            verified_count?: number | null;
+            /** Impersonator Count */
+            impersonator_count?: number | null;
+            /** Unverified Count */
+            unverified_count?: number | null;
+            /** Verification Coverage */
+            verification_coverage?: number | null;
+            /** Pending Count */
+            pending_count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** SecurityMetrics */
         SecurityMetrics: {
             /** Waf Blocked */
@@ -15230,16 +15353,12 @@ export interface components {
              * Bots
              * @default []
              */
-            bots: {
-                [key: string]: unknown;
-            }[];
+            bots: components["schemas"]["SecurityBotRow"][];
             /**
              * Ngwaf Bots
              * @default []
              */
-            ngwaf_bots: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_bots: components["schemas"]["SecurityBotRow"][];
         };
         /** ServiceConfig */
         ServiceConfig: {

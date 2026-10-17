@@ -251,7 +251,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
             s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
             s.setIsSSEModalOpen(true)
             s.reset()
-            s.start(`/api/cron-runs/${(data as any)?.run_id}/stream`)
+            s.start(`/api/cron-runs/${data?.run_id}/stream`)
             cronCacheBust(queryClient, s.activeServiceId)
           } catch (e) {
             console.error(e)

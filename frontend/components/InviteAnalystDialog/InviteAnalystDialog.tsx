@@ -165,8 +165,8 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
       recentInvites.set(service.service_id, { invite, issuedAt: Date.now() })
       setResult(invite)
       setStep('result')
-    } catch (e: any) {
-      setError(e.message || 'Failed to create analyst key')
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : 'Failed to create analyst key')
       setStep('confirm')
     }
   }

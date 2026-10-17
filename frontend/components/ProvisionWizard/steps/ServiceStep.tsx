@@ -45,7 +45,7 @@ export function ServiceStep({ s }: { s: WizardState }) {
               <span>Loading services...</span>
             </div>
           ) : s.filteredServices.length > 0 ? (
-            s.filteredServices.map((svc: any) => (
+            s.filteredServices.map((svc) => (
               // a11y: was a <div onClick> — keyboard-invisible. Native
               // button with disabled state on provisioned services and a
               // descriptive aria-label that includes the service id.

@@ -4,6 +4,8 @@ import { useReportConfig } from './useReportConfig'
 import { useActiveService } from './useActiveService'
 import { client } from '@/lib/api'
 import { useQueryClient } from '@tanstack/react-query'
+import type { components } from '@/types/api.generated'
+import type { FilterPill } from '@/types/filters'
 
 // All sync URL → filterStore mapping (range, ?filters, ?filter_<col>=)
 // now happens inside ``hydrateFilterStoreFromUrl`` BEFORE first render,
@@ -50,14 +52,14 @@ export function useViewMetricUrlSync() {
       // ViewSelector's useQuery). Falls back to a direct GET only when
       // the cache is cold — keeps the legacy ?view=<id> deep-link path
       // working even before ViewSelector mounts.
-      let views = queryClient.getQueryData(['views', activeServiceId]) as any
+      let views = queryClient.getQueryData<components['schemas']['SavedViewRecord'][]>(['views', activeServiceId])
       if (!views) {
         const { data } = await client.GET("/api/views/{service_id}", {
           params: { path: { service_id: activeServiceId } }
         })
         views = data
       }
-      const view = (views as any)?.find((v: any) => v.id === id)
+      const view = views?.find((v) => v.id === id)
       if (view) {
         // filters_json carries TWO shapes for backward compatibility:
         //   - Legacy (older saved views): a bare FilterPill[] array.
@@ -71,12 +73,14 @@ export function useViewMetricUrlSync() {
 
         // Range — prefer relativeRange when extras carry one (rolling window
         // re-derived from now), else fall back to the saved absolute range.
-        if (extras?.relativeRange) {
-          // setRelativeRange records the label so the URL-sync round-trips
-          // as ?range=<label> and reload re-derives [now-duration, now].
-          setRelativeRange(extras.relativeRange, view.start_time, view.end_time)
-        } else if (view.start_time && view.end_time) {
-          setRange(view.start_time, view.end_time)
+        if (view.start_time && view.end_time) {
+          if (extras?.relativeRange) {
+            // setRelativeRange records the label so the URL-sync round-trips
+            // as ?range=<label> and reload re-derives [now-duration, now].
+            setRelativeRange(extras.relativeRange, view.start_time, view.end_time)
+          } else {
+            setRange(view.start_time, view.end_time)
+          }
         }
 
         // Edge-only toggle — flip if it differs from current.
@@ -94,7 +98,7 @@ export function useViewMetricUrlSync() {
 
         clearFilters()
         if (Array.isArray(pills)) {
-          pills.forEach((f: any) => addFilter(f.column, f.value, f.mode))
+          pills.forEach((f: FilterPill) => addFilter(f.column, f.value, f.mode))
         }
 
         const url = new URL(window.location.href)

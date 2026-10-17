@@ -124,9 +124,11 @@ class _ScoringRead(PassthroughModel):
 
 
 class ScoringTopFlaggedRow(_ScoringRead):
-    timestamp: str | None = None
-    edge_sid: str | None = None
-    edge_score: int | None = None
+    # The TOP_FLAGGED SQL always selects these three (edge_score is filtered
+    # non-null); the rest depend on masking and which log fields are enabled.
+    timestamp: str
+    edge_sid: str | None
+    edge_score: int
     edge_score_l1: int | None = None
     edge_score_l2: int | None = None
     edge_cookie_compliance: str | None = None
@@ -144,9 +146,9 @@ class ScoringTopFlaggedResponse(_ScoringRead):
 
 
 class ScoringDistributionRow(_ScoringRead):
-    hour: str | None = None
-    bucket: str | None = None
-    count: int | None = None
+    hour: str
+    bucket: str
+    count: int
 
 
 class ScoringScoreDistributionResponse(_ScoringRead):
@@ -155,9 +157,9 @@ class ScoringScoreDistributionResponse(_ScoringRead):
 
 
 class ScoringComplianceRow(_ScoringRead):
-    hour: str | None = None
-    compliance: str | None = None
-    count: int | None = None
+    hour: str
+    compliance: str
+    count: int
 
 
 class ScoringComplianceBreakdownResponse(_ScoringRead):
@@ -408,9 +410,9 @@ class ScoringSessionEventsResponse(_ScoringRead):
 
 
 class ScoringEnforceThresholdResponse(_ScoringRead):
-    threshold: int | None = None
-    enforced: bool | None = None
-    key: str | None = None
+    threshold: int | None
+    enforced: bool
+    key: str
 
 
 class ScoringEnforceThresholdPutResponse(_ScoringRead):
@@ -425,18 +427,18 @@ class ScoringL2EnforceState(_ScoringRead):
     also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
     there for wire-compat; this standalone GET carries the real schema)."""
 
-    available: bool | None = None
-    enabled: bool | None = None
-    l2_enabled_at: int | None = None
-    days_since_optin: float | None = None
-    ramp_progress: float | None = None
-    fully_ramped: bool | None = None
-    warmup_days_remaining: float | None = None
-    scoring_enabled_at: int | None = None
-    deployment_age_days: float | None = None
-    ready: bool | None = None
-    ramp_days: float | None = None
-    readiness_days: float | None = None
+    available: bool
+    enabled: bool
+    l2_enabled_at: int | None
+    days_since_optin: float | None
+    ramp_progress: float
+    fully_ramped: bool
+    warmup_days_remaining: float | None
+    scoring_enabled_at: int | None
+    deployment_age_days: float | None
+    ready: bool
+    ramp_days: float
+    readiness_days: float
 
 
 class ScoringL2EnforcePutResponse(_ScoringRead):
@@ -447,10 +449,10 @@ class ScoringL2EnforcePutResponse(_ScoringRead):
 
 
 class ScoringExcludeRegexState(_ScoringRead):
-    current: str | None = None
-    is_default: bool | None = None
-    default: str | None = None
-    effective: str | None = None
+    current: str
+    is_default: bool
+    default: str
+    effective: str
 
 
 class ScoringExcludeRegexPutResponse(_ScoringRead):
@@ -473,12 +475,12 @@ class ScoringExcludeRegexValidateResponse(_ScoringRead):
 
 
 class ScoringEnforceStatusCodeState(_ScoringRead):
-    current: int | None = None
-    default: int | None = None
-    effective: int | None = None
-    min: int | None = None
-    max: int | None = None
-    is_default: bool | None = None
+    current: int | None
+    default: int
+    effective: int
+    min: int
+    max: int
+    is_default: bool
 
 
 class ScoringEnforceStatusCodePutResponse(_ScoringRead):
@@ -536,9 +538,9 @@ class ScoringAuditListResponse(_ScoringRead):
 class ScoringThresholdState(_ScoringRead):
     """GET and PUT /scoring/threshold both return this exact shape."""
 
-    threshold: int | None = None
-    set_at: str | None = None
-    enforced: bool | None = None
+    threshold: int | None
+    set_at: str | None
+    enforced: bool
 
 
 class ScoringPerReasonBucket(_ScoringRead):

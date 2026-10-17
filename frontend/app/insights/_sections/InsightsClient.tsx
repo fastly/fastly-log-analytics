@@ -371,7 +371,7 @@ function InsightsBody({
                 className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
                 data-testid="insights-grid-loading"
               >
-                {cards.map((i: any) => (
+                {cards.map((i) => (
                   <InsightCardSkeleton
                     key={i.id}
                     title={i.title ?? ''}

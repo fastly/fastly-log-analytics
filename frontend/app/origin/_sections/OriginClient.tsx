@@ -304,7 +304,7 @@ export default function OriginClient({ nowServerStr }: { nowServerStr?: string }
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 

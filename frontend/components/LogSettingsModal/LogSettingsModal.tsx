@@ -137,8 +137,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         let changed = true
         while (changed) {
            changed = false;
-           (catalog?.groups || []).forEach((g: { id: string; requires?: string }) => {
-             if (nextGroups.has(g.id) && g.requires && !nextGroups.has(g.requires)) {
+           (catalog?.groups || []).forEach((g) => {
+             if (g.id != null && nextGroups.has(g.id) && g.requires && !nextGroups.has(g.requires)) {
                nextGroups.add(g.requires)
                changed = true
              }
@@ -185,7 +185,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       if (allActive) {
         const otherActivePresetsGroups = new Set<string>()
         if (catalog?.presets) {
-          Object.entries(catalog.presets).forEach(([key, preset]: [string, any]) => {
+          Object.entries(catalog.presets).forEach(([key, preset]) => {
              if (preset.groups.length !== presetGroups.length || !preset.groups.every((g: string) => presetGroups.includes(g))) {
                if (isPresetActive(preset.groups)) {
                  preset.groups.forEach((g: string) => otherActivePresetsGroups.add(g))
@@ -197,8 +197,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         presetGroups.forEach(g => {
           if (!otherActivePresetsGroups.has(g)) {
             nextGroups.delete(g);
-            (catalog?.groups || []).forEach((cg: any) => {
-               if (cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
+            (catalog?.groups || []).forEach((cg) => {
+               if (cg.id != null && cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
                  nextGroups.delete(cg.id)
                }
             })
@@ -210,8 +210,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         let changed = true
         while (changed) {
            changed = false;
-           (catalog?.groups || []).forEach((cg: any) => {
-             if (nextGroups.has(cg.id) && cg.requires && !nextGroups.has(cg.requires)) {
+           (catalog?.groups || []).forEach((cg) => {
+             if (cg.id != null && nextGroups.has(cg.id) && cg.requires && !nextGroups.has(cg.requires)) {
                nextGroups.add(cg.requires)
                changed = true
              }

@@ -1,9 +1,9 @@
 "use client";
 
-import type { ProvisionConfig } from "./types";
+import type { LogFieldsCatalog, ProvisionConfig } from "./types";
 
 // ── log field helpers (pure transformations on config) ──
-export function buildToggleGroup(catalog: any) {
+export function buildToggleGroup(catalog: LogFieldsCatalog | null | undefined) {
   return (
     prev: ProvisionConfig,
     groupId: string,
@@ -16,8 +16,9 @@ export function buildToggleGroup(catalog: any) {
       let changed = true;
       while (changed) {
         changed = false;
-        catalog?.groups.forEach((g: any) => {
+        catalog?.groups?.forEach((g) => {
           if (
+            g.id != null &&
             nextGroups.has(g.id) &&
             g.requires &&
             !nextGroups.has(g.requires)
@@ -66,7 +67,7 @@ export function applyUpdateFieldLimit(
 }
 
 export function buildTogglePreset(
-  catalog: any,
+  catalog: LogFieldsCatalog | null | undefined,
   isPresetActive: (groups: string[]) => boolean,
 ) {
   return (
@@ -85,13 +86,13 @@ export function buildTogglePreset(
       const otherActivePresetsGroups = new Set<string>();
       if (catalog?.presets) {
         Object.entries(catalog.presets).forEach(
-          ([_key, preset]: [string, any]) => {
+          ([_key, preset]) => {
             if (
               preset.groups.length !== presetGroups.length ||
-              !preset.groups.every((g: string) => presetGroups.includes(g))
+              !preset.groups.every((g) => presetGroups.includes(g))
             ) {
               if (isPresetActive(preset.groups)) {
-                preset.groups.forEach((g: string) =>
+                preset.groups.forEach((g) =>
                   otherActivePresetsGroups.add(g),
                 );
               }
@@ -103,8 +104,8 @@ export function buildTogglePreset(
       presetGroups.forEach((g) => {
         if (!otherActivePresetsGroups.has(g)) {
           nextGroups.delete(g);
-          catalog?.groups.forEach((cg: any) => {
-            if (cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
+          catalog?.groups?.forEach((cg) => {
+            if (cg.id != null && cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
               nextGroups.delete(cg.id);
             }
           });
@@ -116,8 +117,9 @@ export function buildTogglePreset(
       let changed = true;
       while (changed) {
         changed = false;
-        catalog?.groups.forEach((cg: any) => {
+        catalog?.groups?.forEach((cg) => {
           if (
+            cg.id != null &&
             nextGroups.has(cg.id) &&
             cg.requires &&
             !nextGroups.has(cg.requires)

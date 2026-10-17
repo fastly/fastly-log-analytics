@@ -219,11 +219,12 @@ class CronRunEntry(PassthroughModel):
     store ``0.0``), the count columns are ints, ``parquet_keys`` is the
     json.loads'd list."""
 
-    id: int | None = None
-    task: str | None = None
-    started_at: str | None = None
+    # ``id`` / ``task`` / ``started_at`` are NOT NULL columns; ``status`` is nullable text.
+    id: int
+    task: str
+    started_at: str
     duration_s: float | None = None
-    status: str | None = None
+    status: str | None
     error_message: str | None = None
     files_downloaded: int | None = None
     files_deleted_fos: int | None = None
@@ -270,8 +271,8 @@ class CronScheduleEntry(PassthroughModel):
     ``disabled_reason`` appears only on synthesized disabled rows; the
     last_run_* trio only when a run has been recorded."""
 
-    task: str | None = None
-    next_run_time: str | None = None
+    task: str
+    next_run_time: str | None
     last_run_time: str | None = None
     last_run_status: str | None = None
     last_run_duration_s: float | None = None

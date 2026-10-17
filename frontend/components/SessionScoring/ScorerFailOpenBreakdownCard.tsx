@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
+import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'
 // Generated from the /scoring/health response_model — single source of truth.
@@ -38,11 +39,10 @@ export function ScorerFailOpenBreakdownCard({
   serviceId,
   sinceHours = 24,
 }: ScorerFailOpenBreakdownCardProps) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<HealthResponse>(
-    ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/health', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   const buckets = data?.fail_open_breakdown ?? []

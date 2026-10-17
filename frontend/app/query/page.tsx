@@ -30,6 +30,21 @@ import { RawSqlMode } from './_sections/RawSqlMode'
 import { ResultsTable } from './_sections/ResultsTable'
 import { QueryToolbar } from './_sections/QueryToolbar'
 import { queryKeys } from '@/lib/query-keys'
+import type { components } from '@/types/api.generated'
+
+type QueryResponse = components['schemas']['QueryResponse']
+
+// The shapes the backend's error envelope takes (``detail`` is a string or an object).
+interface ErrorBody {
+  detail?: string | { message?: string; error?: string }
+  message?: string
+}
+
+function errorBodyMessage(body: ErrorBody | null): string | undefined {
+  const detail = body?.detail
+  if (typeof detail === 'string') return detail
+  return detail?.message || detail?.error || body?.message
+}
 
 const HISTORY_KEY = 'fastly_qe_history'
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
@@ -227,7 +242,7 @@ function QueryPageInner() {
     queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/schema', { signal })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId,
     // Schema only changes when admin adds a custom field — never within
@@ -259,19 +274,19 @@ function QueryPageInner() {
   const activeSchema = useMemo<{ name: string; type: string }[]>(() => {
     if (dataset === 'client_vitals') return RUM_SCHEMAS.client_vitals
     if (dataset === 'client_errors') return RUM_SCHEMAS.client_errors
-    const rawList: any[] = schemaData?.schema || schemaData?.columns || []
+    const rawList = schemaData?.schema ?? []
     if (rawList.length > 0) {
       return rawList
         .map(item => ({
-          name: item.name || item.column || '',
+          name: item.name || '',
           type: item.type || 'VARCHAR',
         }))
         .filter(item => Boolean(item.name))
     }
     if (catalog?.fields?.length) {
       return catalog.fields
-        .filter((f: any) => Boolean(f.id))
-        .map((f: any) => ({
+        .filter((f) => Boolean(f.id))
+        .map((f) => ({
           name: f.id,
           type: f.duckdb_type || 'VARCHAR',
         }))
@@ -309,36 +324,23 @@ function QueryPageInner() {
 
   const queryMutation = useMutation({
     mutationFn: async (params: { sql: string; max_rows: number; explain: boolean; dataset?: Dataset }) => {
-      const { data, error } = await client.POST('/api/query', { body: params as any, parseAs: 'text' })
+      const { data, error } = await client.POST('/api/query', { body: { dataset: 'logs', ...params }, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
-          let parsed: any = null
+          let parsed: ErrorBody | null = null
           try {
             parsed = JSON.parse(error)
           } catch {
             throw new Error(error)
           }
-          const msg =
-            parsed?.detail?.message ||
-            (typeof parsed?.detail === 'string' ? parsed.detail : null) ||
-            parsed?.detail?.error ||
-            parsed?.message ||
-            error
-          throw new Error(String(msg))
+          throw new Error(errorBodyMessage(parsed) || error)
         }
         if (error instanceof Error) throw error
-        const anyErr = error as any
-        const msg =
-          anyErr?.detail?.message ||
-          (typeof anyErr?.detail === 'string' ? anyErr.detail : null) ||
-          anyErr?.detail?.error ||
-          anyErr?.message ||
-          'Query execution failed'
-        throw new Error(String(msg))
+        throw new Error(errorBodyMessage(error as ErrorBody) || 'Query execution failed')
       }
       if (!data) throw new Error('No data')
-      if (typeof data !== 'string') return data as any
-      return await parseJsonAsync<any>(data as string)
+      if (typeof data !== 'string') return data as QueryResponse
+      return await parseJsonAsync<QueryResponse>(data)
     },
   })
 

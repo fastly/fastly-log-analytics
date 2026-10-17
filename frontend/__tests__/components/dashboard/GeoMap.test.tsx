@@ -147,9 +147,9 @@ describe('GeoMap', () => {
 
   it('renders ChoroplethMap with one marker per map_data row when populated', async () => {
     const map_data = [
-      { country: 'US', name: 'United States', requests: 100 },
-      { country: 'DE', name: 'Germany', requests: 40 },
-      { country: 'JP', name: 'Japan', requests: 25 },
+      { country: 'US', count: 100 },
+      { country: 'DE', count: 40 },
+      { country: 'JP', count: 25 },
     ]
     render(
       <GeoMap
@@ -174,7 +174,7 @@ describe('GeoMap', () => {
         isReady={true}
         isLoadingAggs={false}
         isFetchingAggs={false}
-        aggregates={{ map_data: [{ country: 'US', name: 'United States', requests: 1 }] }}
+        aggregates={{ map_data: [{ country: 'US', count: 1 }] }}
         catalog={catalog}
         onCountryClick={onCountryClick}
       />,

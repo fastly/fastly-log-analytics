@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { reducer, DEFAULTS, calculate } from './calc'
-import type { CalcState } from './calc'
+import type { CalcState, PrefillResponse } from './calc'
 import { Inputs } from './Inputs'
 import { Pricing } from './Pricing'
 import { Results } from './Results'
@@ -10,7 +10,7 @@ import { Results } from './Results'
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 interface CostCalculatorProps {
-  prefillData?: any
+  prefillData?: PrefillResponse
   prefillNote?: string
   overrideBytesPerLine?: number
 }
@@ -19,7 +19,7 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
-    if (prefillData && !prefillData.error) {
+    if (prefillData) {
       dispatch({ type: 'PREFILL', prefill: prefillData })
     }
   }, [prefillData])

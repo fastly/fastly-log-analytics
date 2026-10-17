@@ -72,7 +72,7 @@ const baseProps = {
 
 describe('AlertPreview', () => {
   test('renders the empty placeholder when previewData has no points', () => {
-    render(<AlertPreview {...baseProps} previewData={{ times: [], values: [] }} />)
+    render(<AlertPreview {...baseProps} previewData={{ times: [], values: [], type: 'absolute' }} />)
     expect(screen.getByText('No data available for preview.')).toBeInTheDocument()
     // PlotlyChart should NOT have been mounted in the empty branch.
     expect(plotlyChartCalls).toHaveLength(0)
@@ -96,7 +96,7 @@ describe('AlertPreview', () => {
         {...baseProps}
         lookbackHours={12}
         setLookbackHours={setLookbackHours}
-        previewData={{ times: [], values: [] }}
+        previewData={{ times: [], values: [], type: 'absolute' }}
       />,
     )
 
@@ -118,7 +118,7 @@ describe('AlertPreview', () => {
     const previewData = {
       times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
       values: [10, 20],
-      type: 'absolute',
+      type: 'absolute' as const,
     }
     render(<AlertPreview {...baseProps} previewData={previewData} threshold="" />)
 
@@ -141,7 +141,7 @@ describe('AlertPreview', () => {
     const previewData = {
       times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
       values: [10, 20],
-      type: 'absolute',
+      type: 'absolute' as const,
     }
     render(
       <AlertPreview
@@ -161,7 +161,7 @@ describe('AlertPreview', () => {
     const previewData = {
       times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
       values: [10, 20],
-      type: 'absolute',
+      type: 'absolute' as const,
     }
     render(<AlertPreview {...baseProps} previewData={previewData} threshold="42" />)
 
@@ -180,7 +180,7 @@ describe('AlertPreview', () => {
     const previewData = {
       times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
       values: [10, 20],
-      type: 'absolute',
+      type: 'absolute' as const,
     }
     render(<AlertPreview {...baseProps} previewData={previewData} threshold="" />)
 
@@ -195,7 +195,7 @@ describe('AlertPreview', () => {
       times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
       values: [110, 220],
       hist_values: [100, 200],
-      type: 'relative',
+      type: 'relative' as const,
     }
     render(
       <AlertPreview

@@ -30,6 +30,11 @@ import { HelpDialog } from '@/components/ui/help-dialog'
 import { CRON_GROUPS, CRON_DISPLAY_NAMES, CRON_EXPLANATIONS } from './CronExplanations'
 import { CronScheduleBox } from './CronScheduleBox'
 import { queryKeys } from '@/lib/query-keys'
+import type { components } from '@/types/api.generated'
+import type { SyncStatus } from '@/hooks/useSyncStatus'
+import type { CronRun } from '../_state'
+
+type CronScheduleEntry = components['schemas']['CronScheduleEntry']
 
 export function CronTab({
   cronColumns,
@@ -51,19 +56,19 @@ export function CronTab({
   setIsPurgeOpen,
   purgeMutation,
 }: {
-  cronColumns: ColumnDef<any>[]
-  cronLogs: any
+  cronColumns: ColumnDef<CronRun>[]
+  cronLogs: components['schemas']['CronRunsResponse'] | undefined
   isLoadingCron: boolean
   isFetchingCron: boolean
-  orderedSchedules: Array<{ task: string; activeJob: any; schedule: any }>
+  orderedSchedules: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>
   taskFilter: string
   setTaskFilter: (v: string) => void
   statusFilter: string
   setStatusFilter: (v: string) => void
   isAnalyst: boolean
-  status: any
+  status: SyncStatus | undefined
   activeServiceId: string | null | undefined
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<any[]>>
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
   setSelectedConsoleJobId: (id: number | string | null) => void
   setConsoleOpen: (open: boolean) => void
   isPurgeOpen: boolean
@@ -83,7 +88,7 @@ export function CronTab({
   // "Waiting for stream...": useSSE's start() call is aborted by the
   // cleanup before the fetch has a chance to register a chunk handler.
   const tableData = React.useMemo(
-    () => (cronLogs?.entries || []).filter((e: any) => e.status !== 'running'),
+    () => (cronLogs?.entries || []).filter((e) => e.status !== 'running'),
     [cronLogs?.entries],
   )
 
@@ -94,9 +99,9 @@ export function CronTab({
         data={tableData}
         isLoading={isLoadingCron}
         initialSorting={[{ id: 'started_at', desc: true }]}
-        onRowClick={(row: any) => {
+        onRowClick={(row: CronRun) => {
           setDisplayedJobs(prev => {
-            if (prev.some((j: any) => j.id === row.id)) return prev
+            if (prev.some((j) => j.id === row.id)) return prev
             return [...prev, { ...row, status: row.status }]
           })
           setSelectedConsoleJobId(row.id)

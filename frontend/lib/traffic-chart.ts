@@ -2,10 +2,17 @@ import { formatDate, toUTCDate } from '@/lib/date'
 import { INTERVAL_SECONDS } from '@/lib/constants'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import type { components } from '@/types/api.generated'
+
+// Only the series metadata is read here (also runs in a Web Worker).
+type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'metric' | 'interval' | 'time_series'>>
+type Catalog = {
+  fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null
+}
 
 export interface BuildTrafficDataParams {
-  aggregates: any
-  compareAggregates: any
+  aggregates: Aggregates | null | undefined
+  compareAggregates: Aggregates | null | undefined
   compareMode: boolean
   compareStartTime: string | null | undefined
   startTime: string | null
@@ -15,7 +22,7 @@ export interface BuildTrafficDataParams {
   metric: string
   effectiveInterval: string
   hiddenCategories: Set<string>
-  catalog: any
+  catalog: Catalog | null | undefined
 }
 
 /**
@@ -72,7 +79,7 @@ export function buildTrafficData({
   const isBar = actualMetric === 'requests' || actualMetric === '5xx' || actualMetric === '4xx'
 
   // Find metric metadata from catalog
-  const metricField = catalog?.fields?.find((f: any) => f.id === actualMetric)
+  const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
   const unit = metricField?.unit || ''
   const precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
 
@@ -84,7 +91,7 @@ export function buildTrafficData({
 
   // If we have categories (e.g. 5xx/4xx breakdown), group by category.
   // Pydantic serializes optional fields as null, so null and undefined both mean "no category".
-  const hasCategories = time_series.some((d: any) => d.category != null)
+  const hasCategories = time_series.some((d) => d.category != null)
 
   // For bar metrics, zero-fill empty buckets so a sparse (filtered) series
   // renders full-width bars instead of Plotly hairlines. Scatter series
@@ -145,11 +152,11 @@ export function buildTrafficData({
     const compareStart = new Date(compareStartTime).getTime()
     const shift = currentStart - compareStart
 
-    const compX = compareAggregates.time_series.map((d: any) => {
+    const compX = compareAggregates.time_series.map((d) => {
       const t = toUTCDate(d.time).getTime() + shift
       return formatDate(new Date(t).toISOString(), timezone, "yyyy-MM-dd HH:mm:ss")
     })
-    const compY = compareAggregates.time_series.map((d: any) => d.value)
+    const compY = compareAggregates.time_series.map((d) => d.value)
 
     traces.push({
       x: compX,
@@ -162,10 +169,10 @@ export function buildTrafficData({
     })
   }
 
-  if (!hasCategories && time_series.some((d: any) => d.baseline != null)) {
+  if (!hasCategories && time_series.some((d) => d.baseline != null)) {
     traces.push({
-      x: time_series.map((d: any) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss")),
-      y: time_series.map((d: any) => d.baseline),
+      x: time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss")),
+      y: time_series.map((d) => d.baseline),
       type: 'scatter', mode: 'lines',
       name: 'Baseline (7d prior)',
       hovertemplate: getHoverTemplate(actualMetric, 'Baseline'),
@@ -174,8 +181,8 @@ export function buildTrafficData({
   }
 
   if (!hasCategories && trend !== 'off') {
-    const xValues = time_series.map((d: any) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
-    const yValues = time_series.map((d: any) => d.value)
+    const xValues = time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    const yValues = time_series.map((d) => d.value)
     const n = yValues.length
     let windowSize = 0
     if (trend === 'auto') {

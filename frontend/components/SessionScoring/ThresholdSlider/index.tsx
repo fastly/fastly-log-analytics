@@ -92,11 +92,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-threshold-committed', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/threshold' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/threshold',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { threshold: number | null; set_at: string | null; enforced: boolean }
+      return data
     },
     staleTime: 30_000,
   })
@@ -119,11 +119,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const commitMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/threshold' as any,
+        '/api/services/{service_id}/scoring/threshold',
         {
           params: { path: { service_id: serviceId } },
           body: { threshold: newThreshold },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data
@@ -141,11 +141,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-enforce-threshold', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-threshold' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/enforce-threshold',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { threshold: number | null; enforced: boolean }
+      return data
     },
     staleTime: 30_000,
   })
@@ -153,14 +153,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const enforceMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-threshold' as any,
+        '/api/services/{service_id}/scoring/enforce-threshold',
         {
           params: {
             path: { service_id: serviceId },
             query: { confirm: true },
           },
           body: { threshold: newThreshold },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data
@@ -179,18 +179,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-enforce-status-code', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-status-code' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/enforce-status-code',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as {
-        current: number | null
-        default: number
-        effective: number
-        min: number
-        max: number
-        is_default: boolean
-      }
+      return data
     },
     staleTime: 30_000,
   })
@@ -198,14 +191,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const statusCodeMutation = useMutation({
     mutationFn: async (newCode: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-status-code' as any,
+        '/api/services/{service_id}/scoring/enforce-status-code',
         {
           params: {
             path: { service_id: serviceId },
             query: { confirm: true },
           },
           body: { status_code: newCode },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data

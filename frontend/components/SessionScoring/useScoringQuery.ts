@@ -2,39 +2,29 @@
 
 import { useQuery, type UseQueryOptions, type UseQueryResult } from '@tanstack/react-query'
 
-import { client } from '@/lib/api'
-
 /**
  * Shared React Query wrapper for the service-scoped session-scoring GET
  * endpoints (``/api/services/{service_id}/scoring/<endpoint>``).
  *
- * Every scoring card/chart repeated the same queryFn body: a
- * ``client.GET`` with ``path: { service_id }`` + a query object, a
- * ``if (!response.ok) throw`` guard, and a ``return data as T`` cast. This
- * centralizes that boilerplate; callers pass the query-key, endpoint slug,
- * query params, and result type, and get back the full ``useQuery`` result
- * (data / isLoading / isFetching / isError / error / refetch) unchanged.
- *
- * The openapi-fetch path is intentionally cast to ``any`` — the endpoint
- * slug is interpolated, so the per-route typing is lost; callers supply the
- * concrete ``T``. This mirrors what the inlined call sites already did.
+ * Every scoring card/chart repeated the same queryFn body: a typed
+ * ``client.GET`` plus an ``if (!response.ok) throw`` guard. This centralizes
+ * the guard; the caller passes the typed ``client.GET`` call itself, so the
+ * path, query params and result type all come from the generated OpenAPI
+ * schema with no cast. Returns the full ``useQuery`` result unchanged.
  */
+type ScoringResult<T> = { data?: T; response: Response }
+
 export function useScoringQuery<T>(
   queryKey: readonly unknown[],
-  serviceId: string,
-  endpoint: string,
-  query: Record<string, unknown>,
+  request: () => Promise<ScoringResult<T>>,
   options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn'>,
 ): UseQueryResult<T, Error> {
   return useQuery<T, Error, T, readonly unknown[]>({
     queryKey,
     queryFn: async () => {
-      const { data, response } = await client.GET(
-        `/api/services/{service_id}/scoring/${endpoint}` as any,
-        { params: { path: { service_id: serviceId }, query } } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as T
+      const { data, response } = await request()
+      if (!response.ok || data === undefined) throw new Error(`status ${response.status}`)
+      return data
     },
     ...options,
   })

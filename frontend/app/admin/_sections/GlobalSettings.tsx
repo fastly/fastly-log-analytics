@@ -87,7 +87,7 @@ export const PricingSettings = () => {
   // pressed (audit finding N-9, 2026-06-10).
   useEffect(() => {
     if (!settings) return
-    const d = settings as any
+    const d = settings
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
     setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
@@ -98,7 +98,7 @@ export const PricingSettings = () => {
 
   function handleCancel() {
     if (settings) {
-      const d = settings as any
+      const d = settings
       setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
       setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
       setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))
@@ -118,7 +118,7 @@ export const PricingSettings = () => {
           cdn_egress_rate_per_gb: parseFloat(rateCdn),
           storage_rate_per_gb_month: parseFloat(rateStorage),
           min_billed_days: parseInt(minBilledDays),
-        } as any,
+        },
       })
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
       queryClient.invalidateQueries({ queryKey: ['usage'] })
@@ -206,24 +206,24 @@ export function GlobalSettings() {
     staleTime: 60_000,
   })
 
-  const usageLoggingEnabled = (usageLoggingSettings as any)?.enabled ?? false
-  const usageLogRetention = (usageLoggingSettings as any)?.retention_days ?? 30
+  const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
+  const usageLogRetention = usageLoggingSettings?.retention_days ?? 30
 
   async function saveUsageLogRetention(days: number) {
     if (!Number.isFinite(days) || days < 1 || days === usageLogRetention) return
-    queryClient.setQueryData(['usage-logging-settings'], (old: any) => ({ ...old, retention_days: days }))
+    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days }))
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } as any })
+      await client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } })
     } finally {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     }
   }
 
   async function handleUsageLoggingToggle(enabled: boolean) {
-    queryClient.setQueryData(['usage-logging-settings'], (old: any) => ({ ...old, enabled }))
+    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, enabled }))
     setUsageLoggingLoading(true)
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { enabled } as any })
+      await client.PATCH('/api/admin/usage-logging', { body: { enabled } })
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     } catch {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })

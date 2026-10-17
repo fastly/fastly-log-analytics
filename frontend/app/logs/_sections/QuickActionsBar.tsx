@@ -14,6 +14,12 @@ import { client, extractApiError } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
 import { queryKeys } from '@/lib/query-keys'
+import type { components } from '@/types/api.generated'
+import type { SyncStatus } from '@/hooks/useSyncStatus'
+import type { useSSE } from '@/hooks/useSSE'
+import type { CronRun } from '../_state'
+
+type CronRunsResponse = components['schemas']['CronRunsResponse']
 
 export function QuickActionsBar({
   isAnalyst,
@@ -32,17 +38,17 @@ export function QuickActionsBar({
   setConsoleOpen,
 }: {
   isAnalyst: boolean
-  status: any
+  status: Partial<SyncStatus> | undefined
   activeServiceId: string | null | undefined
-  recentCrons: any
-  cronLogs: any
+  recentCrons: Partial<CronRunsResponse> | undefined
+  cronLogs: Partial<CronRunsResponse> | undefined
   setSseTitle: (s: string) => void
   setSseDescription: (s: string) => void
   setIsSSEModalOpen: (open: boolean) => void
   setIsSyncModalOpen: (open: boolean) => void
   reset: () => void
-  start: (url: string, opts?: any) => void
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<any[]>>
+  start: ReturnType<typeof useSSE>['start']
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
   setSelectedConsoleJobId: (id: number | string | null) => void
   setConsoleOpen: (open: boolean) => void
 }) {
@@ -62,7 +68,7 @@ export function QuickActionsBar({
               try {
                 const { data } = await client.POST("/api/admin/ingest-logs", {})
                 // 200 body is an opaque dict; the run_id keys the SSE stream.
-                const runId = (data as any)?.run_id
+                const runId = data?.run_id
                 if (!runId) { showToast('No run id returned'); return }
                 setSseTitle('Importing Logs')
                 setSseDescription('Downloading new raw logs from Fastly Object Storage and processing them...')
@@ -95,7 +101,7 @@ export function QuickActionsBar({
             onClick={async () => {
               try {
                 const { data } = await client.POST("/api/admin/commit-iceberg", {})
-                const runId = (data as any)?.run_id
+                const runId = data?.run_id
                 if (!runId) { showToast('No run id returned'); return }
                 setSseTitle('Committing Buffer')
                 setSseDescription('Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')
@@ -143,11 +149,11 @@ export function QuickActionsBar({
         variant="outline"
         className="h-8 text-xs bg-background"
         onClick={() => {
-          const latestSync = recentCrons?.entries?.find((e: any) => e.task === 'log_discovery') ||
-                             cronLogs?.entries?.find((e: any) => e.task === 'log_discovery')
+          const latestSync = recentCrons?.entries?.find((e) => e.task === 'log_discovery') ||
+                             cronLogs?.entries?.find((e) => e.task === 'log_discovery')
           if (latestSync) {
             setDisplayedJobs(prev => {
-              if (prev.some((j: any) => j.id === latestSync.id)) return prev
+              if (prev.some((j) => j.id === latestSync.id)) return prev
               return [...prev, { ...latestSync, status: latestSync.status }]
             })
             setSelectedConsoleJobId(latestSync.id)

@@ -44,7 +44,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
     queryKey: queryKeys.admin.iceberg(activeServiceId),
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/iceberg-info")
-      return data as any
+      return data
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,
@@ -62,7 +62,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
             <Info className="h-4 w-4" />
             <span className="text-sm font-medium">Failed to load DuckLake table info</span>
           </div>
-          <p className="text-xs text-muted-foreground mt-1">{(error as any)?.message || 'Unknown error'}</p>
+          <p className="text-xs text-muted-foreground mt-1">{error?.message || 'Unknown error'}</p>
         </CardContent>
       </Card>
     )

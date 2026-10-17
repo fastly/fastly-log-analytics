@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { CronLiveLog } from '@/components/CronLiveLog'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { cn } from '@/lib/utils'
+import type { BackgroundCronToast, CronRun } from '../_state'
 
 import { formatCount } from '@/lib/format'
 export function FloatingOperationsDock({
@@ -26,15 +27,15 @@ export function FloatingOperationsDock({
   backgroundCronToast,
   setBackgroundCronToast
 }: {
-  displayedJobs: any[];
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<any[]>>;
+  displayedJobs: CronRun[];
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>;
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
   selectedJobId: number | string | null;
   setSelectedJobId: (id: number | string | null) => void;
   onDismiss: (id: number) => void;
-  backgroundCronToast: any;
-  setBackgroundCronToast: (toast: any) => void;
+  backgroundCronToast: BackgroundCronToast;
+  setBackgroundCronToast: (toast: BackgroundCronToast) => void;
 }) {
   const { full, abbr } = useDateFormat()
 
@@ -98,10 +99,10 @@ export function FloatingOperationsDock({
               {/* Optional completed job statistics */}
               {backgroundCronToast.status !== 'running' && (
                 <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400 font-mono">
-                  {backgroundCronToast.rows_ingested !== undefined && (
+                  {backgroundCronToast.rows_ingested != null && (
                     <span>Ingested: <strong className="text-zinc-300">{formatCount(backgroundCronToast.rows_ingested)} rows</strong></span>
                   )}
-                  {backgroundCronToast.duration_s !== undefined && (
+                  {backgroundCronToast.duration_s != null && (
                     <span>Duration: <strong className="text-zinc-300">{backgroundCronToast.duration_s.toFixed(1)}s</strong></span>
                   )}
                 </div>

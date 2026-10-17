@@ -20,14 +20,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 interface MatrixVersionsCardProps {
   serviceId: string
 }
 
-type MatrixVersionsResponse = components['schemas']['ScoringMatrixVersionsResponse']
 type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
 
 import { formatBytes } from '@/lib/format'
@@ -43,32 +42,31 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
     queryKey: ['scoring-matrix-versions', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/matrix-versions' as any,
+        '/api/services/{service_id}/scoring/matrix-versions',
         {
           params: { path: { service_id: serviceId } },
-        } as any,
+        },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as MatrixVersionsResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
   })
 
   const restore = useMutation({
     mutationFn: async (version: string): Promise<RestoreResponse> => {
-      const { data, response } = await client.POST(
-        '/api/services/{service_id}/scoring/matrix-versions/{version}/restore' as any,
+      const { data, error: errBody, response } = await client.POST(
+        '/api/services/{service_id}/scoring/matrix-versions/{version}/restore',
         {
           params: {
             path: { service_id: serviceId, version },
             query: { confirm: true },
           },
-        } as any,
+        },
       )
-      if (!response.ok) {
-        const msg = (data as any)?.detail?.error ?? `status ${response.status}`
-        throw new Error(msg)
+      if (!response.ok || !data) {
+        throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
       }
-      return data as RestoreResponse
+      return data
     },
     onSuccess: (res) => {
       setRestoreResult(res)

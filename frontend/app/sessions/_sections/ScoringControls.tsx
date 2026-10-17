@@ -7,6 +7,7 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 
 interface ScoringControlsProps {
   cmcdEnabled: boolean
@@ -18,7 +19,7 @@ interface ScoringControlsProps {
   setMinReqs: (v: number | '') => void
   min4xxPct: number | ''
   setMin4xxPct: (v: number | '') => void
-  data: any
+  data: Pick<components['schemas']['SessionsResponse'], 'min_reqs_flag' | 'min_4xx_pct_flag'> | undefined
   isFetching: boolean
   isLoadingInitial: boolean
   refetch: () => void
