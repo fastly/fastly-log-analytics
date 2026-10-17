@@ -126,11 +126,11 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
 
           {insight.items && insight.items.length > 0 && (
             <div className="space-y-1.5 mt-1">
-              {keyByOccurrence(insight.items.slice(0, 5), (it) => it.label).map(({ key, item }) => (
+              {keyByOccurrence(insight.items.slice(0, 5), (it) => it.label).map(({ key }, index) => (
                 <InsightItemRow
                   key={key}
-                  item={item}
-                  insightId={insight.id}
+                  insight={insight}
+                  index={index}
                   onMapClick={(data) => setSelectedMapItem(data)}
                   onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
                   onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}

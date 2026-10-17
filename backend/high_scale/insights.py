@@ -2,7 +2,9 @@ from datetime import UTC
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
-from backend.models.dashboard import CacheCollapseDetailResponse, InsightCard, InsightItem, InsightsResponse
+from backend.models.dashboard import CacheCollapseDetailResponse, InsightsResponse
+from backend.models.insight_meta import HighScale5xxMeta
+from backend.models.insights import HighScale5xxInsightCard, InsightItem
 
 
 def insights_endpoint(
@@ -31,10 +33,16 @@ def insights_endpoint(
         for r in rows:
             if r["errors"] > 0:
                 items.append(
-                    InsightItem(label=r["url"], current_val=float(r["errors"]), unit="errors", severity="high")
+                    InsightItem[HighScale5xxMeta](
+                        label=r["url"],
+                        current_val=float(r["errors"]),
+                        unit="errors",
+                        severity="high",
+                        meta=HighScale5xxMeta(),
+                    )
                 )
         insights.append(
-            InsightCard(
+            HighScale5xxInsightCard(
                 id="high_scale_5xx",
                 title="Elevated 5xx Errors",
                 description="Paths with highest 5xx error counts in the last 24h.",

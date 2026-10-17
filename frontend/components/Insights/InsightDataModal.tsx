@@ -36,11 +36,11 @@ export function InsightDataModal({ insight, isOpen, onOpenChange, onMapClick, on
 
         <ScrollArea className="flex-1 -mx-6 px-6">
           <div className="space-y-1.5 py-4">
-            {keyByOccurrence(insight.items, (it) => it.label).map(({ key, item }) => (
+            {keyByOccurrence(insight.items, (it) => it.label).map(({ key }, index) => (
               <InsightItemRow
                 key={key}
-                item={item}
-                insightId={insight.id}
+                insight={insight}
+                index={index}
                 onMapClick={onMapClick}
                 onCacheCollapseClick={onCacheCollapseClick}
                 onScriptedTrafficClick={onScriptedTrafficClick}

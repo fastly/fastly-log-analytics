@@ -104,15 +104,12 @@ export type DashboardTableData = components['schemas']['FieldAggregate']
 
 export type DashboardMapData = components['schemas']['MapPoint']
 
-export type InsightItem = Omit<components['schemas']['InsightItem'], 'meta'> & {
-  meta?: Record<string, any>
-}
-
-export type InsightCardData = Omit<components['schemas']['InsightCard'], 'items'> & {
-  items: InsightItem[]
-}
-
 export type InsightsResponse = components['schemas']['InsightsResponse']
+
+/** One card, discriminated on `id`; `items[].meta` is the per-detection model for that id. */
+export type InsightCardData = InsightsResponse['insights'][number]
+
+export type InsightItem = InsightCardData['items'][number]
 
 export type InsightAvailabilityResponse = components['schemas']['InsightsAvailabilityResponse']
 

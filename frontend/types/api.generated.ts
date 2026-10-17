@@ -7033,6 +7033,107 @@ export interface components {
             /** Cdn Secret */
             cdn_secret?: string | null;
         };
+        /** AsnConcentrationInsightCard */
+        AsnConcentrationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_concentration";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnConcentrationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnConcentrationMeta */
+        AsnConcentrationMeta: {
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** AsnHostingShiftInsightCard */
+        AsnHostingShiftInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_hosting_shift";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnHostingShiftMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnHostingShiftMeta */
+        AsnHostingShiftMeta: {
+            /** Window Hosting */
+            window_hosting: number;
+            /** Window Total */
+            window_total: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** AsnMetroPerformanceInsightCard */
+        AsnMetroPerformanceInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_metro_performance";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnMetroPerformanceMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnMetroPerformanceMeta */
+        AsnMetroPerformanceMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** AssetTypeBreakdownRow */
         AssetTypeBreakdownRow: {
             /** Asset Type */
@@ -7537,6 +7638,39 @@ export interface components {
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
         };
+        /** BotnetGroupingInsightCard */
+        BotnetGroupingInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "botnet_grouping";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_BotnetGroupingMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** BotnetGroupingMeta */
+        BotnetGroupingMeta: {
+            /** Requests */
+            requests: number;
+            /** Ip Ratio */
+            ip_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * BucketCountRow
          * @description Histogram bucket. Repository paths key the bucket as ``bucket``; the
@@ -7692,6 +7826,39 @@ export interface components {
             /** Clusters */
             clusters?: unknown[];
         };
+        /** CacheCollapseInsightCard */
+        CacheCollapseInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_collapse";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheCollapseMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheCollapseMeta */
+        CacheCollapseMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** CacheCollapseTimelinePoint */
         CacheCollapseTimelinePoint: {
             /** Bucket */
@@ -7706,6 +7873,37 @@ export interface components {
             total_requests: number;
             /** Hit Rate */
             hit_rate: number;
+        };
+        /** CacheHitCliffInsightCard */
+        CacheHitCliffInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_hit_cliff";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheHitCliffMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheHitCliffMeta */
+        CacheHitCliffMeta: {
+            /** Window Cacheable */
+            window_cacheable: number;
+            /** Baseline Cacheable */
+            baseline_cacheable: number;
+            /** Drop Pts */
+            drop_pts: number;
+        } & {
+            [key: string]: unknown;
         };
         /** CacheMissPoint */
         CacheMissPoint: {
@@ -7730,6 +7928,76 @@ export interface components {
             requests: number;
             /** Bytes */
             bytes: number;
+        };
+        /** CacheTtlMismatchInsightCard */
+        CacheTtlMismatchInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_ttl_mismatch";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheTtlMismatchMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheTtlMismatchMeta */
+        CacheTtlMismatchMeta: {
+            /** Avg Ttl S */
+            avg_ttl_s: number;
+            /** Avg Hits */
+            avg_hits: number;
+            /** Avg Age S */
+            avg_age_s: number;
+            /** Samples */
+            samples: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CacheabilityRegressionInsightCard */
+        CacheabilityRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cacheability_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheabilityRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheabilityRegressionMeta */
+        CacheabilityRegressionMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** CachingMetrics */
         CachingMetrics: {
@@ -7863,6 +8131,138 @@ export interface components {
             access_key: string;
             /** Secret Key */
             secret_key: string;
+        };
+        /** CipherSpreadInsightCard */
+        CipherSpreadInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cipher_spread";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CipherSpreadMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CipherSpreadMeta */
+        CipherSpreadMeta: {
+            /** Requests */
+            requests: number;
+            /** Baseline Total Ips */
+            baseline_total_ips: number;
+            /** Sha */
+            sha: string;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CityErrorSpikesInsightCard */
+        CityErrorSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_error_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CityErrorSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CityErrorSpikesMeta */
+        CityErrorSpikesMeta: {
+            /** Requests */
+            requests: number;
+            /** Errors */
+            errors: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CityLatencyRegressionsInsightCard */
+        CityLatencyRegressionsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_latency_regressions";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CityLatencyRegressionsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CityLatencyRegressionsMeta */
+        CityLatencyRegressionsMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CitySurgesInsightCard */
+        CitySurgesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_surges";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CitySurgesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CitySurgesMeta */
+        CitySurgesMeta: {
+            /** Spike Ratio */
+            spike_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** ClaimTokenResponse */
         ClaimTokenResponse: {
@@ -8475,6 +8875,78 @@ export interface components {
             /** Bytes */
             bytes: number;
         };
+        /** ConnectionAbuseInsightCard */
+        ConnectionAbuseInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "connection_abuse";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ConnectionAbuseMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ConnectionAbuseMeta */
+        ConnectionAbuseMeta: {
+            /** Max Conn Reqs */
+            max_conn_reqs: number;
+            /** Avg Conn Reqs */
+            avg_conn_reqs: number;
+            /** Requests */
+            requests: number;
+            /** P95 Baseline */
+            p95_baseline: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** ConnectionTypeMixInsightCard */
+        ConnectionTypeMixInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "connection_type_mix";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ConnectionTypeMixMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ConnectionTypeMixMeta */
+        ConnectionTypeMixMeta: {
+            /** Requests */
+            requests: number;
+            /** C Type */
+            c_type: string | null;
+            /** C Speed */
+            c_speed: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ConsolidateRollupsResponse
          * @description Result from POST /admin/consolidate-rollups.
@@ -8498,6 +8970,43 @@ export interface components {
             cleaned_entries?: number | null;
             /** Duration S */
             duration_s?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ContentDiscoveryInsightCard */
+        ContentDiscoveryInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "content_discovery";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ContentDiscoveryMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ContentDiscoveryMeta */
+        ContentDiscoveryMeta: {
+            /** Requests */
+            requests: number;
+            /** Not Found */
+            not_found: number;
+            /** Not Found Rate Pct */
+            not_found_rate_pct: number;
+            /** Distinct 404 Urls */
+            distinct_404_urls: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
         } & {
             [key: string]: unknown;
         };
@@ -8553,6 +9062,76 @@ export interface components {
             value: string | number | null;
             /** Count */
             count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CrawlerDisparityInsightCard */
+        CrawlerDisparityInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "crawler_disparity";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CrawlerDisparityMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CrawlerDisparityMeta */
+        CrawlerDisparityMeta: {
+            /** Crawls */
+            crawls: number;
+            /** Referrals */
+            referrals: number;
+            /** Crawls Per Referral */
+            crawls_per_referral: number;
+            /** Baseline Crawls Per Referral */
+            baseline_crawls_per_referral: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CredentialEnumerationInsightCard */
+        CredentialEnumerationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "credential_enumeration";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CredentialEnumerationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CredentialEnumerationMeta */
+        CredentialEnumerationMeta: {
+            /** Attempts */
+            attempts: number;
+            /** Denied */
+            denied: number;
+            /** Fail Rate Pct */
+            fail_rate_pct: number;
+            /** Distinct Paths */
+            distinct_paths: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
         } & {
             [key: string]: unknown;
         };
@@ -9178,6 +9757,39 @@ export interface components {
         ErrorEnvelope: {
             detail: components["schemas"]["ErrorDetail"];
         };
+        /** ErrorSpikesInsightCard */
+        ErrorSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "error_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ErrorSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ErrorSpikesMeta */
+        ErrorSpikesMeta: {
+            /** Requests */
+            requests: number;
+            /** Errors */
+            errors: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ExpireSnapshotsResponse
          * @description Outcome and counters from ``POST /admin/expire-snapshots/{service_id}``.
@@ -9556,6 +10168,30 @@ export interface components {
             } | null;
             celery?: components["schemas"]["HealthCeleryStats"] | null;
             high_scale?: components["schemas"]["HealthHighScale"] | null;
+        };
+        /** HighScale5xxInsightCard */
+        HighScale5xxInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "high_scale_5xx";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_HighScale5xxMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** HighScale5xxMeta */
+        HighScale5xxMeta: {
+            [key: string]: unknown;
         };
         /** HighScaleAggregateRequest */
         HighScaleAggregateRequest: {
@@ -10037,6 +10673,41 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** Http3FallbackInsightCard */
+        Http3FallbackInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "http3_fallback";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_Http3FallbackMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** Http3FallbackMeta */
+        Http3FallbackMeta: {
+            /** Window Quic */
+            window_quic: number;
+            /** Window Total */
+            window_total: number;
+            /** Share Drop Pts */
+            share_drop_pts: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** IOFormatBreakdown */
         IOFormatBreakdown: {
             /** Format */
@@ -10193,6 +10864,92 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** ImageOptimizationOpportunitiesInsightCard */
+        ImageOptimizationOpportunitiesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "image_optimization_opportunities";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ImageOptimizationOpportunitiesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ImageOptimizationOpportunitiesMeta */
+        ImageOptimizationOpportunitiesMeta: {
+            /** Requests */
+            requests: number;
+            /** Total Mb */
+            total_mb: number;
+            /** Mobile Ratio */
+            mobile_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** ImpossibleDistanceInsightCard */
+        ImpossibleDistanceInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "impossible_distance";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ImpossibleDistanceMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ImpossibleDistanceMeta */
+        ImpossibleDistanceMeta: {
+            /** Hits */
+            hits: number;
+            /** Excess Km */
+            excess_km: number;
+            /** Pop */
+            pop: string | null;
+            /** Sample Ip */
+            sample_ip: string | null;
+            /** Client Lat */
+            client_lat: number | null;
+            /** Client Lon */
+            client_lon: number | null;
+            /** Pop Lat */
+            pop_lat: number;
+            /** Pop Lon */
+            pop_lon: number;
+            /** Tcp Rtt */
+            tcp_rtt: number | null;
+            /** Country */
+            country: string | null;
+            /** City */
+            city: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * IngestCatchupStatus
          * @description How far behind ingest is from the wallclock — derived from the
@@ -10271,25 +11028,8 @@ export interface components {
             /** Available */
             available: boolean;
         };
-        /** InsightCard */
-        InsightCard: {
-            /** Id */
-            id: string;
-            /** Title */
-            title: string;
-            /** Description */
-            description: string;
-            /** Severity */
-            severity: string;
-            /** Summary */
-            summary: string;
-            /** Items */
-            items: components["schemas"]["InsightItem"][];
-            /** Category */
-            category?: string | null;
-        };
-        /** InsightItem */
-        InsightItem: {
+        /** InsightItem[AsnConcentrationMeta] */
+        InsightItem_AsnConcentrationMeta_: {
             /** Label */
             label: string;
             /** Current Val */
@@ -10308,10 +11048,1333 @@ export interface components {
              * @default clean
              */
             severity: string;
-            /** Meta */
-            meta?: {
-                [key: string]: unknown;
-            };
+            meta: components["schemas"]["AsnConcentrationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[AsnHostingShiftMeta] */
+        InsightItem_AsnHostingShiftMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["AsnHostingShiftMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[AsnMetroPerformanceMeta] */
+        InsightItem_AsnMetroPerformanceMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["AsnMetroPerformanceMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[BotnetGroupingMeta] */
+        InsightItem_BotnetGroupingMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["BotnetGroupingMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheCollapseMeta] */
+        InsightItem_CacheCollapseMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheCollapseMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheHitCliffMeta] */
+        InsightItem_CacheHitCliffMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheHitCliffMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheTtlMismatchMeta] */
+        InsightItem_CacheTtlMismatchMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheTtlMismatchMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheabilityRegressionMeta] */
+        InsightItem_CacheabilityRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheabilityRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CipherSpreadMeta] */
+        InsightItem_CipherSpreadMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CipherSpreadMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CityErrorSpikesMeta] */
+        InsightItem_CityErrorSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CityErrorSpikesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CityLatencyRegressionsMeta] */
+        InsightItem_CityLatencyRegressionsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CityLatencyRegressionsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CitySurgesMeta] */
+        InsightItem_CitySurgesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CitySurgesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ConnectionAbuseMeta] */
+        InsightItem_ConnectionAbuseMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ConnectionAbuseMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ConnectionTypeMixMeta] */
+        InsightItem_ConnectionTypeMixMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ConnectionTypeMixMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ContentDiscoveryMeta] */
+        InsightItem_ContentDiscoveryMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ContentDiscoveryMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CrawlerDisparityMeta] */
+        InsightItem_CrawlerDisparityMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CrawlerDisparityMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CredentialEnumerationMeta] */
+        InsightItem_CredentialEnumerationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CredentialEnumerationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ErrorSpikesMeta] */
+        InsightItem_ErrorSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ErrorSpikesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[HighScale5xxMeta] */
+        InsightItem_HighScale5xxMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["HighScale5xxMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[Http3FallbackMeta] */
+        InsightItem_Http3FallbackMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["Http3FallbackMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ImageOptimizationOpportunitiesMeta] */
+        InsightItem_ImageOptimizationOpportunitiesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ImageOptimizationOpportunitiesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ImpossibleDistanceMeta] */
+        InsightItem_ImpossibleDistanceMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ImpossibleDistanceMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[LatencyRegressionMeta] */
+        InsightItem_LatencyRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["LatencyRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[LowAndSlowMeta] */
+        InsightItem_LowAndSlowMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["LowAndSlowMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[MethodDriftMeta] */
+        InsightItem_MethodDriftMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["MethodDriftMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[MetroDeliveryDegradationMeta] */
+        InsightItem_MetroDeliveryDegradationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["MetroDeliveryDegradationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NetworkAsnHealthMeta] */
+        InsightItem_NetworkAsnHealthMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NetworkAsnHealthMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewAsnTrafficMeta] */
+        InsightItem_NewAsnTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewAsnTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewCityTrafficMeta] */
+        InsightItem_NewCityTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewCityTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewCountryTrafficMeta] */
+        InsightItem_NewCountryTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewCountryTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewProbeUrlsMeta] */
+        InsightItem_NewProbeUrlsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewProbeUrlsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginErrorRateMeta] */
+        InsightItem_OriginErrorRateMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginErrorRateMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginIpFailureMeta] */
+        InsightItem_OriginIpFailureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginIpFailureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginLatencySpikeMeta] */
+        InsightItem_OriginLatencySpikeMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginLatencySpikeMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginRetriesMeta] */
+        InsightItem_OriginRetriesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginRetriesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OrphanedDeepCrawlMeta] */
+        InsightItem_OrphanedDeepCrawlMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OrphanedDeepCrawlMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[PayloadCompressionRegressionMeta] */
+        InsightItem_PayloadCompressionRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["PayloadCompressionRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[PopLatencyRegressionMeta] */
+        InsightItem_PopLatencyRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["PopLatencyRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ProxySurgeMeta] */
+        InsightItem_ProxySurgeMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ProxySurgeMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RefererMonocultureMeta] */
+        InsightItem_RefererMonocultureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RefererMonocultureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RegionLatencyMeta] */
+        InsightItem_RegionLatencyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RegionLatencyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RepeatedPatternsFpMeta] */
+        InsightItem_RepeatedPatternsFpMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RepeatedPatternsFpMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RepeatedPatternsMeta] */
+        InsightItem_RepeatedPatternsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RepeatedPatternsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RequestSizeAnomalyMeta] */
+        InsightItem_RequestSizeAnomalyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RequestSizeAnomalyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ResidentialFingerprintDispersionMeta] */
+        InsightItem_ResidentialFingerprintDispersionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ResidentialFingerprintDispersionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[SessionHarvestingMeta] */
+        InsightItem_SessionHarvestingMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["SessionHarvestingMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ShieldPathDegradationMeta] */
+        InsightItem_ShieldPathDegradationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ShieldPathDegradationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[StaleBrowserVersionMeta] */
+        InsightItem_StaleBrowserVersionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["StaleBrowserVersionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[TailLatencyMeta] */
+        InsightItem_TailLatencyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["TailLatencyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[TimeoutSplitMeta] */
+        InsightItem_TimeoutSplitMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["TimeoutSplitMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[UaMonocultureMeta] */
+        InsightItem_UaMonocultureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["UaMonocultureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[WafSignalSpikesMeta] */
+        InsightItem_WafSignalSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["WafSignalSpikesMeta"];
             /** Investigate Url */
             investigate_url?: string | null;
             /** Tooltip */
@@ -10382,7 +12445,7 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Insights */
-            insights: components["schemas"]["InsightCard"][];
+            insights: (components["schemas"]["ErrorSpikesInsightCard"] | components["schemas"]["BotnetGroupingInsightCard"] | components["schemas"]["NewCountryTrafficInsightCard"] | components["schemas"]["CitySurgesInsightCard"] | components["schemas"]["CityErrorSpikesInsightCard"] | components["schemas"]["CityLatencyRegressionsInsightCard"] | components["schemas"]["NewCityTrafficInsightCard"] | components["schemas"]["UaMonocultureInsightCard"] | components["schemas"]["NewProbeUrlsInsightCard"] | components["schemas"]["WafSignalSpikesInsightCard"] | components["schemas"]["ProxySurgeInsightCard"] | components["schemas"]["AsnConcentrationInsightCard"] | components["schemas"]["AsnMetroPerformanceInsightCard"] | components["schemas"]["CacheCollapseInsightCard"] | components["schemas"]["CacheabilityRegressionInsightCard"] | components["schemas"]["LatencyRegressionInsightCard"] | components["schemas"]["ImpossibleDistanceInsightCard"] | components["schemas"]["TailLatencyInsightCard"] | components["schemas"]["CipherSpreadInsightCard"] | components["schemas"]["RequestSizeAnomalyInsightCard"] | components["schemas"]["ConnectionAbuseInsightCard"] | components["schemas"]["RegionLatencyInsightCard"] | components["schemas"]["CacheTtlMismatchInsightCard"] | components["schemas"]["ImageOptimizationOpportunitiesInsightCard"] | components["schemas"]["OriginLatencySpikeInsightCard"] | components["schemas"]["OriginErrorRateInsightCard"] | components["schemas"]["OriginRetriesInsightCard"] | components["schemas"]["OriginIpFailureInsightCard"] | components["schemas"]["ShieldPathDegradationInsightCard"] | components["schemas"]["RepeatedPatternsInsightCard"] | components["schemas"]["RepeatedPatternsFpInsightCard"] | components["schemas"]["LowAndSlowInsightCard"] | components["schemas"]["CredentialEnumerationInsightCard"] | components["schemas"]["NetworkAsnHealthInsightCard"] | components["schemas"]["ContentDiscoveryInsightCard"] | components["schemas"]["RefererMonocultureInsightCard"] | components["schemas"]["MethodDriftInsightCard"] | components["schemas"]["NewAsnTrafficInsightCard"] | components["schemas"]["AsnHostingShiftInsightCard"] | components["schemas"]["MetroDeliveryDegradationInsightCard"] | components["schemas"]["ConnectionTypeMixInsightCard"] | components["schemas"]["PopLatencyRegressionInsightCard"] | components["schemas"]["Http3FallbackInsightCard"] | components["schemas"]["CacheHitCliffInsightCard"] | components["schemas"]["PayloadCompressionRegressionInsightCard"] | components["schemas"]["SessionHarvestingInsightCard"] | components["schemas"]["TimeoutSplitInsightCard"] | components["schemas"]["CrawlerDisparityInsightCard"] | components["schemas"]["StaleBrowserVersionInsightCard"] | components["schemas"]["OrphanedDeepCrawlInsightCard"] | components["schemas"]["ResidentialFingerprintDispersionInsightCard"] | components["schemas"]["HighScale5xxInsightCard"])[];
             /** Window Start */
             window_start: string;
             /** Window End */
@@ -10567,6 +12630,39 @@ export interface components {
             total_bytes: number;
             /** Status */
             status: number;
+        };
+        /** LatencyRegressionInsightCard */
+        LatencyRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "latency_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_LatencyRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** LatencyRegressionMeta */
+        LatencyRegressionMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * LocalCompactNowResponse
@@ -11063,6 +13159,43 @@ export interface components {
             /** Missing Fields */
             missing_fields?: string[];
         };
+        /** LowAndSlowInsightCard */
+        LowAndSlowInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "low_and_slow";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_LowAndSlowMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** LowAndSlowMeta */
+        LowAndSlowMeta: {
+            /** Hits */
+            hits: number;
+            /** Distinct Paths */
+            distinct_paths: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** LowTtlAssetRow */
         LowTtlAssetRow: {
             /** Url */
@@ -11133,6 +13266,39 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** MethodDriftInsightCard */
+        MethodDriftInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "method_drift";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_MethodDriftMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** MethodDriftMeta */
+        MethodDriftMeta: {
+            /** Requests */
+            requests: number;
+            /** Method */
+            method: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * MetricHistoryBatchResponse
          * @description Every series newer than ``since``, returned by ``GET /api/admin/metric-history/batch``.
@@ -11156,6 +13322,41 @@ export interface components {
             /** Value */
             value: number;
         };
+        /** MetroDeliveryDegradationInsightCard */
+        MetroDeliveryDegradationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "metro_delivery_degradation";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_MetroDeliveryDegradationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** MetroDeliveryDegradationMeta */
+        MetroDeliveryDegradationMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Window Mbps */
+            window_mbps: number;
+            /** Baseline Mbps */
+            baseline_mbps: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * MutationStub
          * @description Generic request body for Phase 0 mutation stubs.
@@ -11173,6 +13374,51 @@ export interface components {
             payload: {
                 [key: string]: unknown;
             };
+        };
+        /** NetworkAsnHealthInsightCard */
+        NetworkAsnHealthInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "network_asn_health";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NetworkAsnHealthMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NetworkAsnHealthMeta */
+        NetworkAsnHealthMeta: {
+            /** Window Packet Loss Pct */
+            window_packet_loss_pct: number;
+            /** Baseline Packet Loss Pct */
+            baseline_packet_loss_pct: number;
+            /** Window Jitter Ms */
+            window_jitter_ms: number;
+            /** Baseline Jitter Ms */
+            baseline_jitter_ms: number;
+            /** Window Retrans Avg */
+            window_retrans_avg: number;
+            /** Baseline Retrans Avg */
+            baseline_retrans_avg: number;
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** NetworkBundleRequest */
         NetworkBundleRequest: {
@@ -11655,6 +13901,128 @@ export interface components {
             /** Score */
             score?: number | null;
         };
+        /** NewAsnTrafficInsightCard */
+        NewAsnTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_asn_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewAsnTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewAsnTrafficMeta */
+        NewAsnTrafficMeta: {
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewCityTrafficInsightCard */
+        NewCityTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_city_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewCityTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewCityTrafficMeta */
+        NewCityTrafficMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewCountryTrafficInsightCard */
+        NewCountryTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_country_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewCountryTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewCountryTrafficMeta */
+        NewCountryTrafficMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewProbeUrlsInsightCard */
+        NewProbeUrlsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_probe_urls";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewProbeUrlsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewProbeUrlsMeta */
+        NewProbeUrlsMeta: {
+            /** Error Pct */
+            error_pct: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * NgwafStatusResponse
          * @description ``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;
@@ -12028,6 +14396,66 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** OriginErrorRateInsightCard */
+        OriginErrorRateInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_error_rate";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginErrorRateMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginErrorRateMeta */
+        OriginErrorRateMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginIpFailureInsightCard */
+        OriginIpFailureInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_ip_failure";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginIpFailureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginIpFailureMeta */
+        OriginIpFailureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** OriginIpHealthRequest */
         OriginIpHealthRequest: {
             /** Start Time */
@@ -12115,6 +14543,37 @@ export interface components {
             rows: components["schemas"]["OriginIpHealthRow"][];
             /** Approx */
             _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginLatencySpikeInsightCard */
+        OriginLatencySpikeInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_latency_spike";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginLatencySpikeMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginLatencySpikeMeta */
+        OriginLatencySpikeMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
         } & {
             [key: string]: unknown;
         };
@@ -12314,6 +14773,37 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+        };
+        /** OriginRetriesInsightCard */
+        OriginRetriesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_retries";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginRetriesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginRetriesMeta */
+        OriginRetriesMeta: {
+            /** Max Retries */
+            max_retries: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** OriginShieldingAnalysisRequest */
         OriginShieldingAnalysisRequest: {
@@ -12755,6 +15245,43 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** OrphanedDeepCrawlInsightCard */
+        OrphanedDeepCrawlInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "orphaned_deep_crawl";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OrphanedDeepCrawlMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OrphanedDeepCrawlMeta */
+        OrphanedDeepCrawlMeta: {
+            /** Requests */
+            requests: number;
+            /** Distinct Urls */
+            distinct_urls: number;
+            /** Requests Per Url */
+            requests_per_url: number;
+            /** Surge Ratio */
+            surge_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** OverviewMetrics */
         OverviewMetrics: {
             /** Origin Offload Pct */
@@ -12875,6 +15402,39 @@ export interface components {
         PasscodePayload: {
             /** Passcode */
             passcode: string;
+        };
+        /** PayloadCompressionRegressionInsightCard */
+        PayloadCompressionRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "payload_compression_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_PayloadCompressionRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** PayloadCompressionRegressionMeta */
+        PayloadCompressionRegressionMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** PerformanceAggregatesResponse */
         PerformanceAggregatesResponse: {
@@ -13105,6 +15665,39 @@ export interface components {
             }[];
             /** Data */
             data: components["schemas"]["PopHealthItem"][];
+        };
+        /** PopLatencyRegressionInsightCard */
+        PopLatencyRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "pop_latency_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_PopLatencyRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** PopLatencyRegressionMeta */
+        PopLatencyRegressionMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** PopLocation */
         PopLocation: {
@@ -13815,6 +16408,37 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ProxySurgeInsightCard */
+        ProxySurgeInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "proxy_surge";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ProxySurgeMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ProxySurgeMeta */
+        ProxySurgeMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** QuarantineEvidenceItem */
         QuarantineEvidenceItem: {
             /** Id */
@@ -14152,6 +16776,37 @@ export interface components {
             /** Last Seq */
             last_seq: number;
         };
+        /** RefererMonocultureInsightCard */
+        RefererMonocultureInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "referer_monoculture";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RefererMonocultureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RefererMonocultureMeta */
+        RefererMonocultureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * RefreshPopLocationsRequest
          * @description Body for ``POST /api/admin/pop-locations/refresh`` — the Fastly API
@@ -14164,6 +16819,180 @@ export interface components {
              * @description Fastly API key
              */
             token: string;
+        };
+        /** RegionLatencyInsightCard */
+        RegionLatencyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "region_latency";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RegionLatencyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RegionLatencyMeta */
+        RegionLatencyMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+            /** Ottfb P95 Ms */
+            ottfb_p95_ms?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RepeatedPatternsFpInsightCard */
+        RepeatedPatternsFpInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "repeated_patterns_fp";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RepeatedPatternsFpMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RepeatedPatternsFpMeta */
+        RepeatedPatternsFpMeta: {
+            /** Score */
+            score: number;
+            /** Cv */
+            cv: number;
+            /** Modal Frac */
+            modal_frac: number;
+            /** Mean Interval S */
+            mean_interval_s: number;
+            /** Stddev S */
+            stddev_s: number;
+            /** Mode Gap S */
+            mode_gap_s: number | null;
+            /** N Gaps */
+            n_gaps: number;
+            /** N Events */
+            n_events: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Distinct Ip */
+            distinct_ip: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RepeatedPatternsInsightCard */
+        RepeatedPatternsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "repeated_patterns";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RepeatedPatternsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RepeatedPatternsMeta */
+        RepeatedPatternsMeta: {
+            /** Score */
+            score: number;
+            /** Cv */
+            cv: number;
+            /** Modal Frac */
+            modal_frac: number;
+            /** Mean Interval S */
+            mean_interval_s: number;
+            /** Stddev S */
+            stddev_s: number;
+            /** Mode Gap S */
+            mode_gap_s: number | null;
+            /** N Gaps */
+            n_gaps: number;
+            /** N Events */
+            n_events: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Distinct Ua */
+            distinct_ua: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RequestSizeAnomalyInsightCard */
+        RequestSizeAnomalyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "request_size_anomaly";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RequestSizeAnomalyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RequestSizeAnomalyMeta */
+        RequestSizeAnomalyMeta: {
+            /** Max Bytes */
+            max_bytes: number;
+            /** Avg Bytes */
+            avg_bytes: number;
+            /** Requests */
+            requests: number;
+            /** P95 Baseline */
+            p95_baseline: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ResetLogsRequest
@@ -14191,6 +17020,41 @@ export interface components {
              * @default true
              */
             preserve_usage_history: boolean;
+        };
+        /** ResidentialFingerprintDispersionInsightCard */
+        ResidentialFingerprintDispersionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "residential_fingerprint_dispersion";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ResidentialFingerprintDispersionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ResidentialFingerprintDispersionMeta */
+        ResidentialFingerprintDispersionMeta: {
+            /** Ja4 */
+            ja4: string;
+            /** Ips */
+            ips: number;
+            /** Asns */
+            asns: number;
+            /** Requests */
+            requests: number;
+            /** Asn Expansion Ratio */
+            asn_expansion_ratio: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * RollupCompactResponse
@@ -16218,6 +19082,41 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** SessionHarvestingInsightCard */
+        SessionHarvestingInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "session_harvesting";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_SessionHarvestingMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** SessionHarvestingMeta */
+        SessionHarvestingMeta: {
+            /** Requests */
+            requests: number;
+            /** Distinct Sessions */
+            distinct_sessions: number;
+            /** Baseline Distinct Sessions */
+            baseline_distinct_sessions: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** SessionsRequest */
         SessionsRequest: {
             /**
@@ -16732,6 +19631,35 @@ export interface components {
             /** Token Override */
             token_override?: string | null;
         };
+        /** ShieldPathDegradationInsightCard */
+        ShieldPathDegradationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "shield_path_degradation";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ShieldPathDegradationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ShieldPathDegradationMeta */
+        ShieldPathDegradationMeta: {
+            /** Ratio */
+            ratio: number;
+            /** Requests */
+            requests: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ShieldingAnalysis
          * @description Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``.
@@ -16882,6 +19810,37 @@ export interface components {
              * @enum {string}
              */
             op: "execute" | "executemany" | "executescript";
+        };
+        /** StaleBrowserVersionInsightCard */
+        StaleBrowserVersionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "stale_browser_version";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_StaleBrowserVersionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** StaleBrowserVersionMeta */
+        StaleBrowserVersionMeta: {
+            /** Requests */
+            requests: number;
+            /** Ips */
+            ips: number;
+            /** Surge Ratio */
+            surge_ratio: number;
+        } & {
+            [key: string]: unknown;
         };
         /** StreamMetrics */
         StreamMetrics: {
@@ -17048,6 +20007,43 @@ export interface components {
             /** Jobs */
             jobs: components["schemas"]["SystemJobStatus"][];
         };
+        /** TailLatencyInsightCard */
+        TailLatencyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "tail_latency";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_TailLatencyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** TailLatencyMeta */
+        TailLatencyMeta: {
+            /** P99 Ms */
+            p99_ms: number;
+            /** P50 Ms */
+            p50_ms: number;
+            /** Ratio */
+            ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** ThreatIntelItem */
         ThreatIntelItem: {
             /** Tls Fingerprint */
@@ -17088,6 +20084,46 @@ export interface components {
             }[];
             /** Data */
             data: components["schemas"]["ThreatIntelItem"][];
+        };
+        /** TimeoutSplitInsightCard */
+        TimeoutSplitInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "timeout_split";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_TimeoutSplitMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** TimeoutSplitMeta */
+        TimeoutSplitMeta: {
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "connect" | "read";
+            /** Connect P95 Ms */
+            connect_p95_ms: number;
+            /** Baseline Connect P95 Ms */
+            baseline_connect_p95_ms: number;
+            /** Read P95 Ms */
+            read_p95_ms: number;
+            /** Baseline Read P95 Ms */
+            baseline_read_p95_ms: number;
+            /** Window Requests */
+            window_requests: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * TlsFingerprintRow
@@ -17256,6 +20292,37 @@ export interface components {
             }[];
             /** Nodes */
             nodes: components["schemas"]["TreeNode"][];
+        };
+        /** UaMonocultureInsightCard */
+        UaMonocultureInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "ua_monoculture";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_UaMonocultureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** UaMonocultureMeta */
+        UaMonocultureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** UsageBandwidthPoint */
         UsageBandwidthPoint: {
@@ -17780,6 +20847,37 @@ export interface components {
             signal?: string | null;
             /** Count */
             count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** WafSignalSpikesInsightCard */
+        WafSignalSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "waf_signal_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_WafSignalSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** WafSignalSpikesMeta */
+        WafSignalSpikesMeta: {
+            /** Spike Ratio */
+            spike_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
         } & {
             [key: string]: unknown;
         };

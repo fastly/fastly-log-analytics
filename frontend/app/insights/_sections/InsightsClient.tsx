@@ -9,7 +9,6 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
-import { InsightCardData } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -291,11 +290,12 @@ function InsightsBody({
     staleTime: 5 * 60 * 1000,
   })
 
+  const allInsights = data?.insights
   const filteredInsights = useMemo(() => {
-    if (!data?.insights) return []
-    if (statusFilter === 'all') return data.insights
-    return (data.insights as InsightCardData[]).filter((insight: InsightCardData) => insight.severity === statusFilter)
-  }, [data?.insights, statusFilter])
+    if (!allInsights) return []
+    if (statusFilter === 'all') return allInsights
+    return allInsights.filter((insight) => insight.severity === statusFilter)
+  }, [allInsights, statusFilter])
 
   // Skeleton cards rendered while /api/insights is in flight come from the
   // /api/insight-availability response (titles + descriptions per available
@@ -312,7 +312,7 @@ function InsightsBody({
   // entries have no severity → sortInsights orders them by title.
   const groupedInsights = useMemo(
     () =>
-      groupInsightsBySection(filteredInsights as InsightCardData[], {
+      groupInsightsBySection(filteredInsights, {
         includeAll: true,
         includeEmptySections: true,
       }),
