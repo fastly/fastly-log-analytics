@@ -55,16 +55,6 @@ describe('resolveOriginDefaultKey (key-match contract)', () => {
     expect(a.anchor).toBe(b.anchor)
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
-
-  it('fresh log extents (<=15min old) leave the naive "now" anchor unchanged', async () => {
-    const { resolveOriginDefaultKey } = await import('@/lib/ssr/origin')
-    const now = new Date('2026-06-29T12:00:00Z')
-    const got = resolveOriginDefaultKey(now, {
-      earliest_log_at: '2026-06-01T00:00:00Z',
-      latest_log_at: '2026-06-29T11:55:00Z',
-    })
-    expect(got.anchor).toBe('2026-06-29T12:00:00Z')
-  })
 })
 
 describe('SSR-seed key ↔ client first-paint key byte-match', () => {

@@ -10,13 +10,7 @@
  */
 
 import { expect, test } from '@playwright/test'
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { adminGatewayContextOptions } = require('../../../scripts/lib/admin_gateway_client.cjs') as {
-  adminGatewayContextOptions: (target: string) => {
-    clientCertificates?: Array<{ origin: string; certPath: string; keyPath: string }>
-  }
-}
+import { adminGatewayContextOptions } from '../../../scripts/lib/admin_gateway_client.cjs'
 
 type LayoutShiftEntry = PerformanceEntry & {
   hadRecentInput?: boolean

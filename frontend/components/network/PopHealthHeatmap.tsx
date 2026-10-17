@@ -18,6 +18,8 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 
+const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
+
 export type PopHealthItem = components['schemas']['PopHealthItem']
 
 interface PopHealthHeatmapProps {
@@ -70,9 +72,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-            {Array.from({ length: 16 }).map((_, i) => (
-              // eslint-disable-next-line react/no-array-index-key
-              <div key={i} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
+            {SKELETON_IDS.map((id) => (
+              <div key={id} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
             ))}
           </div>
         </CardContent>

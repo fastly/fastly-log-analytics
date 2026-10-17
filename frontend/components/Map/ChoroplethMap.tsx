@@ -196,18 +196,16 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       }
 
       const max = Math.max(...data.map(d => d.count))
-      const matchExpression: unknown[] = ['match', ['get', 'name']]
-
-      data.forEach(d => {
+      const [first, ...others] = data.map((d): [string, string] => {
         const intensity = 0.2 + (d.count / max) * 0.8
         const englishName = resolveCountryName(d.country)
-        const countryName = NORMALIZE_COUNTRY[englishName] || englishName
-        matchExpression.push(countryName)
-        matchExpression.push(`rgba(59, 130, 246, ${intensity})`)
+        return [NORMALIZE_COUNTRY[englishName] || englishName, `rgba(59, 130, 246, ${intensity})`]
       })
 
-      matchExpression.push(countryFill(theme === 'dark'))
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression as unknown as maplibregl.ExpressionSpecification)
+      const matchExpression: maplibregl.ExpressionSpecification = [
+        'match', ['get', 'name'], first[0], first[1], ...others.flat(), countryFill(theme === 'dark'),
+      ]
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression)
       map.current.resize()
     }
 

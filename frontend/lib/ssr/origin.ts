@@ -95,8 +95,6 @@ export interface OriginSsrSeed {
  */
 export function resolveOriginDefaultKey(
   now: Date = new Date(),
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
@@ -114,15 +112,12 @@ export function resolveOriginDefaultKey(
  *                    backend's context resolution 400s — bail to client fetch.
  * @param now         Render instant; floored to the anchor quantum. Injectable
  *                    for tests.
- * @param logExtents  bootstrap.log_extents for serviceId, if available. See
- *                    resolveOriginDefaultKey.
  */
 export async function fetchOriginServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-  logExtents?: unknown,
 ): Promise<OriginSsrSeed | null> {
-  const { rangeToken, anchor } = resolveOriginDefaultKey(now, logExtents)
+  const { rangeToken, anchor } = resolveOriginDefaultKey(now)
 
   // Without a service id the backend 400s — bail so the page builds the client
   // key path and fetches once it has a service.

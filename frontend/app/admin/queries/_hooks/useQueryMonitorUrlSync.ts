@@ -43,10 +43,9 @@ export function useQueryMonitorUrlSync(
 ): void {
   const hydratedRef = React.useRef(false)
 
-  // Hydrate from URL on first mount. The dependency array is intentionally
-  // empty — re-running this on setter identity changes would clobber
-  // user-driven state updates with the (now-stale) URL on every render.
-  React.useEffect(() => {
+  // Hydrate from URL on first mount only — re-running on setter identity changes
+  // would clobber user-driven state updates with the (now-stale) URL on every render.
+  const hydrateFromUrl = React.useEffectEvent(() => {
     if (hydratedRef.current) return
     if (typeof window === 'undefined') return
     const p = new URLSearchParams(window.location.search)
@@ -69,7 +68,9 @@ export function useQueryMonitorUrlSync(
     // negative so the default URL stays clean.
     if (p.get('nogroup') === '1') setters.setGroupCrons(false)
     hydratedRef.current = true
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  })
+  React.useEffect(() => {
+    hydrateFromUrl()
   }, [])
 
   // Write state → URL on every change after hydration. Each param is

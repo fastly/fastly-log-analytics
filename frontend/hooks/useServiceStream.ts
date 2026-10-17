@@ -72,12 +72,7 @@ interface UseServiceStreamOpts {
  * immediately, exactly as before.
  */
 function useServiceStoreHydrated(): boolean {
-  const persist = (useServiceStore as unknown as {
-    persist?: {
-      hasHydrated?: () => boolean
-      onFinishHydration?: (cb: () => void) => () => void
-    }
-  }).persist
+  const persist = useServiceStore.persist
   // useSyncExternalStore (not useState+useEffect) so the read is SSR-safe and
   // free of setState-in-effect: server + first-client snapshot agree (both
   // pre-rehydrate → false), then onFinishHydration nudges React to re-read

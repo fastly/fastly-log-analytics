@@ -59,26 +59,23 @@ export default async function SecurityPage({
     firstParam(params.service) ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   return (
     <Suspense fallback={<SecurityLoading />}>
-      <SecurityPageContent serviceId={serviceId} logExtents={logExtents} />
+      <SecurityPageContent serviceId={serviceId} />
     </Suspense>
   )
 }
 
 async function SecurityPageContent({
   serviceId,
-  logExtents,
 }: {
   serviceId: string | undefined
-  logExtents: unknown
 }) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveSecurityDefaultKey + fetchSecurityServerSide both floor it).
   const now = new Date()
-  const seed = await fetchSecurityServerSide(serviceId, now, logExtents)
+  const seed = await fetchSecurityServerSide(serviceId, now)
 
   const dehydratedState = seed
     ? seedDehydratedState(

@@ -302,7 +302,7 @@ function DataTableImpl<TData, TValue>({
     }
   }
 
-  const tableHeader = React.useMemo(() => (
+  const tableHeader = (
     <TableHeader>
       {table.getHeaderGroups().map((headerGroup) => (
         <TableRow key={headerGroup.id}>
@@ -317,10 +317,7 @@ function DataTableImpl<TData, TValue>({
         </TableRow>
       ))}
     </TableHeader>
-  // columnVisibility is a dep because TanStack Table's `table` ref is stable
-  // across visibility changes — without it the header would show stale columns.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [table, columnOrder, columnVisibility, columnSizing])
+  )
 
   return (
     <div className="w-full">

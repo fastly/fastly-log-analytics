@@ -65,11 +65,13 @@ export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPicke
   // the operator to pick before they even know what's available. Only
   // fires while the field is still at its untouched default (null) so it
   // never clobbers an explicit choice.
-  React.useEffect(() => {
+  const seedLatest = React.useEffectEvent(() => {
     if (latest && value === null) {
       onChange(latest);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed-once on latest arrival, not on every value/onChange identity change
+  });
+  React.useEffect(() => {
+    seedLatest();
   }, [latest]);
 
   if (isLoading) {

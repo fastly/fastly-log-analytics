@@ -452,11 +452,8 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         // table below still renders the data; show a placeholder instead of
         // throwing into the route error boundary.
         map.current = null
-        // Error-recovery path only: fires at most once and never on a normal
-        // render, so the "cascading renders" concern this rule guards against
-        // doesn't apply (same try/catch shape as ImpossibleDistanceModal).
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setMapError(true)
+        // Reported from a microtask: MapLibre's failure is an external-system event, not render state.
+        queueMicrotask(() => setMapError(true))
       }
     }
 

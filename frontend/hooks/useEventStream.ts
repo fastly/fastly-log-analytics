@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { parseSSEFrames } from '@/lib/sse-parser'
 
 /**
@@ -201,28 +201,17 @@ export function useEventStream(
 ): { state: SSEConnectionState } {
   const [state, setState] = useState<SSEConnectionState>('idle')
 
-  const onEventRef = useRef(onEvent)
-  const onStateChangeRef = useRef(opts.onStateChange)
-  const requestRef = useRef(request)
-  // Keep the stale-callback / latest-request refs fresh WITHOUT making them
-  // reconnect triggers. Updated in an effect (not during render) so the
-  // react-hooks/refs rule is satisfied; declared before the connection effect
-  // so the refs are current by the time a reconnect-triggering re-run reads
-  // them. Initial mount is covered by the useRef initial values above.
-  useEffect(() => {
-    onEventRef.current = onEvent
-    onStateChangeRef.current = opts.onStateChange
-    requestRef.current = request
-  })
+  // Effect events read the latest callbacks / request without making them reconnect triggers.
+  const emitEvent = useEffectEvent(onEvent)
+  const emitState = useEffectEvent((next: SSEConnectionState) => opts.onStateChange?.(next))
+  const latestRequest = useEffectEvent(() => request)
 
   const key = requestKey(enabled ? request : null)
 
   useEffect(() => {
-    const req = requestRef.current
+    const req = latestRequest()
     if (!enabled || !req) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setState('idle')
-      onStateChangeRef.current?.('idle')
+      emitState('idle')
       return
     }
 
@@ -233,7 +222,7 @@ export function useEventStream(
     const safeSetState = (next: SSEConnectionState) => {
       if (!cancelled) {
         setState(next)
-        onStateChangeRef.current?.(next)
+        emitState(next)
       }
     }
 
@@ -257,7 +246,7 @@ export function useEventStream(
               if (!dataLine) return
               const raw = dataLine.slice('data:'.length).trim()
               if (!raw) return
-              onEventRef.current(raw)
+              emitEvent(raw)
             },
           })
         } catch (err) {
@@ -281,11 +270,11 @@ export function useEventStream(
     return () => {
       cancelled = true
       abort.abort()
+      setState('idle')
     }
-    // `key` captures every reconnect-worthy change in `request`; `request`
-    // itself is read from a ref so a new-identity object with the same key
-    // doesn't churn the connection. onEvent is deliberately excluded (see doc).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `key` captures every reconnect-worthy change in `request`; the request
+    // itself is read through an effect event so a new-identity object with the
+    // same key doesn't churn the connection.
   }, [enabled, key])
 
   return { state }

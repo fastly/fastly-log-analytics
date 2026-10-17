@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -115,27 +115,17 @@ function SyncStatusBadgeInner() {
 
   // a11y (WCAG 4.1.2): announce sync state transitions to screen readers
   // via an sr-only role="status" live region. We only fire on actual
-  // state changes (tracked via useRef) — not on every poll/render — so
-  // assistive tech doesn't spam "running" each time the badge re-renders.
-  const prevSyncStatusRef = useRef<string | null | undefined>(undefined)
+  // state changes (tracked against the previously rendered status) — not on every
+  // poll/render — so assistive tech doesn't spam "running" each time the badge re-renders.
+  const currentSyncStatus = lastSync?.status ?? null
+  const [prevSyncStatus, setPrevSyncStatus] = useState<string | null>(currentSyncStatus)
   const [a11yAnnouncement, setA11yAnnouncement] = useState<string>('')
-  useEffect(() => {
-    const current = lastSync?.status ?? null
-    const prev = prevSyncStatusRef.current
-    if (prev !== undefined && prev !== current) {
-      if (current === 'running') {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setA11yAnnouncement('Sync started')
-      } else if (current === 'error') {
-
-        setA11yAnnouncement('Sync errored')
-      } else if (prev === 'running' && current && current !== 'running') {
-
-        setA11yAnnouncement('Sync finished')
-      }
-    }
-    prevSyncStatusRef.current = current
-  }, [lastSync?.status])
+  if (prevSyncStatus !== currentSyncStatus) {
+    setPrevSyncStatus(currentSyncStatus)
+    if (currentSyncStatus === 'running') setA11yAnnouncement('Sync started')
+    else if (currentSyncStatus === 'error') setA11yAnnouncement('Sync errored')
+    else if (prevSyncStatus === 'running' && currentSyncStatus) setA11yAnnouncement('Sync finished')
+  }
 
   if (!activeServiceId) return null
   if (!status && !headerBadge) return null

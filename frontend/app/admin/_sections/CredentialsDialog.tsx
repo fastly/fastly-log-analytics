@@ -1,5 +1,5 @@
 'use client'
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -23,20 +23,16 @@ interface Props {
   initialMode: 'token' | 'manual'
 }
 
-export function CredentialsDialog({ service, onClose, initialMode }: Props) {
+/** Keyed so opening a different service (or mode) starts from fresh form state. */
+export function CredentialsDialog(props: Props) {
+  return <CredentialsDialogBody key={`${props.service?.service_id ?? ''}|${props.initialMode}`} {...props} />
+}
+
+function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
   const [credMode, setCredMode] = useState<'token' | 'manual'>(initialMode)
   const [credApiToken, setCredApiToken] = useState('')
   const [credAccessKey, setCredAccessKey] = useState('')
   const [credSecretKey, setCredSecretKey] = useState('')
-
-  // Reset local state whenever a new service is opened.
-  React.useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setCredMode(initialMode)
-    setCredApiToken('')
-    setCredAccessKey('')
-    setCredSecretKey('')
-  }, [service?.service_id, initialMode])
 
   const credentialsMutation = useMutation({
     mutationFn: async ({ service_id, payload }: { service_id: string; payload: { api_token: string } | { access_key: string; secret_key: string } }) => {

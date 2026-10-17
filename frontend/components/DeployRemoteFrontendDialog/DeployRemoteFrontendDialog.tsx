@@ -61,7 +61,7 @@ export function DeployRemoteFrontendDialog() {
   const [overrideHost, setOverrideHost] = React.useState('')
 
   // Step 3: Trigger Deployment State
-  const [serviceName, setServiceName] = React.useState('')
+  const [serviceNameDraft, setServiceName] = React.useState('')
   const [isServiceNameEdited, setIsServiceNameEdited] = React.useState(false)
   const [tokenOverride, setTokenOverride] = React.useState('')
   const [deploying, setDeploying] = React.useState(false)
@@ -76,10 +76,9 @@ export function DeployRemoteFrontendDialog() {
   // Clipboard hook for copying live link
   const { copied, copy } = useCopyToClipboard()
 
-  // Reset State on Open/Close
-  React.useEffect(() => {
-    if (open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+  // Reset all form state when the dialog opens.
+  const handleOpenChange = (next: boolean) => {
+    if (next) {
       setStep(1)
       setPrefix('')
       setIsCustom(false)
@@ -94,7 +93,8 @@ export function DeployRemoteFrontendDialog() {
       setDeployError('')
       setDeployResult(null)
     }
-  }, [open])
+    setOpen(next)
+  }
 
   // Computed Domain based on step 1 selections
   const computedDomain = React.useMemo(() => {
@@ -102,13 +102,12 @@ export function DeployRemoteFrontendDialog() {
     return isCustom ? prefix : `${prefix}.global.ssl.fastly.net`
   }, [prefix, isCustom])
 
-  // Auto-generate service name when domain changes, unless user edited it
-  React.useEffect(() => {
-    if (!isServiceNameEdited && computedDomain) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setServiceName(`Fastly Log Analytics Remote Frontend - ${computedDomain}`)
-    }
-  }, [computedDomain, isServiceNameEdited])
+  // The service name follows the domain until the user edits it.
+  const serviceName = isServiceNameEdited
+    ? serviceNameDraft
+    : computedDomain
+      ? `Fastly Log Analytics Remote Frontend - ${computedDomain}`
+      : ''
 
   // Handle Domain Verification
   const handleCheckDomain = async () => {
@@ -182,7 +181,7 @@ export function DeployRemoteFrontendDialog() {
   const canDeploy = !deploying && !!serviceName && canGoToStep3 && canGoToStep2
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger
         render={
           <Button variant="outline" className="gap-1.5 border-primary/20 hover:bg-primary/5">

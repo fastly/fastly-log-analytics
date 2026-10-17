@@ -1,6 +1,6 @@
 'use client'
 
-import React, { Suspense, useState, useEffect, useMemo, useCallback } from 'react'
+import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
@@ -352,15 +352,15 @@ function QueryPageInner() {
   // a custom query and shouldn't see it re-execute on every keystroke.
   // We also skip the very first paint unless the user signalled intent
   // (deep-link via See Raw Logs OR explicit Run click) — see hasUserRun.
+  const runStructured = useEffectEvent(() => {
+    pushHistory(structuredSql)
+    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
+  })
   useEffect(() => {
     if (mode !== 'structured') return
     if (!activeServiceId) return
     if (!hasUserRun) return
-    pushHistory(structuredSql)
-    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
-    // queryMutation/pushHistory are stable from useMutation/useCallback; we
-    // only want to re-fire when the generated SQL or run-time inputs change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    runStructured()
   }, [structuredSql, mode, activeServiceId, hasUserRun, maxRows, explain, dataset])
 
   const handleExportCSV = useCallback(() => {

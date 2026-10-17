@@ -73,26 +73,23 @@ export default async function OriginPage({
     firstParam(params.service) ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   return (
     <Suspense fallback={<OriginLoading />}>
-      <OriginPageContent serviceId={serviceId} logExtents={logExtents} />
+      <OriginPageContent serviceId={serviceId} />
     </Suspense>
   )
 }
 
 async function OriginPageContent({
   serviceId,
-  logExtents,
 }: {
   serviceId: string | undefined
-  logExtents: unknown
 }) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveOriginDefaultKey + fetchOriginServerSide both floor it).
   const now = new Date()
-  const seed = await fetchOriginServerSide(serviceId, now, logExtents)
+  const seed = await fetchOriginServerSide(serviceId, now)
 
   // Seed under the EXACT client first-paint key. seedDehydratedState returns
   // null when seed is null, so a failed prefetch degrades to the client fetch.

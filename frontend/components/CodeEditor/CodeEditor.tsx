@@ -43,13 +43,6 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
   const isDark = theme === 'dark'
   const cmRef = React.useRef<ReactCodeMirrorRef | null>(null)
 
-  const schemaObj: Record<string, string[]> = {}
-  if (schema) {
-    const cols = schema.map(s => s.name)
-    schemaObj[tableName] = cols
-    if (tableName !== 'logs') schemaObj['logs'] = cols
-  }
-
   React.useImperativeHandle(
     ref,
     () => ({
@@ -97,9 +90,15 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
   // surface column completions without requiring `logs.` prefix —
   // matches what users get in Metabase / Snowsight.
   const sqlExtension = React.useMemo(
-    () => sql({ schema: schemaObj, defaultTable: tableName }),
-    // schemaObj is rebuilt every render; depend on its stable inputs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    () => {
+      const schemaObj: Record<string, string[]> = {}
+      if (schema) {
+        const cols = schema.map(s => s.name)
+        schemaObj[tableName] = cols
+        if (tableName !== 'logs') schemaObj['logs'] = cols
+      }
+      return sql({ schema: schemaObj, defaultTable: tableName })
+    },
     [schema, tableName],
   )
 

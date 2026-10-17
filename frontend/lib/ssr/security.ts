@@ -73,8 +73,6 @@ export interface SecuritySsrSeed {
  */
 export function resolveSecurityDefaultKey(
   now: Date = new Date(),
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
@@ -88,15 +86,12 @@ export function resolveSecurityDefaultKey(
  * @param serviceId   Active service id (from the SSR'd bootstrap). Without it the
  *                    backend's context resolution 400s — bail to client fetch.
  * @param now         Render instant; floored to the anchor quantum. Injectable.
- * @param logExtents  bootstrap.log_extents for serviceId, if available. See
- *                    resolveSecurityDefaultKey.
  */
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-  logExtents?: unknown,
 ): Promise<SecuritySsrSeed | null> {
-  const { rangeToken, anchor } = resolveSecurityDefaultKey(now, logExtents)
+  const { rangeToken, anchor } = resolveSecurityDefaultKey(now)
 
   if (!serviceId) return null
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useFilterStore } from '@/stores/filterStore'
 import { useShallow } from 'zustand/react/shallow'
 import { type ChartInterval, INTERVAL_SECONDS, INTERVALS } from '@/lib/constants'
@@ -82,19 +82,12 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
     }
   }, [startTime, endTime, chartInterval, manualInterval])
 
-  // Sync effective interval and validate trend
-  useEffect(() => {
-    if (config.effectiveInterval !== chartInterval) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setChartInterval(config.effectiveInterval)
-    }
-
-    if (!config.validTrends.has(trend)) {
-      setTrend('off')
-    }
-  }, [config, chartInterval, trend])
-
-
+  // Derive-during-render resets (React's sanctioned alternative to an effect that sets state).
+  if (config.effectiveInterval !== chartInterval) {
+    setChartInterval(config.effectiveInterval)
+  } else if (!config.validTrends.has(trend)) {
+    setTrend('off')
+  }
 
   return {
     metric,

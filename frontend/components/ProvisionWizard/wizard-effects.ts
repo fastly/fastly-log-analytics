@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useEffectEvent } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { client, extractApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -114,7 +114,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   ]);
 
   // After FOS check succeeds in the join flow, auto-proceed to lake analysis
-  useEffect(() => {
+  const autoAnalyzeLake = useEffectEvent(() => {
     if (
       fosStatus === "success" &&
       step === "join" &&
@@ -125,7 +125,9 @@ export function useWizardEffects(args: WizardEffectsArgs) {
     ) {
       handleAnalyzeLake();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    autoAnalyzeLake();
   }, [fosStatus]);
 
   // Auto-fetch NGWAF workspaces when entering the ngwaf step
@@ -162,7 +164,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   }, [step, selectedService?.id, token]);
 
   // Save ngwaf_workspace_id to local config after provisioning completes
-  useEffect(() => {
+  const persistNgwafWorkspace = useEffectEvent(() => {
     if (
       isDone &&
       step === "execute" &&
@@ -196,7 +198,9 @@ export function useWizardEffects(args: WizardEffectsArgs) {
           console.error("[wizard] failed to persist ngwaf_workspace_id:", e);
         });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    persistNgwafWorkspace();
   }, [isDone]);
 }
 

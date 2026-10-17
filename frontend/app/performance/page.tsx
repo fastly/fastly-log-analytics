@@ -49,26 +49,23 @@ export default async function PerformancePage({
     firstParam(params.service) ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   return (
     <Suspense fallback={<PerformanceLoading />}>
-      <PerformancePageContent serviceId={serviceId} logExtents={logExtents} />
+      <PerformancePageContent serviceId={serviceId} />
     </Suspense>
   )
 }
 
 async function PerformancePageContent({
   serviceId,
-  logExtents,
 }: {
   serviceId: string | undefined
-  logExtents: unknown
 }) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolvePerformanceDefaultKey + fetchPerformanceServerSide floor it).
   const now = new Date()
-  const seed = await fetchPerformanceServerSide(serviceId, now, logExtents)
+  const seed = await fetchPerformanceServerSide(serviceId, now)
 
   // Seed the single query key under one dehydrated state.
   let dehydratedState = null

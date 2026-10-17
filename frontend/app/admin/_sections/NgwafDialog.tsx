@@ -1,5 +1,5 @@
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -29,9 +29,14 @@ interface Props {
   onClose: () => void
 }
 
-export function NgwafDialog({ service, onClose }: Props) {
+/** Keyed on the service id so opening a different service starts from fresh form state. */
+export function NgwafDialog(props: Props) {
+  return <NgwafDialogBody key={props.service?.service_id ?? ''} {...props} />
+}
+
+function NgwafDialogBody({ service, onClose }: Props) {
   const queryClient = useQueryClient()
-  const [ngwafWorkspaceId, setNgwafWorkspaceId] = useState('')
+  const [ngwafWorkspaceId, setNgwafWorkspaceId] = useState(service?.ngwaf_workspace_id || '')
   const [ngwafWorkspaces, setNgwafWorkspaces] = useState<{ id: string; name: string }[]>([])
   const [ngwafFetchError, setNgwafFetchError] = useState('')
   const [ngwafFetching, setNgwafFetching] = useState(false)
@@ -43,17 +48,6 @@ export function NgwafDialog({ service, onClose }: Props) {
   // match in the backend lets through the legitimate admin flow without
   // requiring them to remember it from somewhere else.
   const [ngwafApiToken, setNgwafApiToken] = useState('')
-
-  // Re-init whenever a new service is opened.
-  useEffect(() => {
-    if (!service) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setNgwafWorkspaceId(service.ngwaf_workspace_id || '')
-    setNgwafWorkspaces([])
-    setNgwafFetchError('')
-    setNgwafSaved(false)
-    setNgwafApiToken('')
-  }, [service?.service_id])
 
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) onClose() }}>

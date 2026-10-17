@@ -14,17 +14,19 @@ import { CHART_COLORS } from '@/lib/chart-colors'
 
 type CoordTree = number | CoordTree[]
 
+const isPosition = (coords: CoordTree[]): coords is number[] => typeof coords[0] === 'number'
+
 function geoBbox(geometry: { coordinates: CoordTree[] }): [number, number, number, number] {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  const processCoord = ([x, y]: [number, number]) => {
+  const processCoord = ([x, y]: number[]) => {
     if (x < minX) minX = x
     if (y < minY) minY = y
     if (x > maxX) maxX = x
     if (y > maxY) maxY = y
   }
   const walk = (coords: CoordTree[]) => {
-    if (typeof coords[0] === 'number') { processCoord(coords as unknown as [number, number]); return }
-    for (const c of coords) walk(c as CoordTree[])
+    if (isPosition(coords)) { processCoord(coords); return }
+    for (const c of coords) if (Array.isArray(c)) walk(c)
   }
   walk(geometry.coordinates)
   return [minX, minY, maxX, maxY]
