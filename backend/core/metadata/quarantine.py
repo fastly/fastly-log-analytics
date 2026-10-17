@@ -1,4 +1,4 @@
-"""Quarantined-file tracking in metadata SQLite.
+"""Quarantined-file tracking in the metadata Postgres database.
 
 Tracks raw .gz files copied to the ``errors/`` FOS prefix because they
 contained corrupt/invalid lines during ingestion. Provides CRUD for the

@@ -1,4 +1,4 @@
-"""Cached ASN-name lookups against the ``asn_names`` table in metadata SQLite."""
+"""Cached ASN-name lookups against the ``asn_names`` table in the metadata Postgres database."""
 
 from __future__ import annotations
 

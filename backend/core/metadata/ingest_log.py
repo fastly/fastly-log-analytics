@@ -1,4 +1,4 @@
-"""Ingested-files tracking + dedup + activity reporting in metadata SQLite.
+"""Ingested-files tracking + dedup + activity reporting in the metadata Postgres database.
 
 Covers the ``ingested_files``, ``ingested_files_summary``, ``ingest_in_flight``,
 and ``local_compacted_files`` tables. Also exposes the helpers powering the

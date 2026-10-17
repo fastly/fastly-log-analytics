@@ -1,4 +1,4 @@
-"""Source registration + FOS/CDN usage telemetry against metadata SQLite.
+"""Source registration + FOS/CDN usage telemetry against the metadata Postgres database.
 
 Covers the ``sources``, ``usage_log``, and ``usage_log_hourly_summary``
 tables. The hourly summary is the rolled-up backstop that lets the admin

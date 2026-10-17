@@ -1,4 +1,4 @@
-"""Saved-dashboard-view CRUD against the ``views`` table in metadata SQLite."""
+"""Saved-dashboard-view CRUD against the ``views`` table in the metadata Postgres database."""
 
 from __future__ import annotations
 

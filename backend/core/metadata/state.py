@@ -1,4 +1,4 @@
-"""Audit log + applied-data-migration tracking against the metadata SQLite store.
+"""Audit log + applied-data-migration tracking against the metadata Postgres store.
 
 The audit log is mirrored across hosts via state_sync (export/import); the
 applied-data-migration table is local-only because each host runs its own

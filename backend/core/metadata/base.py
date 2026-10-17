@@ -30,13 +30,12 @@ from backend.core.metadata import pg_connection
 logger = logging.getLogger(__name__)
 
 # ``_DATA_DIR`` is retained (rather than deleted outright) because
-# ``backend.core.metadata.usage_log_db`` — still SQLite-backed, owned by a
-# separate migration task — imports it directly from this module, and
-# ``db_path()`` (below) is still called by out-of-scope callers
-# (``alerts.list_alerts_cross_service``, ``reconciliation``,
-# ``repositories._base.attach_metadata_db``) that build a per-service SQLite
-# path for their own (still-SQLite) purposes. Nothing in THIS module's
-# connection path (``get_con`` et al., all Postgres-only below) reads it.
+# ``backend.core.metadata.usage_log_db.db_path`` imports it directly from this
+# module, and ``db_path()`` (below) is still called by
+# ``alerts.list_alerts_cross_service``, ``reconciliation`` and
+# ``repositories._base.attach_metadata_db``, which build the legacy per-service
+# SQLite path for their own purposes. Nothing in THIS module's connection path
+# (``get_con`` et al., all Postgres-only below) reads it.
 _DATA_DIR = "data/services"
 
 # Process-wide cache of {service_id: set[file_name]} for ingest dedup.
