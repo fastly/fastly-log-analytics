@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
 from backend.core import metadata as metadata_db
 from backend.core.ingest import ingest
 from tests.core.test_ingest_partial_failure import (  # reuse fixture helpers
@@ -126,20 +124,6 @@ def test_concurrent_ingest_calls_one_wins_one_is_no_op(ingest_local_env, monkeyp
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "ingest_local_env fixture wires a single DuckDB _S3RewritingConn + "
-        "single MockFos client to one bucket; running two ingest() calls "
-        "with different service_ids over the same fixture means the second "
-        "source sees the first source's already-ingested files via the "
-        "shared cache and reports rows_inserted=0. Validating per-service "
-        "gate independence properly requires two fully-independent fixtures "
-        "(distinct buckets + distinct DuckDB connections) — out of scope "
-        "for the audit follow-up. The per-service scoping is exercised "
-        "indirectly by tests/core/test_cross_tenant_scope.py and "
-        "tests/test_multi_service_e2e.py."
-    )
-)
 def test_concurrent_ingest_on_different_sources_both_succeed(ingest_local_env, monkeypatch):  # noqa: F811
     """Two threads against two different ``service_id`` values BOTH win.
 
@@ -148,12 +132,36 @@ def test_concurrent_ingest_on_different_sources_both_succeed(ingest_local_env, m
     to a process-wide lock would surface as one thread becoming a 'loser'.
 
     We clone the fixture's source with a fresh name/service_id for the
-    second worker. metadata_db is service_id-keyed and the routed DuckDB +
-    mock-FOS layer doesn't care about source name, so they share a bucket.
+    second worker. metadata_db is service_id-keyed; each ingest gets its
+    own DuckDB connection and cache dir, and both share one mock bucket.
     """
+    import duckdb
+
+    import backend.core.duckdb as my_duckdb
+    from tests.core.test_ingest_partial_failure import _S3RewritingConn
+
     log_dir = ingest_local_env["log_dir"]
     src_a = dict(ingest_local_env["src"])
     src_b = {**src_a, "name": "test_service_b", "service_id": "test-service-b"}
+
+    # The shared fixture hands every ingest the SAME in-memory DuckDB
+    # connection and ONE cache dir, so two concurrent sources collide on the
+    # staging table and see each other's buffers. Give each ingest its own
+    # connection and a per-service cache dir — what production does, since
+    # each service has its own pool/cache.
+    bucket_prefix = f"s3://{src_a['bucket']}/"
+    file_prefix = "file://" + str(log_dir.absolute()) + "/"
+    opened: list = []
+
+    def fresh_memory_connection(_src):
+        con = duckdb.connect(":memory:")
+        opened.append(con)
+        return _S3RewritingConn(con, bucket_prefix, file_prefix)
+
+    monkeypatch.setattr(my_duckdb, "get_memory_connection", fresh_memory_connection)
+    monkeypatch.setattr(
+        my_duckdb, "_cache_dir", lambda s: str(log_dir.parent / "cache" / str(s.get("service_id") or s["name"]))
+    )
 
     key_a = "raw/2026-06-11/09/2026-06-11T09-00-00.a.gz"
     key_b = "raw/2026-06-11/09/2026-06-11T09-00-00.b.gz"
