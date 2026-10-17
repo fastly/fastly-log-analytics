@@ -7,8 +7,6 @@ omits whatever a given branch did not set. Telemetry keys injected by
 
 from __future__ import annotations
 
-from typing import Any
-
 from backend.models._base import WireSafeModel
 
 
@@ -42,6 +40,74 @@ class RumBeaconHealthResponse(WireSafeModel):
     message: str | None = None
 
 
+# Numeric fields below are ``int | float`` (not ``float``) so an integer the
+# producer emitted (an INP p75, a whole-number average) stays ``5`` on the wire
+# instead of being coerced to ``5.0``.
+RumNumber = int | float
+
+
+class RumCwvDistribution(WireSafeModel):
+    good: int
+    needs_improvement: int
+    poor: int
+
+
+class RumCwvVital(WireSafeModel):
+    """One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch."""
+
+    p75: RumNumber | None
+    distribution: RumCwvDistribution | None
+
+
+class RumFidVital(WireSafeModel):
+    p75: RumNumber | None
+    fcp: RumNumber | None
+    ttfb: RumNumber | None
+
+
+class RumVitals(WireSafeModel):
+    lcp: RumCwvVital
+    cls: RumCwvVital
+    inp: RumCwvVital
+    fid: RumFidVital
+
+
+class RumWorstPage(WireSafeModel):
+    path: str
+    views: int
+    avg_load_time: RumNumber
+    lcp_p75: RumNumber | None
+    cls_p75: RumNumber | None
+    error_rate: RumNumber
+
+
+class RumJsError(WireSafeModel):
+    message: str | None
+    file: str
+    line: int
+    col: int
+    count: int
+
+
+class RumTrends(WireSafeModel):
+    """Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``
+    are absent on the no-data branch."""
+
+    timestamps: list[str]
+    lcp: list[RumNumber | None]
+    cls: list[RumNumber | None]
+    error_rate: list[RumNumber | None]
+    pageviews: list[int] | None = None
+    interactions: list[int] | None = None
+    errors: list[int] | None = None
+
+
+class RumEnvironments(WireSafeModel):
+    browsers: dict[str, int]
+    os: dict[str, int]
+    devices: dict[str, int]
+
+
 class RumAnalyticsResponse(WireSafeModel):
     """``GET /{service_id}/rum/analytics`` (data, no-data and failure branches)."""
 
@@ -53,8 +119,8 @@ class RumAnalyticsResponse(WireSafeModel):
     error_count: int | None = None
     message: str | None = None
     error: str | None = None
-    vitals: dict[str, Any] | None = None
-    worst_pages: list[dict[str, Any]] | None = None
-    errors: list[dict[str, Any]] | None = None
-    trends: dict[str, Any] | None = None
-    environments: dict[str, Any] | None = None
+    vitals: RumVitals | None = None
+    worst_pages: list[RumWorstPage] | None = None
+    errors: list[RumJsError] | None = None
+    trends: RumTrends | None = None
+    environments: RumEnvironments | None = None

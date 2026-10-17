@@ -8,14 +8,45 @@ may hold non-JSON natives, so they keep the ``jsonable_encoder`` encoding.
 
 from __future__ import annotations
 
-from backend.models._base import JsonAny, JsonDict, JsonRows, WireSafeModel
+from typing import Any
+
+from backend.models._base import JsonAny, JsonDict, WireSafeModel
+
+
+class CeleryActiveTask(WireSafeModel):
+    """One entry of Celery ``inspect().active()``; other inspect keys ride as extras."""
+
+    id: str
+    name: str
+    args: list[Any]
+    time_start: int | float
+
+
+class CeleryWorkers(WireSafeModel):
+    """``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
+    ``error`` is present only when the inspect call failed."""
+
+    active_tasks: dict[str, list[CeleryActiveTask]]
+    stats: JsonDict
+    registered: dict[str, list[str]]
+    scheduled: JsonDict
+    count: int
+    error: str | None = None
+
+
+class CeleryScheduleEntry(WireSafeModel):
+    name: str
+    task: str
 
 
 class CeleryStatusResponse(WireSafeModel):
+    """``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
+    summed across services, so both keep open string keys."""
+
     broker_reachable: bool | None = None
-    workers: JsonDict | None = None
+    workers: CeleryWorkers | None = None
     queues: dict[str, int] | None = None
-    schedules: JsonRows | None = None
+    schedules: list[CeleryScheduleEntry] | None = None
     ledger: dict[str, int] | None = None
 
 

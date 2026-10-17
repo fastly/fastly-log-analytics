@@ -7734,26 +7734,79 @@ export interface components {
             /** Query Id */
             query_id: number;
         };
-        /** CeleryStatusResponse */
+        /**
+         * CeleryActiveTask
+         * @description One entry of Celery ``inspect().active()``; other inspect keys ride as extras.
+         */
+        CeleryActiveTask: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Args */
+            args: unknown[];
+            /** Time Start */
+            time_start: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CeleryScheduleEntry */
+        CeleryScheduleEntry: {
+            /** Name */
+            name: string;
+            /** Task */
+            task: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CeleryStatusResponse
+         * @description ``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
+         *     summed across services, so both keep open string keys.
+         */
         CeleryStatusResponse: {
             /** Broker Reachable */
             broker_reachable?: boolean | null;
-            /** Workers */
-            workers?: {
-                [key: string]: unknown;
-            } | null;
+            workers?: components["schemas"]["CeleryWorkers"] | null;
             /** Queues */
             queues?: {
                 [key: string]: number;
             } | null;
             /** Schedules */
-            schedules?: {
-                [key: string]: unknown;
-            }[] | null;
+            schedules?: components["schemas"]["CeleryScheduleEntry"][] | null;
             /** Ledger */
             ledger?: {
                 [key: string]: number;
             } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CeleryWorkers
+         * @description ``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
+         *     ``error`` is present only when the inspect call failed.
+         */
+        CeleryWorkers: {
+            /** Active Tasks */
+            active_tasks: {
+                [key: string]: components["schemas"]["CeleryActiveTask"][];
+            };
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+            /** Registered */
+            registered: {
+                [key: string]: string[];
+            };
+            /** Scheduled */
+            scheduled: {
+                [key: string]: unknown;
+            };
+            /** Count */
+            count: number;
+            /** Error */
+            error?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -13510,26 +13563,13 @@ export interface components {
             message?: string | null;
             /** Error */
             error?: string | null;
-            /** Vitals */
-            vitals?: {
-                [key: string]: unknown;
-            } | null;
+            vitals?: components["schemas"]["RumVitals"] | null;
             /** Worst Pages */
-            worst_pages?: {
-                [key: string]: unknown;
-            }[] | null;
+            worst_pages?: components["schemas"]["RumWorstPage"][] | null;
             /** Errors */
-            errors?: {
-                [key: string]: unknown;
-            }[] | null;
-            /** Trends */
-            trends?: {
-                [key: string]: unknown;
-            } | null;
-            /** Environments */
-            environments?: {
-                [key: string]: unknown;
-            } | null;
+            errors?: components["schemas"]["RumJsError"][] | null;
+            trends?: components["schemas"]["RumTrends"] | null;
+            environments?: components["schemas"]["RumEnvironments"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -13560,6 +13600,28 @@ export interface components {
             estimated_class_a_ops: number;
             /** Estimated Cost Usd */
             estimated_cost_usd: number;
+        };
+        /** RumCwvDistribution */
+        RumCwvDistribution: {
+            /** Good */
+            good: number;
+            /** Needs Improvement */
+            needs_improvement: number;
+            /** Poor */
+            poor: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumCwvVital
+         * @description One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch.
+         */
+        RumCwvVital: {
+            /** P75 */
+            p75: number | null;
+            distribution: components["schemas"]["RumCwvDistribution"] | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * RumDisableRequest
@@ -13604,6 +13666,49 @@ export interface components {
              * @default true
              */
             activate: boolean;
+        };
+        /** RumEnvironments */
+        RumEnvironments: {
+            /** Browsers */
+            browsers: {
+                [key: string]: number;
+            };
+            /** Os */
+            os: {
+                [key: string]: number;
+            };
+            /** Devices */
+            devices: {
+                [key: string]: number;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumFidVital */
+        RumFidVital: {
+            /** P75 */
+            p75: number | null;
+            /** Fcp */
+            fcp: number | null;
+            /** Ttfb */
+            ttfb: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumJsError */
+        RumJsError: {
+            /** Message */
+            message: string | null;
+            /** File */
+            file: string;
+            /** Line */
+            line: number;
+            /** Col */
+            col: number;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * RumSettingsPartial
@@ -13697,6 +13802,29 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * RumTrends
+         * @description Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``
+         *     are absent on the no-data branch.
+         */
+        RumTrends: {
+            /** Timestamps */
+            timestamps: string[];
+            /** Lcp */
+            lcp: (number | null)[];
+            /** Cls */
+            cls: (number | null)[];
+            /** Error Rate */
+            error_rate: (number | null)[];
+            /** Pageviews */
+            pageviews?: number[] | null;
+            /** Interactions */
+            interactions?: number[] | null;
+            /** Errors */
+            errors?: number[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * RumUpgradeRequest
          * @description Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
          *     Faro Web SDK version and reconcile the deployed bundle to match.
@@ -13737,6 +13865,32 @@ export interface components {
              * @default false
              */
             update_available: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumVitals */
+        RumVitals: {
+            lcp: components["schemas"]["RumCwvVital"];
+            cls: components["schemas"]["RumCwvVital"];
+            inp: components["schemas"]["RumCwvVital"];
+            fid: components["schemas"]["RumFidVital"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumWorstPage */
+        RumWorstPage: {
+            /** Path */
+            path: string;
+            /** Views */
+            views: number;
+            /** Avg Load Time */
+            avg_load_time: number;
+            /** Lcp P75 */
+            lcp_p75: number | null;
+            /** Cls P75 */
+            cls_p75: number | null;
+            /** Error Rate */
+            error_rate: number;
         } & {
             [key: string]: unknown;
         };

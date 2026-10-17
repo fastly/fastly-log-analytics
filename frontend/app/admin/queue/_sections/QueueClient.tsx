@@ -23,33 +23,15 @@ import { queryKeys } from '@/lib/query-keys'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 
-interface CeleryStatusResponse {
-  broker_reachable?: boolean
-  queues?: Record<string, number>
-  workers?: {
-    count: number
-    active_tasks: Record<string, { id: string; name: string; args: unknown[]; time_start: number }[]>
-    stats: Record<string, unknown>
-    registered: Record<string, string[]>
-    scheduled: Record<string, unknown[]>
-    error?: string
-  }
-  schedules?: Array<{
-    name: string
-    task: string
-  }>
-  ledger?: Record<string, number>
-}
-
 export function QueueClient() {
   const { state: sseConnected } = useAdminEventStream(true, ['celery-status'])
 
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.admin.celeryStatus(),
-    queryFn: async ({ signal }): Promise<CeleryStatusResponse> => {
+    queryFn: async ({ signal }) => {
       const { data, response } = await client.GET('/api/admin/celery/status', { signal })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return data as unknown as CeleryStatusResponse
+      if (!response.ok || !data) throw new Error(`HTTP ${response.status}`)
+      return data
     },
     // We only poll if SSE isn't fully established as a fallback,
     // otherwise the stream pushes to this query key directly.

@@ -19,9 +19,15 @@ def _expected(payload):
 def test_celery_status_matches_producer(client, monkeypatch):
     payload = {
         "broker_reachable": True,
-        "workers": {"active_tasks": {"w1": []}, "stats": {}, "registered": {}, "scheduled": {}, "count": 0},
+        "workers": {
+            "active_tasks": {"w1": [{"id": "t1", "name": "n", "args": [1], "time_start": 2.5, "worker_pid": 7}]},
+            "stats": {"w1": {"started": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}},
+            "registered": {"w1": ["a.b"]},
+            "scheduled": {},
+            "count": 1,
+        },
         "queues": {"q.ingest": 3},
-        "schedules": [{"name": "job", "next_run": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}],
+        "schedules": [{"name": "job", "task": "backend.tasks.job"}],
         "ledger": {"committed": 5},
     }
     monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)

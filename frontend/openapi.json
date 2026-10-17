@@ -55803,6 +55803,63 @@
         "title": "CancelResponse",
         "description": "Outcome of ``POST /api/admin/queries/{qid}/cancel``."
       },
+      "CeleryActiveTask": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "args": {
+            "items": {},
+            "type": "array",
+            "title": "Args"
+          },
+          "time_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Time Start"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "args",
+          "time_start"
+        ],
+        "title": "CeleryActiveTask",
+        "description": "One entry of Celery ``inspect().active()``; other inspect keys ride as extras."
+      },
+      "CeleryScheduleEntry": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "task": {
+            "type": "string",
+            "title": "Task"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "task"
+        ],
+        "title": "CeleryScheduleEntry"
+      },
       "CeleryStatusResponse": {
         "properties": {
           "broker_reachable": {
@@ -55819,14 +55876,12 @@
           "workers": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/CeleryWorkers"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Workers"
+            ]
           },
           "queues": {
             "anyOf": [
@@ -55846,8 +55901,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CeleryScheduleEntry"
                 },
                 "type": "array"
               },
@@ -55874,7 +55928,68 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "CeleryStatusResponse"
+        "title": "CeleryStatusResponse",
+        "description": "``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``\nsummed across services, so both keep open string keys."
+      },
+      "CeleryWorkers": {
+        "properties": {
+          "active_tasks": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/CeleryActiveTask"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Active Tasks"
+          },
+          "stats": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Stats"
+          },
+          "registered": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Registered"
+          },
+          "scheduled": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Scheduled"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "active_tasks",
+          "stats",
+          "registered",
+          "scheduled",
+          "count"
+        ],
+        "title": "CeleryWorkers",
+        "description": "``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;\n``error`` is present only when the inspect call failed."
       },
       "CheckFosRequest": {
         "properties": {
@@ -70521,21 +70636,18 @@
           "vitals": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/RumVitals"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Vitals"
+            ]
           },
           "worst_pages": {
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/RumWorstPage"
                 },
                 "type": "array"
               },
@@ -70549,8 +70661,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/RumJsError"
                 },
                 "type": "array"
               },
@@ -70563,26 +70674,22 @@
           "trends": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/RumTrends"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Trends"
+            ]
           },
           "environments": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/RumEnvironments"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Environments"
+            ]
           }
         },
         "additionalProperties": true,
@@ -70691,6 +70798,66 @@
         ],
         "title": "RumBreakdownPoint"
       },
+      "RumCwvDistribution": {
+        "properties": {
+          "good": {
+            "type": "integer",
+            "title": "Good"
+          },
+          "needs_improvement": {
+            "type": "integer",
+            "title": "Needs Improvement"
+          },
+          "poor": {
+            "type": "integer",
+            "title": "Poor"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "good",
+          "needs_improvement",
+          "poor"
+        ],
+        "title": "RumCwvDistribution"
+      },
+      "RumCwvVital": {
+        "properties": {
+          "p75": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P75"
+          },
+          "distribution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RumCwvDistribution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "p75",
+          "distribution"
+        ],
+        "title": "RumCwvVital",
+        "description": "One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch."
+      },
       "RumDisableRequest": {
         "properties": {
           "token": {
@@ -70734,6 +70901,134 @@
         "type": "object",
         "title": "RumEnableRequest",
         "description": "Body for ``POST /api/services/{service_id}/rum/enable`` \u2014 selective\nonboarding/enabling of Real User Monitoring (RUM)."
+      },
+      "RumEnvironments": {
+        "properties": {
+          "browsers": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Browsers"
+          },
+          "os": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Os"
+          },
+          "devices": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Devices"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "browsers",
+          "os",
+          "devices"
+        ],
+        "title": "RumEnvironments"
+      },
+      "RumFidVital": {
+        "properties": {
+          "p75": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P75"
+          },
+          "fcp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fcp"
+          },
+          "ttfb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttfb"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "p75",
+          "fcp",
+          "ttfb"
+        ],
+        "title": "RumFidVital"
+      },
+      "RumJsError": {
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "file": {
+            "type": "string",
+            "title": "File"
+          },
+          "line": {
+            "type": "integer",
+            "title": "Line"
+          },
+          "col": {
+            "type": "integer",
+            "title": "Col"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "message",
+          "file",
+          "line",
+          "col",
+          "count"
+        ],
+        "title": "RumJsError"
       },
       "RumSettingsPartial": {
         "properties": {
@@ -70988,6 +71283,120 @@
         "title": "RumStatusResponse",
         "description": "``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys."
       },
+      "RumTrends": {
+        "properties": {
+          "timestamps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Timestamps"
+          },
+          "lcp": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Lcp"
+          },
+          "cls": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Cls"
+          },
+          "error_rate": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Error Rate"
+          },
+          "pageviews": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pageviews"
+          },
+          "interactions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interactions"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "timestamps",
+          "lcp",
+          "cls",
+          "error_rate"
+        ],
+        "title": "RumTrends",
+        "description": "Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``\nare absent on the no-data branch."
+      },
       "RumUpgradeRequest": {
         "properties": {
           "version": {
@@ -71054,6 +71463,104 @@
         "type": "object",
         "title": "RumVersionsResponse",
         "description": "Response for ``GET /api/services/{service_id}/rum/versions`` \u2014\navailable Faro Web SDK releases plus the operator's pinned/latest\nstate. Only returned on a successful registry lookup; a registry\nfailure surfaces as 503 instead of a degraded body (see the handler)."
+      },
+      "RumVitals": {
+        "properties": {
+          "lcp": {
+            "$ref": "#/components/schemas/RumCwvVital"
+          },
+          "cls": {
+            "$ref": "#/components/schemas/RumCwvVital"
+          },
+          "inp": {
+            "$ref": "#/components/schemas/RumCwvVital"
+          },
+          "fid": {
+            "$ref": "#/components/schemas/RumFidVital"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "lcp",
+          "cls",
+          "inp",
+          "fid"
+        ],
+        "title": "RumVitals"
+      },
+      "RumWorstPage": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "views": {
+            "type": "integer",
+            "title": "Views"
+          },
+          "avg_load_time": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Avg Load Time"
+          },
+          "lcp_p75": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lcp P75"
+          },
+          "cls_p75": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cls P75"
+          },
+          "error_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Error Rate"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "path",
+          "views",
+          "avg_load_time",
+          "lcp_p75",
+          "cls_p75",
+          "error_rate"
+        ],
+        "title": "RumWorstPage"
       },
       "SavedView": {
         "properties": {

@@ -14,7 +14,7 @@ import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
 import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
-import type { Expect, WireParity, components } from '@/types/api';
+import type { WithRequired, components } from '@/types/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 import {
@@ -44,58 +44,17 @@ interface CwvColors {
   label: string;
 }
 
-interface RumWorstPage {
-  path: string;
-  views: number;
-  avg_load_time: number | null;
-  lcp_p75: number | null;
-  cls_p75: number | null;
-}
+type RumWire = components['schemas']['RumAnalyticsResponse']
+type RumWorstPage = components['schemas']['RumWorstPage']
+type RumJsError = components['schemas']['RumJsError']
+type RumCwvDistribution = components['schemas']['RumCwvDistribution']
 
-interface RumJsError {
-  message: string;
-  file: string;
-  line: number;
-  col: number;
-  count: number;
-}
-
-interface CwvVital {
-  p75: number | null;
-  distribution: { good: number; needs_improvement: number; poor: number };
-}
-
-// The wire models vitals/trends/environments as free dicts, so their nested
-// shapes are local narrowings; the top-level keys stay pinned by the guard below.
-interface RumAnalytics {
-  is_mock?: boolean;
-  no_data?: boolean;
-  beacon_count: number;
-  pageview_count?: number;
-  interaction_count?: number;
-  error_count?: number;
-  message?: string;
-  error?: string;
-  vitals: { lcp: CwvVital; cls: CwvVital; inp: CwvVital };
-  worst_pages: RumWorstPage[];
-  errors: RumJsError[];
-  trends: {
-    timestamps?: string[];
-    lcp: number[];
-    cls: number[];
-    error_rate: number[];
-    pageviews?: number[];
-    interactions?: number[];
-    errors?: number[];
-  };
-  environments: {
-    browsers: Record<string, number>;
-    os: Record<string, number>;
-    devices: Record<string, number>;
-  };
-}
-
-type _RumAnalyticsParity = Expect<WireParity<RumAnalytics, components['schemas']['RumAnalyticsResponse']>>
+// Every data-branch response carries these; the all-optional wire model only
+// omits them on the 500 path, which never reaches this consumer.
+type RumAnalytics = WithRequired<
+  RumWire,
+  'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'
+>
 
 type RumLiveEvent = {
   time: string;
@@ -432,7 +391,9 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   const inpColors = getInpColors(analytics.vitals.inp.p75);
 
   // Distribution helper
-  const renderDistributionBar = (dist: { good: number; needs_improvement: number; poor: number }) => (
+  const renderDistributionBar = (distribution: RumCwvDistribution | null) => {
+    const dist = distribution ?? { good: 0, needs_improvement: 0, poor: 0 };
+    return (
     <div className="w-full mt-2">
       <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-secondary">
         <div style={{ width: `${dist.good}%` }} className="bg-emerald-500" title={`Good: ${dist.good}%`} />
@@ -445,7 +406,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <span>{dist.poor}% Poor</span>
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-6">

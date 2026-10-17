@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tests.conftest import MOCK_SERVICE_ID
@@ -56,12 +58,48 @@ def _body(resp):
                 "interaction_count": 0,
                 "error_count": 0,
                 "message": "Waiting",
-                "vitals": {"lcp": {"p75": None, "distribution": None}},
+                "vitals": {
+                    "lcp": {"p75": None, "distribution": None},
+                    "cls": {"p75": None, "distribution": None},
+                    "inp": {"p75": None, "distribution": None},
+                    "fid": {"p75": None, "fcp": None, "ttfb": None},
+                },
                 "worst_pages": [],
                 "errors": [],
-                "trends": {"timestamps": []},
-                "environments": {"browsers": {}},
+                "trends": {"timestamps": [], "lcp": [], "cls": [], "error_rate": []},
+                "environments": {"browsers": {}, "os": {}, "devices": {}},
                 "_debug_queries": [],
+            },
+        ),
+        (
+            "RumAnalyticsResponse",
+            {
+                "is_mock": False,
+                "no_data": False,
+                "beacon_count": 12,
+                "pageview_count": 10,
+                "interaction_count": 1,
+                "error_count": 1,
+                "vitals": {
+                    "lcp": {"p75": 2.5, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
+                    "cls": {"p75": 0.1, "distribution": {"good": 90, "needs_improvement": 10, "poor": 0}},
+                    "inp": {"p75": 180, "distribution": {"good": 70, "needs_improvement": 20, "poor": 10}},
+                    "fid": {"p75": 3.0, "fcp": 1.2, "ttfb": 0.4},
+                },
+                "worst_pages": [
+                    {"path": "/a", "views": 4, "avg_load_time": 1, "lcp_p75": None, "cls_p75": 0.05, "error_rate": 0.0}
+                ],
+                "errors": [{"message": "boom", "file": "a.js", "line": 3, "col": 4, "count": 2}],
+                "trends": {
+                    "timestamps": ["2026-01-01T00:00:00+00:00"],
+                    "lcp": [None],
+                    "cls": [0.1],
+                    "error_rate": [0.0],
+                    "pageviews": [10],
+                    "interactions": [1],
+                    "errors": [1],
+                },
+                "environments": {"browsers": {"Chrome": 9}, "os": {"macOS": 9}, "devices": {"desktop": 9}},
             },
         ),
     ],
@@ -70,7 +108,10 @@ def test_rum_models_roundtrip(model_name, payload):
     from backend.models import rum
 
     model = getattr(rum, model_name)
-    assert model.model_validate(payload).model_dump(mode="json") == payload
+    validated = model.model_validate(payload)
+    assert validated.model_dump(mode="json") == payload
+    # Same bytes, not just equal values: an int must not come back as 5.0.
+    assert validated.model_dump_json() == json.dumps(payload, separators=(",", ":"))
 
 
 def test_scoring_status_route_disabled_shape(client, monkeypatch):

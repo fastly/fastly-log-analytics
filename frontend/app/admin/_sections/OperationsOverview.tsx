@@ -27,24 +27,12 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
-import type { Expect, WireParity } from '@/types/api'
 import { adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 import { queryKeys } from '@/lib/query-keys'
 
 const POLL_MS = 10_000
-
-// The wire models workers/queues/ledger as free dicts, so these nested shapes
-// are local narrowings; the top-level keys stay pinned by the parity guard.
-type CeleryStatus = {
-  broker_reachable?: boolean
-  workers?: { count?: number }
-  queues?: Record<string, number>
-  schedules?: Record<string, unknown>[]
-  ledger?: { dead_letter?: number; quarantined?: number }
-}
-export type _CeleryStatusParity = Expect<WireParity<CeleryStatus, components['schemas']['CeleryStatusResponse']>>
 
 type SummaryResponse = components['schemas']['SummaryResponse']
 type LogAccountingResponse = components['schemas']['LogAccountingResponse']
@@ -359,10 +347,10 @@ function OverviewCard({
 // ── Card 4: Celery Status ───────────────────────────────────────────
 
 function CeleryStatusCard() {
-  const { data, isFetching, isLoading, isError } = useQuery<CeleryStatus>({
+  const { data, isFetching, isLoading, isError } = useQuery({
     queryKey: queryKeys.admin.overviewCeleryStatus(),
     queryFn: async ({ signal }) => {
-      return adminJson<'/api/admin/celery/status', CeleryStatus>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
+      return adminJson<'/api/admin/celery/status'>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
     },
     retry: false,
     staleTime: POLL_MS,

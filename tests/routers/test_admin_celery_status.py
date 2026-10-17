@@ -28,7 +28,9 @@ def test_celery_status_success(client):
         patch("backend.celery_status._get_redis", return_value=_mock_redis(queues, redbeat)),
     ):
         mock_i = MagicMock()
-        mock_i.active.return_value = {"worker1": ["task1"]}
+        mock_i.active.return_value = {
+            "worker1": [{"id": "t1", "name": "backend.tasks.ingest", "args": ["svc1"], "time_start": 1.5}]
+        }
         mock_i.stats.return_value = {"worker1": {"pool": {}}}
         mock_i.registered.return_value = {"worker1": ["task_a"]}
         mock_i.scheduled.return_value = {"worker1": ["task_b"]}
@@ -39,7 +41,9 @@ def test_celery_status_success(client):
         data = resp.json()
         assert data["broker_reachable"] is True
         assert data["workers"]["count"] == 1
-        assert data["workers"]["active_tasks"] == {"worker1": ["task1"]}
+        assert data["workers"]["active_tasks"] == {
+            "worker1": [{"id": "t1", "name": "backend.tasks.ingest", "args": ["svc1"], "time_start": 1.5}]
+        }
         # Known queues are always reported (LLEN on a missing list is 0);
         # discovered q.* queues are included too.
         assert data["queues"]["q.ingest"] == 5
