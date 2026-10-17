@@ -16,9 +16,10 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
+import type { PlotlyTrace } from '@/types/plotly'
 
 vi.mock('@/components/charts/TimeSeriesChart', () => ({
-  TimeSeriesChart: ({ data }: { data: any[] }) => (
+  TimeSeriesChart: ({ data }: { data: PlotlyTrace[] }) => (
     <div data-testid="timeseries-chart">
       <span data-testid="trace-count">{data?.length ?? 0}</span>
     </div>
@@ -49,6 +50,7 @@ vi.mock('@/hooks/useActiveLogFields', () => ({
 
 import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'
+import { partial } from '../../helpers/partial'
 
 const catalog = {
   fields: [
@@ -62,11 +64,11 @@ const catalog = {
   ],
 }
 
-const config = {
+const config = partial<ReportConfiguration>({
   effectiveInterval: '1 hour',
   validIntervals: new Set(['1 hour']),
   validTrends: new Set(['off', 'auto', '1m', '5m', '1h', '1d']),
-} as unknown as ReportConfiguration
+})
 
 function renderChart(overrides: Partial<React.ComponentProps<typeof TrafficChart>> = {}) {
   const defaults: React.ComponentProps<typeof TrafficChart> = {

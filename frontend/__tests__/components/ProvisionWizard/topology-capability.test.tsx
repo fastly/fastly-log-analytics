@@ -36,7 +36,7 @@ function makeState(overrides: Partial<WizardState> = {}): WizardState {
     isCheckingConfig: false,
     handleCheckConfig: vi.fn(),
     ...overrides,
-  } as unknown as WizardState;
+  } as WizardState;
 }
 
 describe("ProvisionWizard topology capability", () => {

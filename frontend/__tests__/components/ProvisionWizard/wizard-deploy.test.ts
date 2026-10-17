@@ -14,6 +14,7 @@
  * exercises browser-only `URL.createObjectURL` plumbing not present in
  * jsdom. The other 5 exports are covered.
  */
+import { without } from '@/__tests__/helpers/partial'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
@@ -294,7 +295,7 @@ describe('runDeploy', () => {
 
   it('passes log_fields=null when missing', () => {
     const args = makeArgs({
-      config: { ...FULL_CONFIG, log_fields: undefined as unknown as never },
+      config: without(FULL_CONFIG, 'log_fields') as typeof FULL_CONFIG,
     })
     runDeploy(args)
     const [, body] = (args.start as ReturnType<typeof vi.fn>).mock.calls[0]

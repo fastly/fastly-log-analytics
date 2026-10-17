@@ -16,6 +16,7 @@ import userEvent from '@testing-library/user-event'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useServiceStore } from '@/stores/serviceStore'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { stubResizeObserver } from '../helpers/browser-stubs'
 
 // ServiceSwitcher calls useQueryClient() (it invalidates the bootstrap query
 // on switch), so every render needs a QueryClientProvider. One fresh client
@@ -25,11 +26,7 @@ const renderSwitcher = () => render(<ServiceSwitcher />, { wrapper: makeQueryWra
 
 // cmdk requires ResizeObserver; jsdom doesn't ship one.
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as any
+  stubResizeObserver()
 })
 
 vi.mock('next/navigation', () => ({
@@ -44,10 +41,10 @@ beforeEach(() => {
   queryClient.clear()
   useServiceStore.setState({
     services: [
-      { id: 'svc-alpha', name: 'Alpha Service' } as any,
-      { id: 'svc-beta', name: 'Beta Service' } as any,
-      { id: 'svc-gamma', name: 'Gamma Service' } as any,
-      { id: 'svc-delta', name: 'Delta Service' } as any,
+      { id: 'svc-alpha', name: 'Alpha Service' },
+      { id: 'svc-beta', name: 'Beta Service' },
+      { id: 'svc-gamma', name: 'Gamma Service' },
+      { id: 'svc-delta', name: 'Delta Service' },
     ],
     activeServiceId: 'svc-alpha',
   })

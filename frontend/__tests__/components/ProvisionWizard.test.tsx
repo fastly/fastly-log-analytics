@@ -44,9 +44,9 @@ vi.mock("@/hooks/useSSE", () => ({
 // Lucide icons often cause issues in Vitest if they use SVG primitives that
 // jsdom doesn't fully support or if they are imported as ES modules.
 vi.mock("lucide-react", async () => {
-  const actual = await vi.importActual("lucide-react");
+  const actual = await vi.importActual<Record<string, unknown>>("lucide-react");
   return {
-    ...actual as any,
+    ...actual,
     // Provide simple component mocks for the ones used in the first steps
     ChevronRight: () => <div data-testid="icon-chevron-right" />,
     Plus: () => <div data-testid="icon-plus" />,

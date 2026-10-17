@@ -10,14 +10,14 @@ const { setWorkerUrl, constructedWithWorker } = vi.hoisted(() => ({
 }))
 
 vi.mock('maplibre-gl', () => {
-  const module = maplibreMockFactory()
-  class PrewarmMap extends module.Map {
-    constructor(options: ConstructorParameters<typeof module.Map>[0]) {
+  const mapMock = maplibreMockFactory()
+  class PrewarmMap extends mapMock.Map {
+    constructor(options: ConstructorParameters<typeof mapMock.Map>[0]) {
       constructedWithWorker(setWorkerUrl.mock.calls.at(-1)?.[0])
       super(options)
     }
   }
-  return { ...module, Map: PrewarmMap, setWorkerUrl }
+  return { ...mapMock, Map: PrewarmMap, setWorkerUrl }
 })
 
 it('configures the worker before prewarming without another map component present', async () => {

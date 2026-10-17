@@ -26,7 +26,7 @@ import type { ColumnDef } from '@tanstack/react-table'
 
 vi.mock('@tanstack/react-virtual', () => {
   return {
-    useVirtualizer: (options: any) => ({
+    useVirtualizer: (options: { count: number }) => ({
       getVirtualItems: () => Array.from({ length: options.count }).map((_, i) => ({ index: i, start: i * 40, end: (i + 1) * 40 })),
       getTotalSize: () => options.count * 40,
     })

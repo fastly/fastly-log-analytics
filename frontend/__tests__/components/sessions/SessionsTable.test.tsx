@@ -27,7 +27,7 @@ import type { SessionsResponse } from '@/types/api'
 type SessionRow = components['schemas']['Session']
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count: number }) => ({
     getVirtualItems: () =>
       Array.from({ length: options.count }).map((_, i) => ({
         index: i,

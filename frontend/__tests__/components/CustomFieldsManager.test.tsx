@@ -4,6 +4,7 @@ import { expect, test, vi } from 'vitest'
 import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
+import type { components } from '@/types/api.generated'
 import React from 'react'
 
 Object.defineProperty(window, 'matchMedia', {
@@ -25,6 +26,7 @@ const queryClient = new QueryClient()
 test('renders custom fields and handles deletion', async () => {
   const user = userEvent.setup()
   vi.spyOn(customFieldsApi.customFieldsApi, 'listCustomFields').mockResolvedValue({
+    _is_cached: false,
     fields: [
       {
         name: 'test_field_1',
@@ -32,6 +34,7 @@ test('renders custom fields and handles deletion', async () => {
         description: 'A test field',
         vcl_log_expression: 'req.http.Host',
         collection_stage: 'edge',
+        origin_log_frequency: 'all',
         duckdb_type: 'VARCHAR',
         value_type: 'string',
         bytes_estimate: 20,
@@ -42,9 +45,9 @@ test('renders custom fields and handles deletion', async () => {
         filterable: true
       }
     ]
-  } as any)
+  })
 
-  const deleteSpy = vi.spyOn(customFieldsApi.customFieldsApi, 'deleteCustomField').mockResolvedValue({} as any)
+  const deleteSpy = vi.spyOn(customFieldsApi.customFieldsApi, 'deleteCustomField').mockResolvedValue({} as components['schemas']['CustomFieldResponse'])
 
   render(
     <QueryClientProvider client={queryClient}>

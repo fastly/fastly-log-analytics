@@ -18,7 +18,7 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, type QueryCacheNotifyEvent } from '@tanstack/react-query'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
@@ -248,7 +248,7 @@ describe('DebugPanel — dedup + lifecycle', () => {
     // setState fires; if it were false we'd see "2 queries".
     await act(async () => {
       const q = qc.getQueryCache().find({ queryKey: ['debug-fixture', 'one'] })!
-      qc.getQueryCache().notify({ type: 'updated', query: q } as any)
+      qc.getQueryCache().notify({ type: 'updated', query: q } as QueryCacheNotifyEvent)
     })
     await new Promise((r) => setTimeout(r, 10))
     expect(screen.getByRole('button', { name: /Show 1 queries/i })).toBeInTheDocument()

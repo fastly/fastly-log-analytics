@@ -22,14 +22,14 @@ import React from 'react'
 // In tests we collapse it to a synchronous passthrough so the
 // ChoroplethMap mock below renders on first paint.
 vi.mock('next/dynamic', () => ({
-  default: (loader: any) => {
-    const Comp = (props: any) => {
-      const [C, setC] = React.useState<any>(null)
+  default: (loader: () => unknown) => {
+    const Comp = (props: Record<string, unknown>) => {
+      const [C, setC] = React.useState<React.ComponentType<Record<string, unknown>> | null>(null)
       React.useEffect(() => {
         let alive = true
-        Promise.resolve(loader()).then((mod: any) => {
+        Promise.resolve(loader()).then((mod) => {
           if (!alive) return
-          setC(() => (mod?.default ?? mod))
+          setC(() => (mod as { default?: React.ComponentType<Record<string, unknown>> } | null)?.default ?? (mod as React.ComponentType<Record<string, unknown>>))
         })
         return () => {
           alive = false
@@ -59,15 +59,15 @@ vi.mock('@/hooks/useActiveLogFields', () => ({
 }))
 
 vi.mock('@/components/Map/ChoroplethMap', () => ({
-  ChoroplethMap: ({ data, onCountryClick }: { data: any[]; onCountryClick: (c: string) => void }) => (
+  ChoroplethMap: ({ data, onCountryClick }: { data: Array<{ country?: string; name?: string }>; onCountryClick: (c: string) => void }) => (
     <div data-testid="choropleth-map">
       <span data-testid="marker-count">{data?.length ?? 0}</span>
-      {(data ?? []).map((row: any) => (
+      {(data ?? []).map((row) => (
         <button
           key={row.country ?? row.name}
           type="button"
           data-testid={`country-${row.country ?? row.name}`}
-          onClick={() => onCountryClick(row.country ?? row.name)}
+          onClick={() => onCountryClick(row.country ?? row.name ?? "")}
         >
           {row.country ?? row.name}
         </button>

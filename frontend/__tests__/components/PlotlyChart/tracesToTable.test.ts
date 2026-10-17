@@ -4,9 +4,9 @@ import { tracesToTable } from '@/components/PlotlyChart/tracesToTable'
 
 describe('tracesToTable', () => {
   it('returns an empty shape when data is not an array', () => {
-    expect(tracesToTable(null as any)).toMatchObject({ empty: true, rows: [] })
-    expect(tracesToTable({} as any)).toMatchObject({ empty: true, rows: [] })
-    expect(tracesToTable(undefined as any)).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable(null)).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable({})).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable(undefined)).toMatchObject({ empty: true, rows: [] })
   })
 
   it('returns an empty shape when data is an empty array', () => {
@@ -77,7 +77,7 @@ describe('tracesToTable', () => {
   })
 
   it('replaces null/undefined y values with empty string (no "undefined" rendering)', () => {
-    const data = [{ type: 'scatter', name: 'A', x: ['t1', 't2', 't3'], y: [1, null as any, undefined as any] }]
+    const data = [{ type: 'scatter', name: 'A', x: ['t1', 't2', 't3'], y: [1, null, undefined] }]
     const out = tracesToTable(data)
     expect(out.rows).toEqual([
       ['t1', 1],

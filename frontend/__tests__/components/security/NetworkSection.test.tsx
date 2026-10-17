@@ -10,11 +10,16 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import React from 'react'
+import type React from 'react'
+import type { components } from '@/types/api.generated'
+import type { PlotlyChart } from '@/components/PlotlyChart'
 
-const plotlyMock = vi.fn((_props: any) => <div data-testid="plotly-chart" />)
+type PlotlyProps = React.ComponentProps<typeof PlotlyChart>
+type SecurityData = components['schemas']['SecurityAggregatesResponse']
+
+const plotlyMock = vi.fn<(props: PlotlyProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
 vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: any) => plotlyMock(props),
+  PlotlyChart: (props: PlotlyProps) => plotlyMock(props),
 }))
 
 vi.mock('@/lib/date', () => ({
@@ -37,6 +42,33 @@ vi.mock('@/hooks/useActiveLogFields', () => ({
 }))
 
 import { NetworkSection } from '@/app/security/_sections/NetworkSection'
+
+function securityData(overrides: Partial<SecurityData>): SecurityData {
+  return {
+    _is_cached: false,
+    tls_fingerprints: [],
+    fingerprint_coverage: {},
+    req_size_dist: [],
+    top_ips_header: [],
+    ipv6_adoption: [],
+    proxy_dist: [],
+    conn_reuse_dist: [],
+    verified_bots_ts: [],
+    ngwaf_configured: false,
+    ngwaf_verified_bots: [],
+    ngwaf_verified_bots_ts: [],
+    wellknown_bots: [],
+    bots: [],
+    ngwaf_bots: [],
+    active_proxies_count: 0,
+    tunnel_requests_count: 0,
+    distance_mismatches_count: 0,
+    traffic_quality: [],
+    suspicious_isps: [],
+    active_clients: [],
+    ...overrides,
+  }
+}
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkSection>> = {}) {
   return {
@@ -73,7 +105,7 @@ describe('NetworkSection', () => {
     render(
       <NetworkSection
         {...baseProps({
-          data: { ipv6_adoption: [], proxy_dist: [], conn_reuse_dist: [] } as any,
+          data: securityData({}),
         })}
       />
     )
@@ -95,7 +127,7 @@ describe('NetworkSection', () => {
     render(
       <NetworkSection
         {...baseProps({
-          data: { ipv6_adoption: [], proxy_dist: [], conn_reuse_dist: [] } as any,
+          data: securityData({}),
         })}
       />
     )
@@ -108,7 +140,7 @@ describe('NetworkSection', () => {
     render(
       <NetworkSection
         {...baseProps({
-          data: {
+          data: securityData({
             ipv6_adoption: [
               { time: '2026-01-01T00:00:00Z', pct: 42 },
               { time: '2026-01-01T01:00:00Z', pct: 51 },
@@ -123,7 +155,7 @@ describe('NetworkSection', () => {
               { bucket: '2-5', count: 1200 },
               { bucket: '6-10', count: 900 },
             ],
-          } as any,
+          }),
         })}
       />
     )
@@ -132,18 +164,18 @@ describe('NetworkSection', () => {
     const [ipv6Call, proxyCall, reuseCall] = plotlyMock.mock.calls.map((c) => c[0])
 
     // IPv6 trace: useTimeseriesToTraces config = pct → "IPv6 %"
-    expect(ipv6Call.data[0].name).toBe('IPv6 %')
-    expect(ipv6Call.data[0].y).toEqual([42, 51])
+    expect(ipv6Call.data[0]?.name).toBe('IPv6 %')
+    expect(ipv6Call.data[0]?.y).toEqual([42, 51])
 
     // Proxy donut: pie with hole=0.4, labels = types, values = counts
-    expect(proxyCall.data[0].type).toBe('pie')
-    expect(proxyCall.data[0].labels).toEqual(['residential', 'hosting', 'tor'])
-    expect(proxyCall.data[0].values).toEqual([800, 150, 5])
+    expect(proxyCall.data[0]?.type).toBe('pie')
+    expect(proxyCall.data[0]?.labels).toEqual(['residential', 'hosting', 'tor'])
+    expect(proxyCall.data[0]?.values).toEqual([800, 150, 5])
 
     // Connection reuse: bar trace
-    expect(reuseCall.data[0].type).toBe('bar')
-    expect(reuseCall.data[0].x).toEqual(['1', '2-5', '6-10'])
-    expect(reuseCall.data[0].y).toEqual([300, 1200, 900])
+    expect(reuseCall.data[0]?.type).toBe('bar')
+    expect(reuseCall.data[0]?.x).toEqual(['1', '2-5', '6-10'])
+    expect(reuseCall.data[0]?.y).toEqual([300, 1200, 900])
   })
 
   it('opens the help dialog when the user clicks an AnalyticsCard help button', async () => {
@@ -151,7 +183,7 @@ describe('NetworkSection', () => {
     render(
       <NetworkSection
         {...baseProps({
-          data: { ipv6_adoption: [], proxy_dist: [], conn_reuse_dist: [] } as any,
+          data: securityData({}),
         })}
       />
     )

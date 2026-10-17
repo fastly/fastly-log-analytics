@@ -13,16 +13,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
 import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
 
 // Capture every Plot render so each test can pull its most recent props.
-const plotCalls: any[] = []
+type PlotStubProps = {
+  layout?: PlotlyLayout
+  config?: PlotlyConfig
+  onUpdate?: unknown
+  onInitialized: (figure: unknown, graphDiv: PlotlyGraphDiv) => void
+}
+const plotCalls: PlotStubProps[] = []
 
 // ``next/dynamic`` normally returns a lazy wrapper around the loader.
 // For tests, return a stub that records its props and renders a marker.
 vi.mock('next/dynamic', () => ({
   __esModule: true,
-  default: (_loader: any, _opts: any) => {
-    const Stub = (props: any) => {
+  default: () => {
+    const Stub = (props: PlotStubProps) => {
       plotCalls.push(props)
       return <div data-testid="plot-stub" />
     }
@@ -35,10 +42,10 @@ vi.mock('next-themes', () => ({
 }))
 
 // IntersectionObserver: capture the callback so tests can fire it.
-let lastIOCallback: ((entries: any[]) => void) | null = null
+let lastIOCallback: ((entries: Array<{ isIntersecting: boolean }>) => void) | null = null
 let lastIOOptions: IntersectionObserverInit | null = null
 class MockIntersectionObserver {
-  constructor(cb: (entries: any[]) => void, options?: IntersectionObserverInit) {
+  constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void, options?: IntersectionObserverInit) {
     lastIOCallback = cb
     lastIOOptions = options ?? null
   }
@@ -61,8 +68,8 @@ beforeEach(() => {
   plotCalls.length = 0
   lastIOCallback = null
   lastIOOptions = null
-  vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as any)
-  vi.stubGlobal('ResizeObserver', MockResizeObserver as any)
+  vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+  vi.stubGlobal('ResizeObserver', MockResizeObserver)
 })
 
 describe('PlotlyChart', () => {
@@ -99,12 +106,12 @@ describe('PlotlyChart', () => {
       />,
     )
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
-    const props = plotCalls.at(-1)
-    expect(props.layout.legend.orientation).toBe('v')
-    expect(props.layout.legend.x).toBe(0.5)
-    expect(props.layout.xaxis.type).toBe('date')
-    expect(props.layout.xaxis.range).toEqual(['a', 'b'])
-    expect(props.layout.yaxis.title).toBe('count')
+    const props = plotCalls.at(-1)!
+    expect(props.layout?.legend?.orientation).toBe('v')
+    expect(props.layout?.legend?.x).toBe(0.5)
+    expect(props.layout?.xaxis?.type).toBe('date')
+    expect(props.layout?.xaxis?.range).toEqual(['a', 'b'])
+    expect(props.layout?.yaxis?.title).toBe('count')
   })
 
   it('always renders the ChartA11yTable companion alongside the chart', () => {
@@ -121,15 +128,15 @@ describe('PlotlyChart', () => {
     const onRelayout = vi.fn()
     render(<PlotlyChart data={[]} onRelayout={onRelayout} a11yTitle="x" />)
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
-    const props = plotCalls.at(-1)
+    const props = plotCalls.at(-1)!
     // Simulate Plotly invoking onInitialized with a fake graphDiv that
     // records ``on(eventName, handler)`` so we can fire it manually.
-    let handler: ((e: any) => void) | undefined
-    const fakeGraphDiv = {
-      on: (name: string, h: (e: any) => void) => {
+    let handler: ((e: PlotlyRelayoutEvent) => void) | undefined
+    const fakeGraphDiv: PlotlyGraphDiv = Object.assign(document.createElement('div'), {
+      on: (name: string, h: (e: PlotlyRelayoutEvent) => void) => {
         if (name === 'plotly_relayout') handler = h
       },
-    }
+    })
     await act(async () => {
       props.onInitialized({}, fakeGraphDiv)
     })
@@ -142,9 +149,9 @@ describe('PlotlyChart', () => {
     const onUpdate = vi.fn()
     render(<PlotlyChart data={[]} onUpdate={onUpdate} a11yTitle="x" />)
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
-    const props = plotCalls.at(-1)
-    expect(props.config.responsive).toBe(true)
-    expect(props.config.displayModeBar).toBe(false)
+    const props = plotCalls.at(-1)!
+    expect(props.config?.responsive).toBe(true)
+    expect(props.config?.displayModeBar).toBe(false)
     expect(props.onUpdate).toBe(onUpdate)
   })
 })

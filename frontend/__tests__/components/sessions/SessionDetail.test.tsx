@@ -14,7 +14,7 @@
  * the timeline to render.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
@@ -31,7 +31,7 @@ const postMock = vi.fn()
 
 vi.mock('@/lib/api', () => ({
   client: {
-    POST: (...args: any[]) => postMock(...args),
+    POST: (...args: unknown[]) => postMock(...args),
     GET: vi.fn(),
     use: vi.fn(),
   },
@@ -46,7 +46,7 @@ vi.mock('@/hooks/useFieldLabel', () => ({
 
 // Virtualizer needs to enumerate every row for jsdom layout-free tests.
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count: number }) => ({
     getVirtualItems: () =>
       Array.from({ length: options.count }).map((_, i) => ({
         index: i,

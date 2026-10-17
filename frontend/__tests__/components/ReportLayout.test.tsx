@@ -38,7 +38,7 @@ vi.mock('@/hooks/useReportConfig', () => ({
 }))
 
 vi.mock('@/components/ReportShell', () => ({
-  ReportShell: ({ children, title }: any) => (
+  ReportShell: ({ children, title }: { children?: React.ReactNode; title?: React.ReactNode }) => (
     <div>
       <h1>{title}</h1>
       {children}
@@ -54,8 +54,10 @@ function wrapper() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
   })
-  return ({ children }: { children: React.ReactNode }) =>
-    React.createElement(QueryClientProvider, { client: qc }, children)
+  function TestWrapper({ children }: { children: React.ReactNode }) {
+    return React.createElement(QueryClientProvider, { client: qc }, children)
+  }
+  return TestWrapper
 }
 
 describe('ReportLayout', () => {

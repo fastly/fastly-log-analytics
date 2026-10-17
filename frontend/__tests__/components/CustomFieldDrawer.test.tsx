@@ -21,16 +21,15 @@
  */
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
-import React from 'react'
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({
-  default: ({ value, onChange }: any) => (
+  default: ({ value, onChange }: { value?: string; onChange: (next: string) => void }) => (
     <textarea
       data-testid="mock-monaco"
       value={value}
@@ -93,7 +92,7 @@ test('submits valid custom field and displays validation errors when invalid', a
     errors: [],
     warnings: [],
     format_length_limit: 8000,
-  } as any)
+  })
 
   vi.spyOn(customFieldsApi.customFieldsApi, 'createCustomField').mockRejectedValueOnce(
     new Error('Field name must be lowercase alphanumeric + underscore'),
@@ -154,7 +153,26 @@ test('submits valid custom field and displays validation errors when invalid', a
   fireEvent.change(nameInput, { target: { value: 'valid_name' } })
 
   vi.spyOn(customFieldsApi.customFieldsApi, 'createCustomField').mockResolvedValueOnce(
-    {} as any,
+    {
+      _is_cached: false,
+      field: {
+        name: 'valid_name',
+        label: 'My Bad Field!',
+        description: '',
+        vcl_log_expression: 'req.http.Host',
+        collection_stage: 'edge',
+        origin_log_frequency: 'all',
+        duckdb_type: 'VARCHAR',
+        value_type: 'string',
+        bytes_estimate: 32,
+        nullable: true,
+        enabled: true,
+        show_in_dashboard: false,
+        show_in_logs: false,
+        filterable: false,
+      },
+      warnings: [],
+    },
   )
 
   await user.click(saveBtn)
@@ -177,7 +195,7 @@ test('CustomFieldDrawer has no axe-detectable a11y violations', async () => {
     errors: [],
     warnings: [],
     format_length_limit: 8000,
-  } as any)
+  })
 
   const { container } = render(
     <QueryClientProvider client={queryClient}>

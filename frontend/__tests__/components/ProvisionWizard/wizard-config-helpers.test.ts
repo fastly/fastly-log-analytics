@@ -14,6 +14,7 @@
  * frontend-coverage path (file was 1.8% covered pre-test) — pure
  * functions, no React, no MSW.
  */
+import { without } from '@/__tests__/helpers/partial'
 import { describe, it, expect } from 'vitest'
 
 import {
@@ -113,9 +114,9 @@ describe('buildToggleGroup', () => {
 
   it('tolerates a config with no groups array set yet', () => {
     const toggle = buildToggleGroup(CATALOG)
-    const config = {
+    const config: typeof INITIAL_CONFIG = {
       ...INITIAL_CONFIG,
-      log_fields: { ...INITIAL_CONFIG.log_fields, groups: undefined as unknown as string[] },
+      log_fields: without(INITIAL_CONFIG.log_fields, 'groups') as typeof INITIAL_CONFIG.log_fields,
     }
     const next = toggle(config, 'core', true)
     expect(next.log_fields.groups).toEqual(['core'])
@@ -149,8 +150,7 @@ describe('applyToggleField', () => {
     const config = {
       ...INITIAL_CONFIG,
       log_fields: {
-        ...INITIAL_CONFIG.log_fields,
-        field_overrides: undefined as unknown as Record<string, boolean>,
+        ...without(INITIAL_CONFIG.log_fields, 'field_overrides'),
       },
     }
     const next = applyToggleField(config, 'cookie_id', false, true)
@@ -196,8 +196,7 @@ describe('applyUpdateFieldLimit', () => {
     const config = {
       ...INITIAL_CONFIG,
       log_fields: {
-        ...INITIAL_CONFIG.log_fields,
-        field_limits: undefined as unknown as Record<string, number>,
+        ...without(INITIAL_CONFIG.log_fields, 'field_limits'),
       },
     }
     const next = applyUpdateFieldLimit(config, 'url', 4096)

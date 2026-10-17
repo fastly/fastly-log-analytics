@@ -11,29 +11,40 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { ComponentProps } from 'react'
 import React from 'react'
+import { partial } from '../../helpers/partial'
+import type { PlotlyChart } from '@/components/PlotlyChart'
 
-const plotlyMock = vi.fn((_props: any) => <div data-testid="plotly-chart" />)
+type PlotlyMockProps = ComponentProps<typeof PlotlyChart>
+const plotlyMock = vi.fn<(props: PlotlyMockProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
+type TableRow = { name?: string; bot_name?: string; fingerprint?: string }
+type ColumnVisibilityMockProps = {
+  columns: Array<{ id: string; label: string }>
+  onChange?: (id: string, visible: boolean) => void
+}
+type FilterValueCellMockProps = { display?: React.ReactNode; filters?: Array<{ value?: React.ReactNode }> }
 vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: any) => plotlyMock(props),
+  PlotlyChart: (props: PlotlyMockProps) => plotlyMock(props),
 }))
 
-const dataTableMock = vi.fn((_props: any) => null)
-const columnVisibilityMock = vi.fn((_props: any) => null)
+type DataTableMockProps = { data?: TableRow[]; emptyMessage?: string }
+const dataTableMock = vi.fn<(props: DataTableMockProps) => null>(() => null)
+const columnVisibilityMock = vi.fn<(props: ColumnVisibilityMockProps) => null>(() => null)
 vi.mock('@/components/DataTable', () => ({
-  DataTable: (props: any) => {
+  DataTable: (props: DataTableMockProps) => {
     dataTableMock(props)
     return (
       <div data-testid={`data-table-${props.data?.length ?? 0}`}>
         {props.data?.length === 0
           ? <span data-testid="empty">{props.emptyMessage}</span>
-          : props.data?.map((row: any, i: number) => (
-              <div key={i} data-testid="row">{row.name || row.bot_name || row.fingerprint}</div>
+          : props.data?.map((row) => (
+              <div key={row.name || row.bot_name || row.fingerprint} data-testid="row">{row.name || row.bot_name || row.fingerprint}</div>
             ))}
       </div>
     )
   },
-  ColumnVisibilityDropdown: (props: any) => {
+  ColumnVisibilityDropdown: (props: ColumnVisibilityMockProps) => {
     columnVisibilityMock(props)
     return (
       <button
@@ -48,7 +59,7 @@ vi.mock('@/components/DataTable', () => ({
 }))
 
 vi.mock('@/components/FilterValueCell', () => ({
-  FilterValueCell: (props: any) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
+  FilterValueCell: (props: FilterValueCellMockProps) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
 }))
 
 vi.mock('@/lib/date', () => ({
@@ -71,6 +82,8 @@ vi.mock('@/hooks/useActiveLogFields', () => ({
 }))
 
 import { BotsSection } from '@/app/security/_sections/BotsSection'
+
+type BotsData = NonNullable<React.ComponentProps<typeof BotsSection>['data']>
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof BotsSection>> = {}) {
   return {
@@ -122,13 +135,13 @@ describe('BotsSection', () => {
     render(
       <BotsSection
         {...baseProps({
-          data: {
+          data: partial<BotsData>({
             ngwaf_configured: true,
             ngwaf_verified_bots_ts: [],
             ngwaf_verified_bots: [],
             wellknown_bots: [],
             tls_fingerprints: [],
-          } as any,
+          }),
         })}
       />
     )
@@ -145,13 +158,13 @@ describe('BotsSection', () => {
     render(
       <BotsSection
         {...baseProps({
-          data: {
+          data: partial<BotsData>({
             ngwaf_configured: false,
             ngwaf_verified_bots_ts: [],
             ngwaf_verified_bots: [],
             wellknown_bots: [],
             tls_fingerprints: [],
-          } as any,
+          }),
         })}
       />
     )
@@ -160,13 +173,13 @@ describe('BotsSection', () => {
   })
 
   it('routes the TLS-fingerprint empty copy on field-active state', () => {
-    const emptyData = {
+    const emptyData = partial<BotsData>({
       ngwaf_configured: true,
       ngwaf_verified_bots_ts: [],
       ngwaf_verified_bots: [],
       wellknown_bots: [],
       tls_fingerprints: [],
-    } as any
+    })
 
     // Not enabled (no ja3/ja4 in the active format) → "Requires …" hint.
     const { unmount } = render(<BotsSection {...baseProps({ data: emptyData })} />)
@@ -191,7 +204,7 @@ describe('BotsSection', () => {
     render(
       <BotsSection
         {...baseProps({
-          data: {
+          data: partial<BotsData>({
             ngwaf_configured: true,
             ngwaf_verified_bots_ts: [
               { time: '2026-01-01T00:00:00Z', bot_name: 'OpenAI', count: 12 },
@@ -205,7 +218,7 @@ describe('BotsSection', () => {
               { id: 'gb', name: 'Googlebot', category: 'search-engine', request_count: 100, verified_count: 90, impersonator_count: 5, unverified_count: 3, pending_count: 2 },
             ],
             tls_fingerprints: [{ fingerprint: 'sha-abc', ip_count: 4, request_count: 50 }],
-          } as any,
+          }),
         })}
       />
     )
@@ -215,15 +228,15 @@ describe('BotsSection', () => {
     const traces = plotlyMock.mock.calls[0]![0].data
     expect(Array.isArray(traces)).toBe(true)
     expect(traces.length).toBe(2)
-    const names = traces.map((t: any) => t.name).sort()
+    const names = traces.map((t) => t.name).sort()
     expect(names).toEqual(['Anthropic', 'OpenAI'])
 
     // All three tables receive their respective rows.
     const tableProps = dataTableMock.mock.calls.map((c) => c[0])
     expect(tableProps).toHaveLength(3)
-    expect(tableProps[0].data).toHaveLength(1) // ngwaf_verified_bots
-    expect(tableProps[1].data).toHaveLength(1) // wellknown_bots
-    expect(tableProps[2].data).toHaveLength(1) // tls_fingerprints
+    expect(tableProps[0]?.data).toHaveLength(1) // ngwaf_verified_bots
+    expect(tableProps[1]?.data).toHaveLength(1) // wellknown_bots
+    expect(tableProps[2]?.data).toHaveLength(1) // tls_fingerprints
 
     // Custom-mocked DataTable renders the row label inline so a populated
     // row is observable from the DOM, not just from mock-call inspection.
@@ -235,7 +248,7 @@ describe('BotsSection', () => {
     render(
       <BotsSection
         {...baseProps({
-          data: {
+          data: partial<BotsData>({
             ngwaf_configured: true,
             ngwaf_verified_bots_ts: [],
             ngwaf_verified_bots: [],
@@ -243,7 +256,7 @@ describe('BotsSection', () => {
             tls_fingerprints: [],
             // tls 0.5% => hint (< 1% threshold)
             fingerprint_coverage: { tls_ciphers_sha: 0.005 },
-          } as any,
+          }),
         })}
       />
     )
@@ -257,13 +270,13 @@ describe('BotsSection', () => {
     render(
       <BotsSection
         {...baseProps({
-          data: {
+          data: partial<BotsData>({
             ngwaf_configured: true,
             ngwaf_verified_bots_ts: [],
             ngwaf_verified_bots: [],
             wellknown_bots: [],
             tls_fingerprints: [],
-          } as any,
+          }),
           onNgwafBotVisChange,
         })}
       />

@@ -55,7 +55,7 @@ const status = {
       last_active_time: '2026-06-05T10:00:00Z',
     },
   ],
-} as unknown as ShareStatus
+} as ShareStatus
 
 // Data rows only (drop the header row).
 const bodyRows = () => screen.getAllByRole('row').slice(1)

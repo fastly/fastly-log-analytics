@@ -7,6 +7,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { server } from '../../tests/msw/server'
+import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 
 const API_BASE = getApiBase()
@@ -49,7 +50,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof DeleteDataDialo
         access_level: 'read_write',
         duckdb_size_bytes: 5_000_000,
         cache_file_count: 12,
-      } as any}
+      } as ServiceConfig}
       open={true}
       onOpenChange={vi.fn()}
       {...props}
@@ -145,7 +146,7 @@ test('DeleteDataDialog blocks the Cancel/Close path while streaming and only off
   const qc = createTestQueryClient()
   const { rerender } = render(
     <DeleteDataDialog
-      service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as any}
+      service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as ServiceConfig}
       open={true}
       onOpenChange={onOpenChange}
     />,
@@ -159,7 +160,7 @@ test('DeleteDataDialog blocks the Cancel/Close path while streaming and only off
   // internal state set by the click above; a fresh render() would reset it.
   rerender(
     <DeleteDataDialog
-      service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as any}
+      service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as ServiceConfig}
       open={true}
       onOpenChange={onOpenChange}
     />,

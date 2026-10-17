@@ -45,7 +45,7 @@ vi.mock('@/hooks/useSSE', () => ({
 const mockAdminFetch = vi.fn()
 
 vi.mock('@/lib/api', () => ({
-  adminFetch: (...args: any[]) => mockAdminFetch(...args),
+  adminFetch: (...args: unknown[]) => mockAdminFetch(...args),
 }))
 
 vi.mock('@tanstack/react-query', () => ({

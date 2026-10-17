@@ -1,12 +1,12 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import React from 'react'
 
-import * as apiLib from '@/lib/api'
 import { server } from '@/tests/msw/server'
+import { useServiceStore } from '@/stores/serviceStore'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
+import type { ShareStatus } from '@/components/share-dashboard/utils'
 
 // Radix primitives (Dialog/Select/Checkbox) need these in jsdom.
 Object.defineProperty(window, 'matchMedia', {
@@ -24,7 +24,28 @@ Object.defineProperty(window, 'matchMedia', {
 })
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
-const services = [{ service_id: 'svcA', name: 'Service A' }] as any
+const services: ShareStatus['services'] = [{ service_id: 'svcA', name: 'Service A' }]
+
+interface InviteBody {
+  allow_concurrent_sessions?: boolean
+}
+
+// Captures the POSTed invite body over the wire instead of spying on the client.
+function captureInviteBody(): { current: InviteBody | undefined } {
+  const captured: { current: InviteBody | undefined } = { current: undefined }
+  server.use(
+    http.post('*/api/admin/share/invites', async ({ request }) => {
+      captured.current = (await request.json()) as InviteBody
+      return HttpResponse.json({ id: 'i1' })
+    }),
+  )
+  return captured
+}
+
+beforeEach(() => {
+  // The api-client middleware aborts requests when no service is active.
+  useServiceStore.setState({ activeServiceId: 'svcA' })
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -39,9 +60,7 @@ async function fillRequiredFields(user: ReturnType<typeof userEvent.setup>) {
 
 test('CreateInviteDialog sends allow_concurrent_sessions=true when the shared-logins box is checked', async () => {
   const user = userEvent.setup()
-  const postSpy = vi
-    .spyOn(apiLib.client, 'POST')
-    .mockResolvedValue({ data: { id: 'i1' } } as any)
+  const posted = captureInviteBody()
 
   render(
     <CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />,
@@ -51,16 +70,13 @@ test('CreateInviteDialog sends allow_concurrent_sessions=true when the shared-lo
   await user.click(screen.getByRole('checkbox', { name: /multiple people to use this link/i }))
   await user.click(screen.getByRole('button', { name: /create invite/i }))
 
-  await waitFor(() => expect(postSpy).toHaveBeenCalled())
-  const body = (postSpy.mock.calls[0][1] as any).body
-  expect(body.allow_concurrent_sessions).toBe(true)
+  await waitFor(() => expect(posted.current).toBeDefined())
+  expect(posted.current?.allow_concurrent_sessions).toBe(true)
 })
 
 test('CreateInviteDialog defaults allow_concurrent_sessions to false', async () => {
   const user = userEvent.setup()
-  const postSpy = vi
-    .spyOn(apiLib.client, 'POST')
-    .mockResolvedValue({ data: { id: 'i1' } } as any)
+  const posted = captureInviteBody()
 
   render(
     <CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />,
@@ -69,9 +85,8 @@ test('CreateInviteDialog defaults allow_concurrent_sessions to false', async () 
   await fillRequiredFields(user)
   await user.click(screen.getByRole('button', { name: /create invite/i }))
 
-  await waitFor(() => expect(postSpy).toHaveBeenCalled())
-  const body = (postSpy.mock.calls[0][1] as any).body
-  expect(body.allow_concurrent_sessions).toBe(false)
+  await waitFor(() => expect(posted.current).toBeDefined())
+  expect(posted.current?.allow_concurrent_sessions).toBe(false)
 })
 
 test('CreateInviteDialog OAuth mode hides the passcode field and shows the provider selector', async () => {

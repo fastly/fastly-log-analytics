@@ -89,8 +89,8 @@ test('hasCoords guard prevents .toFixed() crash on undefined pop coordinates', (
   // When pop_lat is undefined (unknown POP code), that threw TypeError.
   // The fix wraps the overlay in {hasCoords && (...)}.
   // Verify the guard logic directly — Number.isFinite rejects null, undefined, and NaN.
-  expect(Number.isFinite(undefined as any)).toBe(false)
-  expect(Number.isFinite(null as any)).toBe(false)
+  expect(Number.isFinite(undefined)).toBe(false)
+  expect(Number.isFinite(null)).toBe(false)
   expect(Number.isFinite(NaN)).toBe(false)
   expect(Number.isFinite(37.7749)).toBe(true)
 })

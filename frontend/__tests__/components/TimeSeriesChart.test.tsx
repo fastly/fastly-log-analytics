@@ -10,13 +10,16 @@
  */
 import { render } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { ComponentProps } from 'react'
 import React from 'react'
 
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import type { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
 
-const plotlyMock = vi.fn((_props: any) => <div data-testid="plotly-chart" />)
+type PlotlyChartProps = ComponentProps<typeof PlotlyChart>
+const plotlyMock = vi.fn<(props: PlotlyChartProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
 vi.mock('@/components/PlotlyChart/PlotlyChart', () => ({
-  PlotlyChart: (props: any) => plotlyMock(props),
+  PlotlyChart: (props: PlotlyChartProps) => plotlyMock(props),
 }))
 
 vi.mock('@/lib/chart-helpers', () => ({
@@ -58,12 +61,12 @@ describe('TimeSeriesChart', () => {
     )
     const layout = plotlyMock.mock.calls[0]![0].layout
     // Caller's hovermode overrides TIME_HOVER_LAYOUT's
-    expect(layout.hovermode).toBe('closest')
-    expect(layout.xaxis).toEqual({
+    expect(layout?.hovermode).toBe('closest')
+    expect(layout?.xaxis).toEqual({
       type: 'date',
       range: ['2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z'],
     })
-    expect(layout.yaxis).toEqual({ title: 'count' })
+    expect(layout?.yaxis).toEqual({ title: 'count' })
   })
 
   it('forwards className, height, and onRelayout to PlotlyChart', () => {
@@ -104,6 +107,6 @@ describe('TimeSeriesChart', () => {
     )
     const secondLayout = plotlyMock.mock.calls.at(-1)![0].layout
     expect(secondLayout).not.toBe(firstLayout)
-    expect(secondLayout.xaxis.range[1]).toBe('2026-01-01T02:00:00Z')
+    expect(secondLayout?.xaxis?.range?.[1]).toBe('2026-01-01T02:00:00Z')
   })
 })

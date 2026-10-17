@@ -17,6 +17,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AppLayout } from '@/components/AppLayout'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
+import { partial } from '../helpers/partial'
+import type { BootstrapResponse } from '@/types/api'
 import React from 'react'
 
 // AppLayout now calls useQueryClient() to implement the navigation-cancel
@@ -76,15 +78,17 @@ vi.mock('@/components/ui/scroll-area', () => ({
   ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
 
+type BootstrapData = BootstrapResponse
+
 // Real store for the test
 beforeEach(async () => {
   vi.clearAllMocks()
 
-  vi.mocked(useBootstrap).mockReturnValue({
-    data: { services: [{ id: 'test-svc', name: 'Test Service' }] },
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({ services: [{ id: 'test-svc', name: 'Test Service' }] }),
     isSuccess: true,
     isLoading: false,
-  } as any)
+  }))
 
   // Default useIsAnalyst implementation: mirror the prod hook's
   // serviceStore-accessLevel branch (the bootstrap-settings branch
@@ -134,18 +138,18 @@ test('hides restricted items for analysts', () => {
 })
 
 test('renders analyst watermark when bootstrap reports remote analyst', async () => {
-  vi.mocked(useBootstrap).mockReturnValue({
-    data: {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({
       services: [{ id: 'test-svc', name: 'Test Service' }],
       settings: {
         is_remote_analyst: true,
         analyst_email: 'jane@example.com',
         analyst_name: 'Jane Doe',
       },
-    },
+    }),
     isSuccess: true,
     isLoading: false,
-  } as any)
+  }))
   // useIsAnalyst reads its own QueryClient cache; flip it true for
   // this assertion so the watermark render gate (isAnalyst &&
   // (analystEmail || analystName)) opens.
