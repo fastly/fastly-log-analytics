@@ -3320,6 +3320,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/high-scale/retention-recommendation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api High Scale Retention Recommendation
+         * @description Recommend hot/warm retention for sizing; an explicit per-service setting always wins.
+         */
+        get: operations["api_high_scale_retention_recommendation_api_admin_high_scale_retention_recommendation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/iceberg-info": {
         parameters: {
             query?: never;
@@ -9672,6 +9692,62 @@ export interface components {
             metadata: components["schemas"]["QueryResponseMetadataResponse"];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /**
+         * HighScaleRetentionRecommendationResponse
+         * @description Advisory hot/warm retention for one service (never applied automatically).
+         *
+         *     ``effective_retention_days`` is the explicit per-service
+         *     ``provisioning.cron_sync.data_retention_days`` whenever one is set
+         *     (``source="override"``; ``null`` when it is ``0``, meaning keep forever),
+         *     otherwise the recommended warm window (``source="recommendation"``).
+         */
+        HighScaleRetentionRecommendationResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Recommended Hot Days */
+            recommended_hot_days: number;
+            /** Recommended Warm Days */
+            recommended_warm_days: number;
+            /** Reasoning */
+            reasoning: string;
+            /** Volume Total Bytes */
+            volume_total_bytes: number;
+            /**
+             * Volume Total Source
+             * @enum {string}
+             */
+            volume_total_source: "request" | "sampled";
+            /** Explicit Retention Days */
+            explicit_retention_days?: number | null;
+            /** Effective Retention Days */
+            effective_retention_days?: number | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "override" | "recommendation";
         };
         /** HighScaleRumFactResponse */
         HighScaleRumFactResponse: {
@@ -35793,6 +35869,114 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VclHealthResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_high_scale_retention_recommendation_api_admin_high_scale_retention_recommendation_get: {
+        parameters: {
+            query: {
+                service_id: string;
+                /** @description Observed or estimated request events per second */
+                events_per_second: number;
+                average_row_bytes?: number;
+                /** @description Serving volume size; defaults to the sampled volume */
+                total_bytes?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRetentionRecommendationResponse"];
                 };
             };
             /** @description Bad request */

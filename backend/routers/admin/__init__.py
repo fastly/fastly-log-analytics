@@ -47,6 +47,7 @@ from . import (  # noqa: F401
     duckdb,
     events,
     health,
+    high_scale,
     iceberg,
     ingest,
     log_accounting,

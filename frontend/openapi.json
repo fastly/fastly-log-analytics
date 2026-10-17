@@ -31664,6 +31664,173 @@
         }
       }
     },
+    "/api/admin/high-scale/retention-recommendation": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api High Scale Retention Recommendation",
+        "description": "Recommend hot/warm retention for sizing; an explicit per-service setting always wins.",
+        "operationId": "api_high_scale_retention_recommendation_api_admin_high_scale_retention_recommendation_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "events_per_second",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Observed or estimated request events per second",
+              "title": "Events Per Second"
+            },
+            "description": "Observed or estimated request events per second"
+          },
+          {
+            "name": "average_row_bytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 500.0,
+              "title": "Average Row Bytes"
+            }
+          },
+          {
+            "name": "total_bytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Serving volume size; defaults to the sampled volume",
+              "title": "Total Bytes"
+            },
+            "description": "Serving volume size; defaults to the sampled volume"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HighScaleRetentionRecommendationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/iceberg-info": {
       "get": {
         "tags": [
@@ -60650,6 +60817,123 @@
           "next_cursor"
         ],
         "title": "HighScaleRequestFactResponse"
+      },
+      "HighScaleRetentionRecommendationResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "recommended_hot_days": {
+            "type": "number",
+            "title": "Recommended Hot Days"
+          },
+          "recommended_warm_days": {
+            "type": "number",
+            "title": "Recommended Warm Days"
+          },
+          "reasoning": {
+            "type": "string",
+            "title": "Reasoning"
+          },
+          "volume_total_bytes": {
+            "type": "integer",
+            "title": "Volume Total Bytes"
+          },
+          "volume_total_source": {
+            "type": "string",
+            "enum": [
+              "request",
+              "sampled"
+            ],
+            "title": "Volume Total Source"
+          },
+          "explicit_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explicit Retention Days"
+          },
+          "effective_retention_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Retention Days"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "recommendation"
+            ],
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "recommended_hot_days",
+          "recommended_warm_days",
+          "reasoning",
+          "volume_total_bytes",
+          "volume_total_source",
+          "source"
+        ],
+        "title": "HighScaleRetentionRecommendationResponse",
+        "description": "Advisory hot/warm retention for one service (never applied automatically).\n\n``effective_retention_days`` is the explicit per-service\n``provisioning.cron_sync.data_retention_days`` whenever one is set\n(``source=\"override\"``; ``null`` when it is ``0``, meaning keep forever),\notherwise the recommended warm window (``source=\"recommendation\"``)."
       },
       "HighScaleRumFactResponse": {
         "properties": {

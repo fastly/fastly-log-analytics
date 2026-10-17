@@ -25,7 +25,7 @@ what each wiring deliberately does **not** do. It extends
 | Module | Production caller | Gate | Effect |
 |---|---|---|---|
 | `disk_guard` | `backend/cron/jobs/metric_snapshot.py::_sample_high_scale_disk` (60 s global sampler) via `backend/high_scale/disk_sampler.py` | `is_high_scale_mode()` | Reads real serving-volume stats, evaluates the mode, logs transitions, exports gauges, surfaces mode in `GET /api/admin/health-snapshot` |
-| `retention` | `GET /api/admin/high-scale/retention-recommendation` in `backend/routers/admin/high_scale.py` | `is_high_scale_mode()` | Returns a hot/warm recommendation; an explicit per-service `data_retention_days` always wins; never writes config |
+| `retention` | `GET /api/admin/high-scale/retention-recommendation` in `backend/routers/admin/high_scale.py` | `is_high_scale_mode()` | Returns a hot/warm recommendation; an explicit per-service retention setting (`provisioning.cron_sync.data_retention_days`) always wins; never writes config |
 | `fairness` | `HighScaleWorkerLoop.run_once` work selection in `backend/high_scale/worker.py` | worker process (`HIGH_SCALE_ENABLED=1`) | Schedules (service, domain) pages through `FairScheduler` with optional per-tick page capacity and per-service weights |
 | `projections` | `HighScaleIngestController` request-domain projection step in `backend/high_scale/ingest_controller.py` | high-scale ingest controller | Publishes `project_cmcd` rows to `cmcd_projection_facts` for request events that carry CMCD fields |
 | `recovery_capacity` | `rebuild_serving_state_from_fos` / `rebuild_origin_projections_from_fos` in `backend/high_scale/recovery.py`, driven by `scripts/backfill_high_scale_origin.py --capacity-json` | explicit measurement supplied by the operator | Evaluates the recovery claim and records it on the `RecoveryReport`; recovery itself is never blocked |
@@ -72,9 +72,11 @@ ClickHouse TTL follows each service's `data_retention_days`.
   is known the endpoint answers `409 high_scale_volume_unknown`.
 - The response (`HighScaleRetentionRecommendationResponse`) carries the
   recommended hot and warm days, the reasoning, the service's explicit
-  `data_retention_days` (or `null`), the `effective_retention_days`, and a
-  `source` of `override` or `recommendation`. A positive explicit setting
-  always wins; the recommendation is advisory and nothing is persisted.
+  `provisioning.cron_sync.data_retention_days` (or `null` when never set), the
+  `effective_retention_days`, and a `source` of `override` or `recommendation`.
+  Any explicit setting always wins (`0` means keep forever, reported as a
+  `null` effective window); the recommendation is advisory and nothing is
+  persisted.
 - Outside high-scale mode the endpoint answers `404 high_scale_not_enabled`.
 - Each call logs `high_scale.retention_recommended` with the inputs and result.
 - The design decision "no separate hot window" stands: the recommendation is a
