@@ -3,7 +3,39 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const apiBase = vi.hoisted(() => ({ value: 'http://api.test' }))
 vi.mock('@/lib/api', () => ({ getApiBase: () => apiBase.value }))
 
+import { useAdminTokenStore } from '@/stores/adminTokenStore'
+import { buildAdminHeaders } from '@/lib/adminHeaders'
 import { buildStreamRequest } from '@/lib/streamRequest'
+
+describe('buildAdminHeaders', () => {
+  afterEach(() => {
+    useAdminTokenStore.setState({ token: null })
+  })
+
+  it('sets x-service-id and X-Admin-Token only when present', () => {
+    expect(buildAdminHeaders({ serviceId: 'svc', adminToken: 'tok' })).toEqual({
+      'x-service-id': 'svc',
+      'X-Admin-Token': 'tok',
+    })
+    expect(buildAdminHeaders({ serviceId: null, adminToken: '' })).toEqual({})
+    expect(buildAdminHeaders({ adminToken: null })).toEqual({})
+  })
+
+  it('reads the admin-token store when no token is passed, and sends nothing when empty', () => {
+    expect(buildAdminHeaders({ serviceId: 'svc' })).toEqual({ 'x-service-id': 'svc' })
+    useAdminTokenStore.setState({ token: 'store-tok' })
+    expect(buildAdminHeaders({ serviceId: 'svc' })).toEqual({
+      'x-service-id': 'svc',
+      'X-Admin-Token': 'store-tok',
+    })
+    expect(buildAdminHeaders()).toEqual({ 'X-Admin-Token': 'store-tok' })
+  })
+
+  it('an explicit null overrides a populated store (no token leak to analyst paths)', () => {
+    useAdminTokenStore.setState({ token: 'store-tok' })
+    expect(buildAdminHeaders({ serviceId: 'svc', adminToken: null })).toEqual({ 'x-service-id': 'svc' })
+  })
+})
 
 describe('buildStreamRequest', () => {
   afterEach(() => {

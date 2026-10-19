@@ -99,6 +99,8 @@ export const client = createClient<paths>({
   baseUrl: getApiBase(),
 });
 
+export { buildAdminHeaders } from "@/lib/adminHeaders";
+
 // Plain ``fetch`` wrapper for the handful of callers that don't go
 // through the openapi-fetch client (typically because the response
 // type isn't in the OpenAPI spec or the caller wants raw Response).

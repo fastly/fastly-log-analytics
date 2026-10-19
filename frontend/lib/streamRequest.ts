@@ -1,11 +1,12 @@
 import { getApiBase } from '@/lib/api'
+import { buildAdminHeaders } from '@/lib/adminHeaders'
 import type { EventStreamRequest } from '@/hooks/useEventStream'
 
 export interface BuildStreamRequestOptions {
   /** Path (with any query string) appended to `getApiBase()`. */
   path: string
   serviceId?: string | null
-  /** `ADMIN_SHARED_SECRET` token; raw fetch bypasses the openapi-fetch middleware that normally injects it. */
+  /** `ADMIN_SHARED_SECRET` token; raw fetch bypasses the openapi-fetch middleware that normally injects it. Omit to read the admin-token store. */
   adminToken?: string | null
   method?: 'GET' | 'POST'
   body?: BodyInit
@@ -34,8 +35,7 @@ export function buildStreamRequest({
     ...(body !== undefined ? { body } : {}),
     headers: {
       Accept: 'text/event-stream',
-      ...(serviceId ? { 'x-service-id': serviceId } : {}),
-      ...(adminToken ? { 'X-Admin-Token': adminToken } : {}),
+      ...buildAdminHeaders({ serviceId, adminToken }),
       ...extraHeaders,
     },
     ...(cache ? { cache } : {}),

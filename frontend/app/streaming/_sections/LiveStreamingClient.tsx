@@ -34,6 +34,7 @@ import { useEventStream, type EventStreamRequest } from '@/hooks/useEventStream'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { getApiBase } from '@/lib/api'
+import { buildAdminHeaders } from '@/lib/adminHeaders'
 import { statusBadgeClass } from '@/lib/status-style'
 import { cn } from '@/lib/utils'
 
@@ -133,9 +134,7 @@ function LiveStreamingBody({ activeServiceId }: LiveStreamingBodyProps) {
     const headers: Record<string, string> = {
       Accept: 'text/event-stream',
       'Cache-Control': 'no-cache',
-    }
-    if (adminToken) {
-      headers['X-Admin-Token'] = adminToken
+      ...buildAdminHeaders({ adminToken }),
     }
     return { url, method: 'GET', headers }
   }, [activeServiceId])
