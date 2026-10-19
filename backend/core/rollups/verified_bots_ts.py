@@ -40,6 +40,7 @@ from ._common import (
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def build_verified_bots_ts_bundles(service_id: str, source: dict, hours: list[st
             f"  ) sub "
             f"  WHERE tag LIKE 'VERIFIED-BOT.%' "
             f"  GROUP BY 1, 2"
-            f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

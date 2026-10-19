@@ -22,6 +22,7 @@ from ._common import (
     POP_HEALTH_BUNDLE_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def build_pop_health_bundles(service_id: str, source: dict, hours: list[str]) ->
             f"    AND pop IS NOT NULL "
             f"    AND pop != '' "
             f"  GROUP BY pop"
-            f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

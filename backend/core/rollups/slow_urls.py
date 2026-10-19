@@ -46,6 +46,7 @@ from ._common import (
     SLOW_URLS_BUNDLE_TOP_K,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ def build_slow_urls_bundles(service_id: str, source: dict, hours: list[str]) -> 
             f"  HAVING COUNT(*) >= {SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR} "
             f"  ORDER BY APPROX_QUANTILE(lat_us, 0.95) DESC "
             f"  LIMIT {SLOW_URLS_BUNDLE_TOP_K}"
-            f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

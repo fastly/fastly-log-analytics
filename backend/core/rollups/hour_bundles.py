@@ -17,8 +17,10 @@ from ._common import (
     _hour_bundled_root,
     _ip_spread_root,
     _rollups_root,
+    parquet_zstd_target,
     parse_hour_token,
     quote_path_list,
+    unlink_quiet,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,16 +136,13 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
             query = (
                 f"COPY (SELECT field, value, CAST(count AS BIGINT) AS count "
                 f"FROM read_parquet([{paths_sql}])) "
-                f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                f"{parquet_zstd_target(tmp_path)}"
             )
             try:
                 con.execute(query)
             except duckdb.Error as e:
                 logger.warning("[rollups] %s: bundle COPY failed for hour=%s: %s", service_id, hour, e)
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
                 continue
 
             with _get_service_lock(lock_key):
@@ -231,10 +230,7 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
             stamped += 1
         except OSError as e:
             logger.warning("[rollups] %s: empty-hour sentinel write failed for hour=%s: %s", service_id, hour, e)
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+            unlink_quiet(tmp_path)
     return stamped
 
 
@@ -344,7 +340,7 @@ def bundle_hours_ip_spread(service_id: str, source: dict, hours: list[str]) -> i
                 "CAST(ip_count_observed AS BIGINT) AS ip_count_observed, "
                 "sample_capped "
                 f"FROM read_parquet([{paths_sql}])) "
-                f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                f"{parquet_zstd_target(tmp_path)}"
             )
             try:
                 con.execute(query)
@@ -355,10 +351,7 @@ def bundle_hours_ip_spread(service_id: str, source: dict, hours: list[str]) -> i
                     hour,
                     e,
                 )
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
                 continue
 
             with _get_service_lock(lock_key):

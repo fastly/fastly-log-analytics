@@ -27,6 +27,7 @@ from ._common import (
     NETWORK_SUMMARY_BUNDLE_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ def build_network_summary_bundles(service_id: str, source: dict, hours: list[str
             f"FROM {table_ident} "
             f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
             f"AND timestamp < TIMESTAMPTZ '{end_iso}') "
-            f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"{parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

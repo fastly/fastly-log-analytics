@@ -26,6 +26,7 @@ from ._common import (
     NETWORK_QUALITY_REGION_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def _build_sql(
         f'  GROUP BY "{dim_col}" {country_group} '
         f"  ORDER BY requests DESC "
         f"  LIMIT 100"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 

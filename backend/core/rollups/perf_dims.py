@@ -41,6 +41,7 @@ from ._common import (
     PERF_TTL_DIST_BUNDLE_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def _build_ttl_dist_copy_sql(ctx: object, table_ident: str, start_iso: str, end_
         f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
         f"    AND ttl IS NOT NULL "
         f"  GROUP BY 1"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 

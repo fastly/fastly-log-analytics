@@ -50,6 +50,7 @@ from ._common import (
     PERF_URLS_MIN_REQUESTS_PER_HOUR,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def build_perf_latency_bundles(service_id: str, source: dict, hours: list[str]) 
                 f"  HAVING COUNT(*) >= {min_req} "
                 f"  ORDER BY APPROX_QUANTILE(elapsed, 0.99) DESC "
                 f"  LIMIT {PERF_LATENCY_BUNDLE_TOP_K}"
-                f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                f") {parquet_zstd_target(tmp_path)}"
             )
 
         written += build_per_hour_bundles(

@@ -7,6 +7,7 @@ import logging
 from ._common import (
     SESSIONS_BUNDLE_FILENAME,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
             f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
             f'AND "ip" IS NOT NULL '
             f"GROUP BY 1, 2, 3) "
-            f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"{parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

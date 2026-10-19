@@ -37,6 +37,7 @@ import logging
 from ._common import (
     NETWORK_GEO_BUNDLE_FILENAME,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ def build_network_geo_bundles(service_id: str, source: dict, hours: list[str]) -
             f"    AND country IS NOT NULL AND country != ''"
             f"  GROUP BY country, {city_grp}, {lat_grp}, {lon_grp}, {metro_grp}"
             f"  HAVING COUNT(*) >= 1"
-            f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

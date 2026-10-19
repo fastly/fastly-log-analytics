@@ -45,7 +45,10 @@ from ._common import (
     _is_safe_ident,
     _rollups_root,
     compact_closed_days,
+    parquet_zstd_target,
     quote_path_list,
+    unlink_quiet,
+    wavg,
 )
 
 logger = logging.getLogger(__name__)
@@ -199,16 +202,13 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
                 f"  GROUP BY field "
                 f"  HAVING SUM(count) > 0"
                 f") "
-                f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                f"{parquet_zstd_target(tmp_path)}"
             )
             try:
                 con.execute(query)
             except duckdb.Error as e:
                 logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e)
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
                 continue
 
             with _get_service_lock(lock_key):
@@ -589,10 +589,7 @@ def compact_closed_days_to_daily(
                         day,
                         e,
                     )
-                    try:
-                        os.remove(tmp_file)
-                    except OSError:
-                        pass
+                    unlink_quiet(tmp_file)
                     continue
 
                 with _get_service_lock(lock_key):
@@ -601,10 +598,7 @@ def compact_closed_days_to_daily(
                         rebuilt += 1
                     except OSError as e:
                         logger.warning("[rollups] %s: rename to %s failed: %s", service_id, day_file, e)
-                        try:
-                            os.remove(tmp_file)
-                        except OSError:
-                            pass
+                        unlink_quiet(tmp_file)
     finally:
         con.close()
 
@@ -666,21 +660,21 @@ def compact_origin_summary_closed_days_to_daily(
             f"    CAST(SUM(total_misses) AS BIGINT) AS total_misses, "
             f"    CAST(SUM(total_passes) AS BIGINT) AS total_passes, "
             f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
-            f"    CAST(SUM(ottfb_p50_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS DOUBLE) AS ottfb_p50_us, "
-            f"    CAST(SUM(ottfb_p75_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS DOUBLE) AS ottfb_p75_us, "
-            f"    CAST(SUM(ottfb_p95_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS DOUBLE) AS ottfb_p95_us, "
-            f"    CAST(SUM(ottfb_p99_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS DOUBLE) AS ottfb_p99_us, "
+            f"    CAST({wavg('ottfb_p50_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p50_us, "
+            f"    CAST({wavg('ottfb_p75_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p75_us, "
+            f"    CAST({wavg('ottfb_p95_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p95_us, "
+            f"    CAST({wavg('ottfb_p99_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p99_us, "
             f"    CAST(SUM(ottlb_count) AS BIGINT) AS ottlb_count, "
-            f"    CAST(SUM(ottlb_p50_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0) AS DOUBLE) AS ottlb_p50_us, "
-            f"    CAST(SUM(ottlb_p95_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0) AS DOUBLE) AS ottlb_p95_us, "
+            f"    CAST({wavg('ottlb_p50_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p50_us, "
+            f"    CAST({wavg('ottlb_p95_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p95_us, "
             f"    CAST(SUM(cdn_ovh_count) AS BIGINT) AS cdn_ovh_count, "
-            f"    CAST(SUM(cdn_ovh_p50_us * cdn_ovh_count) / NULLIF(SUM(cdn_ovh_count), 0) AS DOUBLE) AS cdn_ovh_p50_us, "
+            f"    CAST({wavg('cdn_ovh_p50_us', 'cdn_ovh_count')} AS DOUBLE) AS cdn_ovh_p50_us, "
             f"    CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
             f"    CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
             f"    CAST(SUM(obytes_count) AS BIGINT) AS obytes_count, "
-            f"    CAST(SUM(obytes_p50 * obytes_count) / NULLIF(SUM(obytes_count), 0) AS DOUBLE) AS obytes_p50 "
+            f"    CAST({wavg('obytes_p50', 'obytes_count')} AS DOUBLE) AS obytes_p50 "
             f"  FROM read_parquet([{paths_sql}])"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -722,11 +716,11 @@ def compact_network_rtt_closed_days_to_daily(
             f"  SELECT asn, "
             f"    CAST(SUM(requests) AS BIGINT) AS requests, "
             f"    CAST(SUM(rtt_count) AS BIGINT) AS rtt_count, "
-            f"    CAST(SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS DOUBLE) AS p95_us, "
-            f"    CAST(SUM(p99_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS DOUBLE) AS p99_us "
+            f"    CAST({wavg('p95_us', 'rtt_count')} AS DOUBLE) AS p95_us, "
+            f"    CAST({wavg('p99_us', 'rtt_count')} AS DOUBLE) AS p99_us "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY asn"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -761,7 +755,7 @@ def compact_network_speed_closed_days_to_daily(
             f"  SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS count "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY asn, c_speed"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -792,7 +786,7 @@ def compact_ngwaf_bots_closed_days_to_daily(
             f"  SELECT bot_name, category, CAST(SUM(count) AS BIGINT) AS count "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY bot_name, category"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -836,7 +830,7 @@ def compact_verified_bots_ts_closed_days_to_daily(
             f"  SELECT bucket_ts, bot_type, CAST(SUM(count) AS BIGINT) AS count "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY bucket_ts, bot_type"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -883,16 +877,16 @@ def compact_origin_latency_ts_closed_days_to_daily(
             f"COPY ("
             f"  SELECT bucket_ts, "
             f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count, "
-            f"    SUM(ttfb_p50_us * ttfb_count) / NULLIF(SUM(ttfb_count), 0) AS ttfb_p50_us, "
-            f"    SUM(ttfb_p95_us * ttfb_count) / NULLIF(SUM(ttfb_count), 0) AS ttfb_p95_us, "
-            f"    SUM(ttfb_p99_us * ttfb_count) / NULLIF(SUM(ttfb_count), 0) AS ttfb_p99_us, "
+            f"    {wavg('ttfb_p50_us', 'ttfb_count')} AS ttfb_p50_us, "
+            f"    {wavg('ttfb_p95_us', 'ttfb_count')} AS ttfb_p95_us, "
+            f"    {wavg('ttfb_p99_us', 'ttfb_count')} AS ttfb_p99_us, "
             f"    CAST(SUM(ttlb_count) AS BIGINT) AS ttlb_count, "
-            f"    SUM(ttlb_p50_us * ttlb_count) / NULLIF(SUM(ttlb_count), 0) AS ttlb_p50_us, "
-            f"    SUM(ttlb_p95_us * ttlb_count) / NULLIF(SUM(ttlb_count), 0) AS ttlb_p95_us, "
-            f"    SUM(ttlb_p99_us * ttlb_count) / NULLIF(SUM(ttlb_count), 0) AS ttlb_p99_us "
+            f"    {wavg('ttlb_p50_us', 'ttlb_count')} AS ttlb_p50_us, "
+            f"    {wavg('ttlb_p95_us', 'ttlb_count')} AS ttlb_p95_us, "
+            f"    {wavg('ttlb_p99_us', 'ttlb_count')} AS ttlb_p99_us "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY bucket_ts"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -933,16 +927,16 @@ def compact_perf_latency_closed_days_to_daily(
             f"      CAST(SUM(requests) AS BIGINT) AS requests, "
             f"      CAST(SUM(elapsed_count) AS BIGINT) AS elapsed_count, "
             f"      CAST(SUM(elapsed_sum) AS DOUBLE) AS elapsed_sum, "
-            f"      CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us, "
-            f"      CAST(SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_us, "
-            f"      CAST(SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p99_us, "
+            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
+            f"      CAST({wavg('p99_us', 'requests')} AS DOUBLE) AS p99_us, "
             f"      ROW_NUMBER() OVER ("
-            f"        ORDER BY SUM(p99_us * requests) / NULLIF(SUM(requests), 0) DESC"
+            f"        ORDER BY {wavg('p99_us', 'requests')} DESC"
             f"      ) AS rn "
             f"    FROM read_parquet([{paths_sql}]) "
             f"    GROUP BY value"
             f"  ) WHERE rn <= {PERF_LATENCY_BUNDLE_TOP_K}"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -992,13 +986,13 @@ def compact_origin_dims_closed_days_to_daily(
             f"      CAST(SUM(requests) AS BIGINT) AS requests, "
             f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
             f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"      CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us, "
-            f"      CAST(SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_us, "
+            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
             f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
             f"    FROM read_parquet([{paths_sql}]) "
             f"    GROUP BY pop"
             f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     # oip: per-day GROUP BY oip, request-weighted percentiles, SUM the exact
@@ -1012,15 +1006,15 @@ def compact_origin_dims_closed_days_to_daily(
             f"      CAST(SUM(requests) AS BIGINT) AS requests, "
             f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
             f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"      CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us, "
-            f"      CAST(SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_us, "
+            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
             f"      CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
             f"      CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
             f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
             f"    FROM read_parquet([{paths_sql}]) "
             f"    GROUP BY oip"
             f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     # edge: per-day GROUP BY edge, request-weighted percentiles. NO top-K (2
@@ -1032,11 +1026,11 @@ def compact_origin_dims_closed_days_to_daily(
             f"    CAST(SUM(requests) AS BIGINT) AS requests, "
             f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
             f"    CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"    CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us, "
-            f"    CAST(SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_us "
+            f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+            f"    CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY edge"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -1091,7 +1085,7 @@ def compact_security_dims_closed_days_to_daily(
             f"    CAST(MIN(min_val) AS BIGINT) AS min_val "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY bucket"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     # topips: GROUP BY ip, MAX(max_header) (MAX-of-MAX), re-cap top-K by max.
@@ -1105,7 +1099,7 @@ def compact_security_dims_closed_days_to_daily(
             f"    ORDER BY max_header DESC "
             f"    LIMIT {SECURITY_TOPIPS_BUNDLE_TOP_K}"
             f"  )"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     # cov: collapse to one row per day — SUM both counts.
@@ -1116,7 +1110,7 @@ def compact_security_dims_closed_days_to_daily(
             f"    CAST(SUM(total_rows) AS BIGINT) AS total_rows, "
             f"    CAST(SUM(tls_populated) AS BIGINT) AS tls_populated "
             f"  FROM read_parquet([{paths_sql}])"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -1163,7 +1157,7 @@ def compact_perf_dims_closed_days_to_daily(
             f"    CAST(MIN(min_ttl) AS BIGINT) AS min_ttl "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY bucket"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -1210,7 +1204,7 @@ def compact_overview_closed_days_to_daily(
             f"    CAST(SUM(miss_elapsed_count) AS BIGINT) AS miss_elapsed_count "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY hour_start"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -1238,11 +1232,11 @@ def compact_pop_health_closed_days_to_daily(
             f"      CAST(SUM(errors) AS BIGINT) AS errors, "
             f"      CAST(SUM(cache_hits) AS BIGINT) AS cache_hits, "
             f"      CAST(SUM(bandwidth_bytes) AS BIGINT) AS bandwidth_bytes, "
-            f"      CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_rtt_us, "
-            f"      CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_ttfb_ms "
+            f"      CAST({wavg('p50_rtt_us', 'requests')} AS DOUBLE) AS p50_rtt_us, "
+            f"      CAST({wavg('p95_ttfb_ms', 'requests')} AS DOUBLE) AS p95_ttfb_ms "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY pop"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(
@@ -1275,11 +1269,11 @@ def compact_network_quality_closed_days_to_daily(
             f"COPY ("
             f"  SELECT dim_val {country_select}, "
             f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us "
+            f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us "
             f"  FROM read_parquet([{paths_sql}]) "
             f"  GROUP BY dim_val {country_select} "
             f"  ORDER BY requests DESC LIMIT 100"
-            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f") {parquet_zstd_target(tmp_file)}"
         )
 
     return compact_closed_days(

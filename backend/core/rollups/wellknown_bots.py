@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from backend.utils.date_utils import parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
-from ._common import parse_hour_token, quote_path_list
+from ._common import parquet_zstd_target, parse_hour_token, quote_path_list, unlink_quiet
 
 logger = logging.getLogger(__name__)
 
@@ -189,14 +189,11 @@ def recompute_wellknown_bots_rollup(
                     f"  GROUP BY ua, ip "
                     f"  ORDER BY request_count DESC "
                     f"  LIMIT 50000"
-                    f") TO '{tmp_path_sql}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    f") {parquet_zstd_target(tmp_path_sql)}"
                 )
             except duckdb.Error as e:
                 logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
                 continue
 
             # Atomic publish under the per-service iceberg lock.
@@ -210,10 +207,7 @@ def recompute_wellknown_bots_rollup(
                 try:
                     for fname in os.listdir(hour_dir):
                         if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                            try:
-                                os.remove(os.path.join(hour_dir, fname))
-                            except OSError:
-                                pass
+                            unlink_quiet(os.path.join(hour_dir, fname))
                 except OSError:
                     pass
                 final_path = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
@@ -226,10 +220,7 @@ def recompute_wellknown_bots_rollup(
                         hour,
                         e,
                     )
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
+                    unlink_quiet(tmp_path)
                     continue
             rebuilt += 1
     finally:

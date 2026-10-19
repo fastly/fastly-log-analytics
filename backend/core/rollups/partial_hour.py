@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from backend.utils.date_utils import parse_hour_key_strict
 
-from ._common import TOP_K, _build_copy_query, _is_safe_ident, parse_hour_token
+from ._common import TOP_K, _build_copy_query, _is_safe_ident, parse_hour_token, unlink_quiet
 
 if TYPE_CHECKING:
     import duckdb
@@ -127,10 +127,7 @@ def read_partial_hour_all_fields(
                 return []
         logger.warning("[partial_hour] Failed reading %s: %s", path, e)
         if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            unlink_quiet(path)
         return []
 
 
@@ -178,10 +175,7 @@ def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnect
                 return 0
         logger.warning("[partial_hour] Failed reading total from %s: %s", path, e)
         if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            unlink_quiet(path)
         return 0
 
 
@@ -270,10 +264,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                 existing_path,
                 e,
             )
-            try:
-                os.remove(existing_path)
-            except OSError:
-                pass
+            unlink_quiet(existing_path)
             existing_corrupt = True
         finally:
             probe_con.close()
@@ -416,10 +407,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
             os.replace(tmp_path, _all_fields_path(source, active_hour))
         finally:
             if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
     finally:
         con.close()
 

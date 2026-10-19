@@ -88,6 +88,7 @@ from ._common import (
     ORIGIN_POP_BUNDLE_FILENAME,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,7 @@ def _build_pop_copy_sql(lat_us_expr: object, table_ident: str, start_iso: str, e
         f"  GROUP BY pop "
         f"  ORDER BY COUNT(*) DESC "
         f"  LIMIT {ORIGIN_DIMS_BUNDLE_TOP_K}"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
@@ -154,7 +155,7 @@ def _build_ip_copy_sql(lat_us_expr: object, table_ident: str, start_iso: str, en
         f"  HAVING COUNT(*) >= {ORIGIN_IP_MIN_REQUESTS_PER_HOUR} "
         f"  ORDER BY COUNT(*) DESC "
         f"  LIMIT {ORIGIN_DIMS_BUNDLE_TOP_K}"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
@@ -178,7 +179,7 @@ def _build_path_copy_sql(lat_us_expr: object, table_ident: str, start_iso: str, 
         f"  ) "
         f"  WHERE lat_us IS NOT NULL "
         f"  GROUP BY edge"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 

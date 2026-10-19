@@ -7,6 +7,7 @@ import logging
 from ._common import (
     TIME_SERIES_BUNDLE_FILENAME,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,7 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
             f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
             f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
             f"GROUP BY 1) "
-            f"TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"{parquet_zstd_target(tmp_path)}"
         )
 
     return build_per_hour_bundles(

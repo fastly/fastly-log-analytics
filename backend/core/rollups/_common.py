@@ -7,6 +7,7 @@ sub-module needs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -199,10 +200,7 @@ def _save_markers(source: dict, markers: dict[str, str]) -> None:
         os.replace(tmp_path, path)
     except OSError as e:
         logger.warning("[rollups] could not write markers to %s: %s", path, e)
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        unlink_quiet(tmp_path)
 
 
 def _publish_field_partitions(tmp_field_dir: str, dst_root: str, field: str) -> int:
@@ -792,6 +790,31 @@ def _network_summary_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", NETWORK_SUMMARY_BUNDLE_FILENAME)
 
 
+def unlink_quiet(path: str) -> None:
+    """Remove ``path``, ignoring any OSError (missing file, permissions, ...).
+
+    The cleanup-after-failure idiom for temp parquet files: the caller is
+    already on an error path and must not mask it with a second failure.
+    """
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
+
+def wavg(value_col: str, weight_col: str) -> str:
+    """SQL for the weight-averaged ``value_col`` across rows (hours/files).
+
+    Percentile rollups cannot be merged exactly (DuckDB has no sketch
+    combine), so both the day compactors and the readers carry a row count
+    alongside each percentile and request-weight-average it.
+    """
+    return f"SUM({value_col} * {weight_col}) / NULLIF(SUM({weight_col}), 0)"
+
+
+def parquet_zstd_target(path: str) -> str:
+    """The ``TO '<path>' (FORMAT PARQUET, COMPRESSION ZSTD)`` tail of a rollup COPY."""
+    return f"TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+
+
 def quote_path_list(paths: Iterable[str]) -> str:
     """Render ``paths`` as a comma-separated list of single-quoted,
     SQL-escaped string literals for a DuckDB ``read_parquet([...])`` /
@@ -969,10 +992,7 @@ def compact_closed_days(
                         day,
                         e,
                     )
-                    try:
-                        os.remove(tmp_file)
-                    except OSError:
-                        pass
+                    unlink_quiet(tmp_file)
                     continue
 
                 with _get_service_lock(lock_key):
@@ -987,10 +1007,7 @@ def compact_closed_days(
                             day_file,
                             e,
                         )
-                        try:
-                            os.remove(tmp_file)
-                        except OSError:
-                            pass
+                        unlink_quiet(tmp_file)
     finally:
         con.close()
 
@@ -1103,10 +1120,7 @@ def build_per_hour_bundles(
                     hour,
                     e,
                 )
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
                 continue
 
             try:
@@ -1121,10 +1135,7 @@ def build_per_hour_bundles(
                     hour,
                     e,
                 )
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                unlink_quiet(tmp_path)
 
         return rebuilt
     finally:

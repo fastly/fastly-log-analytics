@@ -65,6 +65,7 @@ from ._common import (
     SECURITY_TOPIPS_BUNDLE_TOP_K,
     backfill_missing_bundles,
     build_per_hour_bundles,
+    parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def _build_req_size_copy_sql(ctx: object, table_ident: str, start_iso: str, end_
         f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
         f"    AND req_header_bytes IS NOT NULL "
         f"  GROUP BY 1"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
@@ -125,7 +126,7 @@ def _build_conn_reuse_copy_sql(ctx: object, table_ident: str, start_iso: str, en
         f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
         f"    AND conn_requests IS NOT NULL AND conn_requests > 0 "
         f"  GROUP BY 1"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
@@ -144,7 +145,7 @@ def _build_topips_copy_sql(ctx: object, table_ident: str, start_iso: str, end_is
         f"  GROUP BY 1 "
         f"  ORDER BY 2 DESC "
         f"  LIMIT {SECURITY_TOPIPS_BUNDLE_TOP_K}"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
@@ -161,7 +162,7 @@ def _build_cov_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: 
         f"  FROM {table_ident} "
         f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
         f"    AND timestamp <  TIMESTAMPTZ '{end_iso}'"
-        f") TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        f") {parquet_zstd_target(tmp_path)}"
     )
 
 
