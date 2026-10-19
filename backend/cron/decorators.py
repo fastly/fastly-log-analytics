@@ -17,6 +17,8 @@ import logging
 import threading
 from functools import wraps
 
+from backend.cron.heartbeat import CronHeartbeat
+
 # We intentionally keep the historical logger NAME (a plain string, not a
 # module reference) so caplog filters and log-shipping rules that read
 # ``logger="backend.scheduler"`` keep receiving watchdog error lines.
@@ -98,44 +100,6 @@ def cron_task(name: str, job_name: str | None = None):
 
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
-            def heartbeat_loop(stop_event: threading.Event):
-                import time
-
-                from backend.core.metadata.base import get_con, release_thread_connection
-
-                try:
-                    while not stop_event.is_set():
-                        if stop_event.wait(10.0):
-                            break
-                        try:
-                            con = get_con(service_id)
-                            if job_name:
-                                con.execute(
-                                    "UPDATE job_runs SET heartbeat_at = ? "
-                                    "WHERE service_id = ? AND job_name = ? AND status = 'running'",
-                                    (time.time(), service_id, job_name),
-                                )
-                            else:
-                                # No job_name declared: refresh nothing rather than
-                                # everything — an unscoped refresh keeps other jobs'
-                                # leaked leases alive forever (frozen-ingestion trap).
-                                pass
-                            con.commit()
-                        except Exception:
-                            pass
-                finally:
-                    # This thread is a fresh, never-reused `threading.Thread`
-                    # per cron invocation, not a pooled executor worker — the
-                    # `get_con()` connection it opened above must be handed
-                    # back explicitly before it exits, or it permanently pins
-                    # one slot of the bounded Postgres metadata pool (see
-                    # release_thread_connection's docstring). At
-                    # METADATA_PG_POOL_MAX ticks (any mix of cron jobs across
-                    # the whole scheduler) every later get_con() call anywhere
-                    # in the process starts raising PoolTimeout — this was a
-                    # live incident (AGENTS.md, "cron heartbeat thread leak").
-                    release_thread_connection()
-
             def _body():
 
                 from backend.utils.telemetry import process_context_scope, start_call_tracking
@@ -150,26 +114,19 @@ def cron_task(name: str, job_name: str | None = None):
 
             cap = _CRON_HARD_CAP_S
 
-            stop_event = threading.Event()
-            hb_thread = threading.Thread(target=heartbeat_loop, args=(stop_event,), daemon=True)
-            hb_thread.start()
-
-            ex = _get_watchdog_executor()
-            fut = ex.submit(_body)
-            try:
-                return fut.result(timeout=cap)
-            except concurrent.futures.TimeoutError:
-                logger.error(
-                    "[scheduler] %s/%s exceeded %ds watchdog threshold — waiting "
-                    "for worker cleanup before releasing the scheduler slot",
-                    name,
-                    service_id,
-                    cap,
-                )
-                return fut.result()
-            finally:
-                stop_event.set()
-                hb_thread.join(timeout=1.0)
+            with CronHeartbeat(service_id, job_name):
+                fut = _get_watchdog_executor().submit(_body)
+                try:
+                    return fut.result(timeout=cap)
+                except concurrent.futures.TimeoutError:
+                    logger.error(
+                        "[scheduler] %s/%s exceeded %ds watchdog threshold — waiting "
+                        "for worker cleanup before releasing the scheduler slot",
+                        name,
+                        service_id,
+                        cap,
+                    )
+                    return fut.result()
 
         # Register celery task
         task_name = f"{func.__module__}.{func.__name__}_celery"
