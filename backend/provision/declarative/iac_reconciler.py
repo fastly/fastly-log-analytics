@@ -7,6 +7,7 @@ Active HTTP Readiness probing, and VCL logging services in a single transactiona
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -28,6 +29,7 @@ from backend.provision.declarative.reconciler import (
 from backend.provision.declarative.state import FeatureState
 from backend.provision.session_scoring_orchestrator import (
     _SCORER_PACKAGE,
+    _SCORING_FIELD_NAMES,
     _deploy_wasm_package,
     _remove_scoring_custom_fields,
     _write_matrix_to_kv,
@@ -260,29 +262,46 @@ def reconcile_infrastructure(
         print_speculative_execution_plan(desired, current)
         return
 
-    # Transactional rollback: load & save the previous config to restore in case of failure
+    # Transactional rollback: remember the keys this flow owns (the ``scoring`` block and the scoring
+    # custom_fields) so a failure can put just those back. Fastly/Compute calls below take minutes, so
+    # every write is a locked read-modify-write of those keys only; anything else a concurrent writer
+    # changed in the meantime (and the write-once cid salt) is never touched.
     from backend.config import config_path as _config_path
-    from backend.config import mutate_config, restore_config, snapshot_config
+    from backend.config import mutate_config, snapshot_config
 
     config_path = _config_path(logging_service_id)
     orig_config_content = snapshot_config(logging_service_id)
     if orig_config_content is None:
         raise RuntimeError(f"Configuration file {config_path} is required for live deployment.")
     cfg = json.loads(orig_config_content)
+    orig_scoring = copy.deepcopy(cfg.get("scoring"))
+    orig_scoring_fields = [
+        copy.deepcopy(cf)
+        for cf in (cfg.get("log_fields") or {}).get("custom_fields") or []
+        if cf.get("name") in _SCORING_FIELD_NAMES
+    ]
+    persisted = False
 
-    def _persist_cfg() -> None:
-        """Write the in-memory ``cfg`` through the config lock (atomic write, cache invalidation)."""
-
-        def _replace(disk_cfg: dict) -> None:
-            disk_cfg.clear()
-            disk_cfg.update(cfg)
-
-        if mutate_config(logging_service_id, _replace) is None:
+    def _persist(apply: Callable[[dict], None]) -> None:
+        nonlocal persisted
+        persisted = True
+        if mutate_config(logging_service_id, apply) is None:
             raise RuntimeError(f"Configuration file {config_path} disappeared during reconciliation.")
+
+    def _rollback_owned_keys(disk_cfg: dict) -> None:
+        if orig_scoring is None:
+            disk_cfg.pop("scoring", None)
+        else:
+            disk_cfg["scoring"] = copy.deepcopy(orig_scoring)
+        if orig_scoring_fields:
+            _remove_scoring_custom_fields(disk_cfg)
+            lf = disk_cfg.setdefault("log_fields", {})
+            lf["custom_fields"] = [*(lf.get("custom_fields") or []), *copy.deepcopy(orig_scoring_fields)]
 
     try:
         # ── Phase 1 & Phase 2: Create & Populate Storage + Compute Scorer ─────
         scoring_meta: dict[str, Any] = {}
+        apply_phase3: Callable[[dict], None] | None = None
         if desired.compute_scorer:
             if status_cb:
                 status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
@@ -305,8 +324,8 @@ def reconcile_infrastructure(
                 status_cb=status_cb,
             )
 
-            # Update the configuration dictionary with populated IDs & metadata
-            cfg["scoring"] = {
+            # The scoring block to persist, with the populated IDs & metadata
+            new_scoring = {
                 "enabled": True,
                 "scoring_service_id": scoring_service_id,
                 "scoring_service_name": scoring_meta.get("scoring_service_name", ""),
@@ -320,6 +339,11 @@ def reconcile_infrastructure(
                 "deployed_package_files_hash": package_meta["files_hash"],
             }
 
+            def _set_scoring(disk_cfg: dict) -> None:
+                disk_cfg["scoring"] = copy.deepcopy(new_scoring)
+
+            apply_phase3 = _set_scoring
+
             # ── Phase 2.5: Active HTTP Readiness Probe ───────────────────────
             if status_cb:
                 status_cb("⏳ Phase 2.5: Issuing HTTP readiness checks on deployed domain...")
@@ -331,17 +355,20 @@ def reconcile_infrastructure(
                 status_cb("⏳ Phase 4: Executing safe reverse-topological teardown of disabled assets...")
                 status_cb("⏳ Stripping VCL scoring backend and snippets first...")
 
-            # Clean up the JSON configuration log-fields
-            cfg = _remove_scoring_custom_fields(cfg)
-            if "scoring" in cfg:
-                cfg["scoring"]["enabled"] = False
+            def _disable_scoring_keys(disk_cfg: dict) -> None:
+                _remove_scoring_custom_fields(disk_cfg)
+                if "scoring" in disk_cfg:
+                    disk_cfg["scoring"]["enabled"] = False
+
+            apply_phase3 = _disable_scoring_keys
 
         # ── Phase 3: VCL Logging Sync ────────────────────────────────────────
         if status_cb:
             status_cb("⏳ Phase 3: Syncing VCL Edge Logging Configurations, Custom Fields, and Backends...")
 
         # Update JSON config on disk before triggering VCL reconciliation so the reconciler sees the live state
-        _persist_cfg()
+        if apply_phase3 is not None:
+            _persist(apply_phase3)
 
         reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb)
 
@@ -372,9 +399,10 @@ def reconcile_infrastructure(
             )
 
             # Completely clear out the scoring configuration on full teardown success
-            if "scoring" in cfg:
-                cfg.pop("scoring", None)
-            _persist_cfg()
+            def _drop_scoring(disk_cfg: dict) -> None:
+                disk_cfg.pop("scoring", None)
+
+            _persist(_drop_scoring)
 
         if status_cb:
             status_cb("✅ Infrastructure state reconciliation completed successfully.")
@@ -383,6 +411,7 @@ def reconcile_infrastructure(
         logger.error("IaC reconciliation failure, executing transactional configuration rollback", exc_info=True)
         if status_cb:
             status_cb(f"❌ Error during reconciliation: {err}. Rolling back to previous configuration...")
-        # Restore the original config file content to disk
-        restore_config(logging_service_id, orig_config_content)
+        # Put back only the keys this flow wrote
+        if persisted:
+            mutate_config(logging_service_id, _rollback_owned_keys)
         raise err
