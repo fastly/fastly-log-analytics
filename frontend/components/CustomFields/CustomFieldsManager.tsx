@@ -8,6 +8,8 @@ import { CustomFieldDrawer } from './CustomFieldDrawer'
 import { queryKeys } from '@/lib/query-keys'
 import { downloadBlob } from '@/lib/utils'
 import { extractApiError } from '@/lib/api'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
   const queryClient = useQueryClient()
@@ -74,6 +76,66 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
 
   const fields = fieldsData?.fields || []
 
+  const columns: ColumnDef<CustomField>[] = [
+    {
+      id: 'name',
+      header: 'Name',
+      accessorFn: (f) => f.name,
+      size: 240,
+      cell: ({ row }) => (
+        <span className="font-mono text-xs">
+          {row.original.name}
+          {!row.original.enabled && <Badge variant="secondary" className="ml-2 text-[10px] uppercase shadow-none scale-90">Disabled</Badge>}
+        </span>
+      ),
+    },
+    {
+      id: 'label',
+      header: 'Label',
+      accessorFn: (f) => f.label,
+      size: 200,
+      cell: ({ row }) => <span className="text-sm">{row.original.label}</span>,
+    },
+    {
+      id: 'type',
+      header: 'Type',
+      accessorFn: (f) => f.duckdb_type,
+      size: 120,
+      cell: ({ row }) => <span className="text-xs font-mono">{row.original.duckdb_type}</span>,
+    },
+    {
+      id: 'dashboard',
+      header: 'Dashboard',
+      accessorFn: (f) => (f.show_in_dashboard ? 1 : 0),
+      size: 110,
+      cell: ({ row }) => <span className="block text-center">{row.original.show_in_dashboard ? '✓' : '✗'}</span>,
+    },
+    {
+      id: 'logs',
+      header: 'Logs',
+      accessorFn: (f) => (f.show_in_logs ? 1 : 0),
+      size: 90,
+      cell: ({ row }) => <span className="block text-center">{row.original.show_in_logs ? '✓' : '✗'}</span>,
+    },
+    {
+      id: 'actions',
+      header: () => <span className="sr-only">Actions</span>,
+      size: 110,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <div className="text-right space-x-2">
+          <Button variant="ghost" size="sm" onClick={() => handleEdit(row.original)}>
+            <Edit className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => handleDelete(row.original.name)} className="text-destructive hover:bg-destructive/10" title="Delete">
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
+
   return (
     <div className="space-y-4">
       <div className="bg-muted/30 p-3 rounded-md text-sm border flex justify-between items-center">
@@ -105,48 +167,16 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
       {/* M-6 (audit, mobile UX): overflow-x-auto so the 6-column custom
           fields table scrolls on narrow viewports instead of clipping
           (overflow-hidden was hiding the actions column on phones). */}
-      <div className="border rounded-md overflow-x-auto text-sm">
-        <table className="w-full">
-          <thead className="bg-muted/40">
-            <tr>
-              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Name</th>
-              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Label</th>
-              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Type</th>
-              <th className="text-center px-3 py-2 text-xs font-medium text-muted-foreground">Dashboard</th>
-              <th className="text-center px-3 py-2 text-xs font-medium text-muted-foreground">Logs</th>
-              <th className="px-3 py-2 text-right"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-               <tr><td colSpan={6} className="px-3 py-4 text-center text-muted-foreground animate-pulse">Loading custom fields...</td></tr>
-            ) : fields.length === 0 ? (
-               <tr><td colSpan={6} className="px-3 py-8 text-center text-muted-foreground bg-muted/10 border-dashed">No custom fields defined yet.</td></tr>
-            ) : (
-                fields.map((field) => (
-                  <tr key={field.name} className={`border-t ${!field.enabled ? 'opacity-50 grayscale' : ''}`}>
-                    <td className="px-3 py-2 font-mono text-xs">
-                        {field.name}
-                        {!field.enabled && <Badge variant="secondary" className="ml-2 text-[10px] uppercase shadow-none scale-90">Disabled</Badge>}
-                    </td>
-                    <td className="px-3 py-2">{field.label}</td>
-                    <td className="px-3 py-2 text-xs font-mono">{field.duckdb_type}</td>
-                    <td className="px-3 py-2 text-center">{field.show_in_dashboard ? '✓' : '✗'}</td>
-                    <td className="px-3 py-2 text-center">{field.show_in_logs ? '✓' : '✗'}</td>
-                    <td className="px-3 py-2 text-right space-x-2">
-                        <Button variant="ghost" size="sm" onClick={() => handleEdit(field)}>
-                            <Edit className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => handleDelete(field.name)} className="text-destructive hover:bg-destructive/10" title="Delete">
-                            <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                    </td>
-                  </tr>
-                ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DataTableReadonly
+        columns={columns}
+        data={fields}
+        isLoading={isLoading}
+        hideToolbar
+        showPagination={false}
+        tableCaption="Custom log fields"
+        emptyMessage="No custom fields defined yet."
+        getRowClassName={(field) => (!field.enabled ? 'opacity-50 grayscale' : '')}
+      />
 
       <CustomFieldDrawer
         serviceId={serviceId}

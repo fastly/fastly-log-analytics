@@ -22,14 +22,7 @@ import { AuditLogTab } from '@/components/SessionScoring/AuditLogTab'
 import { LabelsTab } from '@/components/SessionScoring/LabelsTab'
 import { MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
 
-// jsdom has no layout, so the real virtualizer would render zero rows.
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: { count: number }) => ({
-    getVirtualItems: () =>
-      Array.from({ length: options.count }).map((_, i) => ({ index: i, start: i * 40, end: (i + 1) * 40 })),
-    getTotalSize: () => options.count * 40,
-  }),
-}))
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())
 
 beforeAll(() => {
   stubResizeObserver()

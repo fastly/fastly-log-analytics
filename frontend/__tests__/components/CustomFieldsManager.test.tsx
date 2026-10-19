@@ -7,6 +7,8 @@ import * as customFieldsApi from '@/lib/api/custom-fields'
 import type { components } from '@/types/api.generated'
 import React from 'react'
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation(query => ({

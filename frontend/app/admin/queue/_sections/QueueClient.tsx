@@ -5,14 +5,8 @@ import { RefreshCw } from 'lucide-react'
 import { formatLocalDateTime } from '@/lib/date'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -24,6 +18,82 @@ import { useAdminEventStream } from '@/hooks/useAdminEventStream'
 import { queryKeys } from '@/lib/query-keys'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
+type ActiveTask = components['schemas']['CeleryActiveTask']
+type ScheduleEntry = components['schemas']['CeleryScheduleEntry']
+type QueueDepth = [name: string, count: number]
+
+const QUEUE_COLUMNS: ColumnDef<QueueDepth>[] = [
+  {
+    id: 'queue',
+    header: 'Queue Name',
+    accessorFn: (q) => q[0],
+    size: 320,
+    cell: ({ row }) => <span className="font-mono text-sm">{row.original[0]}</span>,
+  },
+  {
+    id: 'messages',
+    header: 'Messages',
+    accessorFn: (q) => q[1],
+    size: 140,
+    cell: ({ row }) => <span className="block text-right tabular-nums">{row.original[1]}</span>,
+  },
+]
+
+const TASK_COLUMNS: ColumnDef<ActiveTask>[] = [
+  {
+    id: 'id',
+    header: 'ID',
+    accessorFn: (t) => t.id,
+    size: 300,
+    enableSorting: false,
+    cell: ({ row }) => <span className="font-mono text-xs">{row.original.id}</span>,
+  },
+  {
+    id: 'name',
+    header: 'Name',
+    accessorFn: (t) => t.name,
+    size: 260,
+    enableSorting: false,
+    cell: ({ row }) => <span className="text-sm font-medium">{row.original.name}</span>,
+  },
+  {
+    id: 'args',
+    header: 'Args',
+    accessorFn: (t) => JSON.stringify(t.args),
+    size: 240,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground">{JSON.stringify(row.original.args)}</span>
+    ),
+  },
+  {
+    id: 'start',
+    header: 'Start Time',
+    accessorFn: (t) => t.time_start,
+    size: 200,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="text-xs">{formatLocalDateTime(row.original.time_start * 1000)}</span>
+    ),
+  },
+]
+
+const SCHEDULE_COLUMNS: ColumnDef<ScheduleEntry>[] = [
+  {
+    id: 'name',
+    header: 'Schedule Name',
+    accessorFn: (s) => s.name,
+    size: 320,
+    cell: ({ row }) => <span className="font-mono text-xs">{row.original.name}</span>,
+  },
+  {
+    id: 'task',
+    header: 'Task',
+    accessorFn: (s) => s.task,
+    size: 420,
+    cell: ({ row }) => <span className="font-mono text-xs">{row.original.task}</span>,
+  },
+]
 
 export function QueueClient() {
   const { state: sseConnected } = useAdminEventStream(true, ['celery-status'])
@@ -222,22 +292,15 @@ export function QueueClient() {
           {queues.length === 0 ? (
             <p className="text-sm text-muted-foreground">No queues found or Celery mode is inactive.</p>
           ) : (
-            <Table data-testid="admin-queue-depths-table">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Queue Name</TableHead>
-                  <TableHead className="text-right">Messages</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {queues.map(([queueName, count]) => (
-                  <TableRow key={queueName}>
-                    <TableCell className="font-mono text-sm">{queueName}</TableCell>
-                    <TableCell className="text-right tabular-nums">{count as React.ReactNode}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div data-testid="admin-queue-depths-table">
+              <DataTableReadonly
+                columns={QUEUE_COLUMNS}
+                data={queues}
+                hideToolbar
+                showPagination={false}
+                tableCaption="Celery queue depths"
+              />
+            </div>
           )}
         </AnalyticsCard>
       </div>
@@ -278,30 +341,13 @@ export function QueueClient() {
                     </Badge>
                   </h4>
                   {tasks.length > 0 ? (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>ID</TableHead>
-                          <TableHead>Name</TableHead>
-                          <TableHead>Args</TableHead>
-                          <TableHead>Start Time</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {tasks.map((task) => (
-                          <TableRow key={task.id}>
-                            <TableCell className="font-mono text-xs">{task.id}</TableCell>
-                            <TableCell className="text-sm font-medium">{task.name}</TableCell>
-                            <TableCell className="font-mono text-xs text-muted-foreground">
-                              {JSON.stringify(task.args)}
-                            </TableCell>
-                            <TableCell className="text-xs">
-                              {formatLocalDateTime(task.time_start * 1000)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
+                    <DataTableReadonly
+                      columns={TASK_COLUMNS}
+                      data={tasks}
+                      hideToolbar
+                      showPagination={false}
+                      tableCaption={`Active tasks on ${workerName}`}
+                    />
                   ) : (
                     <p className="text-xs text-muted-foreground italic">Idle</p>
                   )}
@@ -384,22 +430,15 @@ export function QueueClient() {
           {schedules.length === 0 ? (
             <p className="text-sm text-muted-foreground">No schedules found.</p>
           ) : (
-            <Table data-testid="admin-queue-schedules-table">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Schedule Name</TableHead>
-                  <TableHead>Task</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {schedules.map((schedule) => (
-                  <TableRow key={schedule.name}>
-                    <TableCell className="font-mono text-xs">{schedule.name}</TableCell>
-                    <TableCell className="font-mono text-xs">{schedule.task}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div data-testid="admin-queue-schedules-table">
+              <DataTableReadonly
+                columns={SCHEDULE_COLUMNS}
+                data={schedules}
+                hideToolbar
+                showPagination={false}
+                tableCaption="RedBeat schedules"
+              />
+            </div>
           )}
         </AnalyticsCard>
       </div>

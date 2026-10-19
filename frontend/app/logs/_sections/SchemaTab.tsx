@@ -1,17 +1,85 @@
 'use client'
 
 import React from 'react'
-import {
-  Table,  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from "@/components/ui/table"
-import { Skeleton } from '@/components/ui/skeleton'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 import { formatCountMaybe } from '@/lib/format'
 import type { components } from '@/types/api.generated'
+
+type SchemaColumn = components['schemas']['SchemaResponse']['schema'][number]
+
+const hasStats = (col: SchemaColumn) => col.null_percentage !== undefined
+const populatedPct = (col: SchemaColumn) =>
+  col.null_percentage != null ? Math.max(0, 100 - col.null_percentage) : null
+
+const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
+  {
+    id: 'name',
+    header: 'Column Name',
+    accessorFn: (c) => c.name,
+    size: 220,
+    cell: ({ row }) => <span className="font-mono text-xs font-bold">{row.original.name}</span>,
+  },
+  {
+    id: 'type',
+    header: 'DuckDB Type',
+    accessorFn: (c) => c.type,
+    size: 160,
+    cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
+  },
+  {
+    id: 'populated',
+    header: 'Populated %',
+    accessorFn: (c) => populatedPct(c) ?? -1,
+    size: 130,
+    cell: ({ row }) => {
+      const pct = populatedPct(row.original)
+      const text = pct != null ? pct.toFixed(1) : '—'
+      return (
+        <span className="block font-mono text-xs text-right tabular-nums">
+          {hasStats(row.original) ? (
+            <span className={text === '0.0' ? 'text-muted-foreground/30' : ''}>{text}%</span>
+          ) : '—'}
+        </span>
+      )
+    },
+  },
+  {
+    id: 'approx_unique',
+    header: 'Approx Unique',
+    accessorFn: (c) => c.approx_unique ?? -1,
+    size: 140,
+    cell: ({ row }) => (
+      <span className="block font-mono text-xs text-right text-muted-foreground tabular-nums">
+        {hasStats(row.original) ? formatCountMaybe(row.original.approx_unique) ?? '—' : '—'}
+      </span>
+    ),
+  },
+  {
+    id: 'min',
+    header: 'Min Value',
+    accessorFn: (c) => c.min ?? '',
+    size: 200,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground" title={row.original.min ?? undefined}>
+        {hasStats(row.original) ? row.original.min ?? '—' : '—'}
+      </span>
+    ),
+  },
+  {
+    id: 'max',
+    header: 'Max Value',
+    accessorFn: (c) => c.max ?? '',
+    size: 200,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground" title={row.original.max ?? undefined}>
+        {hasStats(row.original) ? row.original.max ?? '—' : '—'}
+      </span>
+    ),
+  },
+]
+
 export function SchemaTab({
   schemaData,
   isLoadingSchema,
@@ -27,61 +95,14 @@ export function SchemaTab({
           <p className="text-xs text-muted-foreground mt-1">Based on a fast statistical sample of your logs.</p>
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <Table>
-          <caption className="sr-only">DuckDB Table Schema and Statistics</caption>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Column Name</TableHead>
-              <TableHead>DuckDB Type</TableHead>
-              <TableHead className="text-right">Populated %</TableHead>
-              <TableHead className="text-right">Approx Unique</TableHead>
-              <TableHead className="max-w-[200px]">Min Value</TableHead>
-              <TableHead className="max-w-[200px]">Max Value</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoadingSchema ? (
-              [1, 2, 3, 4, 5].map(i => (
-                <TableRow key={`skeleton-${i}`}>
-                  <TableCell><Skeleton className="h-4 w-32" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-12 ml-auto" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-16 ml-auto" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                </TableRow>
-              ))
-            ) : schemaData?.schema.map((col) => {
-              const hasStats = col.null_percentage !== undefined
-              const populatedPct = col.null_percentage != null ? Math.max(0, 100 - col.null_percentage).toFixed(1) : '—'
-
-              return (
-                <TableRow key={col.name}>
-                  <TableCell className="font-mono text-xs font-bold">{col.name}</TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{col.type}</TableCell>
-                  <TableCell className="font-mono text-xs text-right tabular-nums">
-                    {hasStats ? (
-                      <span className={populatedPct === '0.0' ? 'text-muted-foreground/30' : ''}>
-                        {populatedPct}%
-                      </span>
-                    ) : '—'}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-right text-muted-foreground tabular-nums">
-                    {hasStats ? formatCountMaybe(col.approx_unique) ?? '—' : '—'}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.min ?? undefined}>
-                    {hasStats ? col.min ?? '—' : '—'}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.max ?? undefined}>
-                    {hasStats ? col.max ?? '—' : '—'}
-                  </TableCell>
-                </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
-      </div>
+      <DataTableReadonly
+        columns={SCHEMA_COLUMNS}
+        data={schemaData?.schema ?? []}
+        isLoading={isLoadingSchema}
+        hideToolbar
+        showPagination={false}
+        tableCaption="DuckDB Table Schema and Statistics"
+      />
     </>
   )
 }

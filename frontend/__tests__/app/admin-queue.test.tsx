@@ -18,6 +18,8 @@ vi.mock('@/hooks/useAdminEventStream', () => ({
   useAdminEventStream: () => ({ state: 'open' as const }),
 }))
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin/queue'))
 
 function renderWithQuery(ui: React.ReactElement) {

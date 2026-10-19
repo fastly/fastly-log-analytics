@@ -6,8 +6,11 @@ import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { components } from '@/types/api.generated'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 type BotSourceList = components['schemas']['BotSourcesResponse']
+type BotSource = components['schemas']['BotSourceMeta']
 import { SSEModal } from '@/components/SSEModal/SSEModal'
 import {
   Dialog,
@@ -108,6 +111,76 @@ export function BotSourcesPanel() {
     }
   }
 
+  const sourceColumns: ColumnDef<BotSource>[] = [
+    {
+      id: 'source',
+      header: 'Source',
+      accessorFn: (src) => src.name,
+      size: 260,
+      enableSorting: false,
+      cell: ({ row }) => {
+        const src = row.original
+        return (
+          <div className="text-sm">
+            <div className="flex items-center gap-1.5">
+              <span className="font-medium">{src.name}</span>
+              {src.url && (
+                <a href={src.url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity" title={`View source: ${src.url}`}>
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+            </div>
+            {!src.last_updated && (
+              <span className="text-xs text-amber-500 block mt-0.5">not cached</span>
+            )}
+          </div>
+        )
+      },
+    },
+    {
+      id: 'entries',
+      header: 'Entries',
+      accessorFn: (src) => src.entry_count ?? -1,
+      size: 110,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="block text-right text-sm tabular-nums text-muted-foreground">
+          {row.original.entry_count != null ? formatCount(row.original.entry_count) : '—'}
+        </span>
+      ),
+    },
+    {
+      id: 'last_updated',
+      header: 'Last Updated',
+      accessorFn: (src) => src.last_updated ?? '',
+      size: 140,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="block text-right text-sm text-muted-foreground">
+          {fmtRelative(row.original.last_updated)}
+        </span>
+      ),
+    },
+    {
+      id: 'actions',
+      header: () => <span className="sr-only">Actions</span>,
+      size: 130,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <div className="text-right">
+          <Button
+            variant="outline" size="sm"
+            disabled={refreshingSource === row.original.id}
+            onClick={() => handleRefreshBotSource(row.original.id)}
+          >
+            <RefreshCw className={`h-3 w-3 mr-1.5 ${refreshingSource === row.original.id ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
   return (
     <div className="p-4 border rounded-lg space-y-4">
       <div className="flex items-center gap-2">
@@ -123,56 +196,14 @@ export function BotSourcesPanel() {
           scrolls on phones instead of clipping the actions column (the
           previous overflow-hidden combined with w-full pushed long
           source names + the trailing action button off the right edge). */}
-      <div className="border rounded-md overflow-x-auto text-sm">
-        <table className="w-full">
-          <thead className="bg-muted/40">
-            <tr>
-              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Source</th>
-              <th className="text-right px-3 py-2 text-xs font-medium text-muted-foreground">Entries</th>
-              <th className="text-right px-3 py-2 text-xs font-medium text-muted-foreground">Last Updated</th>
-              <th className="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {(botSourcesData?.sources ?? []).map((src: components['schemas']['BotSourceMeta']) => (
-              <tr key={src.id} className="border-t">
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-medium">{src.name}</span>
-                    {src.url && (
-                      <a href={src.url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity" title={`View source: ${src.url}`}>
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )}
-                  </div>
-                  {!src.last_updated && (
-                    <span className="text-xs text-amber-500 block mt-0.5">not cached</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {src.entry_count != null ? formatCount(src.entry_count) : '—'}
-                </td>
-                <td className="px-3 py-2 text-right text-muted-foreground">
-                  {fmtRelative(src.last_updated)}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  <Button
-                    variant="outline" size="sm"
-                    disabled={refreshingSource === src.id}
-                    onClick={() => handleRefreshBotSource(src.id)}
-                  >
-                    <RefreshCw className={`h-3 w-3 mr-1.5 ${refreshingSource === src.id ? 'animate-spin' : ''}`} />
-                    Refresh
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {!botSourcesData && (
-              <tr><td colSpan={4} className="px-3 py-3 text-center text-xs text-muted-foreground">Loading…</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DataTableReadonly
+        columns={sourceColumns}
+        data={botSourcesData?.sources ?? []}
+        isLoading={!botSourcesData}
+        hideToolbar
+        showPagination={false}
+        tableCaption="Bot intelligence sources"
+      />
 
       {/* rDNS cache stats */}
       <div className="flex items-center justify-between text-sm">
