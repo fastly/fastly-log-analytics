@@ -16,12 +16,12 @@ from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
     _safe_table,
-    collect_hourly_bundle_paths,
     optional_col,
     quote_path_list,
     safe_interval,
     time_bucket_select,
 )
+from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import parse_window, safe_iso

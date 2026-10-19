@@ -13,12 +13,10 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
-from backend.repositories import _base
+from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import (
     QueryRunner,
     _attach_sqlite,
-    _cached_listdir,
-    clear_listdir_cache,
     clear_schema_cols_cache,
     empty_schema_response,
     error_rate_expr,
@@ -63,9 +61,9 @@ def test_clear_schema_cols_cache_with_none_clears_everything():
 def test_cached_listdir_returns_empty_on_oserror(tmp_path):
     """A missing or unreadable path returns [] instead of raising —
     callers treat empty and missing identically when walking rollups."""
-    clear_listdir_cache()
+    rollup_coverage.clear_listdir_cache()
     nonexistent = str(tmp_path / "does_not_exist")
-    out = _cached_listdir(nonexistent)
+    out = rollup_coverage.cached_listdir(nonexistent)
     assert out == []
 
 
@@ -73,21 +71,21 @@ def test_cached_listdir_flushes_cache_when_full(tmp_path):
     """When the cache reaches the max-entries cap, it's flat-cleared
     before the new entry is added. Pinned to prevent unbounded growth
     on a service with high (hour, field) churn."""
-    clear_listdir_cache()
+    rollup_coverage.clear_listdir_cache()
     # Fill the cache to the cap.
-    cap = _base._LISTDIR_CACHE_MAX_ENTRIES
+    cap = rollup_coverage.LISTDIR_CACHE_MAX_ENTRIES
     for i in range(cap):
-        _base._listdir_cache[f"/fake/path/{i}"] = (0.0, [])
-    assert len(_base._listdir_cache) == cap
+        rollup_coverage._listdir_cache[f"/fake/path/{i}"] = (0.0, [])
+    assert len(rollup_coverage._listdir_cache) == cap
 
     # Adding one more triggers the flat-clear branch.
     p = str(tmp_path)
-    out = _cached_listdir(p)
+    out = rollup_coverage.cached_listdir(p)
     assert isinstance(out, list)
     # Cache was cleared then re-populated with just the new entry.
-    assert len(_base._listdir_cache) == 1
-    assert p in _base._listdir_cache
-    clear_listdir_cache()
+    assert len(rollup_coverage._listdir_cache) == 1
+    assert p in rollup_coverage._listdir_cache
+    rollup_coverage.clear_listdir_cache()
 
 
 # ── origin_latency_us_expr: column-presence branches ────────────────────────

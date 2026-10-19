@@ -36,7 +36,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from backend.core import rollup_readiness as rr
-from backend.repositories import _base
+from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
 from backend.utils.date_utils import parse_iso_utc
 from tests._helpers.sources import make_source
@@ -280,7 +280,7 @@ def _collect_hourly(fn: str, allow_all: bool) -> Callable[[QueryRunner, W, Layou
     def call(runner: QueryRunner, w: W, lay: Layout) -> Any:
         if w.st_dt is None or w.et_dt is None:
             return "invalid_window"
-        res = _base.collect_hourly_bundle_paths(
+        res = rollup_coverage.collect_hourly_bundle_paths(
             runner.src, w.st_dt, w.et_dt, str(lay.hour_root), fn, allow_all_fields_coverage=allow_all
         )
         return None if res is None else [list(res[0]), res[1]]
@@ -297,7 +297,7 @@ def _missing_hours(cap: int | None, coverage: str | None) -> Callable[[QueryRunn
             kwargs["cap"] = cap
         if coverage is not None:
             kwargs["coverage_bundle_filename"] = coverage
-        return _base._find_missing_bundle_hours(w.st_dt, w.et_dt, str(lay.hour_root), TS, **kwargs)
+        return rollup_coverage.find_missing_bundle_hours(w.st_dt, w.et_dt, str(lay.hour_root), TS, **kwargs)
 
     return call
 
@@ -722,7 +722,7 @@ def _run_reader(reader: Reader, sc: Scenario, tmp: Path, probe: _Probe, anchors:
         runner._create_active_hour_temp_direct = lambda *a, **k: "__empty__"  # type: ignore[method-assign]
         runner._partial_hour_adjusted_live_start = lambda live_start, token, end: (live_start, [], 0)  # type: ignore[method-assign]
 
-        _base.clear_listdir_cache()
+        rollup_coverage.clear_listdir_cache()
         rr.reset_rollup_coverage_ready()
         probe.counts = {}
         patches = []

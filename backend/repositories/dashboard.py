@@ -13,14 +13,12 @@ from typing import Any
 
 import duckdb
 
-from backend import config as svcconfig
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
     SectionTimer,
     _get_schema,
-    _rc_service_id,
     _safe_table,
     force_rebuild_view,
     get_source_extent,
@@ -337,10 +335,10 @@ def get_aggregates(
     # forced every unfiltered request onto the slow wide-temp base scan
     # (prod 2026-10: 24h/30d /api/dashboard/bundle hung >120s → pool
     # saturation → "Crunching logs..." timeout).
-    from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
     from backend.core.rollups import rollups_present
+    from backend.repositories.rollup_coverage import durable_serving_blocked
 
-    _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src))
+    _durable_blocked = durable_serving_blocked(src)
     use_rollups = not filters and rollups_present(src) and not _durable_blocked
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.

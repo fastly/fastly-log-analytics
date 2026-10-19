@@ -16,12 +16,21 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from backend import config as svcconfig
 from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
-from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
 from backend.core.rollups._common import quote_path_list
+from backend.repositories.rollup_coverage import (
+    MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
+)
+from backend.repositories.rollup_coverage import (
+    cached_listdir,
+    collect_day_prefer_paths,
+    collect_hour_paths_with_floor,
+    durable_serving_blocked,
+    eligible_window,
+    plan_hourly_read,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -30,15 +39,6 @@ from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
 _logger = logging.getLogger(__name__)
-
-
-def _rc_service_id(src: dict) -> str:
-    # Every _base.py call site has `src`/`self.src` shaped as the source
-    # dict `get_source_for_service` returns — `service_id` is always
-    # present; `name` is a display fallback for older/local configs during
-    # the transition, matching the fallback already used elsewhere in this
-    # file (e.g. `self.src.get("name") or self.src.get("service_id")`).
-    return src.get("service_id") or src.get("name") or ""
 
 
 # Rate-limit table for empty-rollup warnings — (service_id, field) → monotonic
@@ -56,7 +56,6 @@ _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 # long stretch — beyond it the oldest gap hours are dropped (the counts
 # degrade exactly as they did before the fallback existed) and the warning
 # below tells the operator to run the deep backfill instead.
-_MISSING_HOUR_HEAL_CAP = 48
 _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
 
 # Clock-skew margin (seconds) for `_create_active_hour_temp_direct`'s buffer
@@ -182,271 +181,6 @@ def clear_schema_cols_cache(service_id: str | None = None) -> None:
         _schema_cols_cache.clear()
     else:
         _schema_cols_cache = {k: v for k, v in _schema_cols_cache.items() if k[0] != service_id}
-
-
-# Cache for ``os.listdir`` on the rollup directory tree. The dir_enum
-# pass inside ``QueryRunner.execute_top_n_rollups`` calls listdir once
-# per (field) at the field-hour and field-day roots, plus once at the
-# bundled-hour root. On prod that's ~80 listdirs returning ~375 entries
-# each per request and lands at 1.3-3 s of pure stat work — sometimes
-# the bulk of the request — per the perf audit (F5).
-#
-# The cron sync rebuilds the rollup tree at most every minute, so a
-# 60 s TTL captures changes without ever serving rollup output that's
-# more than one tick stale. Bounded by entry count so unbounded service
-# / hour churn can't blow the cache.
-_listdir_cache: dict[str, tuple[float, list[str]]] = {}
-_LISTDIR_CACHE_TTL_S = 60.0
-_LISTDIR_CACHE_MAX_ENTRIES = 4096
-
-
-def _cached_listdir(path: str) -> list[str]:
-    """Return ``os.listdir(path)`` cached for ``_LISTDIR_CACHE_TTL_S``.
-
-    Returns ``[]`` on any OSError (matching the existing call-site
-    behaviour around the rollup tree — callers treat missing/empty
-    directories the same). The cache is intentionally simple: no
-    per-entry expiry sweep, just a flat-clear when full.
-    """
-    import time as _time
-
-    now = _time.monotonic()
-    cached = _listdir_cache.get(path)
-    if cached is not None and (now - cached[0]) < _LISTDIR_CACHE_TTL_S:
-        return cached[1]
-    try:
-        import os as _os
-
-        entries = _os.listdir(path)
-    except OSError:
-        entries = []
-    if len(_listdir_cache) >= _LISTDIR_CACHE_MAX_ENTRIES:
-        _listdir_cache.clear()
-    _listdir_cache[path] = (now, entries)
-    return entries
-
-
-def clear_listdir_cache() -> None:
-    """Drop the cached rollup listdir entries. Used by tests + the
-    sync writer's commit hook when fresh files have been written."""
-    _listdir_cache.clear()
-
-
-def collect_hourly_bundle_paths(
-    src: dict,
-    st,
-    et,
-    bundled_root: str,
-    bundle_filename: str,
-    *,
-    allow_all_fields_coverage: bool = False,
-) -> tuple[list[str], bool] | None:
-    """Walk ``[st, et)`` by UTC hour, return ``(paths, crosses_active)``.
-
-    Returns the list of per-hour bundle paths that exist on disk plus a
-    ``crosses_active`` flag set when the window extends into (or past)
-    the live hour. Returns ``None`` if any closed hour has per-field
-    rollup data but no bundle on disk — that's the writer-behind case
-    where serving the rollup path would undercount, so the caller falls
-    back to raw.
-
-    Shared between :meth:`QueryRunner.try_time_series_from_rollup` and
-    :func:`backend.repositories.sessions._collect_sessions_rollup_paths`.
-    The two callsites used to maintain identical walk logic with
-    cross-referenced "mirrors X" comments; the dual maintenance is now
-    one helper. The per-field listdir is done inline (callers do not
-    pre-supply it). ``allow_all_fields_coverage`` is limited to the scalar
-    time-series readers, where an ``all_fields.parquet`` file proves the
-    hour-bundling pass reached the hour even when the time-series bundle is
-    absent. The missing-hour check still distinguishes an empty sentinel
-    from a non-empty bundle and heals the latter.
-    """
-    import os
-    from datetime import UTC, datetime, timedelta
-
-    if svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src)):
-        # Rollups are pod-local accelerators.  A durable serving replica
-        # cannot treat a missing local tree as evidence that the durable
-        # DuckLake table is empty or partially covered.
-        return None
-
-    from backend.core.rollups import _rollups_root
-
-    hour_per_field_root = _rollups_root(src)
-    try:
-        field_dirs = [f for f in _cached_listdir(hour_per_field_root) if f.startswith("field=")]
-    except OSError:
-        field_dirs = []
-
-    # Pre-collect the union of all hour=… entries across every field dir
-    # in one pass. The previous shape probed os.path.isdir per (hour,
-    # field) inside _hour_had_any_data — on a 7-day window with ~70
-    # fields that's 168 × 70 ≈ 11.8k isdir syscalls per /api/sessions
-    # request, often the dominant cost of rollup_paths_collect. The
-    # union set turns each hour check into an O(1) lookup, and the
-    # per-field listdir hits the 60 s ``_cached_listdir`` cache so
-    # back-to-back requests skip the I/O entirely.
-    all_rollup_hours: set[str] = set()
-    for f in field_dirs:
-        try:
-            for entry in _cached_listdir(os.path.join(hour_per_field_root, f)):
-                if entry.startswith("hour="):
-                    all_rollup_hours.add(entry[len("hour=") :])
-        except OSError:
-            continue
-
-    def _hour_had_any_data(h: str) -> bool:
-        return h in all_rollup_hours
-
-    active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    paths: list[str] = []
-    cursor = st.replace(minute=0, second=0, microsecond=0)
-    crosses_active = False
-    while cursor < et:
-        hour_str = cursor.strftime("%Y-%m-%d-%H")
-        if hour_str >= active_hour_str:
-            crosses_active = True
-            break
-        path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
-        if not os.path.isfile(path):
-            if allow_all_fields_coverage and os.path.isfile(
-                os.path.join(bundled_root, f"hour={hour_str}", "all_fields.parquet")
-            ):
-                cursor += timedelta(hours=1)
-                continue
-            if _hour_had_any_data(hour_str):
-                return None
-            cursor += timedelta(hours=1)
-            continue
-        paths.append(path)
-        cursor += timedelta(hours=1)
-    return paths, crosses_active
-
-
-def _find_missing_bundle_hours(
-    st,
-    et,
-    bundled_root: str,
-    bundle_filename: str,
-    cap: int = _MISSING_HOUR_HEAL_CAP,
-    coverage_bundle_filename: str | None = None,
-) -> list[str]:
-    """Closed hours in [st, et) with no ``bundle_filename`` file under
-    ``bundled_root`` — a writer-coverage gap the caller should live-heal,
-    not silently treat as zero. When ``coverage_bundle_filename`` is
-    provided, an hour with that file is considered covered even if the
-    requested bundle is absent. This is used by scalar time-series readers
-    because an empty ``all_fields.parquet`` sentinel proves the hour was
-    checked and has zero traffic, even though it has no time-series rows.
-
-    Bounded by ``cap``: mirrors ``execute_top_n_rollups``'s own heal, which
-    bounds the WALK ITSELF via ``heal_floor_dt = active_dt -
-    timedelta(hours=cap)`` (clamped up to ``st`` when the window starts more
-    recently) rather than walking the whole ``[st, et)`` window and
-    truncating after — on a window near the 366-day max this file already
-    allows, an unbounded walk would double the directory-stat cost
-    ``collect_hourly_bundle_paths`` already pays for the same window on
-    every request that hits a writer gap.
-    """
-    import os
-    from datetime import UTC, datetime, timedelta
-
-    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    active_hour_str = active_dt.strftime("%Y-%m-%d-%H")
-    heal_floor_dt = active_dt - timedelta(hours=cap)
-    if st > heal_floor_dt:
-        heal_floor_dt = st
-    missing: list[str] = []
-    cursor = heal_floor_dt.replace(minute=0, second=0, microsecond=0)
-    while cursor < et:
-        hour_str = cursor.strftime("%Y-%m-%d-%H")
-        if hour_str >= active_hour_str:
-            break
-        path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
-        coverage_path = (
-            os.path.join(bundled_root, f"hour={hour_str}", coverage_bundle_filename)
-            if coverage_bundle_filename
-            else None
-        )
-        if not os.path.isfile(path) and (coverage_path is None or not _is_empty_bundle(coverage_path)):
-            missing.append(hour_str)
-        cursor += timedelta(hours=1)
-    return missing
-
-
-# I5 (final whole-branch review) investigated: execute_top_n_rollups's own
-# missing-hour walk additionally excludes day-compacted days and consults
-# per-field markers, while this function only checks bundle_filename
-# presence. In principle that's a source of disagreement between the two
-# readers — in practice, for this function's only current caller
-# (TIME_SERIES_BUNDLE_FILENAME), it is not: (1) time_series.parquet has NO
-# day-compacted counterpart (it is never in a `compact_closed_days` jobs
-# list), so a day-compaction exclusion check would never find anything to
-# exclude here; (2) hour_bundled/*/time_series.parquet files are never
-# deleted or swept (unlike the per-field `rollups/hour` tree
-# execute_top_n_rollups's walk reads, which IS cleaned up post-bundling) —
-# so "missing" here always means a genuine gap, not a compacted-away
-# source. If this function is ever reused for a bundle_filename that DOES
-# have a day-compacted form, this reasoning must be re-checked.
-
-
-def _count_expected_closed_hours(st, et, active_hour_str: str) -> int:
-    """Pure-arithmetic count of closed hourly buckets in ``[st, et)`` before
-    ``active_hour_str`` — mirrors ``collect_hourly_bundle_paths``'s own
-    hour-stepping walk with zero disk I/O, so its result can be diffed
-    against ``len(rollup_paths)`` to detect a writer-coverage gap that walk
-    silently skipped (no bundle file, no per-field marker) which ALSO falls
-    outside ``_find_missing_bundle_hours``'s heal cap — see C2 (final
-    whole-branch review, part 2): without this check, a genuine gap older
-    than the cap is neither served, nor healed, nor surfaced — the caller
-    would silently serve a truncated window instead of falling back to a
-    raw scan.
-    """
-    from datetime import timedelta
-
-    cursor = st.replace(minute=0, second=0, microsecond=0)
-    count = 0
-    while cursor < et:
-        hour_str = cursor.strftime("%Y-%m-%d-%H")
-        if hour_str >= active_hour_str:
-            break
-        count += 1
-        cursor += timedelta(hours=1)
-    return count
-
-
-def _is_empty_bundle(path: str) -> bool:
-    """Return whether a parquet bundle is the verified-empty sentinel."""
-    import os
-
-    if not os.path.isfile(path):
-        return False
-    try:
-        import pyarrow.parquet as pq
-
-        return pq.read_metadata(path).num_rows == 0
-    except Exception:
-        return False
-
-
-def _count_covered_closed_hours(st, et, bundled_root: str, active_hour_str: str, bundle_filename: str) -> int:
-    """Count closed hours with a data bundle or a verified-empty sentinel."""
-    import os
-    from datetime import timedelta
-
-    cursor = st.replace(minute=0, second=0, microsecond=0)
-    count = 0
-    while cursor < et:
-        hour_str = cursor.strftime("%Y-%m-%d-%H")
-        if hour_str >= active_hour_str:
-            break
-        hour_dir = os.path.join(bundled_root, f"hour={hour_str}")
-        if os.path.isfile(os.path.join(hour_dir, bundle_filename)) or _is_empty_bundle(
-            os.path.join(hour_dir, "all_fields.parquet")
-        ):
-            count += 1
-        cursor += timedelta(hours=1)
-    return count
 
 
 def _compact_sql_for_debug(sql: str) -> str:
@@ -1595,7 +1329,7 @@ class QueryRunner:
         from backend.core.rollups import _is_safe_ident, _safe_table_for
         from backend.utils.date_utils import parse_iso_utc
 
-        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+        if durable_serving_blocked(self.src):
             # The result shape is retained for existing callers, but an
             # empty tuple is explicitly an unavailable rollup result.  Each
             # serving path must then run its DuckLake-backed raw fallback.
@@ -1748,7 +1482,7 @@ class QueryRunner:
             field_day_dir = os.path.join(day_root, f"field={field}")
             if not os.path.isdir(field_day_dir):
                 continue
-            day_entries = _cached_listdir(field_day_dir)
+            day_entries = cached_listdir(field_day_dir)
             for day_entry in day_entries:
                 if not day_entry.startswith("day="):
                     continue
@@ -1780,7 +1514,7 @@ class QueryRunner:
         # window fall through to per-field-hour for the in-window
         # portion (same fall-through as per-field-day).
         if os.path.isdir(bundled_day_root):
-            for entry in _cached_listdir(bundled_day_root):
+            for entry in cached_listdir(bundled_day_root):
                 b_day: str | None = None
                 bundle_path: str | None = None
                 if entry.startswith("day="):
@@ -1815,7 +1549,7 @@ class QueryRunner:
                 bundled_days_set.add(b_day)
 
         if os.path.isdir(bundled_hour_root):
-            for hour_entry in _cached_listdir(bundled_hour_root):
+            for hour_entry in cached_listdir(bundled_hour_root):
                 if not hour_entry.startswith("hour="):
                     continue
                 hour = hour_entry[len("hour=") :]
@@ -1865,7 +1599,7 @@ class QueryRunner:
             # already aggregates the field's whole day).
             covered_days: set[str] = set(bundled_days_set)
             if os.path.isdir(field_day_dir):
-                day_entries = _cached_listdir(field_day_dir)
+                day_entries = cached_listdir(field_day_dir)
                 for day_entry in day_entries:
                     if not day_entry.startswith("day="):
                         continue
@@ -1889,11 +1623,11 @@ class QueryRunner:
                         # hours of this day.
                         continue
                     day_dir = os.path.join(field_day_dir, day_entry)
-                    for fname in _cached_listdir(day_dir):
+                    for fname in cached_listdir(day_dir):
                         if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
                             day_paths.append(os.path.join(day_dir, fname))
                             covered_days.add(day)
-            hour_entries = _cached_listdir(field_hour_dir)
+            hour_entries = cached_listdir(field_hour_dir)
             for hour_entry in hour_entries:
                 if not hour_entry.startswith("hour="):
                     continue
@@ -1914,7 +1648,7 @@ class QueryRunner:
                     # Per-hour bundle already covers this (field, hour).
                     continue
                 hour_dir = os.path.join(field_hour_dir, hour_entry)
-                for fname in _cached_listdir(hour_dir):
+                for fname in cached_listdir(hour_dir):
                     if fname.endswith(".parquet"):
                         hour_paths.append(os.path.join(hour_dir, fname))
                         per_field_hours_seen.add(hour)
@@ -2480,10 +2214,9 @@ class QueryRunner:
         ``[{"time": iso_string, "value": float}, ...]``, ordered by bucket.
         ``None`` means "not eligible — caller should run its raw query".
         """
-        import os
-        from datetime import UTC, datetime, timedelta
+        from datetime import UTC, timedelta
 
-        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME
         from backend.utils.date_utils import parse_iso_utc
 
         if chart_metric not in self._TS_ROLLUP_METRIC_PARTS:
@@ -2509,32 +2242,22 @@ class QueryRunner:
         if (et - st) > timedelta(days=366):
             return None
 
-        bundled_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(bundled_root):
-            return None
-
-        # st is UTC (parse_iso_utc guarantees it). collect_hourly_bundle_paths
-        # returns None when a closed hour has per-field rollup data but no
-        # bundle on disk — that's the writer-behind case where serving the
-        # rollup path would undercount, so we fall back to raw.
-        active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        active_hour_dt = parse_hour_key_strict(active_hour_str)
-        collected = collect_hourly_bundle_paths(
+        # st is UTC (parse_iso_utc guarantees it). The plan is None when a
+        # closed hour has per-field rollup data but no bundle on disk (the
+        # writer-behind case where serving the rollup would undercount), when
+        # a gap is older than the heal cap, or when there is nothing to read.
+        plan = plan_hourly_read(
             self.src,
             st,
             et,
-            bundled_root,
             TIME_SERIES_BUNDLE_FILENAME,
             allow_all_fields_coverage=True,
+            heal=True,
         )
-        if collected is None:
+        if plan is None:
             return None
-        rollup_paths, crosses_active = collected
-
-        if not rollup_paths and not crosses_active:
-            # Window is in the past but no rollup files exist for it (the
-            # backfill hasn't been run, or every hour predates retention).
-            return None
+        rollup_paths, crosses_active = plan.paths, plan.crosses_active
+        active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
 
         parts = self._TS_ROLLUP_METRIC_PARTS[chart_metric]
         # Bucket is TIMESTAMPTZ in the bundle parquets (older notes about
@@ -2563,54 +2286,19 @@ class QueryRunner:
 
         # Missing-hour live heal: a CLOSED hour in [st, et) with no
         # time_series bundle at all is a writer-coverage gap, not proof of
-        # zero traffic — collect_hourly_bundle_paths silently SKIPS such an
-        # hour rather than raising, so without this the hour just
-        # contributes nothing to the chart (see execute_top_n_rollups's own
-        # "Missing-hour live heal" for the sibling fix; that reader already
-        # had this heal, this one didn't). Uses a literal, unparameterized
-        # where-clause against the raw base table — mirrors the pattern
-        # above, sidestepping bound-parameter bookkeeping across UNION ALL
-        # branches since none of this SQL needs them.
-        missing_hours = _find_missing_bundle_hours(
-            st,
-            et,
-            bundled_root,
-            TIME_SERIES_BUNDLE_FILENAME,
-            coverage_bundle_filename="all_fields.parquet",
-        )
-        # C2 (final whole-branch review, part 2): _find_missing_bundle_hours
-        # is capped (default 48h) — a genuine writer-coverage gap OLDER than
-        # the cap would otherwise be silently un-served (collect_hourly_
-        # bundle_paths skipped it with no marker present) AND un-healed
-        # (outside the cap), producing a truncated-but-served window instead
-        # of the correct-but-slower raw-scan fallback. Comparing the full
-        # expected hour count against what rollup_paths actually covered
-        # detects that case with zero extra disk I/O (rollup_paths already
-        # walked the full window above).
-        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
-        covered_closed_hours = _count_covered_closed_hours(
-            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
-        )
-        if expected_closed_hours - covered_closed_hours > len(missing_hours):
-            return None
-        if missing_hours:
+        # zero traffic, so the plan lists it for a live scan of the raw base
+        # table. Uses a literal, unparameterized where-clause — sidesteps
+        # bound-parameter bookkeeping across UNION ALL branches.
+        if plan.missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
             if heal_base_table:
-                heal_start_dt = max(parse_hour_key_strict(missing_hours[0]), st)
-                heal_end_dt = min(parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1), et)
-                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
-                heal_where = (
-                    f"timestamp >= '{heal_start_dt.isoformat()}' "
-                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
-                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
-                )
                 select_clauses.append(
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
                     f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
                     f"FROM {heal_base_table} "
-                    f"WHERE {heal_where} "
+                    f"WHERE {plan.heal_where()} "
                     f"GROUP BY 1"
                 )
 
@@ -2764,10 +2452,9 @@ class QueryRunner:
 
         Returns the total row count (int), or None to fall back to raw query.
         """
-        import os
-        from datetime import UTC, datetime, timedelta
+        from datetime import UTC, timedelta
 
-        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME
         from backend.utils.date_utils import parse_iso_utc
 
         if not unfiltered_window:
@@ -2784,26 +2471,18 @@ class QueryRunner:
         if (et - st) > timedelta(days=366):
             return None
 
-        bundled_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(bundled_root):
-            return None
-
-        active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        active_hour_dt = parse_hour_key_strict(active_hour_str)
-        collected = collect_hourly_bundle_paths(
+        plan = plan_hourly_read(
             self.src,
             st,
             et,
-            bundled_root,
             TIME_SERIES_BUNDLE_FILENAME,
             allow_all_fields_coverage=True,
+            heal=True,
         )
-        if collected is None:
+        if plan is None:
             return None
-        rollup_paths, crosses_active = collected
-
-        if not rollup_paths and not crosses_active:
-            return None
+        rollup_paths, crosses_active = plan.paths, plan.crosses_active
+        active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
 
         st_tz = st.astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
@@ -2818,39 +2497,15 @@ class QueryRunner:
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
             )
 
-        # Missing-hour live heal: see try_time_series_from_rollup's sibling
-        # comment — a CLOSED hour with no time_series bundle is a
-        # writer-coverage gap, not zero traffic.
-        missing_hours = _find_missing_bundle_hours(
-            st,
-            et,
-            bundled_root,
-            TIME_SERIES_BUNDLE_FILENAME,
-            coverage_bundle_filename="all_fields.parquet",
-        )
-        # C2 (final whole-branch review, part 2): see try_time_series_from_
-        # rollup's sibling comment — refuse rather than silently serve a
-        # window with a genuine gap older than the heal cap.
-        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
-        covered_closed_hours = _count_covered_closed_hours(
-            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
-        )
-        if expected_closed_hours - covered_closed_hours > len(missing_hours):
-            return None
-        if missing_hours:
+        # Missing-hour live heal: see try_time_series_from_rollup — a CLOSED
+        # hour with no time_series bundle is a writer-coverage gap, not zero
+        # traffic.
+        if plan.missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
             if heal_base_table:
-                heal_start_dt = max(parse_hour_key_strict(missing_hours[0]), st)
-                heal_end_dt = min(parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1), et)
-                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
-                heal_where = (
-                    f"timestamp >= '{heal_start_dt.isoformat()}' "
-                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
-                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
-                )
-                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where}")
+                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {plan.heal_where()}")
 
         direct_live_tmp: str | None = None
         live_needs_params = False
@@ -2940,25 +2595,13 @@ class QueryRunner:
         short-circuit order is equivalent to the per-method preambles it
         replaces.
         """
-        from datetime import timedelta
-
-        from backend.utils.date_utils import parse_window
-
-        if has_filters:
-            return None
-        if not start_time or not end_time:
-            return None
-        if require_top_asns is not None and not require_top_asns:
-            return None
-        window = parse_window(start_time, end_time)
-        if window is None:
-            return None
-        st, et = window
-        if (et - st) < timedelta(hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
-        return st, et
+        return eligible_window(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            require_top_asns=require_top_asns,
+            min_hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS,
+        )
 
     def try_slow_urls_from_rollup(
         self,
@@ -3007,58 +2650,24 @@ class QueryRunner:
         but the ranking is preserved for the URLs that dominate the
         panel.
         """
-        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+        if durable_serving_blocked(self.src):
             return None
 
-        import os
-        from datetime import UTC, datetime, timedelta
-
-        from backend.core.rollups import SLOW_URLS_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import SLOW_URLS_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
         if win is None:
             return None
         st, et = win
 
-        bundled_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(bundled_root):
-            return None
-
-        # Walk closed hours. Cheap to inline here vs. reusing
-        # collect_hourly_bundle_paths because slow_urls doesn't need
-        # the active-hour merge (see docstring above) — we just want
-        # the list of available closed-hour rollup files, and "skip
-        # the active hour entirely" matches the writer's contract.
-        #
-        # Unlike try_time_series_from_rollup, which falls back on a
-        # single missing closed hour (chart undercount would mislead),
-        # the slow_urls panel is a top-N ranking and missing a few
-        # hours doesn't change which URLs dominate. We tolerate gaps
-        # but require at least 50% closed-hour coverage so a freshly-
-        # backfilling service doesn't serve a misleading sample.
-        active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        rollup_paths: list[str] = []
-        total_closed_hours = 0
-        cur = st.replace(minute=0, second=0, microsecond=0)
-        if cur < st:
-            cur = cur + timedelta(hours=1)
-        while cur < et:
-            hour_str = cur.strftime("%Y-%m-%d-%H")
-            if hour_str >= active_hour_str:
-                break
-            total_closed_hours += 1
-            path = os.path.join(bundled_root, f"hour={hour_str}", SLOW_URLS_BUNDLE_FILENAME)
-            if os.path.exists(path):
-                rollup_paths.append(path)
-            cur = cur + timedelta(hours=1)
-
-        if not rollup_paths:
-            # No files at all — fall back to raw.
-            return None
-        if total_closed_hours > 0 and (len(rollup_paths) / total_closed_hours) < 0.5:
-            # Less than half coverage — backfill is still bootstrapping;
-            # the partial sample would mislead a 30 d top-N ranking. Let
-            # raw serve until coverage improves.
+        # Unlike try_time_series_from_rollup, which falls back on a single
+        # missing closed hour (a chart undercount would mislead), the
+        # slow_urls panel is a top-N ranking: missing a few hours doesn't
+        # change which URLs dominate, so gaps are tolerated down to the
+        # shared closed-hour coverage floor. The active hour is skipped
+        # entirely — merging live SQL for it would force a raw scan anyway.
+        rollup_paths = collect_hour_paths_with_floor(self.src, st, et, SLOW_URLS_BUNDLE_FILENAME)
+        if rollup_paths is None:
             return None
 
         # Single SQL read over all per-hour parquets. Request-weighted
@@ -3125,67 +2734,7 @@ class QueryRunner:
         network_rtt, network_speed, verified_bots_ts, perf_latency); the
         per-feature SQL + result shaping stays in each caller.
         """
-        import os
-        from datetime import UTC, datetime, timedelta
-
-        from backend.core.rollups._common import (
-            DAY_BUNDLE_FILENAME,
-            _day_bundled_root,
-            _hour_bundled_root,
-        )
-
-        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
-            return None
-
-        hour_root = _hour_bundled_root(self.src)
-        day_root = _day_bundled_root(self.src)
-        if not os.path.isdir(hour_root) and not os.path.isdir(day_root):
-            return None
-
-        active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        day_buckets: dict[str, list[str]] = {}
-        total_closed_hours = 0
-        cur = st.replace(minute=0, second=0, microsecond=0)
-        if skip_partial_start and cur < st:
-            cur = cur + timedelta(hours=1)
-        while cur < et:
-            hour_str = cur.strftime("%Y-%m-%d-%H")
-            if hour_str >= active_hour_str:
-                break
-            total_closed_hours += 1
-            day_buckets.setdefault(cur.strftime("%Y-%m-%d"), []).append(hour_str)
-            cur = cur + timedelta(hours=1)
-
-        rollup_paths: list[str] = []
-        covered_hours = 0
-        for day_str, hours_in_day in sorted(day_buckets.items()):
-            day_file = os.path.join(day_root, f"day={day_str}", bundle_filename)
-            chosen_day = day_file if os.path.isfile(day_file) else None
-            if not chosen_day and bundle_filename == DAY_BUNDLE_FILENAME:
-                alt_day_file = os.path.join(day_root, f"day={day_str}", f"day_bundle_{day_str}.parquet")
-                flat_day_file = os.path.join(day_root, f"day_bundle_{day_str}.parquet")
-                if os.path.isfile(alt_day_file):
-                    chosen_day = alt_day_file
-                elif os.path.isfile(flat_day_file):
-                    chosen_day = flat_day_file
-            # Use the per-day compacted file only when the window spans the
-            # ENTIRE UTC day (24 in-window hours); a partial day would pick up
-            # out-of-range hours. Per-hour fallback keeps the window correct.
-            if len(hours_in_day) == 24 and chosen_day:
-                rollup_paths.append(chosen_day)
-                covered_hours += 24
-            else:
-                for hour_str in hours_in_day:
-                    p = os.path.join(hour_root, f"hour={hour_str}", bundle_filename)
-                    if os.path.isfile(p):
-                        rollup_paths.append(p)
-                        covered_hours += 1
-
-        if not rollup_paths:
-            return None
-        if total_closed_hours > 0 and (covered_hours / total_closed_hours) < 0.5:
-            return None
-        return rollup_paths
+        return collect_day_prefer_paths(self.src, st, et, bundle_filename, skip_partial_start=skip_partial_start)
 
     def try_origin_summary_from_rollup(
         self,
@@ -3637,10 +3186,9 @@ class QueryRunner:
         ``None`` on any eligibility miss / read error. Percentiles are
         request-weighted approximations across minutes → ``_approx: True``.
         """
-        import os
         from datetime import UTC, datetime
 
-        from backend.core.rollups import ORIGIN_LATENCY_TS_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.core.rollups import ORIGIN_LATENCY_TS_BUNDLE_FILENAME
 
         if split_by_leg:
             return None
@@ -3663,19 +3211,13 @@ class QueryRunner:
             return None
         st, et = win
 
-        bundled_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(bundled_root):
+        # Fail-closed on any missing closed hour (the plan is None when a
+        # closed hour had data but no bundle on disk). crosses_active tells us
+        # whether to splice in the live tail.
+        plan = plan_hourly_read(self.src, st, et, ORIGIN_LATENCY_TS_BUNDLE_FILENAME)
+        if plan is None:
             return None
-
-        # Fail-closed on any missing closed hour (collect_hourly_bundle_paths
-        # returns None when a closed hour had data but no bundle on disk). The
-        # crosses_active flag tells us whether to splice in the live tail.
-        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, ORIGIN_LATENCY_TS_BUNDLE_FILENAME)
-        if collected is None:
-            return None
-        rollup_paths, crosses_active = collected
-        if not rollup_paths and not crosses_active:
-            return None
+        rollup_paths, crosses_active = plan.paths, plan.crosses_active
 
         cnt_col = f"{metric}_count"
         pcol = f"{metric}_{percentile}_us"
@@ -4357,10 +3899,9 @@ class QueryRunner:
         shaped ``(bucket_ts, bot_type, count)`` matching the live SQL's row
         shape, or ``None`` on any eligibility miss / read error.
         """
-        from datetime import UTC, datetime, timedelta
+        from datetime import UTC, datetime
 
         from backend.core.rollups._common import VERIFIED_BOTS_TS_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_window
 
         if has_filters:
             return None
@@ -4373,14 +3914,10 @@ class QueryRunner:
         # Minute-granular re-bucketing is only exact for whole-minute buckets.
         if n < 60 or n % 60 != 0:
             return None
-        window = parse_window(start_time, end_time)
-        if window is None:
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
             return None
-        st, et = window
-        if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
-            return None
-        if (et - st) > timedelta(days=366):
-            return None
+        st, et = win
 
         active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
@@ -5083,7 +4620,7 @@ class QueryRunner:
         from backend.utils.date_utils import parse_iso_utc
         from backend.utils.hll import HyperLogLog
 
-        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+        if durable_serving_blocked(self.src):
             return {}, {}
 
         def _phase(name: str, ms: float) -> None:
@@ -5488,7 +5025,6 @@ class QueryRunner:
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("repositories._base._schema_cols_cache", _schema_cols_cache)
-_CacheRegistry.register("repositories._base._listdir_cache", _listdir_cache)
 # Per-(service, field) warning-throttle timestamps. Without registration
 # a test that triggers an empty-rollup warning leaves entries behind, and
 # a later test that expects the warning to fire again is silently throttled.

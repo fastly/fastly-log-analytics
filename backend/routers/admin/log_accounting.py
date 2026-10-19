@@ -174,7 +174,7 @@ def _try_row_counts_from_rollup(
 
     from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
     from backend.deps import _ConnectionHolder
-    from backend.repositories._base import collect_hourly_bundle_paths
+    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root):

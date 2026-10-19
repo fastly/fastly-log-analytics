@@ -750,7 +750,7 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
         stat hours older than the cap floor; if it does, this test's older
         "no bundle" hours would incorrectly show up as `missing`.
         """
-        from backend.repositories._base import _find_missing_bundle_hours
+        from backend.repositories.rollup_coverage import find_missing_bundle_hours as _find_missing_bundle_hours
 
         bundled, _per_field, _cache_dir = rollup_layout
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)

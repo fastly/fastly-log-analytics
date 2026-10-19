@@ -48,7 +48,7 @@ def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tup
     expected/correct.
     """
     from backend.core.rollups import SESSIONS_BUNDLE_FILENAME, _hour_bundled_root
-    from backend.repositories._base import collect_hourly_bundle_paths
+    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):

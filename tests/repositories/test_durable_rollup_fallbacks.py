@@ -2,7 +2,8 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from backend import config as svcconfig
-from backend.repositories._base import QueryRunner, collect_hourly_bundle_paths
+from backend.repositories._base import QueryRunner
+from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 
 
 def _durable_source() -> dict:

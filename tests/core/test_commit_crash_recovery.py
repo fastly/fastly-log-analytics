@@ -85,7 +85,7 @@ def test_reader_ignores_stray_tmp_bundle(tmp_path):
     in the bundle dir. The reader keys on the exact ``time_series.parquet``
     name, so a stray tmp must be invisible — never read as data."""
     from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
-    from backend.repositories._base import collect_hourly_bundle_paths
+    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 
     src = {"name": "stray-svc", "service_id": "stray-id", "_cache_dir_override": str(tmp_path)}
     hour_dt = (datetime.now(UTC) - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
