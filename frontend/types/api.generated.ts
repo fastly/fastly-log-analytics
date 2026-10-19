@@ -1443,6 +1443,10 @@ export interface paths {
          * Rum Analytics
          * @description Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
          *     Wraps execution with execute_with_stale_view_retry.
+         *
+         *     A recognized ``range_token`` (+ optional ``anchor``) is resolved server-side by the shared
+         *     ``RequestContext.resolve_window`` (then analyst-clamped), ignoring ``start_time``/``end_time``.
+         *     Absent or unrecognized tokens take the legacy absolute-bounds path unchanged.
          */
         get: operations["rum_analytics_api_services__service_id__rum_analytics_get"];
         put?: never;
@@ -29914,6 +29918,8 @@ export interface operations {
                 start_time?: string | null;
                 end_time?: string | null;
                 filters?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };
