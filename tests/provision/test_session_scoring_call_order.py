@@ -84,7 +84,7 @@ def _cfg() -> dict:
 def _patched(fake: _Fastly):
     return (
         patch.object(sso.svcconfig, "load_config", return_value=_cfg()),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fake),
         patch("backend.core.fastly.service.fastly", fake),
         patch.object(sso, "delete_scoring_service", return_value=[]),
@@ -226,7 +226,7 @@ def _run_swap(fn, fake: _Fastly, **fn_kwargs):
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(sso.svcconfig, "load_config", return_value=_swap_cfg()))
-        stack.enter_context(patch.object(sso.svcconfig, "save_config"))
+        stack.enter_context(patch.object(sso.svcconfig, "_save_config_unlocked"))
         stack.enter_context(patch.object(sso, "fastly", fake))
         stack.enter_context(patch("backend.core.fastly.service.fastly", fake))
         return fn(LOG_SVC, TOKEN, **fn_kwargs)

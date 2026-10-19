@@ -182,7 +182,7 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config") as save_mock,
+        patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package") as wasm_mock,
         patch.object(sso, "_write_matrix_to_kv") as kv_mock,
@@ -234,7 +234,7 @@ def test_enable_scoring_stamps_deploy_identity_for_drift_detection(monkeypatch):
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config") as save_mock,
+        patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package", return_value={"sha": "deadbeef_pkg_sha", "version": 7}),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -316,7 +316,7 @@ def test_enable_scoring_populates_default_exclude_url_regex_on_first_enable(monk
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config") as save_mock,
+        patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -355,7 +355,7 @@ def test_enable_scoring_preserves_operator_overrides_on_reenable(monkeypatch):
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config") as save_mock,
+        patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -387,7 +387,7 @@ def test_enable_scoring_adds_backend_with_correct_shape(monkeypatch):
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -413,7 +413,7 @@ def test_enable_scoring_installs_all_six_named_snippets(monkeypatch):
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -441,12 +441,12 @@ def test_enable_scoring_rolls_back_on_validation_failure(monkeypatch):
     fastly_mock = _happy_path_fastly_mock_with_post_secret()
     save_calls = []
 
-    def fake_save(svc_id, c):
+    def fake_save(svc_id, c, **_kw):
         save_calls.append(dict(c))
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=fake_save),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=fake_save),
         patch.object(sso, "ensure_scoring_service", return_value=_ensure_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -474,7 +474,7 @@ def test_disable_scoring_no_op_when_not_enabled(monkeypatch):
     fastly_mock = MagicMock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch.object(sso, "delete_scoring_service") as delete_mock,
     ):
@@ -541,12 +541,12 @@ def test_disable_scoring_full_teardown_when_enabled(monkeypatch):
     fastly_mock = MagicMock(side_effect=side_effect)
     saved = []
 
-    def fake_save(svc_id, c):
+    def fake_save(svc_id, c, **_kw):
         saved.append(dict(c))
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=fake_save),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=fake_save),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
         patch.object(sso, "delete_scoring_service", return_value=[]) as delete_mock,
@@ -832,7 +832,7 @@ def test_enable_skips_logging_redeploy_when_reconciler_reports_no_change():
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config") as save_mock,
+        patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=meta),
         patch.object(
             sso, "_deploy_wasm_package", return_value={"version": 2, "sha": "PKG", "files_hash": "F", "skipped": True}

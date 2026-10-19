@@ -164,7 +164,7 @@ def test_enable_scoring_heals_missing_request_secret_via_post(monkeypatch):
     fastly_mock = _happy_path_fastly_mock_with_post_secret()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=meta),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -201,7 +201,7 @@ def test_enable_scoring_heals_request_secret_via_patch_when_post_409s(monkeypatc
     happy = _happy_path_fastly_mock_with_post_secret(post_secret_409=True)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=meta),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -234,7 +234,7 @@ def test_enable_scoring_heal_aborts_when_no_keys_store_id():
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=meta),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -258,7 +258,7 @@ def test_enable_scoring_status_cb_fires_on_each_stage():
 
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
@@ -313,7 +313,7 @@ def test_disable_scoring_rolls_back_when_validate_fails():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
         patch.object(sso, "delete_scoring_service") as delete_mock,
@@ -366,7 +366,7 @@ def test_update_recv_exclusion_regex_works_without_request_secret():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -405,7 +405,7 @@ def test_update_recv_exclusion_regex_happy_path_persists_and_activates():
     save_mock = MagicMock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=save_mock),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -457,7 +457,7 @@ def test_update_recv_exclusion_regex_empty_string_persists_as_none():
     save_mock = MagicMock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=save_mock),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -493,7 +493,7 @@ def test_update_recv_exclusion_regex_rolls_back_on_validate_failure():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -538,7 +538,7 @@ def test_update_enforce_status_code_works_without_request_secret():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -578,7 +578,7 @@ def test_update_enforce_status_code_happy_path():
     save_mock = MagicMock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=save_mock),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -626,7 +626,7 @@ def test_update_enforce_status_code_none_persists_as_none_and_uses_default():
     save_mock = MagicMock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config", side_effect=save_mock),
+        patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -664,7 +664,7 @@ def test_update_enforce_status_code_rolls_back_on_validate_failure():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):
@@ -709,7 +709,7 @@ def test_update_recv_exclusion_regex_raises_when_no_active_version():
     fastly_mock = MagicMock(side_effect=side_effect)
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
     ):

@@ -741,44 +741,54 @@ def enable_scoring(
     # Pull them off the pre-existing block before the replace.
     from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX
 
-    prior_scoring = cfg.get("scoring") or {}
-    cfg["scoring"] = {
-        "enabled": True,
-        "scoring_service_id": scoring_service_id,
-        "scoring_service_name": scoring_meta["scoring_service_name"],
-        "scoring_domain": scoring_domain,
-        "scoring_keys_store_id": scoring_meta["scoring_keys_store_id"],
-        "scoring_config_store_id": scoring_meta["scoring_config_store_id"],
-        "scoring_matrix_store_id": matrix_store_id or scoring_meta.get("scoring_matrix_store_id", ""),
-        # Stash the secret here so re-runs of enable_scoring can recover
-        # it (the ConfigStore is write-only from our perspective). The
-        # config file is gitignored under /configs/* so this never leaks.
-        "request_secret": request_secret,
-        "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-        # Identity of the scorer build we just pushed to the edge. /scoring/status
-        # recomputes these from the committed package + VCL generator and flags
-        # drift when they differ, so the operator knows a redeploy is needed.
-        "deployed_package_sha": deployed_package_sha,
-        # The edge's own integrity hash for the live Compute package, stamped so
-        # a later redeploy can ask the edge "did the live package change since
-        # we deployed?" (manual-deploy drift) and skip a no-op upload.
-        "deployed_package_files_hash": deployed_files_hash,
-        "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
-        # First-enable defaults: persist the actual values so the admin UI
-        # shows what's actually in use (no empty-as-sentinel cleverness)
-        # and so a future change to the bundled default doesn't silently
-        # alter the per-service behaviour.
-        "exclude_url_regex": prior_scoring.get("exclude_url_regex") or DEFAULT_ASSET_EXT_REGEX,
-    }
-    # Preserve any operator-set enforce_status_code override across the
-    # block replace; absence means "use the bundled default 429" — there's
-    # no need to materialise the default since the enforce snippet's
-    # default arg already covers it.
-    if prior_scoring.get("enforce_status_code") is not None:
-        cfg["scoring"]["enforce_status_code"] = prior_scoring["enforce_status_code"]
-    # Add the scoring custom_fields so update_logging_endpoint picks them up.
-    _add_scoring_custom_fields(cfg)
-    svcconfig.save_config(logging_service_id, cfg)
+    def _apply_scoring(target: dict) -> None:
+        # Applied on a fresh read under the config lock: Stages 1-2 above ran for minutes, and
+        # only the ``scoring`` block + scoring custom_fields are ours to write. The operator
+        # overrides are re-read here so a change made mid-deploy is not reverted.
+        fresh_prior = target.get("scoring") or {}
+        target["scoring"] = _build_scoring_block(fresh_prior)
+        _add_scoring_custom_fields(target)
+
+    def _build_scoring_block(prior_scoring: dict) -> dict[str, Any]:
+        block = {
+            "enabled": True,
+            "scoring_service_id": scoring_service_id,
+            "scoring_service_name": scoring_meta["scoring_service_name"],
+            "scoring_domain": scoring_domain,
+            "scoring_keys_store_id": scoring_meta["scoring_keys_store_id"],
+            "scoring_config_store_id": scoring_meta["scoring_config_store_id"],
+            "scoring_matrix_store_id": matrix_store_id or scoring_meta.get("scoring_matrix_store_id", ""),
+            # Stash the secret here so re-runs of enable_scoring can recover
+            # it (the ConfigStore is write-only from our perspective). The
+            # config file is gitignored under /configs/* so this never leaks.
+            "request_secret": request_secret,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            # Identity of the scorer build we just pushed to the edge. /scoring/status
+            # recomputes these from the committed package + VCL generator and flags
+            # drift when they differ, so the operator knows a redeploy is needed.
+            "deployed_package_sha": deployed_package_sha,
+            # The edge's own integrity hash for the live Compute package, stamped so
+            # a later redeploy can ask the edge "did the live package change since
+            # we deployed?" (manual-deploy drift) and skip a no-op upload.
+            "deployed_package_files_hash": deployed_files_hash,
+            "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
+            # First-enable defaults: persist the actual values so the admin UI
+            # shows what's actually in use (no empty-as-sentinel cleverness)
+            # and so a future change to the bundled default doesn't silently
+            # alter the per-service behaviour.
+            "exclude_url_regex": prior_scoring.get("exclude_url_regex") or DEFAULT_ASSET_EXT_REGEX,
+        }
+        # Preserve any operator-set enforce_status_code override across the
+        # block replace; absence means "use the bundled default 429" — there's
+        # no need to materialise the default since the enforce snippet's
+        # default arg already covers it.
+        if prior_scoring.get("enforce_status_code") is not None:
+            block["enforce_status_code"] = prior_scoring["enforce_status_code"]
+        return block
+
+    # The scoring custom_fields are added so update_logging_endpoint picks them up.
+    if svcconfig.mutate_config(logging_service_id, _apply_scoring) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
     n_scoring = len(_SCORING_FIELD_NAMES)
     ok(f"Stashed scoring metadata + {n_scoring} custom_fields into service config")
 
@@ -807,14 +817,13 @@ def enable_scoring(
 
     except Exception as exc:
         fail(f"enable_scoring failed: {exc}")
+
         # Also revert the on-disk config so a retry starts from clean state.
-        try:
-            fresh = svcconfig.load_config(logging_service_id) or cfg
-        except Exception:
-            fresh = cfg
-        fresh.pop("scoring", None)
-        _remove_scoring_custom_fields(fresh)
-        svcconfig.save_config(logging_service_id, fresh)
+        def _revert(target: dict) -> None:
+            target.pop("scoring", None)
+            _remove_scoring_custom_fields(target)
+
+        svcconfig.mutate_config(logging_service_id, _revert)
         raise
 
 
@@ -870,8 +879,12 @@ def disable_scoring(
         _remove_scoring_backend(logging_service_id, new_ver, token)
 
         # ── Stage 3: drop the 6 custom_fields + regen log format. ───────────
-        _remove_scoring_custom_fields(cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        def _strip_fields(target: dict) -> None:
+            _remove_scoring_custom_fields(target)
+
+        stripped = svcconfig.mutate_config(logging_service_id, _strip_fields)
+        if stripped is not None:
+            cfg = stripped
 
         from backend.core.fastly.service import list_s3_endpoints
         from backend.provision.fastly_api import generate_capture_vcl, load_log_format
@@ -930,18 +943,11 @@ def disable_scoring(
     _delete_scoring_matrix_from_fos(logging_service_id)
 
     # ── Stage 6: clear the scoring block from config. ──────────────────────
-    # DEFENSE-IN-DEPTH: re-load cfg right before the final save. The
-    # Fastly + Compute teardown stages above can take 60-120s; the
-    # in-memory cfg loaded at line ~644 is a stale snapshot that would
-    # clobber any concurrent writer mutations (metadata_sync tick,
-    # custom_fields PATCH, ngwaf_workspace_id update). Same load-mutate-
-    # save-just-the-target-keys pattern as the enable_scoring rollback.
-    try:
-        fresh = svcconfig.load_config(logging_service_id) or cfg
-    except Exception:
-        fresh = cfg
-    fresh.pop("scoring", None)
-    svcconfig.save_config(logging_service_id, fresh)
+    # The Fastly + Compute teardown stages above can take 60-120s, so only the
+    # ``scoring`` key is dropped, on a fresh read under the config lock: a stale
+    # snapshot would clobber concurrent writer mutations (metadata_sync tick,
+    # custom_fields PATCH, ngwaf_workspace_id update).
+    svcconfig.mutate_config(logging_service_id, lambda target: target.pop("scoring", None))
 
     # Publish the new custom_fields list (now without scoring) so analyst
     # boxes stop seeing the scoring entries on their next metadata_sync.
@@ -1132,23 +1138,24 @@ def update_recv_exclusion_regex(
     re-activates the prior version so the service is never left in an
     inconsistent state.
     """
-    cfg = svcconfig.load_config(logging_service_id)
-    if not cfg:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-    scoring = cfg.get("scoring") or {}
-    if not scoring.get("enabled"):
-        raise RuntimeError(
-            f"Session scoring is not enabled for {logging_service_id}; "
-            "run enable_scoring first before customising the recv exclusion regex."
-        )
     # Persist the override first — that way even if the Fastly activation
     # below fails, a future enable_scoring run picks up the new value.
     # None is the canonical "use default" representation so the JSON cfg
     # file doesn't end up with an empty-string sentinel.
     cleaned = (new_regex or "").strip()
-    scoring["exclude_url_regex"] = cleaned or None
-    cfg["scoring"] = scoring
-    svcconfig.save_config(logging_service_id, cfg)
+
+    def _set_regex(target: dict) -> None:
+        scoring = target.get("scoring") or {}
+        if not scoring.get("enabled"):
+            raise RuntimeError(
+                f"Session scoring is not enabled for {logging_service_id}; "
+                "run enable_scoring first before customising the recv exclusion regex."
+            )
+        scoring["exclude_url_regex"] = cleaned or None
+        target["scoring"] = scoring
+
+    if svcconfig.mutate_config(logging_service_id, _set_regex) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
 
     # Generate the recv snippet body with the new regex.
     from backend.provision.session_scoring_vcl import (
@@ -1222,16 +1229,6 @@ def update_enforce_status_code(
     re-activates the prior version so the service is never left in an
     inconsistent state.
     """
-    cfg = svcconfig.load_config(logging_service_id)
-    if not cfg:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-    scoring = cfg.get("scoring") or {}
-    if not scoring.get("enabled"):
-        raise RuntimeError(
-            f"Session scoring is not enabled for {logging_service_id}; "
-            "run enable_scoring first before customising the enforce status code."
-        )
-
     # Persist the override first so a future enable_scoring re-bake also
     # picks it up even if the activation below fails. None is the canonical
     # "use default" representation (mirrors exclude_url_regex shape).
@@ -1243,9 +1240,19 @@ def update_enforce_status_code(
 
     effective_code = resolve_enforce_status_code(new_status_code)
     is_default = effective_code == DEFAULT_ENFORCE_STATUS_CODE
-    scoring["enforce_status_code"] = None if is_default else effective_code
-    cfg["scoring"] = scoring
-    svcconfig.save_config(logging_service_id, cfg)
+
+    def _set_status_code(target: dict) -> None:
+        scoring = target.get("scoring") or {}
+        if not scoring.get("enabled"):
+            raise RuntimeError(
+                f"Session scoring is not enabled for {logging_service_id}; "
+                "run enable_scoring first before customising the enforce status code."
+            )
+        scoring["enforce_status_code"] = None if is_default else effective_code
+        target["scoring"] = scoring
+
+    if svcconfig.mutate_config(logging_service_id, _set_status_code) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
 
     new_enforce_body = enforce_snippet(effective_code)
 
