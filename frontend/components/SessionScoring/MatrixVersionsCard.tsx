@@ -11,14 +11,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
@@ -27,6 +21,7 @@ interface MatrixVersionsCardProps {
 }
 
 type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
+type MatrixVersion = components['schemas']['ScoringMatrixVersion']
 
 import { formatBytes } from '@/lib/format'
 import { formatDeterministicUTC } from '@/lib/date'
@@ -87,6 +82,72 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
     if (restoreResult?.deploy_hint) copyText(restoreResult.deploy_hint)
   }
 
+  const currentVersion = data?.current_version ?? null
+  const restorePending = restore.isPending
+
+  const columns = React.useMemo<ColumnDef<MatrixVersion>[]>(
+    () => [
+      {
+        id: 'version',
+        header: 'Version',
+        accessorFn: (v) => v.version ?? '',
+        size: 260,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-2 font-mono text-xs">
+            <span>{row.original.version}</span>
+            {currentVersion === row.original.version && (
+              <Badge variant="default" className="text-[10px]">current</Badge>
+            )}
+          </div>
+        ),
+      },
+      {
+        id: 'last_modified',
+        header: 'Last modified',
+        accessorFn: (v) => v.last_modified ?? '',
+        size: 200,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="text-xs text-muted-foreground">
+            {formatDeterministicUTC(row.original.last_modified)}
+          </span>
+        ),
+      },
+      {
+        id: 'size_bytes',
+        header: 'Size',
+        accessorFn: (v) => v.size_bytes ?? 0,
+        size: 110,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="text-xs font-mono tabular-nums">{formatBytes(row.original.size_bytes ?? 0)}</span>
+        ),
+      },
+      {
+        id: 'actions',
+        header: 'Actions',
+        size: 130,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
+              disabled={currentVersion === row.original.version || restorePending}
+              onClick={() => setPendingVersion(row.original.version ?? null)}
+            >
+              <RotateCcw className="h-3 w-3 mr-1" />
+              Restore
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [currentVersion, restorePending],
+  )
+
   if (isError) {
     return (
       <Card className="border-destructive/20 bg-destructive/5">
@@ -104,7 +165,6 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   }
 
   const versions = data?.versions ?? []
-  const currentVersion = data?.current_version ?? null
 
   return (
     <AnalyticsCard
@@ -126,51 +186,13 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
           No prior matrix versions saved yet. Versions accumulate as you retrain.
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Version</TableHead>
-              <TableHead>Last modified</TableHead>
-              <TableHead>Size</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {versions.map((v) => {
-              const isCurrent = currentVersion === v.version
-              return (
-                <TableRow key={v.version}>
-                  <TableCell className="font-mono text-xs">
-                    <div className="flex items-center gap-2">
-                      <span>{v.version}</span>
-                      {isCurrent && (
-                        <Badge variant="default" className="text-[10px]">current</Badge>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {formatDeterministicUTC(v.last_modified)}
-                  </TableCell>
-                  <TableCell className="text-xs font-mono tabular-nums">
-                    {formatBytes(v.size_bytes ?? 0)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
-                      disabled={isCurrent || restore.isPending}
-                      onClick={() => setPendingVersion(v.version ?? null)}
-                    >
-                      <RotateCcw className="h-3 w-3 mr-1" />
-                      Restore
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
+        <DataTableReadonly
+          columns={columns}
+          data={versions}
+          hideToolbar
+          showPagination={versions.length > 50}
+          tableCaption="Matrix versions"
+        />
       )}
 
       {restoreResult && (

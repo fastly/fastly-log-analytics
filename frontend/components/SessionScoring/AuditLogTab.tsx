@@ -8,14 +8,8 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { client } from '@/lib/api'
 import { formatTimeAgo } from '@/lib/date'
 import type { components } from '@/types/api.generated'
@@ -43,6 +37,59 @@ function truncate(s: string, max: number) {
   if (s.length <= max) return s
   return s.slice(0, max) + '…'
 }
+
+const AUDIT_COLUMNS: ColumnDef<AuditRow>[] = [
+  {
+    id: 'timestamp',
+    header: 'Timestamp',
+    accessorFn: (r) => r.timestamp ?? '',
+    size: 140,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span
+        className="text-xs whitespace-nowrap text-muted-foreground"
+        title={row.original.timestamp ?? undefined}
+      >
+        {formatTimeAgo(row.original.timestamp ?? '') || row.original.timestamp}
+      </span>
+    ),
+  },
+  {
+    id: 'action',
+    header: 'Action',
+    accessorFn: (r) => r.action,
+    size: 200,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <Badge variant="secondary" className="font-mono text-[10px]">
+        {row.original.action}
+      </Badge>
+    ),
+  },
+  {
+    id: 'actor',
+    header: 'Actor',
+    accessorFn: (r) => r.actor ?? '',
+    size: 160,
+    enableSorting: false,
+    cell: ({ row }) => <span className="text-xs font-mono">{row.original.actor || '—'}</span>,
+  },
+  {
+    id: 'details',
+    header: 'Details',
+    accessorFn: (r) => detailsToString(r.details),
+    size: 480,
+    enableSorting: false,
+    cell: ({ row }) => {
+      const details = detailsToString(row.original.details)
+      return (
+        <span className="text-xs font-mono" title={details || undefined}>
+          {details ? truncate(details, 60) : '—'}
+        </span>
+      )
+    },
+  },
+]
 
 export function AuditLogTab({ serviceId }: AuditLogTabProps) {
   const query = useQuery({
@@ -105,58 +152,14 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
           <SkeletonGrid count={3} height="2.5rem" className="rounded-md" />
         </div>
       ) : (
-        <div className="max-h-[520px] overflow-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-[140px]">Timestamp</TableHead>
-                <TableHead className="w-[200px]">Action</TableHead>
-                <TableHead className="w-[160px]">Actor</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 && (
-                <TableRow>
-                  <TableCell
-                    colSpan={4}
-                    className="text-center text-xs text-muted-foreground py-6"
-                  >
-                    No audit events yet. Mutations to scoring (enable, retrain,
-                    rotate key, etc.) will appear here.
-                  </TableCell>
-                </TableRow>
-              )}
-              {rows.map((r) => {
-                const details = detailsToString(r.details)
-                return (
-                  <TableRow key={String(r.id)}>
-                    <TableCell
-                      className="text-xs whitespace-nowrap text-muted-foreground"
-                      title={r.timestamp ?? undefined}
-                    >
-                      {formatTimeAgo(r.timestamp ?? '') || r.timestamp}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary" className="font-mono text-[10px]">
-                        {r.action}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-xs font-mono">
-                      {r.actor || '—'}
-                    </TableCell>
-                    <TableCell
-                      className="text-xs font-mono max-w-[480px] truncate"
-                      title={details || undefined}
-                    >
-                      {details ? truncate(details, 60) : '—'}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </div>
+        <DataTableReadonly
+          columns={AUDIT_COLUMNS}
+          data={rows}
+          hideToolbar
+          showPagination={rows.length > 50}
+          tableCaption="Scoring audit log"
+          emptyMessage="No audit events yet. Mutations to scoring (enable, retrain, rotate key, etc.) will appear here."
+        />
       )}
     </AnalyticsCard>
   )
