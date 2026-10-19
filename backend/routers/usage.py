@@ -69,18 +69,9 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
     not nested under an `object_storage` dict. We accept either shape.
     """
 
-    def _get(d, key):
-        return int(d.get(key) or 0)
+    from backend.core.fastly.models import StatsRecord
 
-    a = _get(record, "object_storage_class_a_operations_count")
-    b = _get(record, "object_storage_class_b_operations_count")
-    if a or b:
-        return a, b
-
-    sub = record.get("object_storage")
-    if isinstance(sub, dict):
-        return _get(sub, "class_a_operations_count"), _get(sub, "class_b_operations_count")
-    return 0, 0
+    return StatsRecord.model_validate(record).fos_ops()
 
 
 def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:

@@ -1360,6 +1360,7 @@ def provision_ngwaf_workspaces(
     # bypasses, even if the token matches the server-stored fastly_api_key.
     validate_destructive_token(token, service_id=service_id)
 
+    from backend.core.fastly.models import NgwafWorkspacesResponse
     from backend.utils.router_utils import format_debug_request
 
     _ngwaf_url = "https://api.fastly.com/ngwaf/v1/workspaces"
@@ -1376,15 +1377,8 @@ def provision_ngwaf_workspaces(
         )
         # Handle both {"data": [...]} and {"workspaces": [...]} response shapes.
         # Use key-presence check to avoid falsy-empty-list bug.
-        raw_list = data.get("data") if "data" in data else data.get("workspaces", [])
-        logger.debug("[ngwaf-workspaces] raw_list length=%d", len(raw_list))
-        workspaces = [
-            {
-                "id": w.get("id"),
-                "name": w.get("name") or (w.get("attributes") or {}).get("name") or w.get("id"),
-            }
-            for w in raw_list
-        ]
+        workspaces = NgwafWorkspacesResponse.model_validate(data).workspaces_list()
+        logger.debug("[ngwaf-workspaces] workspaces length=%d", len(workspaces))
         result: dict = {"workspaces": workspaces}
         if not workspaces:
             # Check if this is an automation token, which cannot see NGWAF

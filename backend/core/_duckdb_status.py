@@ -1389,6 +1389,7 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
 
         from backend.core import metadata as metadata_db
         from backend.core.fastly.client import fastly
+        from backend.core.fastly.models import StatsResponse
 
         # Hourly gate — Fastly's hourly /stats/aggregate snaps to the wall
         # clock so re-pulling more than once per hour is pure waste, and the
@@ -1413,20 +1414,12 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
             "GET", f"/stats/aggregate?by=hour&from={from_ts}&to={to_ts}", token=api_key, max_retries=0, timeout=30
         )
 
-        records = payload.get("data", []) or []
         hourly: list[dict] = []
-        for r in records:
-            ts = r.get("start_time")
-            if ts is None:
+        for rec in StatsResponse.model_validate(payload).data:
+            if rec.start_time is None:
                 continue
-            hour_iso = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
-            class_a = int(r.get("object_storage_class_a_operations_count") or 0)
-            class_b = int(r.get("object_storage_class_b_operations_count") or 0)
-            if class_a == 0 and class_b == 0:
-                sub = r.get("object_storage") or {}
-                if isinstance(sub, dict):
-                    class_a = int(sub.get("class_a_operations_count") or 0)
-                    class_b = int(sub.get("class_b_operations_count") or 0)
+            hour_iso = datetime.fromtimestamp(rec.start_time, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
+            class_a, class_b = rec.fos_ops()
             hourly.append({"hour_iso": hour_iso, "class_a": class_a, "class_b": class_b})
 
         return metadata_db.reconcile_fastly_stats(service_id, hourly)

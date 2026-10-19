@@ -88,6 +88,7 @@ def _fetch_fastly_request_counts(
     from datetime import UTC, datetime
 
     from backend.core.fastly.client import fastly
+    from backend.core.fastly.models import StatsResponse
 
     cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
     cached: dict[str, int] | None = _FASTLY_COUNTS_CACHE.get(cache_key)
@@ -101,15 +102,12 @@ def _fetch_fastly_request_counts(
     )
 
     width = 13 if by == "hour" else 10
-    records = payload.get("data", []) or []
     out: dict[str, int] = {}
-    stat_key = "edge_requests" if edge_only else "requests"
-    for r in records:
-        ts = r.get("start_time")
-        if ts is None:
+    for r in StatsResponse.model_validate(payload).data:
+        if r.start_time is None:
             continue
-        bucket = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
-        out[bucket] = out.get(bucket, 0) + int(r.get(stat_key) or r.get("requests") or 0)
+        bucket = datetime.fromtimestamp(r.start_time, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
+        out[bucket] = out.get(bucket, 0) + ((r.edge_requests if edge_only else r.requests) or r.requests)
     _FASTLY_COUNTS_CACHE[cache_key] = out
     return out
 
