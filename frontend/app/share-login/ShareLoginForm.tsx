@@ -2,6 +2,9 @@
 
 import * as React from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
@@ -13,6 +16,16 @@ import { analystFetch } from '@/lib/analystFetch'
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']
 type ClaimResponse = components['schemas']['ShareClaimResponse']
+
+// Presence only: the native `required` / type="email" constraints on the
+// inputs own the user-facing validation copy (browser bubble). The schema is
+// the backstop so a blank value can never reach the login endpoint.
+const loginSchema = z.object({
+  email: z.string().min(1),
+  passcode: z.string().min(1),
+})
+
+type LoginValues = z.infer<typeof loginSchema>
 
 // Fixed code→copy allowlist for ?oauth_error=<code>. The raw param is NEVER
 // rendered (reflected-content hygiene on an unauth page) — an unknown code
@@ -53,8 +66,11 @@ export function ShareLoginForm() {
   const returnTarget = safeReturnTarget(searchParams.get('return') ?? searchParams.get('next'))
   const inviteToken = searchParams.get('token') ?? searchParams.get('invite')
   const oauthErrorCode = searchParams.get('oauth_error')
-  const [email, setEmail] = React.useState('')
-  const [passcode, setPasscode] = React.useState('')
+  const { register, handleSubmit, getValues, setValue } = useForm<LoginValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: '', passcode: '' },
+  })
+  const { ref: emailFieldRef, ...emailField } = register('email')
   const [reveal, setReveal] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [claimedInvite, setClaimedInvite] = React.useState<ClaimResponse | null>(null)
@@ -113,7 +129,7 @@ export function ShareLoginForm() {
         setClaimedInvite(data)
         const claimedEmail = data.email
         if (claimedEmail) {
-          setEmail((prev) => prev || claimedEmail)
+          setValue('email', getValues('email') || claimedEmail)
         }
       } catch {
         // Non-fatal: user can still enter email + passcode manually
@@ -122,7 +138,7 @@ export function ShareLoginForm() {
     return () => {
       cancelled = true
     }
-  }, [inviteToken])
+  }, [inviteToken, getValues, setValue])
 
   const providers = config?.providers ?? []
   // Fail-open: on a config fetch failure, offer the passcode form.
@@ -158,8 +174,7 @@ export function ShareLoginForm() {
     window.location.assign(`/api/share/oauth/authorize?${q.toString()}`)
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleLogin = handleSubmit(async ({ email, passcode }) => {
     if (busy) return
     setError(null)
     setBusy(true)
@@ -227,7 +242,7 @@ export function ShareLoginForm() {
     } finally {
       setBusy(false)
     }
-  }
+  })
 
   return (
     <div
@@ -310,7 +325,7 @@ export function ShareLoginForm() {
 
       {showPasscode && (
         <form
-          onSubmit={handleSubmit}
+          onSubmit={handleLogin}
           data-testid="share-login-form"
           className="space-y-4 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
         >
@@ -326,12 +341,14 @@ export function ShareLoginForm() {
               <Label htmlFor="email" className="text-xs">Email</Label>
               <Input
                 id="email"
-                ref={emailInputRef}
+                {...emailField}
+                ref={(el) => {
+                  emailFieldRef(el)
+                  emailInputRef.current = el
+                }}
                 type="email"
                 autoComplete="email"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
                 disabled={busy}
               />
             </div>
@@ -343,8 +360,7 @@ export function ShareLoginForm() {
                   type={reveal ? 'text' : 'password'}
                   autoComplete="current-password"
                   required
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value)}
+                  {...register('passcode')}
                   disabled={busy}
                 />
                 <Button
