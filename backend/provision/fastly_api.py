@@ -1461,91 +1461,93 @@ def update_logging_endpoint(cfg: dict, token: str):
     if service_cfg is None:
         raise RuntimeError(f"Service config for {service_id} is empty or None")
 
-    # Handle CMCD request merging/removal
     cmcd_enabled_req = cfg.get("cmcd_enabled")
     cmcd_mode_req = cfg.get("cmcd_mode")
     cmcd_version_req = cfg.get("cmcd_version")
-    old_cmcd = service_cfg.get("cmcd") or {}
-    cmcd_was_enabled = bool(old_cmcd.get("enabled"))
-    cmcd_changed = False
 
-    if cmcd_enabled_req is not None:
-        import datetime as _dt
+    def _apply_requested_changes(target: dict) -> None:
+        # Runs on the freshly-read config under the config lock, so only the keys this flow
+        # owns are touched and a concurrent writer's changes survive.
+        old_cmcd = target.get("cmcd") or {}
+        cmcd_was_enabled = bool(old_cmcd.get("enabled"))
 
-        from backend.provision.cmcd_fields import reconcile_cmcd_custom_fields
-        from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
+        if cmcd_enabled_req is not None:
+            import datetime as _dt
 
-        want_enabled = bool(cmcd_enabled_req)
-        new_mode = cmcd_mode_req or old_cmcd.get("mode", "query_string")
-        new_version = int(cmcd_version_req) if cmcd_version_req is not None else old_cmcd.get("version", 1)
+            from backend.provision.cmcd_fields import reconcile_cmcd_custom_fields
+            from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
 
-        if want_enabled and not cmcd_was_enabled:
-            service_cfg["cmcd"] = {
-                "enabled": True,
-                "mode": new_mode,
-                "version": new_version,
-                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-            }
-            lf_cfg = service_cfg.setdefault("log_fields", {})
-            lf_cfg["custom_fields"] = reconcile_cmcd_custom_fields(lf_cfg.get("custom_fields"), enabled=True)
-            cmcd_changed = True
-        elif not want_enabled and cmcd_was_enabled:
-            service_cfg.pop("cmcd", None)
-            _remove_cmcd_custom_fields(service_cfg)
-            cmcd_changed = True
-        elif want_enabled and cmcd_was_enabled:
-            if new_mode != old_cmcd.get("mode") or new_version != old_cmcd.get("version"):
-                service_cfg["cmcd"] = {
-                    **old_cmcd,
+            want_enabled = bool(cmcd_enabled_req)
+            new_mode = cmcd_mode_req or old_cmcd.get("mode", "query_string")
+            new_version = int(cmcd_version_req) if cmcd_version_req is not None else old_cmcd.get("version", 1)
+
+            if want_enabled and not cmcd_was_enabled:
+                target["cmcd"] = {
+                    "enabled": True,
                     "mode": new_mode,
                     "version": new_version,
+                    "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
                 }
-                cmcd_changed = True
+                lf_cfg = target.setdefault("log_fields", {})
+                lf_cfg["custom_fields"] = reconcile_cmcd_custom_fields(lf_cfg.get("custom_fields"), enabled=True)
+            elif not want_enabled and cmcd_was_enabled:
+                target.pop("cmcd", None)
+                _remove_cmcd_custom_fields(target)
+            elif want_enabled and cmcd_was_enabled:
+                if new_mode != old_cmcd.get("mode") or new_version != old_cmcd.get("version"):
+                    target["cmcd"] = {
+                        **old_cmcd,
+                        "mode": new_mode,
+                        "version": new_version,
+                    }
 
-    # Update state fields in nested provisioning block
-    prov = service_cfg.setdefault("provisioning", {})
-    if sample_rate is not None:
-        prov["sample_rate"] = int(sample_rate)
-    if edge_only is not None:
-        prov["edge_only"] = bool(edge_only)
-    if period is not None:
-        service_cfg["log_period"] = int(period)
-    if endpoint_name is not None:
-        prov["endpoint_name"] = endpoint_name
-    if cfg.get("log_fields") is not None:
-        # MERGE GUARD (sibling of the cli.py + api_service_log_fields_set
-        # guards): callers hand us a log_fields built from groups alone
-        # (_build_log_fields_config returns no custom_fields key), so a
-        # wholesale assign strips the user's custom_fields AND the
-        # system-managed scoring/CMCD entries. reconcile_vcl_state then
-        # regenerates the Fastly log format from this config, so the strip
-        # reaches the edge: the extraction VCL keeps running and nothing
-        # logs its output. Treat "absent OR empty" as "no change".
-        incoming_lf = dict(cfg["log_fields"])
-        if not incoming_lf.get("custom_fields"):
-            existing_custom = (service_cfg.get("log_fields") or {}).get("custom_fields")
-            if existing_custom:
-                incoming_lf["custom_fields"] = list(existing_custom)
-        service_cfg["log_fields"] = incoming_lf
+        # Update state fields in nested provisioning block
+        prov = target.setdefault("provisioning", {})
+        if sample_rate is not None:
+            prov["sample_rate"] = int(sample_rate)
+        if edge_only is not None:
+            prov["edge_only"] = bool(edge_only)
+        if period is not None:
+            target["log_period"] = int(period)
+        if endpoint_name is not None:
+            prov["endpoint_name"] = endpoint_name
+        if cfg.get("log_fields") is not None:
+            # MERGE GUARD (sibling of the cli.py + api_service_log_fields_set
+            # guards): callers hand us a log_fields built from groups alone
+            # (_build_log_fields_config returns no custom_fields key), so a
+            # wholesale assign strips the user's custom_fields AND the
+            # system-managed scoring/CMCD entries. reconcile_vcl_state then
+            # regenerates the Fastly log format from this config, so the strip
+            # reaches the edge: the extraction VCL keeps running and nothing
+            # logs its output. Treat "absent OR empty" as "no change".
+            incoming_lf = dict(cfg["log_fields"])
+            if not incoming_lf.get("custom_fields"):
+                existing_custom = (target.get("log_fields") or {}).get("custom_fields")
+                if existing_custom:
+                    incoming_lf["custom_fields"] = list(existing_custom)
+            target["log_fields"] = incoming_lf
 
-    # Re-assert the system-managed custom fields against the FINAL feature
-    # state (post-merge above, post-CMCD-request handling earlier). Keyed on
-    # state rather than on a transition so a reconcile that changes nothing
-    # about CMCD still converges, and a disable strips the fields.
-    reconcile_cfg_system_custom_fields(service_cfg)
-    if path is not None:
-        service_cfg["fos_path"] = path
+        # Re-assert the system-managed custom fields against the FINAL feature
+        # state (post-merge above, post-CMCD-request handling earlier). Keyed on
+        # state rather than on a transition so a reconcile that changes nothing
+        # about CMCD still converges, and a disable strips the fields.
+        reconcile_cfg_system_custom_fields(target)
+        if path is not None:
+            target["fos_path"] = path
 
-    # Save configuration
-    _svcconfig.save_config(service_id, service_cfg)
+    if _svcconfig.mutate_config(service_id, _apply_requested_changes) is None:
+        raise RuntimeError(f"Service config for {service_id} is empty or None")
 
-    # Refresh account level rate-limiting best effort
+    # Refresh account level rate-limiting best effort (Fastly call: no config lock held)
     try:
         detected_rl = account_has_rate_limiting(token, service_id)
-        prov = service_cfg.setdefault("provisioning", {})
-        if detected_rl is not None and prov.get("rate_limiting") != detected_rl:
-            prov["rate_limiting"] = detected_rl
-            _svcconfig.save_config(service_id, service_cfg)
+        current_rl = ((_svcconfig.load_config(service_id) or {}).get("provisioning") or {}).get("rate_limiting")
+        if detected_rl is not None and current_rl != detected_rl:
+
+            def _set_rate_limiting(target: dict) -> None:
+                target.setdefault("provisioning", {})["rate_limiting"] = detected_rl
+
+            _svcconfig.mutate_config(service_id, _set_rate_limiting)
             if detected_rl:
                 yield {
                     "type": "status",

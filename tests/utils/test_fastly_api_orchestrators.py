@@ -455,13 +455,14 @@ def test_update_logging_endpoint_short_circuits_when_no_changes():
 
 def _run_update_logging_endpoint(cfg_in, stored_cfg):
     """Drive update_logging_endpoint and return the config it persisted."""
+    import json
+
+    from backend import config as svcconfig
     from backend.provision.declarative.reconciler import ReconciliationResult
 
-    saved = {}
+    svcconfig.save_config("svc-id", dict(stored_cfg))
 
     with (
-        patch("backend.config.load_config", return_value=stored_cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
         patch("backend.core.fastly.service.get_active_version", return_value=10),
         patch(
@@ -472,7 +473,7 @@ def _run_update_logging_endpoint(cfg_in, stored_cfg):
         events, exc = _drain(fastly_api.update_logging_endpoint(cfg_in, "tok"))
 
     assert exc is None, f"generator raised: {exc}"
-    return saved["cfg"], events
+    return json.loads(svcconfig.config_path("svc-id").read_text()), events
 
 
 def test_update_logging_endpoint_preserves_custom_fields_when_incoming_omits_them():
@@ -630,11 +631,12 @@ def test_update_logging_endpoint_refreshes_rate_limiting_flag():
     """A logging-settings update re-probes the account entitlement and persists
     the refreshed flag (so a later Update-CDN deploys correctly), emitting an
     informational status event. It does NOT redeploy the CDN itself."""
-    saved = []
-    service_cfg = {"provisioning": {"rate_limiting": True}, "log_fields": {"groups": ["A"]}}
+    import json
+
+    from backend import config as svcconfig
+
+    svcconfig.save_config("svc", {"provisioning": {"rate_limiting": True}, "log_fields": {"groups": ["A"]}})
     with (
-        patch("backend.config.load_config", return_value=service_cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
         # Short-circuit the rest of the generator right after the probe block.
         patch("backend.provision.fastly_api.get_active_version", return_value=None),
@@ -646,8 +648,7 @@ def test_update_logging_endpoint_refreshes_rate_limiting_flag():
         events, exc = _drain(gen)
 
     # Flag refreshed + persisted under provisioning.rate_limiting.
-    assert saved and saved[0][0] == "svc"
-    assert saved[0][1]["provisioning"]["rate_limiting"] is False
+    assert json.loads(svcconfig.config_path("svc").read_text())["provisioning"]["rate_limiting"] is False
     # An informational status event was surfaced...
     assert any(e.get("type") == "status" and "rate limiting" in e.get("message", "").lower() for e in events)
     # ...and the rest of the update still ran (and raised on no active version).
