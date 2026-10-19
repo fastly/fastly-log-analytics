@@ -51,6 +51,8 @@ import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { cn } from '@/lib/utils'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { statusBadgeClass } from '@/lib/status-style'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 import { formatCount } from '@/lib/format'
 import type { LogsQueryResponse } from '@/types/api'
@@ -82,6 +84,83 @@ const COMMON_OPTIONAL_COLUMNS = [
   'fastly_service_id',
   'server_datacenter',
 ]
+
+const COLUMN_HEADERS: Record<string, string> = {
+  timestamp: 'Timestamp',
+  status: 'Status',
+  request_method: 'Method',
+  url: 'URL Path',
+  client_ip: 'Client IP',
+  pop: 'POP',
+  origin: 'Origin',
+  response_time_ms: 'Duration',
+}
+
+const COLUMN_SIZES: Record<string, number> = {
+  timestamp: 190,
+  status: 90,
+  request_method: 90,
+  url: 360,
+  client_ip: 140,
+  pop: 80,
+}
+
+function renderLogCell(col: string, raw: LogRow[string]): React.ReactNode {
+  const val = displayCell(raw)
+  switch (col) {
+    case 'timestamp': {
+      const ts = val ? String(val).replace('T', ' ').replace('Z', '') : '—'
+      return <span className="font-mono text-xs text-muted-foreground">{ts}</span>
+    }
+    case 'status':
+      return (
+        <span className={cn('px-2 py-0.5 rounded text-[11px] font-semibold border', statusBadgeClass(val))}>
+          {val ?? '—'}
+        </span>
+      )
+    case 'request_method':
+      return (
+        <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border', getMethodBadgeVariant(val))}>
+          {val ?? 'GET'}
+        </span>
+      )
+    case 'url':
+      return (
+        <span className="font-mono text-[11px] text-foreground/90" title={String(val ?? '')}>
+          {val ?? '—'}
+        </span>
+      )
+    case 'client_ip':
+      return <span className="font-mono text-xs text-foreground/80">{val ?? '—'}</span>
+    case 'pop':
+      return val ? (
+        <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">
+          {val}
+        </Badge>
+      ) : (
+        '—'
+      )
+    case 'response_time_ms': {
+      const num = typeof val === 'number' ? Math.round(val) : val
+      return <span className="font-mono text-xs text-muted-foreground">{num != null ? `${num}ms` : '—'}</span>
+    }
+    default:
+      return <span className="text-xs text-muted-foreground">{val != null ? String(val) : '—'}</span>
+  }
+}
+
+// Row order is the server's (sort_dir + cursor paging), so client-side column
+// sorting would only reorder the current page — disabled on purpose.
+function buildLogColumns(selected: string[]): ColumnDef<LogRow>[] {
+  return selected.map((col) => ({
+    id: col,
+    header: COLUMN_HEADERS[col] ?? col,
+    accessorFn: (row) => displayCell(row[col]),
+    size: COLUMN_SIZES[col] ?? 150,
+    enableSorting: false,
+    cell: ({ row }) => renderLogCell(col, row.original[col]),
+  }))
+}
 
 function getMethodBadgeVariant(method: string | number | null | undefined): string {
   const m = String(method || '').toUpperCase()
@@ -210,6 +289,7 @@ export function RawLogsExplorer({
 
   const totalCount = data?.total_count ?? 0
   const rows = data?.rows ?? []
+  const logColumns = useMemo(() => buildLogColumns(selectedColumns), [selectedColumns])
   const hasMore = data?.has_more ?? false
 
   const filteredDetailKeys = useMemo(() => {
@@ -377,134 +457,16 @@ export function RawLogsExplorer({
               </p>
             </div>
           ) : (
-            <table data-testid="raw-logs-table" className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="border-b bg-muted/40 text-muted-foreground font-medium">
-                  {selectedColumns.map((col) => (
-                    <th key={col} className="p-2.5 whitespace-nowrap font-semibold">
-                      {col === 'timestamp'
-                        ? 'Timestamp'
-                        : col === 'status'
-                        ? 'Status'
-                        : col === 'request_method'
-                        ? 'Method'
-                        : col === 'url'
-                        ? 'URL Path'
-                        : col === 'client_ip'
-                        ? 'Client IP'
-                        : col === 'pop'
-                        ? 'POP'
-                        : col === 'origin'
-                        ? 'Origin'
-                        : col === 'response_time_ms'
-                        ? 'Duration'
-                        : col}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/50">
-                {rows.map((row, idx) => (
-                  <tr
-                    key={row.timestamp ? `${row.timestamp}-${idx}` : idx}
-                    onClick={() => setSelectedRow(row)}
-                    className="hover:bg-muted/50 cursor-pointer transition-colors group"
-                  >
-                    {selectedColumns.map((col) => {
-                      const val = displayCell(row[col])
-
-                      if (col === 'timestamp') {
-                        const ts = val ? String(val).replace('T', ' ').replace('Z', '') : '—'
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap font-mono text-muted-foreground">
-                            {ts}
-                          </td>
-                        )
-                      }
-
-                      if (col === 'status') {
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap">
-                            <span
-                              className={cn(
-                                'px-2 py-0.5 rounded text-[11px] font-semibold border',
-                                statusBadgeClass(val),
-                              )}
-                            >
-                              {val ?? '—'}
-                            </span>
-                          </td>
-                        )
-                      }
-
-                      if (col === 'request_method') {
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap">
-                            <span
-                              className={cn(
-                                'px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border',
-                                getMethodBadgeVariant(val),
-                              )}
-                            >
-                              {val ?? 'GET'}
-                            </span>
-                          </td>
-                        )
-                      }
-
-                      if (col === 'url') {
-                        return (
-                          <td
-                            key={col}
-                            className="p-2.5 max-w-md truncate font-mono text-[11px] text-foreground/90 group-hover:text-primary transition-colors"
-                            title={String(val ?? '')}
-                          >
-                            {val ?? '—'}
-                          </td>
-                        )
-                      }
-
-                      if (col === 'client_ip') {
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap font-mono text-foreground/80">
-                            {val ?? '—'}
-                          </td>
-                        )
-                      }
-
-                      if (col === 'pop') {
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap">
-                            {val ? (
-                              <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">
-                                {val}
-                              </Badge>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
-                        )
-                      }
-
-                      if (col === 'response_time_ms') {
-                        const num = typeof val === 'number' ? Math.round(val) : val
-                        return (
-                          <td key={col} className="p-2.5 whitespace-nowrap font-mono text-muted-foreground">
-                            {num != null ? `${num}ms` : '—'}
-                          </td>
-                        )
-                      }
-
-                      return (
-                        <td key={col} className="p-2.5 whitespace-nowrap max-w-xs truncate text-muted-foreground">
-                          {val != null ? String(val) : '—'}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div data-testid="raw-logs-table">
+              <DataTableReadonly
+                columns={logColumns}
+                data={rows}
+                hideToolbar
+                showPagination={false}
+                onRowClick={setSelectedRow}
+                tableCaption="Raw log records"
+              />
+            </div>
           )}
         </div>
 

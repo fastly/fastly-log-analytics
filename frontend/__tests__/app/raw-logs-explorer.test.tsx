@@ -6,6 +6,7 @@ import { createTestQueryClient } from '../helpers/query'
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/logs'))
 
 const mockPost = vi.fn()
@@ -86,4 +87,23 @@ test('switching services never renders the previous service rows while loading',
   expect(screen.queryByText('/from-a')).toBeNull()
   release()
   expect(await screen.findByText('/from-b')).toBeTruthy()
+})
+
+test('renders selected columns through the shared table and opens the row detail on click', async () => {
+  mockFilterPayload = {}
+  const qc = createTestQueryClient()
+  render(
+    <QueryClientProvider client={qc}>
+      <RawLogsExplorer activeServiceId="svc" />
+    </QueryClientProvider>,
+  )
+  const table = await screen.findByTestId('raw-logs-table')
+  for (const name of ['Timestamp', 'Status', 'Method', 'URL Path', 'Client IP', 'POP', 'Origin', 'Duration']) {
+    expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+  }
+  const dataRow = table.querySelector('tbody tr') as HTMLElement
+  expect(dataRow.textContent).toContain('/x')
+  expect(dataRow.textContent).toContain('2026-08-19 12:00:00')
+  fireEvent.click(dataRow)
+  expect(await screen.findByTestId('raw-logs-row-detail-modal')).toBeInTheDocument()
 })
