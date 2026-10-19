@@ -8,6 +8,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import { FilterValueCell } from '@/components/FilterValueCell'
@@ -43,7 +44,7 @@ const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then(
 })
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire, type RangeWireArgs } from '@/lib/range-wire'
+import type { RangeWireArgs } from '@/lib/range-wire'
 import { useFilterStore } from '@/stores/filterStore'
 import { LazyMount } from '@/components/LazyMount'
 import { StatCard } from '@/components/ui/stat-card'
@@ -240,13 +241,17 @@ function NetworkBody({
 
   // Token mode → range_token drives the scan (server-reproducible, memo-stable);
   // custom-absolute mode → rangeToken is null so the backend uses the start/end
-  // bounds the bodies always send. The cache keys already carry startTime/endTime,
-  // so a custom range gets its own entry.
-  const { rangeToken } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
+  // bounds the bodies always send. The hook's rangeKey ("abs:<start>|<end>" in
+  // custom mode) gives a custom range its own cache entry.
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
 
-  const coreQuery = useServiceQuery(
-    ['network', 'health', 'core', activeServiceId, startTime, endTime, filterPayload, animBucketSeconds, mapAsn, metric, rangeToken, anchor],
-    async ({ signal }) => {
+  const coreQuery = useAnalyticsReportQuery({
+    namespace: ['network', 'health', 'core'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: [animBucketSeconds, mapAsn, metric],
+    queryFn: async ({ rangeToken, signal }) => {
       const { data } = await client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
@@ -265,12 +270,16 @@ function NetworkBody({
         }
       })
       return data
-    }
-  )
+    },
+  })
 
-  const mapQuery = useServiceQuery(
-    ['network', 'health', 'map', activeServiceId, startTime, endTime, filterPayload, animBucketSeconds, mapAsn, metric, rangeToken, anchor],
-    async ({ signal }) => {
+  const mapQuery = useAnalyticsReportQuery({
+    namespace: ['network', 'health', 'map'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: [animBucketSeconds, mapAsn, metric],
+    queryFn: async ({ rangeToken, signal }) => {
       const { data } = await client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
@@ -286,12 +295,15 @@ function NetworkBody({
         }
       })
       return data
-    }
-  )
+    },
+  })
 
-  const shieldingQuery = useServiceQuery(
-    ['network', 'health', 'shielding', activeServiceId, startTime, endTime, filterPayload, rangeToken, anchor],
-    async ({ signal }) => {
+  const shieldingQuery = useAnalyticsReportQuery({
+    namespace: ['network', 'health', 'shielding'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    queryFn: async ({ rangeToken, signal }) => {
       const { data } = await client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
@@ -307,8 +319,8 @@ function NetworkBody({
         }
       })
       return data
-    }
-  )
+    },
+  })
 
   // TCP-RTT quality breakdowns (by country/ASN/region/POP) + RTT-vs-TTFB
   // scatter. Separate endpoint from /network-health; `region_country` scopes

@@ -250,3 +250,40 @@ test('transport section displays missing fields banner when optional fields not 
   expect(screen.getByText('tcp_rtt, retrans, ploss')).toBeInTheDocument()
   expect(screen.getByText('Service Configuration')).toHaveAttribute('href', '/service-config')
 })
+
+test('network health queries keep the range-wire key shape and request body after the hook migration', async () => {
+  mockPost.mockResolvedValue({ data: { available: false, reason: 'Network fields not enabled' } })
+  mockGet.mockResolvedValue({ data: { data: [] } })
+  const { resolveRangeWire } = await import('@/lib/range-wire')
+  const { quantizeAnchor } = await import('@/lib/time-window')
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <NetworkPage />
+    </QueryClientProvider>,
+  )
+  await screen.findByText('Network Metrics Unavailable')
+
+  const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
+  const { rangeKey } = resolveRangeWire({
+    relativeRange: null,
+    isAutoRange: false,
+    startTime: '2026-01-01T00:00:00Z',
+    endTime: '2026-01-01T01:00:00Z',
+    anchor,
+  })
+  const keys = queryClient.getQueryCache().getAll().map((q) => q.queryKey)
+  const prefix = ['test-svc', rangeKey, anchor, {}]
+  expect(keys).toContainEqual(['network', 'health', 'core', ...prefix, 3600, 'all', 'health_score'])
+  expect(keys).toContainEqual(['network', 'health', 'map', ...prefix, 3600, 'all', 'health_score'])
+  expect(keys).toContainEqual(['network', 'health', 'shielding', ...prefix])
+
+  const coreCall = mockPost.mock.calls.find(
+    ([url, opts]) =>
+      url === '/api/network-health' &&
+      (opts as { body: { sections: string[] } }).body.sections.length > 0,
+  )
+  expect(coreCall?.[1]).toMatchObject({
+    body: { start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T01:00:00Z', range_token: null, anchor },
+  })
+})
