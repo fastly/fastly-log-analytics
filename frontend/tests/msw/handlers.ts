@@ -36,7 +36,6 @@ import type { paths } from '@/types/api.generated'
 const API_BASE = 'http://127.0.0.1:8000'
 
 const ok = (body: JsonBodyType = {}) => () => HttpResponse.json(body)
-const okArray = () => () => HttpResponse.json([])
 
 type EnvelopeKeys =
   | '_debug_queries'
@@ -50,7 +49,9 @@ type OkBody<P extends keyof paths, M extends keyof paths[P]> = paths[P][M] exten
   responses: { 200: { content: { 'application/json': infer T } } }
 }
   ? StripEnvelope<T>
-  : never
+  : paths[P][M] extends { responses: { 202: { content: { 'application/json': infer T } } } }
+    ? StripEnvelope<T>
+    : never
 
 /**
  * `ok()` with the body checked against the OpenAPI response schema, so a
@@ -308,7 +309,7 @@ export const handlers = [
       { status: 409 },
     ),
   ),
-  http.get(`${API_BASE}/api/schema`, ok({ tables: [], custom_fields: [] })),
+  http.get(`${API_BASE}/api/schema`, okFor('/api/schema', 'get', { schema: [], table_name: 'logs' })),
 
   // ── Log-fields catalog (gates every analytics page) ───────────────
   http.get(`${API_BASE}/api/log-fields/catalog`, () =>
@@ -607,21 +608,23 @@ export const handlers = [
     // present the optional-chain-less reads crash the panel under tests.
     HttpResponse.json({ sources: [], rdns: { total: 0, pending: 0 } }),
   ),
-  http.post(`${API_BASE}/api/admin/bot-sources/:source_id/refresh`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/bot-sources/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
-  http.post(`${API_BASE}/api/admin/bots/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
+  http.post(`${API_BASE}/api/admin/bot-sources/:source_id/refresh`, okFor('/api/admin/bot-sources/{source_id}/refresh', 'post', { ok: true, source: {} })),
+  http.post(`${API_BASE}/api/admin/bot-sources/refresh`, okFor('/api/admin/bot-sources/refresh', 'post', { ok: true, sources: [], updated_count: 0, failed_count: 0 })),
+  http.post(`${API_BASE}/api/admin/bots/refresh`, okFor('/api/admin/bots/refresh', 'post', { ok: true, sources: [], updated_count: 0, failed_count: 0 })),
+  // The two rDNS routes below are called by BotSourcesPanel but are absent from
+  // the OpenAPI spec (and the backend), so they cannot be spec-typed.
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/backfill`, ok({ enqueued: 0 })),
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/enrich`, ok({ enriched: 0 })),
-  http.post(`${API_BASE}/api/admin/rdns/enrich`, ok({ ok: true, summary: {} })),
+  http.post(`${API_BASE}/api/admin/rdns/enrich`, okFor('/api/admin/rdns/enrich', 'post', { ok: true, summary: { resolved: 0, errors: 0, discovered: 0, batch_limit: 0 } })),
   http.get(`${API_BASE}/api/admin/rdns/stats`, okFor('/api/admin/rdns/stats', 'get', { ok: true, stats: {} })),
   http.get(`${API_BASE}/api/admin/system-jobs`, () => HttpResponse.json({ jobs: [] })),
   http.get(`${API_BASE}/api/admin/usage-logging`, () =>
     // GlobalSettings reads .enabled AND .retention_days.
     HttpResponse.json({ enabled: false, retention_days: 30 }),
   ),
-  http.patch(`${API_BASE}/api/admin/usage-logging`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/commit-iceberg`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/ducklake/migrate`, ok({ ok: true, started: true })),
+  http.patch(`${API_BASE}/api/admin/usage-logging`, okFor('/api/admin/usage-logging', 'patch', { ok: true })),
+  http.post(`${API_BASE}/api/admin/commit-iceberg`, okFor('/api/admin/commit-iceberg', 'post', { ok: true })),
+  http.post(`${API_BASE}/api/admin/ducklake/migrate`, okFor('/api/admin/ducklake/migrate', 'post', { ok: true, message: 'started', service_id: 'svc-default' })),
   http.post(`${API_BASE}/api/admin/ingest-logs`, okFor('/api/admin/ingest-logs', 'post', { ok: true })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),
@@ -632,11 +635,11 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/ingested-files`, () =>
     HttpResponse.json({ files: [], total: 0 }),
   ),
-  http.post(`${API_BASE}/api/admin/metadata-cleanup`, ok({ ok: true, removed: 0 })),
+  http.post(`${API_BASE}/api/admin/metadata-cleanup`, okFor('/api/admin/metadata-cleanup', 'post', { ok: true, removed: 0 })),
   http.get(`${API_BASE}/api/admin/pop-locations`, () =>
     HttpResponse.json({ pops: [] }),
   ),
-  http.post(`${API_BASE}/api/admin/pop-locations/refresh`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/pop-locations/refresh`, okFor('/api/admin/pop-locations/refresh', 'post', { pops: [] })),
   http.get(`${API_BASE}/api/admin/queries`, () => HttpResponse.json({ queries: [] })),
   http.get(`${API_BASE}/api/admin/raw-tree`, () =>
     HttpResponse.json({ tree: [], total: 0 }),
@@ -650,10 +653,10 @@ export const handlers = [
     HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
   http.post(`${API_BASE}/api/admin/duckdb/recycle`, okFor('/api/admin/duckdb/recycle', 'post', { ok: true, status: 'skipped' })),
-  http.get(`${API_BASE}/api/admin/duckdb/status`, ok({ ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
+  http.get(`${API_BASE}/api/admin/duckdb/status`, okFor('/api/admin/duckdb/status', 'get', { ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
   http.post(
     `${API_BASE}/api/admin/optimize/:service_id`,
-    ok({
+    okFor('/api/admin/optimize/{service_id}', 'post', {
       files_rewritten: 0,
       files_added: 0,
       eligible_partitions: 0,
@@ -661,9 +664,9 @@ export const handlers = [
       error: null,
     }),
   ),
-  http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, ok({ ok: true, service_id: 'svc-default', stats: {} })),
-  http.post(`${API_BASE}/api/admin/rum/ledger/sweep/:service_id`, ok({ status: 'started', run_id: 1 })),
-  http.get(`${API_BASE}/api/admin/ngwaf/status`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, okFor('/api/admin/ngwaf/sync/{service_id}', 'post', { ok: true, service_id: 'svc-default', workspace_id: 'ws-default', stats: {} })),
+  http.post(`${API_BASE}/api/admin/rum/ledger/sweep/:service_id`, okFor('/api/admin/rum/ledger/sweep/{service_id}', 'post', { ok: true, run_id: 1 })),
+  http.get(`${API_BASE}/api/admin/ngwaf/status`, okFor('/api/admin/ngwaf/status', 'get', { ok: true })),
 
   // ── AppLayout always-on calls (every page render hits these) ─────
   // sync-status: header lag indicator (useSyncStatus) — every admin
@@ -690,12 +693,12 @@ export const handlers = [
   http.get(`${API_BASE}/api/services/:service_id/log-fields`, () =>
     HttpResponse.json({ fields: [] }),
   ),
-  http.post(`${API_BASE}/api/services/:service_id/log-fields`, ok({ ok: true })),
-  http.patch(`${API_BASE}/api/services/:service_id/credentials`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/services/:service_id/log-fields`, okFor('/api/services/{service_id}/log-fields', 'post', { ok: true })),
+  http.patch(`${API_BASE}/api/services/:service_id/credentials`, okFor('/api/services/{service_id}/credentials', 'patch', { ok: true })),
   http.get(`${API_BASE}/api/services/:service_id/lake-info`, () =>
     HttpResponse.json({ ok: true, table: 'logs' }),
   ),
-  http.post(`${API_BASE}/api/services/:service_id/logging-settings/update`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/services/:service_id/logging-settings/update`, okFor('/api/services/{service_id}/logging-settings/update', 'post', { ok: true })),
   // Bare custom-fields CREATE (the per-field PUT/DELETE already have
   // defaults above; the bare-resource POST was missing).
   http.post(`${API_BASE}/api/services/:service_id/custom-fields`, () =>
@@ -726,10 +729,10 @@ export const handlers = [
   http.post(`${API_BASE}/api/query`, () =>
     HttpResponse.json({ rows: [], columns: [] }),
   ),
-  http.get(`${API_BASE}/api/presets`, okArray()),
+  http.get(`${API_BASE}/api/presets`, okFor('/api/presets', 'get', [])),
 
   // ── Admin-page endpoint defaults ──────────────────────────────────
-  http.get(`${API_BASE}/api/admin/health-snapshot`, ok({ ok: true })),
+  http.get(`${API_BASE}/api/admin/health-snapshot`, okFor('/api/admin/health-snapshot', 'get', { in_flight_runs: [], compaction: {}, pool_wait: [], recent_cron_failures: [], config_lock_degraded: false })),
   http.get(`${API_BASE}/api/admin/debug-settings`, () =>
     HttpResponse.json({
       query_debug_visibility: 'disabled',
@@ -746,18 +749,18 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/metadata-storage`, () =>
     HttpResponse.json({ bytes: 0, tables: [] }),
   ),
-  http.patch(`${API_BASE}/api/admin/metadata-retention`, ok({ ok: true })),
+  http.patch(`${API_BASE}/api/admin/metadata-retention`, okFor('/api/admin/metadata-retention', 'patch', { ok: true })),
   http.get(`${API_BASE}/api/admin/log-accounting`, () =>
     HttpResponse.json({ entries: [] }),
   ),
   http.get(`${API_BASE}/api/admin/metric-history/batch`, () =>
     HttpResponse.json({ series: [] }),
   ),
-  http.post(`${API_BASE}/api/admin/rebuild-local-view`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/rebuild-local-view`, okFor('/api/admin/rebuild-local-view', 'post', { ok: true })),
   // Real handler is an SSE stream (EventSourceResponse); components under
   // test mock useSSE directly (see DeleteDataDialog.test.tsx), so this only
   // needs to exist for the MSW-coverage-vs-openapi.json gate.
-  http.post(`${API_BASE}/api/admin/reset-logs`, ok({ type: 'done', message: 'ok' })),
+  http.post(`${API_BASE}/api/admin/reset-logs`, okFor('/api/admin/reset-logs', 'post', { type: 'done', message: 'ok' })),
   http.get(`${API_BASE}/api/admin/usage-log`, () =>
     HttpResponse.json({ rows: [] }),
   ),
@@ -768,18 +771,18 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/queries/:qid`, () =>
     HttpResponse.json({ query_id: 'q-test', status: 'completed' }),
   ),
-  http.post(`${API_BASE}/api/admin/queries/:qid/cancel`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/queries/:qid/cancel`, okFor('/api/admin/queries/{qid}/cancel', 'post', { state: 'cancelled', query_id: 0 })),
   http.get(`${API_BASE}/api/admin/app-config/query-monitor`, () =>
     HttpResponse.json({ config: {} }),
   ),
   http.get(`${API_BASE}/api/debug/recent-postgres`, () =>
     HttpResponse.json({ rows: [] }),
   ),
-  http.post(`${API_BASE}/api/debug/clear-postgres`, ok({ cleared: 0 })),
+  http.post(`${API_BASE}/api/debug/clear-postgres`, okFor('/api/debug/clear-postgres', 'post', { ok: true, buffer_size: 0, buffer_cap: 0, dropped: 0 })),
   http.get(`${API_BASE}/api/debug/recent-sqlite`, () =>
     HttpResponse.json({ rows: [] }),
   ),
-  http.post(`${API_BASE}/api/debug/clear-sqlite`, ok({ cleared: 0 })),
+  http.post(`${API_BASE}/api/debug/clear-sqlite`, okFor('/api/debug/clear-sqlite', 'post', { ok: true, buffer_size: 0, buffer_cap: 0, dropped: 0 })),
   http.delete(`${API_BASE}/api/cron-runs`, noContent()),
 
   // ── Share-admin family ────────────────────────────────────────────
@@ -793,8 +796,8 @@ export const handlers = [
     HttpResponse.json({ logs: [] }),
   ),
   http.post(`${API_BASE}/api/admin/share/start`, okFor('/api/admin/share/start', 'post', {})),
-  http.post(`${API_BASE}/api/admin/share/stop`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/share/panic`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/stop`, okFor('/api/admin/share/stop', 'post', { ok: true })),
+  http.post(`${API_BASE}/api/admin/share/panic`, okFor('/api/admin/share/panic', 'post', { ok: true })),
   http.get(`${API_BASE}/api/admin/share/wordphrase`, () =>
     HttpResponse.json({ phrase: 'test-phrase' }),
   ),
@@ -805,19 +808,19 @@ export const handlers = [
     HttpResponse.json({ invite_id: 'inv-test', passcode: 'TEST' }),
   ),
   http.delete(`${API_BASE}/api/admin/share/invites/:invite_id`, noContent()),
-  http.post(`${API_BASE}/api/admin/share/invites/:invite_id/revoke`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/invites/:invite_id/revoke`, okFor('/api/admin/share/invites/{invite_id}/revoke', 'post', { ok: true })),
   http.post(`${API_BASE}/api/admin/share/invites/:invite_id/reactivate`, () =>
     HttpResponse.json({ invite_id: 'inv-test', email: 'test@example.com', service_ids: [] }),
   ),
   http.post(`${API_BASE}/api/admin/share/invites/:invite_id/regenerate-passcode`, () =>
     HttpResponse.json({ invite_id: 'inv-test', passcode: 'NEW-PASSCODE' }),
   ),
-  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/passcode`, ok({ ok: true })),
-  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/services`, ok({ ok: true })),
-  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
-  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/share/sessions/:session_id/revoke`, ok({ ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/passcode`, okFor('/api/admin/share/invites/{invite_id}/passcode', 'patch', { ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/services`, okFor('/api/admin/share/invites/{invite_id}/services', 'patch', { ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, okFor('/api/admin/share/invites/{invite_id}/pii', 'patch', { ok: true })),
+  http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, okFor('/api/admin/share/invites/{invite_id}/sharing', 'patch', { ok: true })),
+  http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, okFor('/api/admin/share/sessions/{session_id}/boot', 'post', { ok: true })),
+  http.post(`${API_BASE}/api/admin/share/sessions/:session_id/revoke`, okFor('/api/admin/share/sessions/{session_id}/revoke', 'post', { ok: true })),
   http.get(`${API_BASE}/api/admin/share/settings`, () =>
     HttpResponse.json({ settings: {} }),
   ),
@@ -833,7 +836,7 @@ export const handlers = [
   http.put(`${API_BASE}/api/admin/share/tos`, () =>
     HttpResponse.json({ version: 2, text: 'Updated TOS', published_at: null }),
   ),
-  http.post(`${API_BASE}/api/admin/share/purge`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/purge`, okFor('/api/admin/share/purge', 'post', { ok: true })),
 
   // ── Quarantine ───────────────────────────────────────────────────
   http.get(`${API_BASE}/api/admin/quarantine`, () =>
@@ -851,7 +854,7 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/quarantine/download/:item_id`, () =>
     new HttpResponse(new Uint8Array(), { headers: { 'Content-Type': 'application/octet-stream' } }),
   ),
-  http.post(`${API_BASE}/api/admin/quarantine/purge`, ok({ ok: true, deleted: 0 })),
+  http.post(`${API_BASE}/api/admin/quarantine/purge`, okFor('/api/admin/quarantine/purge', 'post', { deleted: 0 })),
 
   // ── Share-login (analyst auth) ────────────────────────────────────
   // Default auth-config: passcode-only (the OAuth feature is off unless a test
@@ -959,6 +962,6 @@ export const handlers = [
   // DataTable reorder doesn't trip the onUnhandledRequest='error'
   // guard.
   http.post(`${API_BASE}/api/web-vitals`, okFor('/api/web-vitals', 'post', { ok: true })),
-  http.post(`${API_BASE}/api/ux-events`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/ux-events`, okFor('/api/ux-events', 'post', { ok: true })),
 
 ]
