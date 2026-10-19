@@ -29,12 +29,14 @@ from backend.repositories.rollup_coverage import (
     eligible_window,
     plan_hourly_read,
 )
+from backend.repositories.rollup_coverage import heal_where_clause as _heal_where_clause
 
 if TYPE_CHECKING:
     from datetime import datetime
 
 from backend.repositories.top_n_rollups import TopNWindow as _TopNWindow
 from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
+from backend.repositories.top_n_rollups import find_unrolled_hours as _find_unrolled_hours
 from backend.repositories.top_n_rollups import fold_rows as _fold_rows
 from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
 from backend.repositories.top_n_rollups import plan_top_n_paths as _plan_top_n_paths
@@ -1325,8 +1327,7 @@ class QueryRunner:
         behind, so a rollup-writer gap degrades to a slower-but-correct
         read instead of silently under-counted panels.
         """
-        import os
-        from datetime import UTC, datetime, timedelta
+        from datetime import UTC, datetime
 
         from backend.core.duckdb import _cache_dir
         from backend.core.rollups import _is_safe_ident, _safe_table_for
@@ -1540,54 +1541,7 @@ class QueryRunner:
         # its pre-existing fast-but-partial behavior.
         _t_heal = time.perf_counter()
         heal_res: list[tuple] = []
-        heal_floor_dt = active_dt - timedelta(hours=_MISSING_HOUR_HEAL_CAP)
-        if st_dt and st_dt > heal_floor_dt:
-            heal_floor_dt = st_dt
-
-        # Lazy per-day verification for the day-compacted exclusion: a dir
-        # entry alone isn't proof of compaction — a crashed compaction can
-        # leave an empty day dir, and treating that as "compacted" would
-        # permanently exclude the day from the heal (re-creating the silent
-        # undercount this fallback exists to close). Verified only for heal
-        # CANDIDATE days (≤ a few per request) and memoized, so the cheap
-        # dir-presence set stays the prefilter and the walks above pay
-        # nothing extra.
-        _day_rollup_presence: dict[str, bool] = {}
-
-        def _day_has_real_day_rollup(day: str) -> bool:
-            cached = _day_rollup_presence.get(day)
-            if cached is not None:
-                return cached
-            present = os.path.isfile(os.path.join(plan.bundled_day_root, f"day={day}", "all_fields.parquet"))
-            if not present:
-                for f_ in safe_fields:
-                    d_ = os.path.join(plan.day_root, f"field={f_}", f"day={day}")
-                    if not os.path.isdir(d_):
-                        continue
-                    try:
-                        if any(n_.endswith(".parquet") and not n_.startswith(".tmp_") for n_ in os.listdir(d_)):
-                            present = True
-                            break
-                    except OSError:
-                        continue
-            _day_rollup_presence[day] = present
-            return present
-
-        missing_hours: list[str] = []
-        missing_hour_dts: list[datetime] = []
-        cur_dt = heal_floor_dt.replace(minute=0, second=0, microsecond=0)
-        while cur_dt < active_dt:
-            h = cur_dt.strftime("%Y-%m-%d-%H")
-            h_dt = cur_dt
-            cur_dt += timedelta(hours=1)
-            if win.et_floor and h > win.et_floor:
-                break
-            if h in plan.bundled_hours or h in plan.per_field_hours_seen:
-                continue
-            if h[:10] in plan.days_with_day_files_any and _day_has_real_day_rollup(h[:10]):
-                continue
-            missing_hours.append(h)
-            missing_hour_dts.append(h_dt)
+        missing_hours = _find_unrolled_hours(plan, win, safe_fields, _MISSING_HOUR_HEAL_CAP)
         if missing_hours:
             _now_mono = time.monotonic()
             _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
@@ -1616,16 +1570,7 @@ class QueryRunner:
                 # Clamp to the requested window so a mid-hour window edge
                 # (custom range) can't over-count rows outside it; the IN
                 # list prunes to exactly the un-rolled hours in between.
-                heal_start_dt = max(missing_hour_dts[0], st_dt) if st_dt else missing_hour_dts[0]
-                heal_end_dt = missing_hour_dts[-1] + timedelta(hours=1)
-                if et_dt and et_dt < heal_end_dt:
-                    heal_end_dt = et_dt
-                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
-                heal_where = (
-                    f"timestamp >= '{heal_start_dt.isoformat()}' "
-                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
-                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
-                )
+                heal_where = _heal_where_clause(missing_hours, st_dt, et_dt)
                 heal_tmp = self.create_filtered_temp_table(heal_topn_fields, actual_cols, base_table, heal_where)
                 if heal_tmp:
                     try:

@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from backend.repositories import rollup_coverage
-from backend.repositories.top_n_rollups import TopNWindow, plan_top_n_paths
+from backend.repositories.rollup_coverage import heal_where_clause
+from backend.repositories.top_n_rollups import TopNWindow, find_unrolled_hours, plan_top_n_paths
 
 NOW = datetime(2026, 3, 15, 10, 20, tzinfo=UTC)
 
@@ -136,3 +137,53 @@ class TestPlanTopNPaths:
         _touch(tmp_path / "rollups/hour/field=other/hour=2026-03-13-05/p.parquet")
         plan = plan_top_n_paths(str(tmp_path), ["a"], TopNWindow.build(_dt(13), _dt(14), NOW))
         assert not plan.paths
+
+
+def _unrolled(root: Path, win: TopNWindow, cap: int = 48) -> list[str]:
+    return find_unrolled_hours(plan_top_n_paths(str(root), ["a"], win), win, ["a"], cap)
+
+
+class TestFindUnrolledHours:
+    def test_every_hour_is_missing_on_an_empty_tree_up_to_the_cap(self, tmp_path: Path) -> None:
+        got = _unrolled(tmp_path, TopNWindow.build(_dt(14, 6), _dt(14, 9), NOW))
+        assert got == ["2026-03-14-06", "2026-03-14-07", "2026-03-14-08"]
+
+    def test_cap_bounds_the_lookback_from_the_active_hour(self, tmp_path: Path) -> None:
+        got = _unrolled(tmp_path, TopNWindow.build(_dt(1), _dt(15, 10), NOW), cap=3)
+        assert got == ["2026-03-15-07", "2026-03-15-08", "2026-03-15-09"]
+
+    def test_open_ended_window_stops_before_the_active_hour(self, tmp_path: Path) -> None:
+        got = _unrolled(tmp_path, TopNWindow.build(_dt(15, 7), None, NOW))
+        assert got == ["2026-03-15-07", "2026-03-15-08", "2026-03-15-09"]
+
+    def test_bundle_or_per_field_file_counts_as_coverage(self, tmp_path: Path) -> None:
+        _touch(tmp_path / "rollups/hour_bundled/hour=2026-03-14-06/all_fields.parquet")
+        _touch(tmp_path / "rollups/hour/field=a/hour=2026-03-14-07/p.parquet")
+        assert _unrolled(tmp_path, TopNWindow.build(_dt(14, 6), _dt(14, 9), NOW)) == ["2026-03-14-08"]
+
+    def test_mid_hour_start_includes_its_hour_and_end_is_half_open(self, tmp_path: Path) -> None:
+        got = _unrolled(tmp_path, TopNWindow.build(_dt(14, 6, 30), _dt(14, 8), NOW))
+        assert got == ["2026-03-14-06", "2026-03-14-07"]
+
+    def test_compacted_day_is_excluded_but_empty_day_dir_is_not(self, tmp_path: Path) -> None:
+        _touch(tmp_path / "rollups/day/field=a/day=2026-03-13/p.parquet")
+        (tmp_path / "rollups/day/field=a/day=2026-03-14").mkdir(parents=True)
+        got = _unrolled(tmp_path, TopNWindow.build(_dt(13, 22), _dt(14, 2), NOW))
+        assert got == ["2026-03-14-00", "2026-03-14-01"]
+
+    def test_bundled_day_marks_the_day_compacted(self, tmp_path: Path) -> None:
+        _touch(tmp_path / "rollups/day_bundled/day=2026-03-13/all_fields.parquet")
+        assert _unrolled(tmp_path, TopNWindow.build(_dt(13, 22), _dt(14), NOW)) == []
+
+
+class TestHealWhereClause:
+    def test_range_is_clamped_to_the_request_window(self) -> None:
+        got = heal_where_clause(["2026-03-14-06", "2026-03-14-08"], _dt(14, 6, 30), _dt(14, 8, 15))
+        assert got == (
+            "timestamp >= '2026-03-14T06:30:00+00:00' AND timestamp < '2026-03-14T08:15:00+00:00' "
+            "AND strftime(timestamp, '%Y-%m-%d-%H') IN ('2026-03-14-06', '2026-03-14-08')"
+        )
+
+    def test_unbounded_window_uses_hour_edges(self) -> None:
+        got = heal_where_clause(["2026-03-14-06"], None, None)
+        assert got.startswith("timestamp >= '2026-03-14T06:00:00+00:00' AND timestamp < '2026-03-14T07:00:00+00:00'")

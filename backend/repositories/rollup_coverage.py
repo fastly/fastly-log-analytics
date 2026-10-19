@@ -354,6 +354,27 @@ def _missing_hours(
     ]
 
 
+def heal_where_clause(missing_hours: list[str], st: datetime | None, et: datetime | None) -> str:
+    """WHERE clause that live-queries exactly ``missing_hours`` from the raw base table.
+
+    The timestamp range is clamped to the request window so a mid-hour window
+    edge cannot over-count rows outside it; the ``IN`` list prunes to the
+    un-rolled hours in between.
+    """
+    start = parse_hour_key_strict(missing_hours[0])
+    if st and st > start:
+        start = st
+    end = parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1)
+    if et and et < end:
+        end = et
+    hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+    return (
+        f"timestamp >= '{start.isoformat()}' "
+        f"AND timestamp < '{end.isoformat()}' "
+        f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+    )
+
+
 @dataclass(frozen=True)
 class HourlyReadPlan:
     """Fail-closed plan for the minute-grain time-series readers."""
@@ -376,14 +397,7 @@ class HourlyReadPlan:
 
     def heal_where(self) -> str:
         """WHERE clause that live-heals ``missing_hours`` from the raw base table."""
-        heal_start_dt = max(parse_hour_key_strict(self.missing_hours[0]), self.index.st)
-        heal_end_dt = min(parse_hour_key_strict(self.missing_hours[-1]) + timedelta(hours=1), self.index.et)
-        hours_in_sql = ", ".join(f"'{h}'" for h in self.missing_hours)
-        return (
-            f"timestamp >= '{heal_start_dt.isoformat()}' "
-            f"AND timestamp < '{heal_end_dt.isoformat()}' "
-            f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
-        )
+        return heal_where_clause(self.missing_hours, self.index.st, self.index.et)
 
 
 def plan_hourly_read(

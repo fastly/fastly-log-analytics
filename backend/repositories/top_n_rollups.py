@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from backend.core.rollups._common import quote_path_list
-from backend.repositories.rollup_coverage import cached_listdir
+from backend.repositories.rollup_coverage import CoverageIndex, cached_listdir
 from backend.utils.date_utils import parse_day_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -419,6 +419,51 @@ def _per_field_files(
                     out.hour_paths.append(os.path.join(hour_dir, fname))
                     hours_seen.add(hour)
     return hours_seen
+
+
+def _day_has_real_rollup(plan: TopNPlan, safe_fields: list[str], day: str) -> bool:
+    """Whether ``day`` really was day-compacted (a bundle, or a field day dir holding a parquet).
+
+    A dir entry alone isn't proof: a crashed compaction can leave an empty day
+    dir, and treating that as compacted would permanently exclude the day from
+    the heal, re-creating the silent undercount the heal exists to close.
+    """
+    if os.path.isfile(os.path.join(plan.bundled_day_root, f"day={day}", "all_fields.parquet")):
+        return True
+    for field in safe_fields:
+        day_dir = os.path.join(plan.day_root, f"field={field}", f"day={day}")
+        if os.path.isdir(day_dir) and _has_real_parquet(day_dir):
+            return True
+    return False
+
+
+def find_unrolled_hours(plan: TopNPlan, win: TopNWindow, safe_fields: list[str], heal_cap: int) -> list[str]:
+    """Closed in-window hours with no rollup coverage, which the caller live-queries.
+
+    Looks back at most ``heal_cap`` hours from the active hour. An hour is
+    covered by an hour bundle (a verified-empty sentinel bundle counts), a
+    per-field hour file, or its day having been compacted: day compaction
+    deletes the per-hour files by design, so a window cutting through such a
+    day keeps its fast-but-partial read instead of paying a day scan per
+    request. Day-compaction is verified lazily, only for candidate days.
+    """
+    floor = win.active_dt - timedelta(hours=heal_cap)
+    if win.st_dt and win.st_dt > floor:
+        floor = win.st_dt
+    candidates = CoverageIndex.build(floor, win.et_dt or win.active_dt, now=win.active_dt).closed_hours
+    day_compacted: dict[str, bool] = {}
+    missing: list[str] = []
+    for hour in candidates:
+        if hour in plan.bundled_hours or hour in plan.per_field_hours_seen:
+            continue
+        day = hour[:10]
+        if day in plan.days_with_day_files_any:
+            if day not in day_compacted:
+                day_compacted[day] = _day_has_real_rollup(plan, safe_fields, day)
+            if day_compacted[day]:
+                continue
+        missing.append(hour)
+    return missing
 
 
 def plan_top_n_paths(cache_dir: str, safe_fields: list[str], win: TopNWindow) -> TopNPlan:
