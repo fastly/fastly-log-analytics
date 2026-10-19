@@ -88,4 +88,52 @@ describe('BotSourcesPanel', () => {
     await user.click(screen.getByRole('button', { name: /Refresh/ }))
     await waitFor(() => expect(refreshed).toEqual(['src-a']))
   })
+
+  const API_BASE = getApiBase()
+  const botSourcesBody = {
+    sources: [],
+    rdns: { total: 10, pending: 2, last_enrichment_at: null },
+  }
+
+  it('Enrich Now POSTs the real rDNS enrich route and refetches the stats', async () => {
+    let enrichCalls = 0
+    let listCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/admin/bot-sources`, () => {
+        listCalls += 1
+        return HttpResponse.json(botSourcesBody)
+      }),
+      http.post(`${API_BASE}/api/admin/rdns/enrich`, () => {
+        enrichCalls += 1
+        return HttpResponse.json({ ok: true, summary: {} })
+      }),
+    )
+    const user = userEvent.setup()
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <BotSourcesPanel />
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(listCalls).toBe(1))
+    await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
+    await waitFor(() => expect(enrichCalls).toBe(1))
+    await waitFor(() => expect(listCalls).toBe(2))
+  })
+
+  it('shows an inline error when rDNS enrichment fails', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/admin/bot-sources`, () => HttpResponse.json(botSourcesBody)),
+      http.post(`${API_BASE}/api/admin/rdns/enrich`, () =>
+        HttpResponse.json({ detail: { error: 'rdns_failed', message: 'enrichment exploded' } }, { status: 500 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <BotSourcesPanel />
+      </QueryClientProvider>,
+    )
+    await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
+    expect(await screen.findByRole('alert')).toBeTruthy()
+  })
 })

@@ -1,7 +1,7 @@
 'use client'
 import React, { useState } from 'react'
 import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -11,7 +11,6 @@ import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 type BotSourceList = components['schemas']['BotSourcesResponse']
 type BotSource = components['schemas']['BotSourceMeta']
-import { SSEModal } from '@/components/SSEModal/SSEModal'
 import {
   Dialog,
   DialogContent,
@@ -27,7 +26,6 @@ import {
   Download,
   Loader2,
   ExternalLink,
-  Database,
   CloudDownload,
 } from 'lucide-react'
 
@@ -87,8 +85,9 @@ function fmtRelative(iso: string | null | undefined): string {
 }
 
 export function BotSourcesPanel() {
-  const queryClient = useQueryClient()
   const [refreshingSource, setRefreshingSource] = useState<string | null>(null)
+  const [enriching, setEnriching] = useState(false)
+  const [enrichError, setEnrichError] = useState<string | null>(null)
 
   const { data: botSourcesData, refetch: refetchBotSources } = useQuery({
     queryKey: ['bot-sources'],
@@ -108,6 +107,20 @@ export function BotSourcesPanel() {
       await refetchBotSources()
     } finally {
       setRefreshingSource(null)
+    }
+  }
+
+  async function handleEnrichRdns() {
+    setEnriching(true)
+    setEnrichError(null)
+    try {
+      const { error: apiError } = await client.POST('/api/admin/rdns/enrich', {})
+      if (apiError) throw new Error(extractApiError(apiError))
+      await refetchBotSources()
+    } catch (e) {
+      setEnrichError(e instanceof Error ? e.message : 'rDNS enrichment failed')
+    } finally {
+      setEnriching(false)
     }
   }
 
@@ -205,6 +218,8 @@ export function BotSourcesPanel() {
         tableCaption="Bot intelligence sources"
       />
 
+      {enrichError && <div className="text-xs text-red-500" role="alert">{enrichError}</div>}
+
       {/* rDNS cache stats */}
       <div className="flex items-center justify-between text-sm">
         <div className="flex items-center gap-4 text-muted-foreground text-xs">
@@ -222,42 +237,16 @@ export function BotSourcesPanel() {
             <Download className="h-3 w-3 mr-1.5" />
             Export CSV
           </Button>
-          <SSEModal
-            title="Enrich rDNS Cache"
-            description={
-              <div className="space-y-2">
-                <p>This will start a manual enrichment batch for the reverse DNS cache.</p>
-                <p className="text-muted-foreground">It will resolve pending IPs and attempt to discover new IPs from your DuckDB log sources.</p>
-              </div>
-            }
-            endpoint="/api/admin/bot-sources/rdns/enrich"
-            body={{}}
-            onClose={() => queryClient.invalidateQueries({ queryKey: ['bot-sources'] })}
-            trigger={
-              <Button variant="outline" size="sm">
-                <RefreshCw className="h-3 w-3 mr-1.5" />
-                Enrich Now
-              </Button>
-            }
-          />
-          <SSEModal
-            title="Seed rDNS Backfill"
-            description={
-              <div className="space-y-2">
-                <p>This will scan all log sources for the last 30 days to seed the rDNS cache.</p>
-                <p className="text-muted-foreground text-xs italic">Note: This only enqueues IPs for later resolution. It does not perform lookups immediately.</p>
-              </div>
-            }
-            endpoint="/api/admin/bot-sources/rdns/backfill"
-            body={{}}
-            onClose={() => queryClient.invalidateQueries({ queryKey: ['bot-sources'] })}
-            trigger={
-              <Button variant="outline" size="sm">
-                <Database className="h-3 w-3 mr-1.5" />
-                Seed Backfill
-              </Button>
-            }
-          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleEnrichRdns}
+            disabled={enriching}
+            title="Resolve pending IPs now (runs one enrichment batch)"
+          >
+            <RefreshCw className={`h-3 w-3 mr-1.5 ${enriching ? 'animate-spin' : ''}`} />
+            {enriching ? 'Enriching…' : 'Enrich Now'}
+          </Button>
         </div>
 
       </div>
