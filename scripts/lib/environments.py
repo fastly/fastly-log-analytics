@@ -105,7 +105,7 @@ def remediation_command(name: str) -> str:
     if name == "remote-high-scale":
         return os.getenv(
             "REMOTE_HIGH_SCALE_FORWARD_CMD",
-            f"kubectl port-forward svc/frontend-svc -n {elevation_namespace} 3002:3000 & "
-            f"kubectl port-forward svc/backend-svc -n {elevation_namespace} 8002:8000",
+            f"python3 -m scripts.lib.port_forward --namespace {elevation_namespace} "
+            "svc/frontend-svc:3002:3000 svc/backend-svc:8002:8000",
         )
     raise KeyError(name)

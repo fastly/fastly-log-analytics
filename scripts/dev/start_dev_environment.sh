@@ -49,6 +49,28 @@ launch_forwarders() {
     fi
 }
 
+# Supervised kubectl forwards (readiness wait, signal cleanup, bounded restarts).
+# Stays up in the background until killed; the log path is printed for triage.
+launch_k8s_forwarders() {
+    local log
+    log="$(mktemp "${TMPDIR:-/tmp}/fla-port-forward.XXXXXX")"
+    nohup python3 -m scripts.lib.port_forward --namespace "${ELEVATION_NAMESPACE}" \
+        svc/frontend-svc:3002:3000 svc/backend-svc:8002:8000 >"${log}" 2>&1 &
+    echo -e "${CYAN}ℹ️ port-forward supervisor pid $! (log: ${log})${RESET}"
+}
+
+wait_for_ports() {
+    local deadline=$((SECONDS + $1)) port
+    shift
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        for port in "$@"; do
+            lsof -i :"${port}" &>/dev/null || continue 2
+        done
+        return 0
+    done
+    return 1
+}
+
 # 1. Verify and start Colima (Docker Daemon)
 echo -e "\n${BOLD}1. Checking Colima status...${RESET}"
 if ! colima status &>/dev/null; then
@@ -88,15 +110,18 @@ fi
 
 # 4. Check and establish Remote High-Scale Connection (3002/8002)
 echo -e "\n${BOLD}4. Checking Remote High-Scale Connection (3002/8002)...${RESET}"
-if [ -z "${REMOTE_HIGH_SCALE_FORWARD_CMD}" ]; then
-    echo -e "${YELLOW}⚠️ REMOTE_HIGH_SCALE_FORWARD_CMD is unset; skipping remote High-Scale forwarding.${RESET}"
+if [ -z "${REMOTE_HIGH_SCALE_FORWARD_CMD}" ] && [ -z "${ELEVATION_NAMESPACE:-}" ]; then
+    echo -e "${YELLOW}⚠️ REMOTE_HIGH_SCALE_FORWARD_CMD and ELEVATION_NAMESPACE are unset; skipping remote High-Scale forwarding.${RESET}"
 elif ! lsof -i :3002 &>/dev/null || ! lsof -i :8002 &>/dev/null; then
     echo -e "${YELLOW}⚠️ Remote High-Scale ports 3002/8002 are not bound. Launching forwarder...${RESET}"
 
-    launch_forwarders "${REMOTE_HIGH_SCALE_FORWARD_CMD}"
+    if [ -n "${REMOTE_HIGH_SCALE_FORWARD_CMD}" ]; then
+        launch_forwarders "${REMOTE_HIGH_SCALE_FORWARD_CMD}"
+    else
+        launch_k8s_forwarders
+    fi
 
-    sleep 3
-    if lsof -i :3002 &>/dev/null && lsof -i :8002 &>/dev/null; then
+    if wait_for_ports 30 3002 8002; then
         echo -e "${GREEN}✅ Remote High-Scale connection established.${RESET}"
     else
         echo -e "${RED}❌ Failed to establish Remote High-Scale connection.${RESET}"
