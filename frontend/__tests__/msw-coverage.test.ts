@@ -237,12 +237,10 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/share/logout',
   'GET /api/share/heartbeat',
   'POST /api/share/claim/:token',
-  'POST /api/admin/share/invites/:invite_id/revoke',
   'POST /api/admin/share/invites/:invite_id/claim-token',
   'POST /api/admin/share/backup/export',
   'POST /api/admin/share/backup/import',
   'POST /api/admin/share/gdpr/erase',
-  'PATCH /api/admin/share/settings',
 
   // RUM scripts and beacons (served dynamically and parsed as non-rest assets)
   'GET /js/rum.js',
