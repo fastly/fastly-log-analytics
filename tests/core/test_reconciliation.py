@@ -381,11 +381,10 @@ def test_cleanup_non_int_retention_falls_back_to_disabled():
 
 
 def test_postgres_retention_casts_text_timestamps():
-    assert reconciliation._retention_timestamp_expr("ingested_at", True) == "CAST(ingested_at AS TIMESTAMPTZ)"
-    assert reconciliation._retention_timestamp_expr("started_at", True) == "CAST(started_at AS TIMESTAMPTZ)"
-    assert reconciliation._retention_timestamp_expr("ingested_at", False) == "ingested_at"
-    assert reconciliation._table_uses_postgres("cron_runs", True) is True
-    assert reconciliation._table_uses_postgres("usage_log", True) is False
+    assert reconciliation._retention_timestamp_expr("ingested_at") == "CAST(ingested_at AS TIMESTAMPTZ)"
+    assert reconciliation._retention_timestamp_expr("started_at") == "CAST(started_at AS TIMESTAMPTZ)"
+    assert reconciliation._table_uses_postgres("cron_runs") is True
+    assert reconciliation._table_uses_postgres("usage_log") is False
 
 
 def test_cleanup_rollups_skipped_when_rollups_days_zero():

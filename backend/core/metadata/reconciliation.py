@@ -83,16 +83,18 @@ _SLOW_QUERIES_TABLE = "slow_queries"
 _USAGE_LOG_TABLE = "usage_log"
 
 
-def _retention_timestamp_expr(ts_col: str, postgres: bool) -> str:
-    """Return the timestamp expression used by a retention predicate."""
-    if postgres:
-        return f"CAST({ts_col} AS TIMESTAMPTZ)"
-    return ts_col
+def _retention_timestamp_expr(ts_col: str) -> str:
+    """Return the timestamp expression used by a Postgres retention predicate."""
+    return f"CAST({ts_col} AS TIMESTAMPTZ)"
 
 
-def _table_uses_postgres(table: str, postgres: bool) -> bool:
-    """Return whether retention SQL should use the Postgres dialect."""
-    return postgres and table != _USAGE_LOG_TABLE
+def _table_uses_postgres(table: str) -> bool:
+    """Return whether retention SQL should use the native Postgres dialect.
+
+    ``usage_log`` keeps the sqlite-flavoured statements that the
+    ``pg_connection`` translation layer rewrites.
+    """
+    return table != _USAGE_LOG_TABLE
 
 
 def _open_usage_log(service_id: str) -> Any | None:
@@ -261,7 +263,6 @@ def cleanup_metadata(
         cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
-    postgres = True
     t0 = _t.time()
 
     def _con_for(table: str) -> Any:
@@ -305,7 +306,7 @@ def cleanup_metadata(
         # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
         # between commits instead of queuing for the full duration.
         _BATCH = 5_000
-        table_postgres = _table_uses_postgres(table, postgres)
+        table_postgres = _table_uses_postgres(table)
         try:
             total_n = 0
             while True:
@@ -330,7 +331,7 @@ def cleanup_metadata(
                     cfg_svc = svcconfig.load_config(service_id) or {}
                     raw_retention_days = int(cfg_svc.get("log_retention_days", 90))
                     rum_days_int = max(days_int, raw_retention_days + 1)
-                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    timestamp_expr = _retention_timestamp_expr(ts_col)
                     if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN "
@@ -350,7 +351,7 @@ def cleanup_metadata(
                             (f"-{days_int} days", f"-{rum_days_int} days", _BATCH),
                         )
                 else:
-                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    timestamp_expr = _retention_timestamp_expr(ts_col)
                     if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN "
