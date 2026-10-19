@@ -15,6 +15,8 @@ vi.mock('@/hooks/useHighScaleRequestFacts', () => ({
   useHighScaleRequestFacts: useFactsMock,
 }))
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
 vi.mock('@/hooks/useIsDataReady', () => ({
   useEffectiveServiceId: () => 'service-1',
   useBootstrapResolved: () => true,
