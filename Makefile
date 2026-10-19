@@ -1,4 +1,4 @@
-.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard audit audit-watch
+.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -279,7 +279,7 @@ e2e-all:
 # CPU core exhaustion and memory swap thrashing.
 ci:
 	$(MAKE) gen-types
-	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard urllib-guard dateparse-guard security-regression openapi-drift deploy-validate stray-file-gate
+	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard security-regression openapi-drift deploy-validate stray-file-gate
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
 	$(MAKE) perf-ci
@@ -313,6 +313,16 @@ urllib-guard:
 # backend/core + backend/repositories (use backend/utils/date_utils.py).
 dateparse-guard:
 	bash scripts/check_no_raw_dateparse.sh
+
+# B4/B11: ban new hand-rolled for/while + try/except + sleep retry loops in
+# backend/ (use backend/core/retry.py:retry_call).
+retry-guard:
+	bash scripts/check_no_handrolled_retry.sh
+
+# B3/B6/B11: ban new inline COALESCE( null-default SQL in repositories and
+# rollup writers (use backend/core/metric_expressions.py).
+coalesce-guard:
+	bash scripts/check_no_inline_metric_coalesce.sh
 
 # ── Local multipod stack ──────────────────────────────────────────────────────
 # The local stack is BOTH compose files; omitting the observability one drops

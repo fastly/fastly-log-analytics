@@ -178,6 +178,16 @@ _SHARED_COMMAND_GATES = [
         "Date-parsing guard (no new raw strptime/fromisoformat in core + repositories)",
         "bash scripts/check_no_raw_dateparse.sh",
     ),
+    (
+        "retry-guard",
+        "Retry-loop guard (no new hand-rolled retry loops in backend)",
+        "bash scripts/check_no_handrolled_retry.sh",
+    ),
+    (
+        "coalesce-guard",
+        "Metric COALESCE guard (no new inline COALESCE in repositories + rollups)",
+        "bash scripts/check_no_inline_metric_coalesce.sh",
+    ),
     ("security-regression", "Security-regression count gate", "bash scripts/check_security_regression_count.sh"),
 ]
 

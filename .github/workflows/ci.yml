@@ -266,6 +266,19 @@ jobs:
         # Also runnable locally via `make dateparse-guard`.
         run: bash scripts/check_no_raw_dateparse.sh
 
+      - name: Retry-loop guard (no new hand-rolled retry loops in backend)
+        # B4/B11: for/while + try/except + sleep loops re-derive attempt
+        # counting and backoff; use backend/core/retry.py:retry_call.
+        # Baseline ratchet (counts only go down). Also runnable locally via
+        # `make retry-guard`.
+        run: bash scripts/check_no_handrolled_retry.sh
+
+      - name: Metric COALESCE guard (no new inline COALESCE in repositories + rollups)
+        # B3/B6/B11: null-default SQL fragments live in
+        # backend/core/metric_expressions.py. Baseline ratchet (counts only go
+        # down). Also runnable locally via `make coalesce-guard`.
+        run: bash scripts/check_no_inline_metric_coalesce.sh
+
       - name: Deploy config validation (compose + helm chart)
         # Mirrors `make deploy-validate`. Both compose configurations are
         # parsed without a daemon; helm lint +
