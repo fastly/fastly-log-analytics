@@ -14,6 +14,8 @@ vi.mock('@/hooks/useHighScaleRequestFacts', () => ({
   useHighScaleRequestFacts: useFactsMock,
 }))
 
+vi.mock('@tanstack/react-virtual', async () => (await import('./helpers/virtual-mock')).reactVirtualModuleMock())
+
 vi.mock('@/hooks/useIsDataReady', () => ({
   useEffectiveServiceId: () => 'service-1',
   useBootstrapResolved: () => true,
@@ -122,5 +124,8 @@ describe('HighScaleRequestFactsPanel', () => {
     expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('100%')
     expect(screen.getByText('1.2.3.xxx')).toBeInTheDocument()
     expect(screen.queryByText('1.2.3.4')).not.toBeInTheDocument()
+    for (const name of ['Timestamp', 'Status', 'Host', 'POP', 'Country', 'Client IP', 'URL']) {
+      expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+    }
   })
 })

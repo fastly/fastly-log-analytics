@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { AlertCircle, ArrowLeft, ArrowRight, Database, Filter, X } from 'lucide-react'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useTimeRange } from '@/hooks/useTimeRange'
@@ -25,6 +27,45 @@ function formatTimestamp(value: unknown): string {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
 }
+
+type FactRow = NonNullable<ReturnType<typeof useHighScaleRequestFacts>['data']>['rows'][number]
+
+const textColumn = (id: keyof FactRow & string, header: string, size: number): ColumnDef<FactRow> => ({
+  id,
+  header,
+  accessorFn: (row) => valueAsString(row[id]),
+  size,
+  enableSorting: false,
+  cell: ({ row }) => <span className="text-sm">{valueAsString(row.original[id])}</span>,
+})
+
+const FACT_COLUMNS: ColumnDef<FactRow>[] = [
+  {
+    id: 'timestamp',
+    header: 'Timestamp',
+    accessorFn: (row) => formatTimestamp(row.timestamp),
+    size: 210,
+    enableSorting: false,
+    cell: ({ row }) => <span className="whitespace-nowrap text-sm">{formatTimestamp(row.original.timestamp)}</span>,
+  },
+  textColumn('status', 'Status', 80),
+  textColumn('host', 'Host', 180),
+  textColumn('pop', 'POP', 80),
+  textColumn('country', 'Country', 90),
+  textColumn('client_ip', 'Client IP', 150),
+  {
+    id: 'url',
+    header: 'URL',
+    accessorFn: (row) => valueAsString(row.url),
+    size: 420,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="text-sm" title={valueAsString(row.original.url)}>
+        {valueAsString(row.original.url)}
+      </span>
+    ),
+  },
+]
 
 function formatFreshness(seconds: number): string {
   return formatElapsed(seconds, ELAPSED_FRESHNESS)
@@ -238,43 +279,14 @@ export function HighScaleRequestFactsPanel() {
           }`}
           data-testid="high-scale-table-wrapper"
         >
-          <table className="w-full text-sm">
-            <caption className="sr-only">High-scale request facts</caption>
-            <thead className="bg-muted/50 text-left">
-              <tr>
-                <th className="px-3 py-2 font-medium">Timestamp</th>
-                <th className="px-3 py-2 font-medium">Status</th>
-                <th className="px-3 py-2 font-medium">Host</th>
-                <th className="px-3 py-2 font-medium">POP</th>
-                <th className="px-3 py-2 font-medium">Country</th>
-                <th className="px-3 py-2 font-medium">Client IP</th>
-                <th className="px-3 py-2 font-medium">URL</th>
-              </tr>
-            </thead>
-            <tbody>
-              {response.rows.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
-                    No request facts in this time range.
-                  </td>
-                </tr>
-              ) : (
-                response.rows.map((row) => (
-                  <tr key={valueAsString(row.event_id)} className="border-t">
-                    <td className="whitespace-nowrap px-3 py-2">{formatTimestamp(row.timestamp)}</td>
-                    <td className="px-3 py-2">{valueAsString(row.status)}</td>
-                    <td className="px-3 py-2">{valueAsString(row.host)}</td>
-                    <td className="px-3 py-2">{valueAsString(row.pop)}</td>
-                    <td className="px-3 py-2">{valueAsString(row.country)}</td>
-                    <td className="px-3 py-2">{valueAsString(row.client_ip)}</td>
-                    <td className="max-w-xl truncate px-3 py-2" title={valueAsString(row.url)}>
-                      {valueAsString(row.url)}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+          <DataTableReadonly
+            columns={FACT_COLUMNS}
+            data={response.rows}
+            hideToolbar
+            showPagination={false}
+            tableCaption="High-scale request facts"
+            emptyMessage="No request facts in this time range."
+          />
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-muted-foreground">
