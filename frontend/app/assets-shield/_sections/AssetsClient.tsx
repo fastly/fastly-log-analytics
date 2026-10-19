@@ -11,6 +11,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
+import { LargeUncompressedTable, LowTtlTable } from './AssetsTables'
 import { formatBytes, formatPercent, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { RangeWireArgs } from '@/lib/range-wire'
@@ -118,6 +119,7 @@ export function AssetsReportContent({
   const compPerf = data?.compression_performance || []
   const largeUncompressed = data?.large_uncompressed_assets || []
   const lowTtl = data?.low_ttl_assets || []
+  const urlFilterHrefPrefix = `/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=`
   const missingFields = data?.missing_fields || []
 
   // Helper to map cache statuses to pretty colors
@@ -485,54 +487,7 @@ export function AssetsReportContent({
           <p className="text-xs text-muted-foreground mb-4">
             Compressible assets served without compression (br or gzip), consuming excessive origin & CDN bandwidth.
           </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead>
-                <tr className="border-b border-border text-xs text-muted-foreground uppercase font-medium">
-                  <th className="py-3 px-2">Static Asset URL</th>
-                  <th className="py-3 px-2 text-right">Requests</th>
-                  <th className="py-3 px-2 text-right">Avg Size</th>
-                  <th className="py-3 px-2 text-right">Bandwidth</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {isLoading ? (
-                  <tr>
-                    <td colSpan={4} className="py-8 text-center text-muted-foreground text-xs">
-                      <div className="flex items-center justify-center gap-2">
-                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                        <span>Scanning uncompressed static assets...</span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : largeUncompressed.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-4 text-center text-muted-foreground text-xs">
-                      No uncompressed static assets detected! Nice work.
-                    </td>
-                  </tr>
-                ) : (
-                  largeUncompressed.map((row) => (
-                    <tr key={`${row.url}|${row.status}`} className="hover:bg-muted/50 transition-colors">
-                      <td className="py-3 px-2 max-w-[200px] truncate font-mono text-xs" title={row.url}>
-                        <Link
-                          href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=${encodeURIComponent(row.url)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary hover:underline transition-colors font-medium cursor-pointer"
-                        >
-                          {row.url}
-                        </Link>
-                      </td>
-                      <td className="py-3 px-2 text-right font-medium">{formatCount(row.requests)}</td>
-                      <td className="py-3 px-2 text-right text-muted-foreground">{formatBytes(row.avg_bytes ?? 0)}</td>
-                      <td className="py-3 px-2 text-right font-bold text-rose-500">{formatBytes(row.total_bytes ?? 0)}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <LargeUncompressedTable rows={largeUncompressed} isLoading={isLoading} urlHrefPrefix={urlFilterHrefPrefix} />
         </div>
 
         {/* Low Cache-TTL table */}
@@ -559,60 +514,7 @@ export function AssetsReportContent({
           <p className="text-xs text-muted-foreground mb-4">
             Static resources receiving repeated Cache MISSes, potentially due to low/zero TTL configurations.
           </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead>
-                <tr className="border-b border-border text-xs text-muted-foreground uppercase font-medium">
-                  <th className="py-3 px-2">Static Asset URL</th>
-                  <th className="py-3 px-2">Type</th>
-                  <th className="py-3 px-2 text-right">Cache Misses</th>
-                  <th className="py-3 px-2 text-right">Avg TTL</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {isLoading ? (
-                  <tr>
-                    <td colSpan={4} className="py-8 text-center text-muted-foreground text-xs">
-                      <div className="flex items-center justify-center gap-2">
-                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                        <span>Detecting low cache-TTL hotspots...</span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : lowTtl.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-4 text-center text-muted-foreground text-xs">
-                      No cache miss hot spots detected.
-                    </td>
-                  </tr>
-                ) : (
-                  lowTtl.map((row) => (
-                    <tr key={`${row.url}|${row.asset_type}`} className="hover:bg-muted/50 transition-colors">
-                      <td className="py-3 px-2 max-w-[200px] truncate font-mono text-xs" title={row.url}>
-                        <Link
-                          href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=${encodeURIComponent(row.url)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary hover:underline transition-colors font-medium cursor-pointer"
-                        >
-                          {row.url}
-                        </Link>
-                      </td>
-                      <td className="py-3 px-2">
-                        <span className="text-xs font-medium px-2 py-0.5 bg-muted rounded-full">
-                          {row.asset_type}
-                        </span>
-                      </td>
-                      <td className="py-3 px-2 text-right font-bold text-amber-500">{formatCount(row.requests)}</td>
-                      <td className="py-3 px-2 text-right text-muted-foreground">
-                        {row.avg_ttl ? `${row.avg_ttl.toFixed(1)}s` : '0s'}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <LowTtlTable rows={lowTtl} isLoading={isLoading} urlHrefPrefix={urlFilterHrefPrefix} />
         </div>
       </div>
 

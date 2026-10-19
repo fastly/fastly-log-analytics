@@ -10,6 +10,8 @@ vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smok
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/assets-shield'))
 
 const mockPost = vi.fn()
@@ -290,4 +292,21 @@ test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', a
 
   expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
   expect(mockPost).not.toHaveBeenCalled()
+})
+
+test('assets-shield renders the uncompressed and low-TTL tables with encoded drill-down links', async () => {
+  mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <AssetsClient />
+    </QueryClientProvider>,
+  )
+
+  const link = await screen.findByRole('link', { name: '/static/bundle-huge.js' })
+  expect(link.getAttribute('href')).toContain('filter_url=%2Fstatic%2Fbundle-huge.js')
+  for (const name of ['Static Asset URL', 'Requests', 'Avg Size', 'Bandwidth', 'Type', 'Cache Misses', 'Avg TTL']) {
+    expect(screen.getAllByRole('columnheader', { name }).length).toBeGreaterThan(0)
+  }
+  expect(screen.getByText('60.0s')).toBeInTheDocument()
 })
