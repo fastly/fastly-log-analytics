@@ -4,11 +4,19 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  scrollFocusable = false,
+  ...props
+}: React.ComponentProps<"table"> & {
+  /** Make the horizontal scroll wrapper keyboard-focusable (axe scrollable-region-focusable). */
+  scrollFocusable?: boolean
+}) {
   return (
     <div
       data-slot="table-container"
       className="relative w-full overflow-x-auto"
+      tabIndex={scrollFocusable ? 0 : undefined}
     >
       <table
         data-slot="table"

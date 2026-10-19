@@ -204,8 +204,15 @@ function DataTableReadonlyImpl<TData, TValue>({
         />
       ))}
 
-      <div ref={tableContainerRef} className="rounded-md border overflow-auto w-full max-h-[min(600px,calc(100dvh-200px))]">
-        <Table style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
+      {/* Focusable so keyboard users can scroll it even when no row or
+          header inside is interactive (axe scrollable-region-focusable). The
+          inner shadcn table wrapper scrolls horizontally and is focusable too. */}
+      <div
+        ref={tableContainerRef}
+        tabIndex={0}
+        className="rounded-md border overflow-auto w-full max-h-[min(600px,calc(100dvh-200px))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Table scrollFocusable style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
           <caption className="sr-only">
             {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
           </caption>
