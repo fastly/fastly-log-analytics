@@ -9,12 +9,16 @@ path planning and SQL assembly live next to them as they are extracted.
 from __future__ import annotations
 
 import heapq
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from datetime import datetime, timedelta
 from typing import Any
 
 from backend.core.rollups._common import quote_path_list
+from backend.repositories.rollup_coverage import cached_listdir
+from backend.utils.date_utils import parse_day_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
 TopNRow = tuple[str, Any, int]
@@ -165,3 +169,277 @@ def build_rolled_sql(
         + ") GROUP BY field, value QUALIFY ROW_NUMBER() OVER "
         f"(PARTITION BY field ORDER BY c DESC) <= {qualify_limit_expr(safe_fields, limit, per_field_limits)}"
     )
+
+
+@dataclass(frozen=True)
+class TopNWindow:
+    """One request's window in the hour/day keys the rollup tree is named by.
+
+    ``st_floor`` / ``et_floor`` are the inclusive ``YYYY-MM-DD-HH`` bounds the
+    directory walk compares against (fixed-width, so a string compare is
+    correct). ``et_floor`` is taken 1 µs before ``et`` so a request ending
+    exactly on an hour boundary excludes that hour, matching the half-open
+    ``timestamp < et`` the live queries use.
+    """
+
+    st_dt: datetime | None
+    et_dt: datetime | None
+    active_dt: datetime
+    active_dt_end: datetime
+    active_str: str
+    st_floor: str | None
+    et_floor: str | None
+
+    @classmethod
+    def build(cls, st_dt: datetime | None, et_dt: datetime | None, now: datetime) -> TopNWindow:
+        active_dt = now.replace(minute=0, second=0, microsecond=0)
+        return cls(
+            st_dt,
+            et_dt,
+            active_dt,
+            active_dt + timedelta(hours=1),
+            active_dt.strftime("%Y-%m-%d-%H"),
+            st_dt.strftime("%Y-%m-%d-%H") if st_dt else None,
+            (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H") if et_dt else None,
+        )
+
+    def day_fully_in_window(self, day_str: str) -> bool:
+        """Whether a per-day file's whole 24 h lies inside the request window.
+
+        A boundary day's file would over-count rows outside the window, so such
+        days fall back to their per-hour rollups.
+        """
+        try:
+            day_start = parse_day_key_strict(day_str)
+        except ValueError:
+            return False
+        day_end = day_start + timedelta(days=1)
+        if self.st_dt and self.st_dt > day_start:
+            return False
+        return not (self.et_dt and self.et_dt < day_end)
+
+    def day_in_range(self, day: str) -> bool:
+        """Day key is not before the first / after the last window day."""
+        if self.st_floor and day < self.st_floor[:10]:
+            return False
+        return not (self.et_floor and day > self.et_floor[:10])
+
+    def hour_in_range(self, hour: str) -> bool:
+        """Closed hour key inside ``[st_floor, et_floor]`` (the active hour is excluded)."""
+        if self.st_floor and hour < self.st_floor:
+            return False
+        if self.et_floor and hour > self.et_floor:
+            return False
+        return hour < self.active_str
+
+
+@dataclass
+class TopNPlan:
+    """What the filesystem walk found for one window.
+
+    ``bundled_hours`` / ``per_field_hours_seen`` / ``days_with_day_files_any``
+    are the coverage facts the missing-hour heal needs afterwards; ``paths``
+    is what the rolled query reads.
+    """
+
+    paths: TopNPaths
+    bundled_hours: set[str]
+    bundled_days: set[str]
+    days_with_day_files_any: set[str]
+    per_field_hours_seen: set[str]
+    day_root: str
+    bundled_day_root: str
+
+
+def _has_real_parquet(directory: str) -> bool:
+    try:
+        return any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in os.listdir(directory))
+    except OSError:
+        return False
+
+
+def _day_covered_by_any_field(
+    day_root: str, safe_fields: list[str], win: TopNWindow, days_with_day_files_any: set[str]
+) -> set[str]:
+    """Closed, fully-in-window days where at least one field has a usable day file.
+
+    Bundled-hour files for these days are skipped (they would double-count the
+    covered fields); fields without a day file for the day fall through to
+    their own per-field per-hour walk. Also records every day token with ANY
+    day-rollup presence in ``days_with_day_files_any`` for the heal.
+    """
+    covered: set[str] = set()
+    active_day = win.active_str[:10]
+    for field in safe_fields:
+        field_day_dir = os.path.join(day_root, f"field={field}")
+        if not os.path.isdir(field_day_dir):
+            continue
+        for day_entry in cached_listdir(field_day_dir):
+            if not day_entry.startswith("day="):
+                continue
+            day = day_entry[len("day=") :]
+            if len(day) != 10:
+                continue
+            days_with_day_files_any.add(day)
+            if day in covered or day >= active_day or not win.day_in_range(day):
+                continue
+            if not win.day_fully_in_window(day):
+                continue
+            if _has_real_parquet(os.path.join(field_day_dir, day_entry)):
+                covered.add(day)
+    return covered
+
+
+def _bundled_day_files(
+    bundled_day_root: str, win: TopNWindow, days_with_day_files_any: set[str]
+) -> tuple[list[str], set[str]]:
+    """Per-day bundles (one parquet holding every field) usable for this window.
+
+    Accepts ``day=D/all_fields.parquet``, ``day=D/day_bundle_D.parquet`` and the
+    flat ``day_bundle_D.parquet`` spellings. Active and boundary days are
+    skipped; boundary days read their in-window hours instead.
+    """
+    paths: list[str] = []
+    days: set[str] = set()
+    if not os.path.isdir(bundled_day_root):
+        return paths, days
+    active_day = win.active_str[:10]
+    for entry in cached_listdir(bundled_day_root):
+        b_day: str | None = None
+        bundle_path: str | None = None
+        if entry.startswith("day="):
+            cand_day = entry[len("day=") :]
+            if len(cand_day) == 10:
+                cand1 = os.path.join(bundled_day_root, entry, "all_fields.parquet")
+                cand2 = os.path.join(bundled_day_root, entry, f"day_bundle_{cand_day}.parquet")
+                if os.path.isfile(cand1):
+                    b_day, bundle_path = cand_day, cand1
+                elif os.path.isfile(cand2):
+                    b_day, bundle_path = cand_day, cand2
+        elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+            cand_day = entry[len("day_bundle_") : -len(".parquet")]
+            if len(cand_day) == 10:
+                cand = os.path.join(bundled_day_root, entry)
+                if os.path.isfile(cand):
+                    b_day, bundle_path = cand_day, cand
+        if not b_day or not bundle_path:
+            continue
+        days_with_day_files_any.add(b_day)
+        if b_day >= active_day or not win.day_in_range(b_day):
+            continue
+        if not win.day_fully_in_window(b_day):
+            continue
+        if b_day in days:
+            continue
+        paths.append(bundle_path)
+        days.add(b_day)
+    return paths, days
+
+
+def _bundled_hour_files(
+    bundled_hour_root: str, win: TopNWindow, bundled_days: set[str], day_covered_by_any_field: set[str]
+) -> tuple[list[str], set[str]]:
+    """Per-hour bundles for closed in-window hours not already served by a day file."""
+    paths: list[str] = []
+    hours: set[str] = set()
+    if not os.path.isdir(bundled_hour_root):
+        return paths, hours
+    for hour_entry in cached_listdir(bundled_hour_root):
+        if not hour_entry.startswith("hour="):
+            continue
+        hour = hour_entry[len("hour=") :]
+        if not win.hour_in_range(hour):
+            continue
+        if hour[:10] in bundled_days or hour[:10] in day_covered_by_any_field:
+            # A day bundle / a per-field day file covers this hour; reading the
+            # hour bundle too would double-count through UNION ALL.
+            continue
+        bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
+        if os.path.isfile(bundle_path):
+            paths.append(bundle_path)
+            hours.add(hour)
+    return paths, hours
+
+
+def _per_field_files(
+    safe_fields: list[str],
+    day_root: str,
+    hour_root: str,
+    win: TopNWindow,
+    bundled_days: set[str],
+    bundled_hours: set[str],
+    out: TopNPaths,
+) -> set[str]:
+    """Per-field day files, then per-field hour files for what they don't cover.
+
+    Appends to ``out.day_paths`` / ``out.hour_paths`` and returns the hour keys
+    served by at least one per-field hour file (the pre-bundle intermediate
+    state, which counts as rollup coverage for the heal).
+    """
+    active_day = win.active_str[:10]
+    active_str, st_floor, et_floor = win.active_str, win.st_floor, win.et_floor
+    hours_seen: set[str] = set()
+    for field in safe_fields:
+        field_hour_dir = os.path.join(hour_root, f"field={field}")
+        field_day_dir = os.path.join(day_root, f"field={field}")
+        if not os.path.isdir(field_hour_dir):
+            continue
+        # A day bundle suppresses this field's day file AND its per-hour
+        # fallback for that day (the bundle already aggregates the whole day).
+        covered_days: set[str] = set(bundled_days)
+        if os.path.isdir(field_day_dir):
+            for day_entry in cached_listdir(field_day_dir):
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if len(day) != 10:
+                    continue
+                if day in bundled_days or day >= active_day or not win.day_in_range(day):
+                    continue
+                if not win.day_fully_in_window(day):
+                    continue
+                day_dir = os.path.join(field_day_dir, day_entry)
+                for fname in cached_listdir(day_dir):
+                    if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                        out.day_paths.append(os.path.join(day_dir, fname))
+                        covered_days.add(day)
+        for hour_entry in cached_listdir(field_hour_dir):
+            if not hour_entry.startswith("hour="):
+                continue
+            hour = hour_entry[len("hour=") :]
+            # Inlined win.hour_in_range: this is the innermost loop (fields x hours)
+            # and a method call per entry measurably slows the cold walk.
+            if (st_floor and hour < st_floor) or (et_floor and hour > et_floor) or hour >= active_str:
+                continue
+            if hour[:10] in covered_days or hour in bundled_hours:
+                continue
+            hour_dir = os.path.join(field_hour_dir, hour_entry)
+            for fname in cached_listdir(hour_dir):
+                if fname.endswith(".parquet"):
+                    out.hour_paths.append(os.path.join(hour_dir, fname))
+                    hours_seen.add(hour)
+    return hours_seen
+
+
+def plan_top_n_paths(cache_dir: str, safe_fields: list[str], win: TopNWindow) -> TopNPlan:
+    """Enumerate the exact parquet files a top-N read needs for ``win``.
+
+    Preference per day: bundled day file, else per-field day files, else the
+    hour bundle, else per-field hour files; the active hour/day is never read
+    from rollups. Files are enumerated per (field, hour) in Python rather than
+    globbed, because a ``**`` glob makes DuckDB stat every file in the tree
+    before the WHERE can prune (2.8 s on 18,648 files, 2026-06-04).
+    """
+    rollups = os.path.join(cache_dir, "rollups")
+    day_root = os.path.join(rollups, "day")
+    hour_root = os.path.join(rollups, "hour")
+    bundled_day_root = os.path.join(rollups, "day_bundled")
+    days_with_day_files_any: set[str] = set()
+    covered_by_any_field = _day_covered_by_any_field(day_root, safe_fields, win, days_with_day_files_any)
+    bundled_day_paths, bundled_days = _bundled_day_files(bundled_day_root, win, days_with_day_files_any)
+    bundled_hour_paths, bundled_hours = _bundled_hour_files(
+        os.path.join(rollups, "hour_bundled"), win, bundled_days, covered_by_any_field
+    )
+    paths = TopNPaths(bundled_hour_paths=bundled_hour_paths, bundled_day_paths=bundled_day_paths)
+    hours_seen = _per_field_files(safe_fields, day_root, hour_root, win, bundled_days, bundled_hours, paths)
+    return TopNPlan(paths, bundled_hours, bundled_days, days_with_day_files_any, hours_seen, day_root, bundled_day_root)

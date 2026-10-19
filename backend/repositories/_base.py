@@ -23,7 +23,6 @@ from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
 )
 from backend.repositories.rollup_coverage import (
-    cached_listdir,
     collect_day_prefer_paths,
     collect_hour_paths_with_floor,
     durable_serving_blocked,
@@ -34,10 +33,11 @@ from backend.repositories.rollup_coverage import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-from backend.repositories.top_n_rollups import TopNPaths as _TopNPaths
+from backend.repositories.top_n_rollups import TopNWindow as _TopNWindow
 from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
 from backend.repositories.top_n_rollups import fold_rows as _fold_rows
 from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
+from backend.repositories.top_n_rollups import plan_top_n_paths as _plan_top_n_paths
 from backend.repositories.top_n_rollups import truncate_top_n as _truncate_top_n
 from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
@@ -375,7 +375,6 @@ def _get_schema(con: duckdb.DuckDBPyConnection, src: dict) -> list[dict]:
 
 
 from backend.utils.date_utils import (  # noqa: E402
-    parse_day_key_strict,
     parse_hour_key_strict,
     safe_iso,  # noqa: F401 — re-export
 )
@@ -1347,7 +1346,6 @@ class QueryRunner:
                 _phase_log.append({"section": f"top_n_rollups:{name}", "time_ms": round(ms, 2)})
 
         cache_dir = _cache_dir(self.src)
-        rollup_dir = os.path.join(cache_dir, "rollups", "hour")
 
         # Defense-in-depth: field names land in a SQL IN-list as quoted
         # literals AND the service name lands in the base-table identifier.
@@ -1366,296 +1364,14 @@ class QueryRunner:
         st_dt = parse_iso_utc(start_time) if start_time else None
         et_dt = parse_iso_utc(end_time) if end_time else None
 
-        hour_cond = ""
-        if st_dt:
-            st_str = st_dt.strftime("%Y-%m-%d-%H")
-            hour_cond += f" AND hour >= '{st_str}'"
-        if et_dt:
-            # Half-open semantics: a request ending exactly on an hour
-            # boundary (e.g. ``end_time=2026-06-04T15:00:00``) should
-            # EXCLUDE the 15:00 hour rollup (which covers [15:00, 16:00)).
-            # Subtracting 1 microsecond before strftime keeps mid-hour
-            # ends inclusive of the surrounding hour while making exact
-            # boundaries exclusive — matching how the live-hour query
-            # below uses ``timestamp < et_dt``.
-            et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
-            hour_cond += f" AND hour <= '{et_inclusive}'"
-
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_dt_end = active_dt + timedelta(hours=1)
-        active_str = active_dt.strftime("%Y-%m-%d-%H")
-
-        # Glob `rollups/hour/**/*.parquet` was the obvious shape but it has
-        # DuckDB enumerate every file under the tree before the WHERE clause
-        # can prune ANYTHING. On a service with N fields × H hours of rollups
-        # that's N*H file stats up front, dominating wall time (witnessed
-        # 2026-06-04: ~2.8s on 18,648 files for a 24h query that should be
-        # reading ~1,700). Hive-partition pruning kicks in AFTER the glob
-        # expands, not before.
-        #
-        # Instead: enumerate the exact (field, hour) combinations we want in
-        # Python (cheap directory listdir per field, bounded by safe_fields ×
-        # hours-in-window), then pass DuckDB an explicit file list. Skips
-        # the glob, hands DuckDB only the files it needs.
-        st_str_floor = st_dt.strftime("%Y-%m-%d-%H") if st_dt else None
-        # End cutoff for the directory-list filter — `et_inclusive` was
-        # already computed above for the SQL fallback path. Use the same
-        # bounds here so the half-open semantics match.
-        if et_dt:
-            et_str_floor = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
-        else:
-            et_str_floor = None
-
-        # Per-day compacted root (item 17). When a per-day parquet
-        # exists for a closed day, prefer it over the 24 per-hour parquet
-        # files for that day — same data, ~24x fewer file opens. Active
-        # day stays on per-hour because compaction can't run on a day
-        # that's still receiving writes.
-        #
-        # Per-day and per-hour files MUST be enumerated into separate
-        # lists and read via two ``read_parquet([...], hive_partitioning=1)``
-        # calls UNION ALL'd. They live under different hive partition
-        # keys (``day=YYYY-MM-DD`` vs ``hour=YYYY-MM-DD-HH``); mixing
-        # them in one read_parquet call raises ``Binder Error: Hive
-        # partition mismatch ... key "day" not found`` and the whole
-        # top-N read returns empty. That's the 2026-06-06 prod
-        # incident — after the first successful day-compaction
-        # the dashboard top-N tabs went blank.
-        day_root = os.path.join(cache_dir, "rollups", "day")
-        bundled_hour_root = os.path.join(cache_dir, "rollups", "hour_bundled")
-        bundled_day_root = os.path.join(cache_dir, "rollups", "day_bundled")
-        active_day = active_str[:10]
-        day_paths: list[str] = []
-        hour_paths: list[str] = []
-        # Track which hours are satisfied by a per-hour bundled file so
-        # the per-field walk below skips them. Hour bundling collapses
-        # ~40 per-field files into one per-hour file, cutting parquet
-        # file-opens on a 24h query from ~984 to ~24.
-        # Bundled-hour parquets have `field` as a regular column (the
-        # PER-FIELD per-hour parquets have it in the hive path), so they
-        # need a separate read_parquet branch to avoid schema-mismatch
-        # errors when UNION ALL'd with the per-field branch.
-        bundled_hour_paths: list[str] = []
-        bundled_hours: set[str] = set()
-        # Per-day bundled files: one parquet per closed day containing
-        # all fields' top-N. When present, replaces ~40 per-field-day
-        # files (or 24 per-field-hour files) for that day. Built by the
-        # daily rollup_compact_daily cron via backend.core.rollups.
-        # bundle_days(); reader prefers it over per-field-day files.
-        # Same schema as bundled_hour (field/value/count as columns,
-        # no hive partitioning on the projection).
-        bundled_day_paths: list[str] = []
-        bundled_days_set: set[str] = set()
-
-        # Per-day rollups cover [day 00:00 UTC, +24h). When the request
-        # window starts or ends mid-day, including the boundary day's
-        # per-day file would over-count rows outside the user's window
-        # (e.g. a request starting at 17:36 would pull in counts from
-        # 00:00-17:36 too). Only use a per-day file when its entire
-        # 24h is contained in the request window; boundary days fall
-        # back to per-hour rollups for their in-window hours.
-        def _day_fully_in_window(day_str: str) -> bool:
-            try:
-                day_start = parse_day_key_strict(day_str)
-            except ValueError:
-                return False
-            day_end = day_start + timedelta(days=1)
-            if st_dt and st_dt > day_start:
-                return False
-            if et_dt and et_dt < day_end:
-                return False
-            return True
-
-        # Pre-pass: collect days where AT LEAST ONE safe field has a
-        # usable per-day file (in-window, fully-contained, closed,
-        # parquet present). The bundled-hour walk below skips bundled
-        # files whose day is in this set, preventing the day-vs-bundled
-        # double count that fires on hour-aligned closed-day-only
-        # windows. Per-field per-hour fallback (for fields without a
-        # day file for that day) still works because the per-field walk
-        # uses its OWN per-field covered_days set, not this global one.
-        day_covered_by_any_field: set[str] = set()
-        # Every day token with ANY day-rollup presence on disk, ignoring the
-        # window checks below. Consumed by the missing-hour live heal: a day
-        # that has been day-compacted had its per-hour files deleted BY
-        # DESIGN, so its boundary hours falling outside a fully-contained
-        # window are a known, bounded read gap — NOT a writer failure — and
-        # must not trigger a per-request live scan.
-        days_with_day_files_any: set[str] = set()
-        for field in safe_fields:
-            field_day_dir = os.path.join(day_root, f"field={field}")
-            if not os.path.isdir(field_day_dir):
-                continue
-            day_entries = cached_listdir(field_day_dir)
-            for day_entry in day_entries:
-                if not day_entry.startswith("day="):
-                    continue
-                day = day_entry[len("day=") :]
-                if len(day) != 10:
-                    continue
-                days_with_day_files_any.add(day)
-                if day in day_covered_by_any_field:
-                    continue
-                if day >= active_day:
-                    continue
-                if st_str_floor and day < st_str_floor[:10]:
-                    continue
-                if et_str_floor and day > et_str_floor[:10]:
-                    continue
-                if not _day_fully_in_window(day):
-                    continue
-                day_dir = os.path.join(field_day_dir, day_entry)
-                try:
-                    if any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in os.listdir(day_dir)):
-                        day_covered_by_any_field.add(day)
-                except OSError:
-                    continue
-
-        # Bundled-day walk (preferred over per-field-day for windows
-        # where the whole day fits). When present, replaces ~40 per-
-        # field-day file opens with 1. Active day skipped — bundling
-        # only runs for closed days. Days NOT fully contained in the
-        # window fall through to per-field-hour for the in-window
-        # portion (same fall-through as per-field-day).
-        if os.path.isdir(bundled_day_root):
-            for entry in cached_listdir(bundled_day_root):
-                b_day: str | None = None
-                bundle_path: str | None = None
-                if entry.startswith("day="):
-                    cand_day = entry[len("day=") :]
-                    if len(cand_day) == 10:
-                        cand1 = os.path.join(bundled_day_root, entry, "all_fields.parquet")
-                        cand2 = os.path.join(bundled_day_root, entry, f"day_bundle_{cand_day}.parquet")
-                        if os.path.isfile(cand1):
-                            b_day, bundle_path = cand_day, cand1
-                        elif os.path.isfile(cand2):
-                            b_day, bundle_path = cand_day, cand2
-                elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
-                    cand_day = entry[len("day_bundle_") : -len(".parquet")]
-                    if len(cand_day) == 10:
-                        cand = os.path.join(bundled_day_root, entry)
-                        if os.path.isfile(cand):
-                            b_day, bundle_path = cand_day, cand
-                if not b_day or not bundle_path:
-                    continue
-                days_with_day_files_any.add(b_day)
-                if b_day >= active_day:
-                    continue
-                if st_str_floor and b_day < st_str_floor[:10]:
-                    continue
-                if et_str_floor and b_day > et_str_floor[:10]:
-                    continue
-                if not _day_fully_in_window(b_day):
-                    continue
-                if b_day in bundled_days_set:
-                    continue
-                bundled_day_paths.append(bundle_path)
-                bundled_days_set.add(b_day)
-
-        if os.path.isdir(bundled_hour_root):
-            for hour_entry in cached_listdir(bundled_hour_root):
-                if not hour_entry.startswith("hour="):
-                    continue
-                hour = hour_entry[len("hour=") :]
-                if st_str_floor and hour < st_str_floor:
-                    continue
-                if et_str_floor and hour > et_str_floor:
-                    continue
-                if hour >= active_str:
-                    # Active hour served live, not from any bundle.
-                    continue
-                if hour[:10] in bundled_days_set:
-                    # Day bundle covers this hour (and every field for
-                    # this day). Including the hour bundle would
-                    # double-count via UNION ALL.
-                    continue
-                if hour[:10] in day_covered_by_any_field:
-                    # Day file covers this hour for at least one
-                    # field; including the bundled file would
-                    # double-count that field via the UNION ALL.
-                    # Fields without a day file for this day fall
-                    # through to per-field per-hour in the loop
-                    # below (their covered_days won't include this
-                    # day).
-                    continue
-                bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
-                if os.path.isfile(bundle_path):
-                    bundled_hour_paths.append(bundle_path)
-                    bundled_hours.add(hour)
-
+        win = _TopNWindow.build(st_dt, et_dt, datetime.now(UTC))
+        active_dt = win.active_dt
         _t_dir_enum = time.perf_counter()
-        # Hour tokens served by at least one per-field hour file (the pre-
-        # bundle intermediate state). Consumed by the missing-hour live heal
-        # below — such hours have rollup coverage, just not bundled yet.
-        per_field_hours_seen: set[str] = set()
-        for field in safe_fields:
-            field_hour_dir = os.path.join(rollup_dir, f"field={field}")
-            field_day_dir = os.path.join(day_root, f"field={field}")
-            if not os.path.isdir(field_hour_dir):
-                continue
-            # Track which (field, day) tuples we satisfied from the
-            # per-day compacted file; the per-hour walk below skips
-            # those hours.
-            # Track which days are covered for this field. Seeded by
-            # `bundled_days_set` so the per-day-bundle suppresses both
-            # the per-field-day file AND the per-field-hour fallback
-            # for that day (the bundle's one row per (field, value)
-            # already aggregates the field's whole day).
-            covered_days: set[str] = set(bundled_days_set)
-            if os.path.isdir(field_day_dir):
-                day_entries = cached_listdir(field_day_dir)
-                for day_entry in day_entries:
-                    if not day_entry.startswith("day="):
-                        continue
-                    day = day_entry[len("day=") :]
-                    if len(day) != 10:
-                        continue
-                    if day in bundled_days_set:
-                        # Already served by the bundled-day file.
-                        continue
-                    if day >= active_day:
-                        # Active day is still being written — read per-hour.
-                        continue
-                    if st_str_floor and day < st_str_floor[:10]:
-                        continue
-                    if et_str_floor and day > et_str_floor[:10]:
-                        continue
-                    if not _day_fully_in_window(day):
-                        # Boundary day — using the per-day file would over-
-                        # count rows outside the requested window. Fall
-                        # through to per-hour rollups for the in-window
-                        # hours of this day.
-                        continue
-                    day_dir = os.path.join(field_day_dir, day_entry)
-                    for fname in cached_listdir(day_dir):
-                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                            day_paths.append(os.path.join(day_dir, fname))
-                            covered_days.add(day)
-            hour_entries = cached_listdir(field_hour_dir)
-            for hour_entry in hour_entries:
-                if not hour_entry.startswith("hour="):
-                    continue
-                hour = hour_entry[len("hour=") :]
-                # Lexicographic string compare is correct here because the
-                # YYYY-MM-DD-HH format is fixed-width.
-                if st_str_floor and hour < st_str_floor:
-                    continue
-                if et_str_floor and hour > et_str_floor:
-                    continue
-                if hour >= active_str:
-                    # Active hour is served live, not from rollups.
-                    continue
-                if hour[:10] in covered_days:
-                    # Per-day file already covers this hour.
-                    continue
-                if hour in bundled_hours:
-                    # Per-hour bundle already covers this (field, hour).
-                    continue
-                hour_dir = os.path.join(field_hour_dir, hour_entry)
-                for fname in cached_listdir(hour_dir):
-                    if fname.endswith(".parquet"):
-                        hour_paths.append(os.path.join(hour_dir, fname))
-                        per_field_hours_seen.add(hour)
+        plan = _plan_top_n_paths(cache_dir, safe_fields, win)
+        day_paths = plan.paths.day_paths
+        hour_paths = plan.paths.hour_paths
+        bundled_hour_paths = plan.paths.bundled_hour_paths
+        bundled_day_paths = plan.paths.bundled_day_paths
 
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
         _phase("dir_enum:n_day_files", float(len(day_paths)))
@@ -1664,12 +1380,7 @@ class QueryRunner:
         _phase("dir_enum:n_bundled_day_files", float(len(bundled_day_paths)))
 
         _t_rolled = time.perf_counter()
-        rolled_q = _build_rolled_sql(
-            _TopNPaths(day_paths, hour_paths, bundled_hour_paths, bundled_day_paths),
-            safe_fields,
-            limit,
-            per_field_limits,
-        )
+        rolled_q = _build_rolled_sql(plan.paths, safe_fields, limit, per_field_limits)
         rolled_res: list = []
         if rolled_q is not None:
             try:
@@ -1701,13 +1412,13 @@ class QueryRunner:
         # ranges that don't snap to hour boundaries, but the over-count is
         # a real correctness gap when it does fire.
         live_start = max(active_dt, st_dt) if st_dt else active_dt
-        live_end = min(active_dt_end, et_dt) if et_dt else active_dt_end
+        live_end = min(win.active_dt_end, et_dt) if et_dt else win.active_dt_end
         live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
         # We only query the active hour if it overlaps with the requested time window
         should_query_live = True
         if et_dt and et_dt <= active_dt:
             should_query_live = False
-        if st_dt and st_dt >= active_dt_end:
+        if st_dt and st_dt >= win.active_dt_end:
             should_query_live = False
 
         if should_query_live:
@@ -1744,7 +1455,7 @@ class QueryRunner:
                 #
                 live_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
                 live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
-                    live_start, active_str, live_end
+                    live_start, win.active_str, live_end
                 )
                 # live_where was built above from the un-narrowed live_start;
                 # rebuild it here so the create_filtered_temp_table fallback
@@ -1847,10 +1558,10 @@ class QueryRunner:
             cached = _day_rollup_presence.get(day)
             if cached is not None:
                 return cached
-            present = os.path.isfile(os.path.join(bundled_day_root, f"day={day}", "all_fields.parquet"))
+            present = os.path.isfile(os.path.join(plan.bundled_day_root, f"day={day}", "all_fields.parquet"))
             if not present:
                 for f_ in safe_fields:
-                    d_ = os.path.join(day_root, f"field={f_}", f"day={day}")
+                    d_ = os.path.join(plan.day_root, f"field={f_}", f"day={day}")
                     if not os.path.isdir(d_):
                         continue
                     try:
@@ -1869,11 +1580,11 @@ class QueryRunner:
             h = cur_dt.strftime("%Y-%m-%d-%H")
             h_dt = cur_dt
             cur_dt += timedelta(hours=1)
-            if et_str_floor and h > et_str_floor:
+            if win.et_floor and h > win.et_floor:
                 break
-            if h in bundled_hours or h in per_field_hours_seen:
+            if h in plan.bundled_hours or h in plan.per_field_hours_seen:
                 continue
-            if h[:10] in days_with_day_files_any and _day_has_real_day_rollup(h[:10]):
+            if h[:10] in plan.days_with_day_files_any and _day_has_real_day_rollup(h[:10]):
                 continue
             missing_hours.append(h)
             missing_hour_dts.append(h_dt)
