@@ -145,7 +145,7 @@ def test_fetch_verified_bots_paged_single_page():
     page1 = [_bot_request("req1"), _bot_request("req2")]
     responses = [_make_page(page1, next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -161,7 +161,7 @@ def test_fetch_verified_bots_paged_routes_through_central_client():
     workspace path under /ngwaf/v1, and the token threaded as the ``token`` kwarg."""
     responses = [_make_page([_bot_request("req1")], next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses) as mock_fastly:
+    with patch("backend.core.fastly.client.fastly", side_effect=responses) as mock_fastly:
         list(fetch_verified_bots_paged("api-key", "ws-id", "2026-05-06T00:00:00Z"))
 
     args, kwargs = mock_fastly.call_args
@@ -175,7 +175,7 @@ def test_fetch_verified_bots_paged_stops_on_empty_cursor():
     """Empty string cursor must stop pagination (API uses '' not null)."""
     responses = [_make_page([_bot_request("req1")], next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -189,7 +189,7 @@ def test_fetch_verified_bots_paged_multi_page():
         _make_page(page2, next_cursor=""),
     ]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses) as mock_fastly, patch("time.sleep"):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses) as mock_fastly, patch("time.sleep"):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 2
@@ -209,7 +209,7 @@ def test_fetch_verified_bots_paged_skips_non_verified_bot_records():
     bot = _bot_request("req_bot")
     responses = [_make_page([non_bot, bot], next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     records, _, raw_count = pages[0]
@@ -225,7 +225,7 @@ def test_fetch_verified_bots_paged_latest_ts_is_max_in_page():
     later["signals"] = [{"id": "VERIFIED-BOT", "value": "Bot"}]
     responses = [_make_page([earlier, later], next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     _, latest_ts, _ = pages[0]
@@ -235,7 +235,7 @@ def test_fetch_verified_bots_paged_latest_ts_is_max_in_page():
 def test_fetch_verified_bots_paged_empty_page_yields_none_timestamp():
     responses = [_make_page([], next_cursor="")]
 
-    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
+    with patch("backend.core.fastly.client.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -260,7 +260,7 @@ def test_fetch_verified_bots_paged_uses_proper_query_syntax():
     from_dt = datetime.now(UTC) - timedelta(days=4, hours=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
+    with patch("backend.core.fastly.client.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(fetch_verified_bots_paged("api-key", "ws-id", from_ts))
 
         path = mock_fastly.call_args.args[1]
@@ -281,7 +281,7 @@ def test_fetch_verified_bots_paged_rounds_up_to_15min():
     from_dt = datetime.now(UTC) - timedelta(minutes=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
+    with patch("backend.core.fastly.client.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(fetch_verified_bots_paged("api-key", "ws-id", from_ts))
 
         assert "from:-15min" in _parse_q(mock_fastly)
@@ -338,7 +338,7 @@ def test_fetch_verified_bots_paged_includes_until_when_provided():
     from_dt = datetime.now(UTC) - timedelta(days=3)
     until_dt = datetime.now(UTC) - timedelta(days=1)
 
-    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
+    with patch("backend.core.fastly.client.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(
             fetch_verified_bots_paged(
                 "k",

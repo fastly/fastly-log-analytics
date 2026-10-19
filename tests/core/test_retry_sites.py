@@ -13,8 +13,8 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import duckdb
+import httpx
 import pytest
-import requests as req_lib
 
 from backend.core import duckdb as core_duckdb
 from backend.core.realtime import poller as poller_mod
@@ -54,17 +54,8 @@ def _captured_sleeps(*extra_targets: str, only_from: str | None = None):
 # ── realtime poller ──────────────────────────────────────────────────────────
 
 
-class _Resp:
-    def __init__(self, status: int, body: dict | None = None):
-        self.status_code = status
-        self._body = body or {}
-
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise req_lib.HTTPError(response=self)
-
-    def json(self) -> dict:
-        return self._body
+def _Resp(status: int, body: dict | None = None) -> httpx.Response:
+    return httpx.Response(status, json=body or {}, request=httpx.Request("GET", "https://rt.example.test/"))
 
 
 class _ScriptedSession:
@@ -73,7 +64,7 @@ class _ScriptedSession:
         self.script = list(script)
         self.calls = 0
 
-    def get(self, url, timeout=None):
+    def get(self, url, headers=None, timeout=None):
         self.calls += 1
         step = self.script.pop(0)
         if isinstance(step, BaseException):
@@ -104,7 +95,7 @@ def test_poller_retries_503_with_1s_2s_backoff_then_succeeds(_poller_creds):
 def test_poller_exhausted_retryable_status_raises_http_error_without_final_sleep(_poller_creds):
     session = _ScriptedSession([_Resp(429), _Resp(502), _Resp(500)])
     with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
-        with pytest.raises(req_lib.HTTPError) as ei:
+        with pytest.raises(httpx.HTTPStatusError) as ei:
             _fetch(session)
     assert ei.value.response.status_code == 500
     assert session.calls == 3
@@ -114,31 +105,31 @@ def test_poller_exhausted_retryable_status_raises_http_error_without_final_sleep
 def test_poller_non_retryable_status_raises_immediately(_poller_creds):
     session = _ScriptedSession([_Resp(404)])
     with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
-        with pytest.raises(req_lib.HTTPError):
+        with pytest.raises(httpx.HTTPStatusError):
             _fetch(session)
     assert session.calls == 1
     assert delays == []
 
 
 def test_poller_connection_error_retries_then_raises_last(_poller_creds):
-    errs = [req_lib.ConnectionError("a"), req_lib.ConnectionError("b"), req_lib.ConnectionError("c")]
+    errs = [httpx.ConnectError("a"), httpx.ConnectError("b"), httpx.ConnectError("c")]
     session = _ScriptedSession(errs)
     with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
-        with pytest.raises(req_lib.ConnectionError, match="c"):
+        with pytest.raises(httpx.ConnectError, match="c"):
             _fetch(session)
     assert session.calls == 3
     assert delays == [1, 2]
 
 
 def test_poller_non_longpoll_read_timeout_is_retried(_poller_creds):
-    session = _ScriptedSession([req_lib.ReadTimeout(), _Resp(200, {"ok": 2})])
+    session = _ScriptedSession([httpx.ReadTimeout("timed out"), _Resp(200, {"ok": 2})])
     with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
         assert _fetch(session, cursor=0) == {"ok": 2}
     assert delays == [1]
 
 
 def test_poller_longpoll_read_timeout_short_circuits(_poller_creds):
-    session = _ScriptedSession([req_lib.ReadTimeout()])
+    session = _ScriptedSession([httpx.ReadTimeout("timed out")])
     with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
         with pytest.raises(poller_mod._LongPollTimeout):
             _fetch(session, cursor=123)

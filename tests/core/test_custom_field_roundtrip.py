@@ -148,9 +148,9 @@ def test_custom_field_full_roundtrip_end_to_end(tmp_path, monkeypatch):
     )
     services.api_create_custom_field(_admin_request(), svc_id, cf)
 
-    # 2. GET /log-fields ⇒ my_field present with type VARCHAR
-    custom = services_core.api_service_log_fields_get(svc_id)["log_fields"].get("custom_fields", [])
-    assert len(custom) == 1 and custom[0]["name"] == "my_field" and custom[0]["duckdb_type"] == "VARCHAR"
+    # 2. GET /custom-fields ⇒ my_field present with type VARCHAR
+    custom = services_core.api_list_custom_fields(_admin_request(), svc_id).fields
+    assert len(custom) == 1 and custom[0].name == "my_field" and custom[0].duckdb_type == "VARCHAR"
 
     # 3-4. Seed + ingest
     _ingest_once(
