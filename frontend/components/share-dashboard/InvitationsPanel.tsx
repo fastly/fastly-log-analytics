@@ -207,10 +207,17 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   }
 
   return (
-    <section className="rounded-lg border bg-card p-4 space-y-3">
+    <section
+      className="rounded-lg border bg-card p-4 space-y-3"
+      data-testid="admin-share-invites-panel"
+    >
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold">Active invitations</h4>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
+        <Button
+          size="sm"
+          onClick={() => setCreateOpen(true)}
+          data-testid="admin-share-new-invite-btn"
+        >
           <Plus className="h-4 w-4 mr-1" />
           New invitation
         </Button>

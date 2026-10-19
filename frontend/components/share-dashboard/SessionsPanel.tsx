@@ -70,7 +70,10 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
   })
 
   return (
-    <section className="rounded-lg border bg-card p-4 space-y-3">
+    <section
+      className="rounded-lg border bg-card p-4 space-y-3"
+      data-testid="admin-share-sessions-panel"
+    >
       <h4 className="text-sm font-semibold">Active sessions</h4>
       <Table>
         <TableHeader>

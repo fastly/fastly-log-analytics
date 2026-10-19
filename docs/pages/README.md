@@ -77,7 +77,7 @@ docs/pages/
 | `/admin/queue` | [Task Queue](admin/queue.md) | Ingestion ledger claims, Celery queue depth, RedBeat | **Live-certified** |
 | `/admin/rum` | [RUM Ingestion](admin/rum.md) | Beacon ingestion status, sample rates, client scripts | **Live-certified** |
 | `/admin/session-scoring` | [Session Scoring Config](admin/session-scoring.md) | Matrix weights, threshold overrides, model retrain | **Live-certified** |
-| `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Scaffolded (Pending AI Verification)** |
+| `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Live-certified** |
 | `/admin/trends` | [System Trends](admin/trends.md) | Metric history, ingestion latency, CPU/memory over time | **Scaffolded (Pending AI Verification)** |
 | `/admin/usage-log` | [FOS Usage Ledger](admin/usage-log.md) | Per-route and per-cron attribution for FOS storage costs | **Scaffolded (Pending AI Verification)** |
 | `/admin/clickhouse` | [ClickHouse Cluster Admin](admin/clickhouse.md) | Cluster health, schema alignment, dataset generation, bounded replay | **Scaffolded (Pending AI Verification)** |

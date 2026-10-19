@@ -5,16 +5,22 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.config import list_configs
+from backend.deps import require_admin
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.services import OkMessageResponse
 from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/sharing", tags=["sharing"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(
+    prefix="/api/sharing",
+    tags=["sharing"],
+    dependencies=[Depends(require_admin)],
+    responses=DEFAULT_ERROR_RESPONSES,
+)
 
 
 class SharingDeployRequest(BaseModel):

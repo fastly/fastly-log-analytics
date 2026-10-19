@@ -2,34 +2,53 @@
 
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ShieldAlert } from 'lucide-react'
+import { AlertTriangle, RefreshCw, ShieldAlert } from 'lucide-react'
 import dynamic from 'next/dynamic'
+import { useSearchParams } from 'next/navigation'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { Button } from '@/components/ui/button'
 import { DeployRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/DeployRemoteFrontendDialog'
 import { TeardownRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/TeardownRemoteFrontendDialog'
 import { PageHeader } from '@/components/ui/page-header'
-import { useSearchParams } from 'next/navigation'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { SharingControlPanel } from '@/components/share-dashboard/SharingControlPanel'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
-import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
 import { client, extractApiError } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import { cn } from '@/lib/utils'
+import Loading from './loading'
+
+const VALID_SHARE_TABS = new Set(['invites', 'sessions', 'audit'])
 
 // InvitationsPanel is the default tab on cold load — static-importing it
 // keeps the initial paint off the dynamic-chunk fetch path.
 // SessionsPanel + AuditLogPanel stay lazy because they only mount on
 // tab click; ``ssr: false`` keeps their hooks off the SSR pass.
 const SessionsPanel = dynamic(
-  () => import('@/components/share-dashboard/SessionsPanel').then(m => m.SessionsPanel),
-  { ssr: false },
+  () => import('@/components/share-dashboard/SessionsPanel').then((m) => m.SessionsPanel),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-3" aria-busy="true">
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+      </div>
+    ),
+  },
 )
 const AuditLogPanel = dynamic(
-  () => import('@/components/share-dashboard/AuditLogPanel').then(m => m.AuditLogPanel),
-  { ssr: false },
+  () => import('@/components/share-dashboard/AuditLogPanel').then((m) => m.AuditLogPanel),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-3" aria-busy="true">
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+      </div>
+    ),
+  },
 )
 
 // Shared query key so the hover-prefetch on the Admin → Share Dashboard
@@ -42,24 +61,56 @@ export const SHARE_STATUS_QUERY_KEY = queryKeys.admin.shareStatus()
 // the mount-time /status query isn't refetched on the 10-s tick.
 export const SHARE_LIVE_QUERY_KEY = queryKeys.admin.shareLive()
 
-type ShareLiveFields = Partial<Pick<
-  ShareStatus,
-  'sharing_active' | 'public_url' | 'active_session_count' | 'rate_limits' | 'telemetry'
->>
+type ShareLiveFields = Partial<
+  Pick<
+    ShareStatus,
+    'sharing_active' | 'public_url' | 'active_session_count' | 'rate_limits' | 'telemetry'
+  >
+>
 
-export default function ShareDashboardPage() {
+function normalizeShareTab(raw: string | null | undefined): string {
+  return raw && VALID_SHARE_TABS.has(raw) ? raw : 'invites'
+}
+
+function ShareDashboardPageContent() {
   const queryClient = useQueryClient()
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
+  const tabParam = searchParams?.get('tab')
 
   const [actionError, setActionError] = React.useState('')
-  const [activeTab, setActiveTab] = React.useState('invites')
+  const [activeTab, setActiveTab] = React.useState(() => normalizeShareTab(tabParam))
   const [auditEmailFilter, setAuditEmailFilter] = React.useState('')
+
+  React.useEffect(() => {
+    const normalized = normalizeShareTab(tabParam)
+    setActiveTab((prev) => (prev === normalized ? prev : normalized))
+  }, [tabParam])
+
+  const handleTabChange = React.useCallback((nextTab: string) => {
+    const normalized = normalizeShareTab(nextTab)
+    setActiveTab(normalized)
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href)
+      if (normalized === 'invites') {
+        url.searchParams.delete('tab')
+      } else {
+        url.searchParams.set('tab', normalized)
+      }
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    }
+  }, [])
 
   // /status carries the full mount-time payload — services, invites,
   // sessions, audit logs (~11 KB). Mutations refetch this. No
   // refetchInterval; the 10-s live tick rides on /live below.
-  const { data: status, error: statusError, refetch } = useQuery({
+  const {
+    data: status,
+    error: statusError,
+    isLoading: statusLoading,
+    isFetching: statusFetching,
+    refetch,
+  } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
     queryFn: async ({ signal }) => {
       const { data, response } = await client.GET('/api/admin/share/status', { signal })
@@ -100,9 +151,11 @@ export default function ShareDashboardPage() {
     // session disappear without waiting for the 10-s tick.
     queryClient.invalidateQueries({ queryKey: SHARE_LIVE_QUERY_KEY })
   }, [refetch, queryClient])
+
   const statusErrorMsg = statusError
     ? extractApiError(statusError) || (statusError as Error).message || 'unable to load status'
     : ''
+
   // Merge /live fields into /status so SharingControlPanel (which reads
   // active_session_count + rate_limits + telemetry) sees fresh data on
   // every 10-s tick without us touching the full /status payload.
@@ -110,10 +163,13 @@ export default function ShareDashboardPage() {
     ? { ...status, ...(live ?? {}) }
     : null
 
+  const isInitialLoading = statusForPanels === null && !statusErrorMsg && statusLoading
+  const isRefreshing = statusFetching && !isInitialLoading
+
   const activeService = status?.services?.find((s) => s.service_id === activeServiceId)
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="admin-share-root">
       <PageHeader
         title="Remote Dashboard Sharing"
         description="Start the share tunnel, manage analyst invitations, monitor live sessions, and review the audit trail."
@@ -128,6 +184,16 @@ export default function ShareDashboardPage() {
         ) : (
           <DeployRemoteFrontendDialog />
         )}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={refresh}
+          disabled={isRefreshing}
+          data-testid="admin-share-refresh-btn"
+        >
+          <RefreshCw className={cn('h-4 w-4 mr-1', isRefreshing && 'animate-spin')} />
+          Refresh
+        </Button>
         <BackToAdminLink />
       </PageHeader>
 
@@ -145,77 +211,113 @@ export default function ShareDashboardPage() {
       </Alert>
 
       {statusErrorMsg && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" data-testid="admin-share-status-error">
           <AlertDescription>{statusErrorMsg}</AlertDescription>
         </Alert>
       )}
       {actionError && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" data-testid="admin-share-action-error">
           <AlertDescription>{actionError}</AlertDescription>
         </Alert>
       )}
 
-      {statusForPanels === null && !statusErrorMsg ? (
-        // First-render skeleton: React Query yields ``undefined`` (which
-        // we coerce to null) until the initial /api/admin/share/status
-        // fetch returns. Pre-fix the page showed an empty
-        // SharingControlPanel + tabs with no data — looked broken until
-        // ~300ms later when status arrived. With the hover-prefetch on
-        // the Admin → Share Dashboard link, this skeleton usually does
-        // not appear at all (cache hit), but it's a clean fallback on
-        // cold navigations.
-        <FormSkeleton />
-      ) : (
-        <>
-          <SharingControlPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
+      <div
+        className={cn(
+          'min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto] transition-opacity',
+          isRefreshing && 'opacity-40 pointer-events-none',
+        )}
+        data-testid="admin-share-control-reservation"
+      >
+        {statusForPanels === null && !statusErrorMsg ? (
+          <div className="space-y-3" aria-busy="true">
+            <Skeleton className="h-[220px] w-full rounded-xl" />
+          </div>
+        ) : (
+          <SharingControlPanel
+            status={statusForPanels}
+            onRefresh={refresh}
+            onError={setActionError}
+          />
+        )}
+      </div>
 
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-            <TabsList>
-              <TabsTrigger value="invites">Invitations</TabsTrigger>
-              <TabsTrigger value="sessions">Sessions</TabsTrigger>
-              <TabsTrigger value="audit">Audit</TabsTrigger>
-            </TabsList>
+      <Tabs
+        value={activeTab}
+        onValueChange={handleTabChange}
+        className="w-full"
+        data-testid="admin-share-tabs"
+      >
+        <TabsList>
+          <TabsTrigger value="invites" data-testid="admin-share-tab-invites">
+            Invitations
+          </TabsTrigger>
+          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">
+            Sessions
+          </TabsTrigger>
+          <TabsTrigger value="audit" data-testid="admin-share-tab-audit">
+            Audit
+          </TabsTrigger>
+        </TabsList>
 
-            {/* Gate each panel on activeTab so the tab-bundled JS chunks
-               * stay out of the initial parse. ``auditEmailFilter`` is
-               * already lifted to the parent for the invites→audit jump,
-               * so AuditLogPanel's filter state survives the unmount.
-               * Other per-panel state (table sort, pagination cursor)
-               * resets on tab switch — acceptable tradeoff for the
-               * cold-load bundle saving. */}
-            <TabsContent value="invites" className="pt-4">
-              {activeTab === 'invites' && (
-                <InvitationsPanel
-                  status={statusForPanels}
-                  onRefresh={refresh}
-                  onError={setActionError}
-                  onViewAuditLogs={(email) => {
-                    setAuditEmailFilter(email)
-                    setActiveTab('audit')
-                  }}
-                />
-              )}
-            </TabsContent>
+        <div
+          className={cn(
+            'min-h-[360px] [contain-intrinsic-size:auto_360px] [content-visibility:auto] transition-opacity',
+            isRefreshing && 'opacity-40 pointer-events-none',
+          )}
+          data-testid="admin-share-panel-reservation"
+        >
+          {statusForPanels === null && !statusErrorMsg ? (
+            <div className="pt-4 space-y-3" aria-busy="true">
+              <Skeleton className="h-[360px] w-full rounded-xl" />
+            </div>
+          ) : (
+            <>
+              <TabsContent value="invites" className="pt-4">
+                {activeTab === 'invites' && (
+                  <InvitationsPanel
+                    status={statusForPanels}
+                    onRefresh={refresh}
+                    onError={setActionError}
+                    onViewAuditLogs={(email) => {
+                      setAuditEmailFilter(email)
+                      handleTabChange('audit')
+                    }}
+                  />
+                )}
+              </TabsContent>
 
-            <TabsContent value="sessions" className="pt-4">
-              {activeTab === 'sessions' && (
-                <SessionsPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
-              )}
-            </TabsContent>
+              <TabsContent value="sessions" className="pt-4">
+                {activeTab === 'sessions' && (
+                  <SessionsPanel
+                    status={statusForPanels}
+                    onRefresh={refresh}
+                    onError={setActionError}
+                  />
+                )}
+              </TabsContent>
 
-            <TabsContent value="audit" className="pt-4">
-              {activeTab === 'audit' && (
-                <AuditLogPanel
-                  status={statusForPanels}
-                  onError={setActionError}
-                  initialEmailFilter={auditEmailFilter}
-                  onClearInitialFilter={() => setAuditEmailFilter('')}
-                />
-              )}
-            </TabsContent>
-          </Tabs>
-        </>
-      )}
+              <TabsContent value="audit" className="pt-4">
+                {activeTab === 'audit' && (
+                  <AuditLogPanel
+                    status={statusForPanels}
+                    onError={setActionError}
+                    initialEmailFilter={auditEmailFilter}
+                    onClearInitialFilter={() => setAuditEmailFilter('')}
+                  />
+                )}
+              </TabsContent>
+            </>
+          )}
+        </div>
+      </Tabs>
     </div>
+  )
+}
+
+export default function ShareDashboardPage() {
+  return (
+    <React.Suspense fallback={<Loading />}>
+      <ShareDashboardPageContent />
+    </React.Suspense>
   )
 }

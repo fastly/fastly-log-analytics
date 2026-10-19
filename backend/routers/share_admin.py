@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
 from backend import config as svcconfig
 from backend.core import share_db
 from backend.core.oauth import registry as oauth_registry
+from backend.deps import require_admin
 from backend.models.admin_actions import SharePurgeResponse
 from backend.models.common import OkResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -31,17 +32,21 @@ from backend.models.share_admin import (
     InviteRecord,
     OAuthProvidersResponse,
     PasscodePayload,
+    PasscodeRegenerateResponse,
     PiiPolicyPayload,
     ServiceScopePayload,
     SettingsPayload,
     ShareAuditLogsResponse,
     ShareBannerResponse,
+    ShareInvitesResponse,
     ShareLiveResponse,
     SharePanicResponse,
     ShareSettingsResponse,
     ShareStartPayload,
     ShareStartResponse,
     ShareStatusResponse,
+    ShareTosPayload,
+    ShareTosResponse,
     SharingPolicyPayload,
     WordphraseResponse,
 )
@@ -51,7 +56,12 @@ from backend.utils.tunnel import build_share_live_payload, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin/share", tags=["share-admin"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(
+    prefix="/api/admin/share",
+    tags=["share-admin"],
+    dependencies=[Depends(require_admin)],
+    responses=DEFAULT_ERROR_RESPONSES,
+)
 # ── Status ──────────────────────────────────────────────────────────────────
 
 
@@ -207,6 +217,15 @@ def share_panic():
 
 
 # ── Invites ────────────────────────────────────────────────────────────────
+
+
+@router.get("/invites", response_model=ShareInvitesResponse, response_model_exclude_unset=True)
+def list_invites():
+    invites = share_db.get_remote_invites()
+    last_login_by_email = share_db.get_last_login_by_email()
+    for inv in invites:
+        inv["last_login_at"] = last_login_by_email.get((inv.get("email") or "").strip().lower())
+    return {"invites": invites}
 
 
 @router.post("/invites", response_model=InviteRecord, response_model_exclude_unset=True)
@@ -371,6 +390,27 @@ def update_invite_passcode(invite_id: str, payload: PasscodePayload, request: Re
 
 
 @router.post(
+    "/invites/{invite_id}/regenerate-passcode",
+    response_model=PasscodeRegenerateResponse,
+    response_model_exclude_unset=True,
+)
+def regenerate_invite_passcode(invite_id: str, request: Request):
+    """Generate a fresh high-entropy wordphrase and rotate the invite's passcode."""
+    invite = share_db.get_remote_invite(invite_id)
+    if invite is None:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    new_passcode = share_db.generate_wordphrase()
+    share_db.update_remote_invite_passcode(invite_id, new_passcode)
+    share_db.log_share_audit_event(
+        event_type="INVITE_PASSCODE_UPDATE",
+        email=invite.get("email"),
+        ip_address=client_ip(request, default="127.0.0.1"),
+        details=f"invite_id={invite_id} regenerated=true",
+    )
+    return {"ok": True, "invite_id": invite_id, "passcode": new_passcode}
+
+
+@router.post(
     "/invites/{invite_id}/revoke",
     response_model=InviteMutationAck,
     response_model_exclude_unset=True,
@@ -386,6 +426,25 @@ def revoke_invite(invite_id: str, request: Request):
         details=f"invite_id={invite_id} booted_sessions={booted}",
     )
     return {"ok": True, "booted_sessions": booted}
+
+
+@router.post(
+    "/invites/{invite_id}/reactivate",
+    response_model=InviteRecord,
+    response_model_exclude_unset=True,
+)
+def reactivate_invite(invite_id: str, request: Request):
+    """Restore a soft-revoked invite (sets revoked=0) so the analyst can sign in again."""
+    if not share_db.reactivate_remote_invite(invite_id):
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    invite = share_db.get_remote_invite(invite_id) or {}
+    share_db.log_share_audit_event(
+        event_type="INVITE_REACTIVATE",
+        email=invite.get("email"),
+        ip_address=client_ip(request, default="127.0.0.1"),
+        details=f"invite_id={invite_id}",
+    )
+    return {**invite, "ok": True}
 
 
 @router.delete(
@@ -432,6 +491,12 @@ def boot_session(session_id: str, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
     return {"ok": True}
+
+
+@router.post("/sessions/{session_id}/revoke", response_model=OkResponse)
+def revoke_session(session_id: str, request: Request):
+    """Alias for /sessions/{session_id}/boot — immediately revokes a live analyst session."""
+    return boot_session(session_id, request)
 
 
 # ── Backup / Restore ────────────────────────────────────────────────────────
@@ -501,6 +566,11 @@ def gdpr_erase(payload: GdprErasePayload, request: Request):
 # ── Settings ────────────────────────────────────────────────────────────────
 
 
+@router.get("/settings", response_model=ShareSettingsResponse, response_model_exclude_unset=True)
+def get_settings():
+    return {"max_concurrent_analyst_sessions": share_db.get_max_concurrent_sessions()}
+
+
 @router.patch("/settings", response_model=ShareSettingsResponse, response_model_exclude_unset=True)
 def update_settings(payload: SettingsPayload):
     if payload.max_concurrent_analyst_sessions is not None:
@@ -508,6 +578,38 @@ def update_settings(payload: SettingsPayload):
             raise HTTPException(status_code=400, detail={"error": "invalid_value"})
         share_db.set_setting(share_db.MAX_CONCURRENT_ANALYST_SESSIONS_KEY, str(payload.max_concurrent_analyst_sessions))
     return {"max_concurrent_analyst_sessions": share_db.get_max_concurrent_sessions()}
+
+
+# ── Terms of Service ────────────────────────────────────────────────────────
+
+
+@router.get("/tos", response_model=ShareTosResponse)
+def get_tos():
+    tos = share_db.get_latest_tos()
+    if tos is None:
+        return {"version": None, "text": None, "published_at": None}
+    return tos
+
+
+@router.post("/tos", response_model=ShareTosResponse)
+@router.put("/tos", response_model=ShareTosResponse)
+def publish_tos(payload: ShareTosPayload, request: Request):
+    version = (payload.version or "").strip()
+    text = (payload.text or "").strip()
+    if not version or not text:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_request", "message": "version and text are required."},
+        )
+    share_db.publish_tos_version(version, text)
+    share_db.log_share_audit_event(
+        event_type="TOS_PUBLISH",
+        email=None,
+        ip_address=client_ip(request, default="127.0.0.1"),
+        details=f"version={version}",
+    )
+    tos = share_db.get_latest_tos() or {"version": version, "text": text, "published_at": share_db.iso_z_now()}
+    return {"ok": True, **tos}
 
 
 # ── Wordphrase generator (used by admin invite form) ───────────────────────

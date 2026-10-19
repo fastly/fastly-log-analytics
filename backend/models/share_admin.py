@@ -307,3 +307,27 @@ class ShareSettingsResponse(_ShareAdminRead):
 
 class WordphraseResponse(_ShareAdminRead):
     passcode: str | None = None
+
+
+class ShareInvitesResponse(_ShareAdminRead):
+    invites: list[InviteRecord] | None = None
+
+
+class PasscodeRegenerateResponse(_ShareAdminRead):
+    ok: bool | None = None
+    invite_id: str | None = None
+    passcode: str | None = None
+
+
+class ShareTosPayload(BaseModel):
+    """Body for ``POST /api/admin/share/tos`` — publish a new Terms of Service version."""
+
+    version: str
+    text: str
+
+
+class ShareTosResponse(_ShareAdminRead):
+    ok: bool | None = None
+    version: str | None = None
+    text: str | None = None
+    published_at: str | None = None

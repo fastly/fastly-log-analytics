@@ -411,6 +411,14 @@ def revoke_remote_invite(invite_id: str, *, con: Any = None) -> bool:
     return cur.rowcount > 0
 
 
+def reactivate_remote_invite(invite_id: str, *, con: Any = None) -> bool:
+    """Restore a soft-revoked invite (``revoked=0``). Returns True if found."""
+    con = con or get_global_share_con()
+    cur = con.execute("UPDATE remote_invites SET revoked=0 WHERE id=?", (invite_id,))
+    con.commit()
+    return cur.rowcount > 0
+
+
 def delete_remote_invite(invite_id: str, *, con: Any = None) -> bool:
     """Hard-delete an invite. Cascades to invite_services, remote_sessions, and
     remote_invite_claim_tokens via ON DELETE CASCADE. Audit log rows are

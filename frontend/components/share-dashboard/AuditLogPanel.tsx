@@ -159,7 +159,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
   })
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" data-testid="admin-share-audit-panel">
       <section className="rounded-lg border bg-card p-3 space-y-2">
         <h4 className="text-sm font-semibold">Filter audit log</h4>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
@@ -210,10 +210,20 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
           </div>
         </div>
         <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={handleClear}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleClear}
+            data-testid="admin-share-audit-clear-btn"
+          >
             Clear
           </Button>
-          <Button size="sm" onClick={applyFilters} disabled={loading}>
+          <Button
+            size="sm"
+            onClick={applyFilters}
+            disabled={loading}
+            data-testid="admin-share-audit-apply-btn"
+          >
             {loading && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
             Apply
           </Button>

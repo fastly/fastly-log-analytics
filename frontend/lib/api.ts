@@ -221,7 +221,8 @@ export async function adminJson<
 // TanStack would log as an error.
 const SERVICELESS_PATH_PREFIXES = [
   "/api/bootstrap",
-  "/api/share",        // share-login, share-status, etc.
+  "/api/share",        // share-login, tos, heartbeat, etc.
+  "/api/admin/share",  // global live-share admin endpoints (status, live, banner, invites, sessions, audit-logs)
   "/api/auth",
   "/api/login",
   "/api/health",

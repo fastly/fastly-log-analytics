@@ -798,15 +798,41 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/share/wordphrase`, () =>
     HttpResponse.json({ phrase: 'test-phrase' }),
   ),
+  http.get(`${API_BASE}/api/admin/share/invites`, () =>
+    HttpResponse.json({ invites: [] }),
+  ),
   http.post(`${API_BASE}/api/admin/share/invites`, () =>
     HttpResponse.json({ invite_id: 'inv-test', passcode: 'TEST' }),
   ),
   http.delete(`${API_BASE}/api/admin/share/invites/:invite_id`, noContent()),
+  http.post(`${API_BASE}/api/admin/share/invites/:invite_id/revoke`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/invites/:invite_id/reactivate`, () =>
+    HttpResponse.json({ invite_id: 'inv-test', email: 'test@example.com', service_ids: [] }),
+  ),
+  http.post(`${API_BASE}/api/admin/share/invites/:invite_id/regenerate-passcode`, () =>
+    HttpResponse.json({ invite_id: 'inv-test', passcode: 'NEW-PASSCODE' }),
+  ),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/passcode`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/services`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/sessions/:session_id/revoke`, ok({ ok: true })),
+  http.get(`${API_BASE}/api/admin/share/settings`, () =>
+    HttpResponse.json({ settings: {} }),
+  ),
+  http.patch(`${API_BASE}/api/admin/share/settings`, () =>
+    HttpResponse.json({ settings: {} }),
+  ),
+  http.get(`${API_BASE}/api/admin/share/tos`, () =>
+    HttpResponse.json({ version: 1, text: 'Test TOS', published_at: null }),
+  ),
+  http.post(`${API_BASE}/api/admin/share/tos`, () =>
+    HttpResponse.json({ version: 2, text: 'Updated TOS', published_at: null }),
+  ),
+  http.put(`${API_BASE}/api/admin/share/tos`, () =>
+    HttpResponse.json({ version: 2, text: 'Updated TOS', published_at: null }),
+  ),
   http.post(`${API_BASE}/api/admin/share/purge`, ok({ ok: true })),
 
   // ── Quarantine ───────────────────────────────────────────────────

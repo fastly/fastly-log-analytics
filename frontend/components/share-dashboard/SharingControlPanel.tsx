@@ -126,7 +126,10 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   }
 
   return (
-    <section className="rounded-lg border bg-card p-4 space-y-3">
+    <section
+      className="rounded-lg border bg-card p-4 space-y-3"
+      data-testid="admin-share-control-panel"
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           {sharingActive ? (
@@ -135,18 +138,33 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             <WifiOff className="h-4 w-4 text-muted-foreground" />
           )}
           <h3 className="font-semibold text-sm">Sharing</h3>
-          <Badge variant={sharingActive ? 'default' : 'secondary'}>
+          <Badge
+            variant={sharingActive ? 'default' : 'secondary'}
+            data-testid="admin-share-status-badge"
+          >
             {sharingActive ? 'ACTIVE' : 'OFF'}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
           {sharingActive ? (
             <>
-              <Button size="sm" variant="outline" onClick={handleStop} disabled={busy}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleStop}
+                disabled={busy}
+                data-testid="admin-share-stop-btn"
+              >
                 {busy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
                 {busy ? 'Stopping…' : 'Stop'}
               </Button>
-              <Button size="sm" variant="destructive" onClick={handlePanic} disabled={busy}>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={handlePanic}
+                disabled={busy}
+                data-testid="admin-share-panic-btn"
+              >
                 {busy ? (
                   <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                 ) : (
@@ -156,7 +174,12 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
               </Button>
             </>
           ) : (
-            <Button size="sm" onClick={handleStart} disabled={busy}>
+            <Button
+              size="sm"
+              onClick={handleStart}
+              disabled={busy}
+              data-testid="admin-share-start-btn"
+            >
               {busy && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
               {busy ? 'Starting…' : 'Start'}
             </Button>
@@ -211,10 +234,10 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             Heartbeat 401s since boot:{' '}
             <span className="font-mono">{status.telemetry.heartbeat_unauth_count}</span>
           </span>
-          {status.telemetry.tunnel_uptime_history.length > 0 && (
+          {(status.telemetry.tunnel_uptime_history?.length ?? 0) > 0 && (
             <span>
               Prior sessions:{' '}
-              <span className="font-mono">{status.telemetry.tunnel_uptime_history.length}</span>
+              <span className="font-mono">{status.telemetry.tunnel_uptime_history?.length}</span>
             </span>
           )}
         </div>
