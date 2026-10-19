@@ -1,7 +1,11 @@
 import json
 import logging
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterator
+from typing import Any, Literal
 
 import tenacity
 
@@ -12,11 +16,51 @@ RT_BASE = "https://rt.fastly.com"
 
 _RETRYABLE_HTTP_CODES = (429, 500, 502, 503, 504)
 
+# Upper bound on a server-requested ``Retry-After`` pause so a hostile or
+# misconfigured header can't park a worker thread.
+RETRY_AFTER_CAP_S = 30.0
+
 
 def _is_retryable_fastly_error(exc: BaseException) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code in _RETRYABLE_HTTP_CODES
     return isinstance(exc, (urllib.error.URLError, ConnectionError, TimeoutError))
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse a ``Retry-After`` header given as delay-seconds, clamped to ``[0, RETRY_AFTER_CAP_S]``.
+
+    Returns ``None`` when absent or not a number (HTTP-date form is not honored; the
+    default backoff applies instead).
+    """
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    if seconds != seconds or seconds < 0:  # NaN or negative
+        return None
+    return min(seconds, RETRY_AFTER_CAP_S)
+
+
+def _wait_strategy(method: str) -> Callable[[tenacity.RetryCallState], float]:
+    """Default jittered backoff, except that GET retries honor a 429/503 ``Retry-After``.
+
+    Mutations keep the default backoff on purpose: they gain no new behavior here.
+    """
+    default = tenacity.wait_exponential(multiplier=1, min=1, max=8) + tenacity.wait_random(min=0, max=2)
+
+    def _wait(retry_state: tenacity.RetryCallState) -> float:
+        if method.upper() == "GET" and retry_state.outcome is not None:
+            exc = retry_state.outcome.exception()
+            if isinstance(exc, urllib.error.HTTPError) and exc.code in (429, 503):
+                hinted = parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+                if hinted is not None:
+                    return hinted
+        return default(retry_state)
+
+    return _wait
 
 
 def _request(method, path, *, data, headers, expect_empty, max_retries, timeout, base=API_BASE):
@@ -54,7 +98,7 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout,
             for attempt in tenacity.Retrying(
                 retry=tenacity.retry_if_exception(_is_retryable_fastly_error),
                 stop=tenacity.stop_after_attempt(max_retries + 1),
-                wait=tenacity.wait_exponential(multiplier=1, min=1, max=8) + tenacity.wait_random(min=0, max=2),
+                wait=_wait_strategy(method),
                 reraise=True,
             ):
                 with attempt:
@@ -164,3 +208,99 @@ def fastly_rt(path, *, token, max_retries=0, timeout=10):
         timeout=timeout,
         base=RT_BASE,
     )
+
+
+PageStyle = Literal["cursor", "page", "link"]
+
+
+def _next_path_from_link(link: str) -> str | None:
+    """Reduce a ``links.next`` value to an API path, or ``None`` if it points off-host.
+
+    The token rides on every request, so an absolute URL on any host other than
+    ``api.fastly.com`` is refused rather than followed.
+    """
+    if link.startswith("/"):
+        return link
+    parsed = urllib.parse.urlsplit(link)
+    if f"{parsed.scheme}://{parsed.netloc}" != API_BASE:
+        return None
+    return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+
+def fastly_paginate(
+    path: str,
+    *,
+    token: str,
+    style: PageStyle = "cursor",
+    items_key: str = "data",
+    params: dict[str, Any] | None = None,
+    cursor_param: str = "cursor",
+    next_cursor_path: tuple[str, ...] = ("meta", "next_cursor"),
+    page_param: str = "page",
+    per_page_param: str = "per_page",
+    per_page: int = 100,
+    max_pages: int = 1000,
+    page_delay: float = 0.0,
+    timeout: float = 30,
+) -> Iterator[dict]:
+    """GET every page of a list endpoint, yielding each parsed page body (reads only).
+
+    ``style``:
+      - ``"cursor"``: the next cursor is read from ``next_cursor_path`` (falsy ends
+        iteration) and sent back as ``cursor_param``.
+      - ``"page"``: ``page_param``/``per_page_param`` numbering; ends on an empty or
+        short page.
+      - ``"link"``: JSON:API ``links.next`` (path or ``api.fastly.com`` URL); ends when
+        absent. Off-host links are refused.
+
+    Each page goes through :func:`fastly`, so auth, retries (incl. ``Retry-After`` on
+    GET), telemetry and mock mode apply. ``max_pages`` and repeated-cursor detection
+    bound a misbehaving server.
+    """
+    base_params = dict(params or {})
+    sep = "&" if "?" in path else "?"
+    seen: set[str] = set()
+    cursor: str | None = None
+    page_no = 1
+    next_path: str | None = None
+
+    for _ in range(max_pages):
+        if style == "link" and next_path is not None:
+            request_path = next_path
+        else:
+            q = dict(base_params)
+            if style == "cursor" and cursor:
+                q[cursor_param] = cursor
+            elif style == "page":
+                q[page_param] = page_no
+                q[per_page_param] = per_page
+            query = urllib.parse.urlencode(q, quote_via=urllib.parse.quote, safe="")
+            request_path = path + (sep + query if query else "")
+
+        page = fastly("GET", request_path, token=token, timeout=timeout)
+        yield page
+
+        if style == "cursor":
+            node: Any = page
+            for key in next_cursor_path:
+                node = node.get(key) if isinstance(node, dict) else None
+            if not node or not isinstance(node, str) or node in seen:
+                return
+            seen.add(node)
+            cursor = node
+        elif style == "page":
+            items = page.get(items_key) if isinstance(page, dict) else None
+            if not items or len(items) < per_page:
+                return
+            page_no += 1
+        else:
+            link = (page.get("links") or {}).get("next") if isinstance(page, dict) else None
+            if not link or not isinstance(link, str):
+                return
+            next_path = _next_path_from_link(link)
+            if next_path is None or next_path in seen:
+                return
+            seen.add(next_path)
+
+        if page_delay:
+            time.sleep(page_delay)

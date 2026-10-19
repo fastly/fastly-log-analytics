@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import logging
 import math
-import time
-import urllib.parse
 from collections.abc import Generator
 from datetime import UTC, datetime
 
-from backend.core.fastly.client import fastly
+from backend.core.fastly.client import fastly_paginate
 from backend.utils.date_utils import iso_z, parse_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -55,20 +53,13 @@ def fetch_verified_bots_paged(
         relative_until = _get_relative_time_range(until_ts)
         q += f" until:{relative_until}"
 
-    params: dict[str, str] = {
-        "q": q,
-        "limit": str(page_limit),
-    }
-
-    cursor: str = "initial"  # Non-empty sentinel to enter the loop
-
-    while cursor:
-        query_string = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items())
-        path = f"{_API_PREFIX}/workspaces/{workspace_id}/requests?{query_string}"
-        # Route through the central client (retry + auth + telemetry). It
-        # returns parsed JSON, so no local urlopen / json.loads here.
-        data = fastly("GET", path, token=api_key, timeout=30)
-
+    for data in fastly_paginate(
+        f"{_API_PREFIX}/workspaces/{workspace_id}/requests",
+        token=api_key,
+        style="cursor",
+        params={"q": q, "limit": page_limit},
+        page_delay=0.1,  # courtesy pause: no rate-limit headers on this API
+    ):
         raw_data = data.get("data", [])
         records: list[dict] = []
         latest_ts: str | None = None
@@ -82,16 +73,6 @@ def fetch_verified_bots_paged(
                     latest_ts = ts
 
         yield records, latest_ts, len(raw_data)
-
-        # Empty string means no more pages — stop. None would also stop but the
-        # API returns "" not null when exhausted, so `while cursor:` is correct.
-        cursor = data.get("meta", {}).get("next_cursor", "")
-        if cursor:
-            params["cursor"] = cursor
-            time.sleep(0.1)  # 100ms inter-page courtesy sleep (no rate-limit headers)
-        else:
-            # Remove cursor param so it doesn't pollute next loop guard check
-            params.pop("cursor", None)
 
 
 def _get_relative_time_range(ts_str: str) -> str:
