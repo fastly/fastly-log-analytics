@@ -270,4 +270,20 @@ test.describe('Admin Live Query Monitor Page Contract (/admin/queries)', () => {
     const withPageLoadId = observedHeaders.filter((h) => Boolean(h['x-page-load-id']))
     expect(withPageLoadId.length).toBeGreaterThan(0)
   })
+
+  test('6. Pre-nuqs shared links hydrate filter state and round-trip through the URL', async ({ page }) => {
+    await page.goto('/admin/queries?q=COMPACT&view=live&slow=250&nogroup=1')
+    await expect(page.locator('[data-testid="admin-queries-root"]:visible')).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.getByRole('tab', { name: 'Live only' })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('[data-testid="admin-queries-slow-reservation"]')).toHaveCount(0)
+
+    // Switching back to the default view strips its param; the rest survive.
+    await page.getByRole('tab', { name: 'All' }).click()
+    await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBeNull()
+    const params = new URL(page.url()).searchParams
+    expect(params.get('q')).toBe('COMPACT')
+    expect(params.get('slow')).toBe('250')
+    expect(params.get('nogroup')).toBe('1')
+  })
 })

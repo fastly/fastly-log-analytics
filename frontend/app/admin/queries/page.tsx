@@ -8,7 +8,7 @@
  *
  * This file is the orchestrator: data wiring + layout. Derived state
  * (filtered/promoted/slow row sets) lives in `_hooks/useFilteredActive`;
- * URL sync in `_hooks/useQueryMonitorUrlSync`; layout details in
+ * URL sync in `_hooks/useQueryMonitorUrlState`; layout details in
  * `_sections/`; shared types/helpers in `_types.ts` / `_helpers.ts`.
  *
  * Tables render through the project-standard `<DataTable>` (column
@@ -39,7 +39,7 @@ import { extractApiError } from '@/lib/api'
 import { useDocumentVisible } from './_helpers'
 import { useFilteredActive } from './_hooks/useFilteredActive'
 import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
-import { useQueryMonitorUrlSync } from './_hooks/useQueryMonitorUrlSync'
+import { useQueryMonitorUrlState } from './_hooks/useQueryMonitorUrlState'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
 import { DbFilterChips } from './_sections/DbFilterChips'
@@ -51,10 +51,8 @@ import { SummaryStrip } from './_sections/SummaryStrip'
 import type {
   ActiveOrPromotedRow,
   ActiveRow,
-  AttributionKind,
   CancelResponse,
   CompletedRow,
-  DbFilter,
   MonitorConfig,
   SlowQueriesResult,
   SnapshotResponse,
@@ -70,13 +68,22 @@ type DetailRow = ActiveOrPromotedRow | CompletedRow
 export default function QueryMonitorPage() {
   const queryClient = useQueryClient()
   const visible = useDocumentVisible()
-  const [search, setSearch] = React.useState('')
-  const [kindFilter, setKindFilter] = React.useState<AttributionKind | 'all'>('all')
-  const [dbFilter, setDbFilter] = React.useState<DbFilter>('all')
+  const {
+    search,
+    kindFilter,
+    dbFilter,
+    viewMode,
+    slowThresholdMs,
+    groupCrons,
+    setSearch,
+    setKindFilter,
+    setDbFilter,
+    setViewMode,
+    setSlowThresholdMs,
+    setGroupCrons,
+  } = useQueryMonitorUrlState(DEFAULT_SLOW_THRESHOLD_MS)
   const [confirmKill, setConfirmKill] = React.useState<ActiveRow | null>(null)
   const [actionError, setActionError] = React.useState<string>('')
-  const [viewMode, setViewMode] = React.useState<ViewMode>('all')
-  const [slowThresholdMs, setSlowThresholdMs] = React.useState(DEFAULT_SLOW_THRESHOLD_MS)
   // 'recent' = the in-memory ring buffer (400 entries — _HISTORY_CAP in
   // backend/core/query_registry.py; only a few minutes on a busy service
   // where SQLite cron noise churns it, cleared on restart). 'past_24h' /
@@ -91,7 +98,6 @@ export default function QueryMonitorPage() {
   // representative row with a ×N badge — default on because a single tick
   // can spawn dozens of identical queries that otherwise drown out the
   // user's own activity.
-  const [groupCrons, setGroupCrons] = React.useState(true)
   // Manual pause stops the 300ms snapshot poll so an admin can read a row
   // mid-incident without it shifting under them. Distinct from the
   // tab-visibility auto-pause; this one survives focus changes.
@@ -114,11 +120,6 @@ export default function QueryMonitorPage() {
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
-  useQueryMonitorUrlSync(
-    { search, kindFilter, dbFilter, viewMode, slowThresholdMs, groupCrons },
-    { setSearch, setKindFilter, setDbFilter, setViewMode, setSlowThresholdMs, setGroupCrons },
-    DEFAULT_SLOW_THRESHOLD_MS,
-  )
 
   const { data: cfg } = useQuery<MonitorConfig>({
     queryKey: queryKeys.admin.queryMonitorConfig(),
