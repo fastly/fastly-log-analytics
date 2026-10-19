@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -41,23 +42,27 @@ from ._common import (
     parse_hour_token,
 )
 from .hour_bundles import bundle_hours, bundle_hours_ip_spread
-from .network_health_geo import build_network_geo_bundles
-from .network_health_heatmap import build_network_heatmap_bundles
-from .network_rtt import build_network_rtt_bundles
-from .network_speed import build_network_speed_bundles
-from .network_summary import build_network_summary_bundles
-from .ngwaf_bots import build_ngwaf_bots_bundles
-from .origin_dims import build_origin_dims_bundles
-from .origin_latency_ts import build_origin_latency_ts_bundles
-from .origin_summary import build_origin_summary_bundles
-from .overview import build_overview_bundles
-from .perf_dims import build_perf_dims_bundles
-from .perf_latency import build_perf_latency_bundles
-from .security_dims import build_security_dims_bundles
-from .sessions import build_session_bundles
-from .slow_urls import build_slow_urls_bundles
-from .time_series import build_time_series_bundles
-from .verified_bots_ts import build_verified_bots_ts_bundles
+
+# Writers dispatched by name from spec.HOUR_WRITERS (resolved against this
+# module at call time, so each name here is also the test patch point).
+from .network_health_geo import build_network_geo_bundles  # noqa: F401
+from .network_health_heatmap import build_network_heatmap_bundles  # noqa: F401
+from .network_rtt import build_network_rtt_bundles  # noqa: F401
+from .network_speed import build_network_speed_bundles  # noqa: F401
+from .network_summary import build_network_summary_bundles  # noqa: F401
+from .ngwaf_bots import build_ngwaf_bots_bundles  # noqa: F401
+from .origin_dims import build_origin_dims_bundles  # noqa: F401
+from .origin_latency_ts import build_origin_latency_ts_bundles  # noqa: F401
+from .origin_summary import build_origin_summary_bundles  # noqa: F401
+from .overview import build_overview_bundles  # noqa: F401
+from .perf_dims import build_perf_dims_bundles  # noqa: F401
+from .perf_latency import build_perf_latency_bundles  # noqa: F401
+from .security_dims import build_security_dims_bundles  # noqa: F401
+from .sessions import build_session_bundles  # noqa: F401
+from .slow_urls import build_slow_urls_bundles  # noqa: F401
+from .spec import HOUR_WRITERS
+from .time_series import build_time_series_bundles  # noqa: F401
+from .verified_bots_ts import build_verified_bots_ts_bundles  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -143,225 +148,21 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
             e,
         )
 
-    # Time-series rollups for the dashboard chart. Same best-effort
-    # contract: if the build fails, the dashboard falls back to a raw
-    # scan for the affected hours.
-    try:
-        build_time_series_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: time_series bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Sessions rollups for /api/sessions. Best-effort: if the build
-    # fails, the sessions endpoint falls back to a raw window-function
-    # scan for any hours that lack a sessions.parquet.
-    try:
-        build_session_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: sessions bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Slow-URLs rollups for the /origin slow_urls panel. Same best-effort
-    # contract: a failure here leaves the panel on its raw TEMP-table
-    # path for the affected hours.
-    try:
-        build_slow_urls_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: slow_urls bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Origin-summary rollup for the /origin summary card. Same posture.
-    try:
-        build_origin_summary_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_summary bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Network-RTT per-ASN rollup for the /api/network-health
-    # rtt_percentiles_query panel (5.2 s on prod 30 d before this
-    # rollup). Same best-effort contract — a failure leaves the panel
-    # on its raw TEMP-table path for the affected hours.
-    try:
-        build_network_rtt_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_rtt bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Network-speed per-ASN per-c_speed distribution rollup for the
-    # /api/network-health speed_distribution_query panel (2.9 s on
-    # prod 30 d before this rollup). Exact counts SUM across hours —
-    # no _approx flag. Same best-effort contract.
-    try:
-        build_network_speed_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_speed bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-ASN heatmap metrics rollup for /api/network-health's heatmap +
-    # leaderboard + summary + buckets sections (all blocked by the 2–4 s
-    # create_filtered_temp_table on 30 d windows). Enables the skip-temp
-    # guard in get_health() when the geo rollup also hits. Same best-effort
-    # contract — a failure leaves those sections on the raw TEMP-table path.
-    try:
-        build_network_heatmap_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_heatmap bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-geocell metrics rollup for /api/network-health's map_buckets +
-    # cities + metro_leaderboard sections. Together with the heatmap rollup
-    # above, enables the skip-temp guard in get_health(). Same best-effort
-    # contract — a failure leaves those sections on the raw TEMP-table path.
-    try:
-        build_network_geo_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_geo bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Verified-bot minute-granular time-series rollup for the
-    # /api/security/aggregates verified_bots_ts panel (~1.2 s on prod
-    # 30 d before this rollup). Exact counts SUM across hours; the
-    # reader re-buckets from minute granularity and fills the active
-    # hour live. Same best-effort contract.
-    try:
-        build_verified_bots_ts_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: verified_bots_ts bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour top-N url/asn latency rollups for /api/performance/aggregates'
-    # top_urls (~1.45 s) + top_asns (~0.77 s) panels. Same per-dimension
-    # percentile-over-window shape as slow_urls; reader request-weight-
-    # averages + re-ranks by sort_by. Same best-effort contract.
-    try:
-        build_perf_latency_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: perf_latency bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour origin-dimension percentile rollups (pop / oip / edge) for
-    # /api/origin/aggregates' pop_latency + ip_health + path_breakdown panels.
-    # Same per-dimension percentile-over-window shape as slow_urls; reader
-    # request-weight-averages (error_pct stays exact via carried counts).
-    # Same best-effort contract — a failure leaves those panels on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_origin_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour MINUTE-granular origin-latency-percentile time-series rollup for
-    # /api/origin/aggregates' timeseries panel (the temp_table_create driver —
-    # this is the last section to roll up, enabling the skip-temp guard). Hybrid
-    # shape: time-series re-bucket (like verified_bots_ts) + request-weighted
-    # percentile merge (like slow_urls); counts exact, percentiles _approx.
-    # Same best-effort contract — a failure leaves the panel on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_origin_latency_ts_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_latency_ts bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour security-dimension rollups (req_size / conn_reuse / topips / cov)
-    # for /api/security/aggregates' equivalent panels (each an all-rows live
-    # scan today). EXACT counts/MAX SUM/merge across hours — no _approx flag.
-    # Same best-effort contract — a failure leaves those panels on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_security_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: security_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour performance-dimension rollup (ttl_dist) for
-    # /api/performance/aggregates' ttl_dist histogram panel (an all-rows live
-    # scan today). EXACT counts SUM + MIN-of-MIN across hours — no _approx flag.
-    # Same best-effort contract — a failure leaves that panel on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_perf_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: perf_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour NGWAF-bots rollup (waf_req_id ⨝ ngwaf_bot_cache aggregated at
-    # write time) for get_top_bots' ngwaf_bots panel. EXACT SUM across hours.
-    # Same best-effort contract — a failure leaves the panel on the direct
-    # base-table join for the affected hours.
-    try:
-        build_ngwaf_bots_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ngwaf_bots bundle failed (direct join will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour overview rollup for /api/value/summary's combined
-    # overview + caching sections. All SUM-aggregatable — no _approx.
-    # Same best-effort contract — a failure leaves the summary page
-    # on its raw GROUP BY scan for the affected hours.
-    try:
-        build_overview_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: overview bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    try:
-        build_network_summary_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_summary bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
+    # Per-hour feature rollups (see spec.HOUR_WRITERS). Same best-effort
+    # contract for every writer: a failure is logged and leaves the affected
+    # hours on the spec's fallback path (raw scan / direct join) without
+    # blocking the writers after it.
+    for spec in HOUR_WRITERS:
+        try:
+            getattr(sys.modules[__name__], spec.builder)(service_id, source, touched_hours)
+        except Exception as e:
+            logger.warning(
+                "[rollups] %s: %s bundle failed (%s will serve): %s",
+                service_id,
+                spec.label,
+                spec.fallback,
+                e,
+            )
 
 
 def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = None) -> None:
