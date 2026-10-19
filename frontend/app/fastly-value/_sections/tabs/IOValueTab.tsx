@@ -11,10 +11,110 @@ import { FilterValueCell } from '@/components/FilterValueCell'
 import type { components } from '@/types/api.generated'
 import { CHART_COLORS } from '@/lib/chart-colors'
 import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 type IOData = components['schemas']['IOMetrics']
 
 type IOOpportunity = components['schemas']['IOOpportunityRow']
+
+type ConversionPair = NonNullable<IOData['io_format_conversion_pairs']>[number]
+
+const OPPORTUNITY_COLUMNS: ColumnDef<IOOpportunity>[] = [
+  {
+    id: 'url',
+    header: 'URL',
+    accessorFn: (o) => o.url ?? '',
+    size: 420,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs">
+        <FilterValueCell
+          filters={[{ column: 'url', value: row.original.url ?? '' }]}
+          display={truncateUrl(row.original.url ?? '')}
+        />
+      </span>
+    ),
+  },
+  {
+    id: 'request_count',
+    header: 'Requests',
+    accessorFn: (o) => o.request_count ?? 0,
+    size: 110,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">{formatCompactCount(row.original.request_count ?? 0)}</span>
+    ),
+  },
+  {
+    id: 'avg_kb',
+    header: 'Avg KB',
+    accessorFn: (o) => o.avg_kb ?? -1,
+    size: 100,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">
+        {row.original.avg_kb != null ? row.original.avg_kb.toFixed(1) : '—'}
+      </span>
+    ),
+  },
+  {
+    id: 'total_bytes',
+    header: 'Total Bandwidth',
+    accessorFn: (o) => o.total_bytes ?? 0,
+    size: 150,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">{formatBytes(row.original.total_bytes ?? 0)}</span>
+    ),
+  },
+]
+
+const CONVERSION_COLUMNS: ColumnDef<ConversionPair>[] = [
+  {
+    id: 'input_format',
+    header: 'From',
+    accessorFn: (p) => p.input_format,
+    size: 140,
+    enableSorting: false,
+    cell: ({ row }) => <span className="font-mono text-xs uppercase">{row.original.input_format}</span>,
+  },
+  {
+    id: 'output_format',
+    header: 'To',
+    accessorFn: (p) => p.output_format,
+    size: 140,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="flex items-center gap-1 font-mono text-xs uppercase">
+        <ArrowRight className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+        {row.original.output_format}
+      </span>
+    ),
+  },
+  {
+    id: 'count',
+    header: 'Count',
+    accessorFn: (p) => p.count ?? 0,
+    size: 110,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">{formatCompactCount(row.original.count ?? 0)}</span>
+    ),
+  },
+  {
+    id: 'avg_ratio',
+    header: 'Avg Ratio',
+    accessorFn: (p) => p.avg_ratio ?? -1,
+    size: 110,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">
+        {row.original.avg_ratio != null ? `${row.original.avg_ratio}x` : '—'}
+      </span>
+    ),
+  },
+]
 
 const VOLUME_LAYOUT = {
   yaxis: { title: 'IO Transforms', ticksuffix: '' },
@@ -57,39 +157,13 @@ function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
       title="Top Image URLs"
       description="Highest-bandwidth image URLs that could benefit from IO optimization"
     >
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-muted-foreground border-b text-left">
-              <th className="pb-2 pr-4 font-medium">URL</th>
-              <th className="pb-2 pr-4 text-right font-medium">Requests</th>
-              <th className="pb-2 pr-4 text-right font-medium">Avg KB</th>
-              <th className="pb-2 text-right font-medium">Total Bandwidth</th>
-            </tr>
-          </thead>
-          <tbody>
-            {opps.map((opp) => (
-              <tr key={opp.url} className="border-b last:border-0">
-                <td className="py-2 pr-4 font-mono text-xs">
-                  <FilterValueCell
-                    filters={[{ column: 'url', value: opp.url ?? '' }]}
-                    display={truncateUrl(opp.url ?? '')}
-                  />
-                </td>
-                <td className="py-2 pr-4 text-right">
-                  {formatCompactCount(opp.request_count ?? 0)}
-                </td>
-                <td className="py-2 pr-4 text-right">
-                  {opp.avg_kb != null ? opp.avg_kb.toFixed(1) : '—'}
-                </td>
-                <td className="py-2 text-right">
-                  {formatBytes(opp.total_bytes ?? 0)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTableReadonly
+        columns={OPPORTUNITY_COLUMNS}
+        data={opps}
+        hideToolbar
+        showPagination={false}
+        tableCaption="Top image URLs"
+      />
     </AnalyticsCard>
   )
 }
@@ -294,31 +368,13 @@ function IOEnabledView({ data }: { data: IOData }) {
           title="Format Conversions"
           description="Input → output format pairs by volume"
         >
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-muted-foreground border-b text-left">
-                  <th className="pb-2 pr-4 font-medium">From</th>
-                  <th className="pb-2 pr-4 font-medium">To</th>
-                  <th className="pb-2 pr-4 text-right font-medium">Count</th>
-                  <th className="pb-2 text-right font-medium">Avg Ratio</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data.io_format_conversion_pairs ?? []).map((pair) => (
-                  <tr key={`${pair.input_format}-${pair.output_format}`} className="border-b last:border-0">
-                    <td className="py-2 pr-4 font-mono text-xs uppercase">{pair.input_format}</td>
-                    <td className="py-2 pr-4 font-mono text-xs uppercase flex items-center gap-1">
-                      <ArrowRight className="h-3 w-3 text-muted-foreground" />
-                      {pair.output_format}
-                    </td>
-                    <td className="py-2 pr-4 text-right">{formatCompactCount(pair.count ?? 0)}</td>
-                    <td className="py-2 text-right">{pair.avg_ratio != null ? `${pair.avg_ratio}x` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTableReadonly
+            columns={CONVERSION_COLUMNS}
+            data={data.io_format_conversion_pairs ?? []}
+            hideToolbar
+            showPagination={false}
+            tableCaption="Image format conversions"
+          />
         </AnalyticsCard>
       ) : null}
 
