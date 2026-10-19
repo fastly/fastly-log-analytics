@@ -22,7 +22,8 @@ import datetime
 import json
 import logging
 import os
-from typing import Any
+from types import SimpleNamespace
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from sse_starlette.sse import EventSourceResponse
@@ -649,21 +650,28 @@ async def rum_analytics(
     end_time: str | None = Query(None),
     filters: str | None = Query(None),
     ctx: RequestContext = Depends(build_request_context),
+    range_token: Annotated[str | None, Query()] = None,
+    anchor: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
+
+    A recognized ``range_token`` (+ optional ``anchor``) is resolved server-side by the shared
+    ``RequestContext.resolve_window`` (then analyst-clamped), ignoring ``start_time``/``end_time``.
+    Absent or unrecognized tokens take the legacy absolute-bounds path unchanged.
     """
+    window = SimpleNamespace(range_token=range_token, anchor=anchor, start_time=start_time, end_time=end_time)
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_analytics as hs_rum_analytics
 
-        start_time, end_time = ctx.clamp(start_time, end_time)
+        start_time, end_time = ctx.resolve_window(window)
         return _inject_telemetry(hs_rum_analytics(high_scale_service, start_time, end_time))
 
     service_id = ctx.service_id
 
-    # 1. Clamp timebounds against analyst session limits
-    start_time, end_time = ctx.clamp(start_time, end_time)
+    # 1. Resolve (token or absolute) then clamp against analyst session limits
+    start_time, end_time = ctx.resolve_window(window)
 
     # 2. Establish fallback ranges
     if not start_time and not end_time:
