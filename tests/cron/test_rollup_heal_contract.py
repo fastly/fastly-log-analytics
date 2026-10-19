@@ -322,6 +322,12 @@ def test_admin_trigger_and_inspection_parity(contract_service_source, monkeypatc
 
         monkeypatch.setattr("backend.core.rollups._common.backfill_missing_bundles", lambda *a, **k: 0)
 
+        # The route ends with a RUM-aggregates backfill that opens a real ``.rum.duckdb`` connection;
+        # a contended file sat in the lock-retry sleep until the 60 s worker kill (CI hang dump).
+        monkeypatch.setattr("backend.core.duckdb.get_connection", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", lambda *a, **k: None)
+        monkeypatch.setattr("backend.core.rollups.rum.table_exists", lambda *a, **k: False)
+
         resp4 = client.post("/api/admin/backfill-bundle-rollups", headers={"x-service-id": sid})
         assert resp4.status_code == 200, f"Expected 200, got: {resp4.text}"
         data4 = resp4.json()
