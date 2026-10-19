@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/DataTable/DataTable';
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly';
 import { ColumnDef } from '@tanstack/react-table';
 import { useRumStatus } from '@/hooks/useRumStatus';
 import { CHART_COLORS } from '@/lib/chart-colors'
@@ -82,6 +83,56 @@ type RumLiveEvent = {
   os: string | { name?: string };
   raw_log?: RumRawLog;
 }
+
+const WORST_PAGE_COLUMNS: ColumnDef<RumWorstPage>[] = [
+  {
+    id: 'path',
+    header: 'Path',
+    accessorFn: (p) => p.path,
+    size: 260,
+    cell: ({ row }) => <span className="font-semibold font-mono text-xs">{row.original.path}</span>,
+  },
+  {
+    id: 'views',
+    header: 'Pageviews',
+    accessorFn: (p) => p.views,
+    size: 110,
+    cell: ({ row }) => <span className="block text-right text-sm">{row.original.views}</span>,
+  },
+  {
+    id: 'avg_load_time',
+    header: 'Avg Load (s)',
+    accessorFn: (p) => p.avg_load_time ?? -1,
+    size: 120,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">
+        {row.original.avg_load_time != null ? `${row.original.avg_load_time.toFixed(1)}s` : '—'}
+      </span>
+    ),
+  },
+  {
+    id: 'lcp_p75',
+    header: 'LCP p75',
+    accessorFn: (p) => p.lcp_p75 ?? -1,
+    size: 100,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm text-amber-500">
+        {row.original.lcp_p75 != null ? `${row.original.lcp_p75.toFixed(2)}s` : '—'}
+      </span>
+    ),
+  },
+  {
+    id: 'cls_p75',
+    header: 'CLS p75',
+    accessorFn: (p) => p.cls_p75 ?? -1,
+    size: 100,
+    cell: ({ row }) => (
+      <span className="block text-right text-sm">
+        {row.original.cls_p75 != null ? row.original.cls_p75.toFixed(2) : '—'}
+      </span>
+    ),
+  },
+]
 
 function envName(v: string | { name?: string } | null | undefined): string {
   if (typeof v === 'object' && v) return v.name || 'Unknown';
@@ -606,30 +657,14 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       {/* Worst Pages & Error tables */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Worst Performing Pages" icon={<Monitor />} >
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead>
-                <tr className="border-b text-muted-foreground font-medium">
-                  <th className="py-2">Path</th>
-                  <th className="py-2 text-right">Pageviews</th>
-                  <th className="py-2 text-right">Avg Load (s)</th>
-                  <th className="py-2 text-right">LCP p75</th>
-                  <th className="py-2 text-right">CLS p75</th>
-                </tr>
-              </thead>
-              <tbody>
-                {analytics.worst_pages.map((p: RumWorstPage) => (
-                  <tr key={p.path} className="border-b hover:bg-muted/10">
-                    <td className="py-2 font-semibold font-mono text-xs">{p.path}</td>
-                    <td className="py-2 text-right">{p.views}</td>
-                    <td className="py-2 text-right">{p.avg_load_time != null ? `${p.avg_load_time.toFixed(1)}s` : '—'}</td>
-                    <td className="py-2 text-right text-amber-500">{p.lcp_p75 != null ? `${p.lcp_p75.toFixed(2)}s` : '—'}</td>
-                    <td className="py-2 text-right">{p.cls_p75 != null ? p.cls_p75.toFixed(2) : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTableReadonly
+            columns={WORST_PAGE_COLUMNS}
+            data={analytics.worst_pages}
+            hideToolbar
+            showPagination={false}
+            tableCaption="Worst performing pages"
+            emptyMessage="No page data in this window"
+          />
         </AnalyticsCard>
 
         <AnalyticsCard title="JavaScript Runtime Exceptions" icon={<ShieldAlert className="text-rose-500" />}>

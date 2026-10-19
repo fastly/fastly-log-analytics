@@ -26,6 +26,8 @@ import RumPageClient from '@/app/rum/_sections/RumPageClient'
 vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly-chart" /> }))
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())
+
 const API_BASE = getApiBase()
 const SVC = 'svc-rum-client'
 
@@ -60,7 +62,10 @@ function versions(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function mockRumEndpoints({ versionsHandler }: { versionsHandler?: () => Response | Promise<Response> } = {}) {
+function mockRumEndpoints({
+  versionsHandler,
+  analyticsOverrides,
+}: { versionsHandler?: () => Response | Promise<Response>; analyticsOverrides?: Record<string, unknown> } = {}) {
   server.use(
     // RumClient fetches status/analytics/live-events via `adminFetch` with a
     // plain relative path, so the request resolves against jsdom's own
@@ -71,7 +76,7 @@ function mockRumEndpoints({ versionsHandler }: { versionsHandler?: () => Respons
     http.get('/api/services/:service_id/rum/status', () =>
       HttpResponse.json({ enabled: true, enabled_at: '2026-01-01T00:00:00Z' }),
     ),
-    http.get('/api/services/:service_id/rum/analytics', () => HttpResponse.json(analytics())),
+    http.get('/api/services/:service_id/rum/analytics', () => HttpResponse.json(analytics(analyticsOverrides))),
     http.get('/api/services/:service_id/rum/live-events', () => HttpResponse.json([])),
     // RumFaroVersionCard fetches via the openapi-fetch `client`, whose
     // baseUrl IS `NEXT_PUBLIC_API_URL` — this one needs the prefix.
@@ -160,5 +165,34 @@ describe('RumClient — Faro version card placement', () => {
     // The rest of the dashboard is unaffected by the version-card error.
     expect(screen.getByText('Cumulative Layout Shift (CLS)')).toBeInTheDocument()
     expect(screen.getByText('Interaction to Next Paint (INP)')).toBeInTheDocument()
+  })
+})
+
+describe('RumClient — worst pages table', () => {
+  it('renders worst pages through the shared table with formatted vitals', async () => {
+    useServiceStore.setState({
+      activeServiceId: SVC,
+      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+      isInitialized: true,
+    })
+    mockRumEndpoints({
+      analyticsOverrides: {
+        worst_pages: [
+          { path: '/checkout', views: 12, avg_load_time: 3.456, lcp_p75: 4.2, cls_p75: 0.123 },
+          { path: '/home', views: 3, avg_load_time: null, lcp_p75: null, cls_p75: null },
+        ],
+      },
+    })
+
+    renderClient()
+
+    expect(await screen.findByText('/checkout')).toBeInTheDocument()
+    for (const name of ['Path', 'Pageviews', 'Avg Load (s)', 'LCP p75', 'CLS p75']) {
+      expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+    }
+    expect(screen.getByText('3.5s')).toBeInTheDocument()
+    expect(screen.getByText('4.20s')).toBeInTheDocument()
+    expect(screen.getByText('0.12')).toBeInTheDocument()
+    expect(screen.getByText('/home')).toBeInTheDocument()
   })
 })
