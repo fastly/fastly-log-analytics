@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from backend.config import list_configs
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.services import OkMessageResponse
 from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/api/sharing", tags=["sharing"], responses=DEFAULT_ER
 class SharingDeployRequest(BaseModel):
     service_name: str
     domain_name: str
-    origin_host: str = "34.123.30.195"
+    origin_host: str
     origin_port: int = 80
     use_ssl: bool = False
     token_override: str | None = None
@@ -60,7 +61,7 @@ def deploy_frontend(payload: SharingDeployRequest):
                 token = key.strip()
                 break
 
-    from backend.utils.router_utils import load_service_config, make_error, raise_internal
+    from backend.utils.router_utils import make_error, mutate_service_config, raise_internal
 
     # 2. Try to fallback to env if still not found
     if not token:
@@ -87,26 +88,33 @@ def deploy_frontend(payload: SharingDeployRequest):
 
         # If a logging service ID is supplied, write remote frontend specs to its config
         if payload.service_id:
-            from backend import config as svcconfig
-
+            remote_frontend_spec = {
+                "service_id": res["service_id"],
+                "version": res["version"],
+                "domain_name": res["domain_name"],
+                "origin_host": res["origin_host"],
+            }
             try:
-                cfg = load_service_config(payload.service_id)
-                cfg["remote_frontend"] = {
-                    "service_id": res["service_id"],
-                    "version": res["version"],
-                    "domain_name": res["domain_name"],
-                    "origin_host": res["origin_host"],
-                }
-                svcconfig.save_config(payload.service_id, cfg)
+                mutate_service_config(
+                    payload.service_id, lambda c: c.__setitem__("remote_frontend", remote_frontend_spec)
+                )
             except Exception as e:
                 logger.warning(f"Could not save remote_frontend to config of service {payload.service_id}: {e}")
+
+        # Automatically start sharing with this public endpoint
+        try:
+            from backend.utils.tunnel import get_tunnel_manager
+
+            get_tunnel_manager().start_sharing(public_endpoint=f"https://{res['domain_name']}")
+        except Exception as e:
+            logger.warning(f"Could not automatically activate sharing for {res['domain_name']}: {e}")
 
         return res
     except Exception as exc:
         raise_internal(logger, exc)
 
 
-@router.post("/teardown-frontend")
+@router.post("/teardown-frontend", response_model=OkMessageResponse, response_model_exclude_unset=True)
 def teardown_frontend(payload: SharingTeardownRequest):
     """Teardown a remote frontend service.
 
@@ -123,7 +131,7 @@ def teardown_frontend(payload: SharingTeardownRequest):
                 token = key.strip()
                 break
 
-    from backend.utils.router_utils import load_service_config, make_error, raise_internal
+    from backend.utils.router_utils import load_service_config, make_error, mutate_service_config, raise_internal
 
     # 2. Try to fallback to env if still not found
     if not token:
@@ -138,8 +146,6 @@ def teardown_frontend(payload: SharingTeardownRequest):
         )
 
     try:
-        from backend import config as svcconfig
-
         cfg = load_service_config(payload.service_id)
 
         remote_frontend = cfg.get("remote_frontend")
@@ -151,8 +157,7 @@ def teardown_frontend(payload: SharingTeardownRequest):
         delete_remote_frontend(remote_service_id=remote_service_id, token=token)
 
         # Clear remote frontend configuration and save
-        cfg.pop("remote_frontend", None)
-        svcconfig.save_config(payload.service_id, cfg)
+        mutate_service_config(payload.service_id, lambda c: c.pop("remote_frontend", None))
 
         return {"ok": True, "message": f"Successfully deleted remote frontend service {remote_service_id}"}
     except HTTPException:

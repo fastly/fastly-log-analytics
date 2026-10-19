@@ -5,11 +5,15 @@ import type { ColumnDef, SortingState } from '@tanstack/react-table'
 import { DataTable } from '@/components/DataTable'
 import { Clock, Database } from 'lucide-react'
 
+import { formatCount } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
+
 interface ResultsTableProps {
-  data: any
+  data: components['schemas']['QueryResponse']
   isPending: boolean
   isStructured: boolean
-  columns: ColumnDef<any>[]
+  columns: ColumnDef<Record<string, unknown>>[]
   structuredSorting: SortingState
   onStructuredSortingChange: (sorting: SortingState) => void
 }
@@ -32,7 +36,10 @@ export function ResultsTable({
   onStructuredSortingChange,
 }: ResultsTableProps) {
   return (
-    <div className="space-y-4">
+    <div
+      className={cn('space-y-4 transition-opacity duration-150', isPending && 'opacity-60')}
+      data-testid="query-results-table"
+    >
       <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
         <span className="flex items-center gap-1">
           <Database className="h-3 w-3" />
@@ -40,7 +47,7 @@ export function ResultsTable({
           {data.truncated && (
             <span className="text-amber-500 font-semibold ml-1">
               {data.total_rows && data.total_rows > 0
-                ? `(Truncated to ${data.data?.length} of ${data.total_rows.toLocaleString()})`
+                ? `(Truncated to ${data.data?.length} of ${formatCount(data.total_rows)})`
                 : `(Truncated to ${data.data?.length} — more available; add LIMIT to count)`}
             </span>
           )}

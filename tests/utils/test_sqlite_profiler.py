@@ -142,23 +142,22 @@ def test_clear_resets_buffer_but_not_seq(tmp_path):
 
 
 def test_get_con_returns_instrumented_connection():
-    """metadata_db.get_con() must hand out InstrumentedConnection so all
-    real production SQLite traffic flows through the profiler."""
-    from backend.core import metadata as metadata_db
+    """metadata_db.get_con() must hand out PgConnectionWrapper under Postgres."""
+    from backend.core.metadata import base, pg_connection
 
-    con = metadata_db.get_con("test-svc")
-    assert isinstance(con, sqlite_profiler.InstrumentedConnection)
+    con = base.get_con("test-svc")
+    assert isinstance(con, pg_connection.PgConnectionWrapper)
 
 
 def test_metadata_db_traffic_appears_in_buffer():
     """Sanity end-to-end: a real metadata_db call populates the ring buffer."""
-    from backend.core import metadata as metadata_db
+    from backend.core.metadata import base
 
-    metadata_db.get_con("test-svc-traffic")  # init + PRAGMAs
+    con = base.get_con("test-svc-traffic")
+    con.execute("SELECT 1")
     snap = sqlite_profiler.get_recent()
     sqls = [q["sql"] for q in snap["queries"]]
-    # PRAGMA journal_mode=WAL is the canonical first statement after connect.
-    assert any("PRAGMA journal_mode" in s for s in sqls)
+    assert any("SELECT 1" in s for s in sqls)
 
 
 # ── Helper-function direct tests (cover the small surface) ──────────────────

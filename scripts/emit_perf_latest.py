@@ -25,7 +25,7 @@ Override scale via ``--rows N`` or ``PERF_NUM_ROWS=N`` env var.
 The absolute thresholds in baseline.json are NOT production targets;
 they are the headroom-padded CI/nightly numbers (separately measured).
 Production targets live in baseline.json's ``production_targets_comment``
-and are validated by scripts/loadtest_generator.py against a real
+and are validated by scripts/load_test/generate_synthetic_traffic.py against a real
 dataset — that path is documented but not enforced by THIS gate.
 
 Run ``uv run python scripts/emit_perf_latest.py`` for the smoke variant

@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
+from backend.core.duckdb import ensure_cid_salt
 from backend.deps import get_service_id, get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import CustomFieldsImportBody, ProvisionLakeInfoResponse
+from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody, ProvisionLakeInfoResponse
 from backend.models.services import (
     CredentialsUpdateResponse,
     CronScheduleResponse,
@@ -27,9 +26,11 @@ from backend.models.services import (
     ServiceCronSettingsBody,
     ServicesListResponse,
 )
+from backend.repositories import service_stats as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import require_service_in_scope
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, load_service_config, make_error, raise_internal
+from backend.utils.router_utils import load_service_config, make_error, mutate_service_config, raise_internal
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 
@@ -147,41 +148,48 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
                 raise ValueError("Service not found")
             yield json.dumps({"type": "progress", "current": 1, "total": 4})
             yield json.dumps({"type": "status", "message": "Updating sync and compaction schedules..."})
-            prov = cfg.setdefault("provisioning", {})
-            for cron_key in ("cron_sync", "cron_compact", "cron_ngwaf"):
-                incoming = body_payload.get(cron_key)
-                if incoming is None:
-                    continue
-                existing = prov.get(cron_key, {})
-                # exclude_unset on the parent already filtered to sent
-                # keys, but Pydantic dumps each nested block as a full
-                # dict of its model fields — re-filter so we don't write
-                # a None where the operator simply omitted a sub-field.
-                sent = {k: v for k, v in incoming.items() if v is not None}
-                # The scheduler prefers interval_mins over interval_seconds, so
-                # setting seconds while a stale mins is persisted is a silent
-                # no-op — the caller's value lands in the config and is then
-                # ignored. Since this endpoint can only write keys (never remove
-                # them), honour the explicit intent by dropping the losing key.
-                if "interval_seconds" in sent and "interval_mins" not in sent:
-                    existing.pop("interval_mins", None)
-                existing.update(sent)
-                prov[cron_key] = existing
 
-            # Handle RUM settings (top-level cfg, not provisioning)
-            rum_incoming = body_payload.get("rum")
-            if rum_incoming is not None:
-                rum_config = cfg.setdefault("rum", {})
-                rum_config.update({k: v for k, v in rum_incoming.items() if v is not None})
-                if not rum_config.get("cid_salt"):
-                    import secrets
+            def _apply(cfg: dict) -> None:
+                prov = cfg.setdefault("provisioning", {})
+                for cron_key in ("cron_sync", "cron_compact", "cron_ngwaf"):
+                    incoming = body_payload.get(cron_key)
+                    if incoming is None:
+                        continue
+                    existing = prov.get(cron_key, {})
+                    # exclude_unset on the parent already filtered to sent
+                    # keys, but Pydantic dumps each nested block as a full
+                    # dict of its model fields — re-filter so we don't write
+                    # a None where the operator simply omitted a sub-field.
+                    sent = {k: v for k, v in incoming.items() if v is not None}
+                    # The scheduler prefers interval_mins over interval_seconds, so
+                    # setting seconds while a stale mins is persisted is a silent
+                    # no-op — the caller's value lands in the config and is then
+                    # ignored. Since this endpoint can only write keys (never remove
+                    # them), honour the explicit intent by dropping the losing key.
+                    if "interval_seconds" in sent and "interval_mins" not in sent:
+                        existing.pop("interval_mins", None)
+                    existing.update(sent)
+                    prov[cron_key] = existing
 
-                    rum_config["cid_salt"] = secrets.token_hex(32)
-                cfg["rum"] = rum_config
+                # Handle RUM settings (top-level cfg, not provisioning)
+                rum_incoming = body_payload.get("rum")
+                if rum_incoming is not None:
+                    rum_config = cfg.setdefault("rum", {})
+                    sent_rum = {k: v for k, v in rum_incoming.items() if v is not None}
+                    # When log_period is explicitly sent without sync_interval_seconds,
+                    # drop stale sync_interval_seconds so derived interval calculation takes effect.
+                    if "log_period" in sent_rum and "sync_interval_seconds" not in sent_rum:
+                        rum_config.pop("sync_interval_seconds", None)
+                    rum_config.update(sent_rum)
+                    ensure_cid_salt(rum_config)
+                    cfg["rum"] = rum_config
+                    if "log_period" in sent_rum:
+                        cfg["rum_log_period"] = sent_rum["log_period"]
 
             yield json.dumps({"type": "progress", "current": 2, "total": 4})
             yield json.dumps({"type": "status", "message": "Saving settings to local database..."})
-            svcconfig.save_config(service_id, cfg)
+            if svcconfig.mutate_config(service_id, _apply) is None:
+                raise ValueError("Service not found")
             yield json.dumps({"type": "progress", "current": 3, "total": 4})
             yield json.dumps({"type": "status", "message": "Synchronizing APScheduler..."})
             try:
@@ -195,13 +203,13 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
 
                 metadata_db.record_audit(service_id=service_id, event_type="cron_settings_update", details=body_payload)
             except Exception:
-                pass
+                logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
             yield json.dumps({"type": "progress", "current": 4, "total": 4})
             yield json.dumps({"type": "done", "message": "Successfully applied changes."})
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.delete(
@@ -216,21 +224,21 @@ def api_service_clear_time_range(service_id: str):
     log_retention_days), and the FOS scan will use the incremental lookback
     optimization rather than scanning from the original import start date.
     """
-    from backend import config as svcconfig
-
     cfg = load_service_config(service_id)
     prov = cfg.get("provisioning", {})
     if "time_range" not in prov:
         return {"ok": True, "message": "No time_range was set."}
-    del prov["time_range"]
-    cfg["provisioning"] = prov
-    svcconfig.save_config(service_id, cfg)
+
+    def _clear(c: dict) -> None:
+        c.setdefault("provisioning", {}).pop("time_range", None)
+
+    mutate_service_config(service_id, _clear)
     try:
         from backend.core import metadata as metadata_db
 
         metadata_db.record_audit(service_id=service_id, event_type="time_range_cleared", details={})
     except Exception:
-        pass
+        logger.warning("api_service_clear_time_range: metadata_db.record_audit failed (ignored)", exc_info=True)
     return {"ok": True, "message": "time_range cleared. Cron will now ingest all available data."}
 
 
@@ -256,10 +264,8 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
             evs = get_progress(run_id, last_idx, service_id=service_id)
             if evs is None:
                 if last_idx == 0:
-                    # Fall back to SQLite database if progress cache doesn't have it (completed / historical)
+                    # Fall back to metadata database if progress cache doesn't have it (completed / historical)
                     try:
-                        import sqlite3
-
                         from backend.core import metadata as metadata_db
 
                         if service_id:
@@ -318,17 +324,9 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                             )
                                     else:
                                         # No log output — generate a helpful message based on task type and status
-                                        task_name = "unknown task"
-                                        try:
-                                            with sqlite3.connect(f"data/services/{service_id}.metadata.db") as con:
-                                                con.row_factory = sqlite3.Row
-                                                t_row = con.execute(
-                                                    "SELECT task FROM cron_runs WHERE id = ?", (run_id,)
-                                                ).fetchone()
-                                                if t_row:
-                                                    task_name = t_row["task"] or "unknown task"
-                                        except Exception:
-                                            pass
+                                        task_name = (
+                                            row.get("task") if isinstance(row, dict) else (row["task"] if row else None)
+                                        ) or "unknown task"
 
                                         msg = f"Run completed with status {status}."
                                         if normalized_status == "done" and task_name == "rum_sync":
@@ -368,7 +366,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                 last_idx += len(evs)
             await asyncio.sleep(0.5)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.get("/cron-schedule", response_model=CronScheduleResponse, response_model_exclude_unset=True)
@@ -383,6 +381,12 @@ def api_cron_schedule(source: dict = Depends(get_source)):
     payload = build_cron_schedule_payload(source)
     _cron_schedule_cache[service_id] = (now_mono, payload)
     return payload
+
+
+def _store_fos_credentials(cfg: dict, access_key: str, secret_key: str) -> None:
+    cfg["fos_access_key_id"] = access_key
+    cfg["fos_secret_access_key"] = secret_key
+    cfg.setdefault("provisioning", {})["fos_key_id"] = access_key
 
 
 @router.patch(
@@ -403,7 +407,6 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
 
     import botocore.exceptions
 
-    from backend import config as svcconfig
     from backend.core.duckdb import _get_fos_client
 
     _require_service_scope(request, service_id)
@@ -442,10 +445,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
                 )
             except RuntimeError:
                 pass
-        cfg["fos_access_key_id"] = key["access_key"]
-        cfg["fos_secret_access_key"] = key["secret_key"]
-        cfg.setdefault("provisioning", {})["fos_key_id"] = key["access_key"]
-        svcconfig.save_config(service_id, cfg)
+        mutate_service_config(service_id, lambda c: _store_fos_credentials(c, key["access_key"], key["secret_key"]))
         return {"ok": True, "message": "Key rotated via Fastly API", "access_key_id": key["access_key"]}
     if not access_key or not secret_key:
         raise HTTPException(
@@ -479,10 +479,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
         raise HTTPException(status_code=400, detail=make_error("fos_credentials_invalid", str(code)))
     except Exception as e:
         raise_internal(logger, e, code="fos_credentials_failed", status=400)
-    cfg["fos_access_key_id"] = access_key
-    cfg["fos_secret_access_key"] = secret_key
-    cfg.setdefault("provisioning", {})["fos_key_id"] = access_key
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: _store_fos_credentials(c, access_key, secret_key))
     return {"ok": True, "message": "Credentials updated successfully"}
 
 
@@ -581,7 +578,7 @@ def api_service_logging_settings(service_id: str):
             if current_format != target_format:
                 format_match = False
         except Exception:
-            pass
+            logger.debug("api_service_logging_settings: step failed (ignored)", exc_info=True)
 
         # Cache only the business fields — telemetry (debug_queries,
         # debug_calls, section_timings, is_cached) is regenerated per
@@ -641,15 +638,13 @@ def api_service_log_fields_get(service_id: str):
                     table_name = _db._safe_table_name(src["name"])
                     actual_cols = {col["name"] for col in _db.get_schema(c, src, stats=False)}
                     if "waf" in actual_cols:
-                        result = c.execute(
-                            f"\n                            SELECT SUM(CASE WHEN waf = true THEN 1 ELSE 0 END), COUNT(*)\n                            FROM {table_name}\n                            WHERE timestamp >= now() - INTERVAL '7 days'\n                        "
-                        ).fetchone()
+                        result = service_stats_repo.get_waf_flag_counts_7d(c, table_name)
                         if result and result[1] and (result[1] >= 10000) and ((result[0] or 0) == 0):
                             waf_warning = True
                 finally:
                     c.close()
         except Exception:
-            pass
+            logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
     history = []
     try:
         from backend.core import metadata as metadata_db
@@ -669,7 +664,7 @@ def api_service_log_fields_get(service_id: str):
                 }
             )
     except Exception:
-        pass
+        logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
 
     from backend.utils.telemetry import get_tracked_calls
 
@@ -691,7 +686,6 @@ def api_service_log_fields_get(service_id: str):
 )
 def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
 
-    from backend import config as svcconfig
     from backend.core import field_registry as lf
     from backend.provision.system_fields import reconcile_system_custom_fields
 
@@ -736,7 +730,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     new_lf["format_hash"] = new_hash
     new_lf["format_updated_at"] = datetime.now(UTC).isoformat()
     cfg["log_fields"] = new_lf
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
     from backend.repositories._presets_cache import invalidate_presets_cache
 
     invalidate_presets_cache(service_id, old_hash)
@@ -745,7 +739,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
 
         export_admin_state(service_id)
     except Exception:
-        pass
+        logger.warning("api_service_log_fields_set: export_admin_state failed (ignored)", exc_info=True)
     return {
         "ok": True,
         "estimate": lf.estimate_log_line_bytes(new_lf),
@@ -781,7 +775,7 @@ def api_service_update_logging_settings(
     prov = cfg.setdefault("provisioning", {})
     old_period = int(cfg.get("log_period", 60))
     old_sample_rate = int(prov.get("sample_rate", 100))
-    old_prefix = cfg.get("fos_prefix", "")
+    old_prefix = ""
     old_edge_only = prov.get("edge_only", False)
     old_custom_condition = prov.get("custom_condition", "")
 
@@ -789,8 +783,9 @@ def api_service_update_logging_settings(
         period = old_period
     if sample_rate is None:
         sample_rate = old_sample_rate
-    if prefix is None:
-        prefix = old_prefix
+    if prefix:
+        raise HTTPException(status_code=400, detail={"error": "Custom FOS prefixes are not supported in v3"})
+    prefix = ""
     if edge_only is None:
         edge_only = old_edge_only
     if custom_condition is None:
@@ -799,15 +794,11 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
-    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Invalid prefix. Use alphanumerics, /, _, -."},
-        )
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-    prefix = prefix.strip("/")
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
+    from backend.provision.log_paths import analytics_log_path
+
+    path = analytics_log_path()
 
     def stream():
         try:
@@ -845,7 +836,7 @@ def api_service_update_logging_settings(
                             from backend.models.services import CmcdSettingsResponse
 
                             _logging_settings_cache[service_id] = {
-                                "prefix": prefix,
+                                "prefix": "",
                                 "period": period,
                                 "sample_rate": sample_rate,
                                 "edge_only": edge_only,
@@ -864,21 +855,23 @@ def api_service_update_logging_settings(
                             }
                         else:
                             _logging_settings_cache.pop(service_id, None)
-                    fresh_cfg = svcconfig.load_config(service_id) or cfg
-                    fresh_prov = fresh_cfg.setdefault("provisioning", {})
-                    fresh_prov["sample_rate"] = sample_rate
-                    fresh_prov["edge_only"] = edge_only
-                    fresh_prov["custom_condition"] = custom_condition
-                    fresh_cfg["log_period"] = period
-                    fresh_cfg["fos_prefix"] = prefix
-                    if "cron_sync" in fresh_prov:
-                        if period < 60:
-                            fresh_prov["cron_sync"]["interval_seconds"] = period
-                            fresh_prov["cron_sync"].pop("interval_mins", None)
-                        else:
-                            fresh_prov["cron_sync"]["interval_mins"] = max(1, period // 60)
-                            fresh_prov["cron_sync"].pop("interval_seconds", None)
-                    svcconfig.save_config(service_id, fresh_cfg)
+
+                    def _apply_logging_settings(fresh_cfg: dict) -> None:
+                        fresh_prov = fresh_cfg.setdefault("provisioning", {})
+                        fresh_prov["sample_rate"] = sample_rate
+                        fresh_prov["edge_only"] = edge_only
+                        fresh_prov["custom_condition"] = custom_condition
+                        fresh_cfg["log_period"] = period
+                        fresh_cfg["fos_prefix"] = ""
+                        if "cron_sync" in fresh_prov:
+                            if period < 60:
+                                fresh_prov["cron_sync"]["interval_seconds"] = period
+                                fresh_prov["cron_sync"].pop("interval_mins", None)
+                            else:
+                                fresh_prov["cron_sync"]["interval_mins"] = max(1, period // 60)
+                                fresh_prov["cron_sync"].pop("interval_seconds", None)
+
+                    svcconfig.mutate_config(service_id, _apply_logging_settings)
                     if event.get("changed", False):
                         try:
                             _details = {}
@@ -909,18 +902,18 @@ def api_service_update_logging_settings(
                                 details=_details,
                             )
                         except Exception:
-                            pass
+                            logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
                     try:
                         from backend.provision import _sync_crontab
 
                         _sync_crontab()
                     except Exception:
-                        pass
+                        logger.warning("stream: _sync_crontab failed (ignored)", exc_info=True)
                 yield json.dumps(event)
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 from backend.models.services import AnalystInvite
@@ -939,6 +932,8 @@ def api_invite_analyst(service_id: str):
             raise HTTPException(status_code=404, detail={"error": msg})
         if "read_write" in msg.lower():
             raise HTTPException(status_code=403, detail={"error": msg})
+        if "independent analyst invites are unavailable" in msg.lower():
+            raise HTTPException(status_code=409, detail={"error": msg})
         raise HTTPException(status_code=400, detail={"error": msg})
 
     result["_debug_calls"] = get_tracked_calls()
@@ -1043,7 +1038,7 @@ def api_ngwaf_sync(service_id: str):
             log_cron_run(src, "ngwaf_sync", time.time() - start_time, "error", error_message=str(e), run_id=run_id)
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 # Same-identity re-export: these predicates moved to backend.core.field_registry
@@ -1204,7 +1199,6 @@ def _persist_log_fields(lf: dict, new_custom: list, candidate_lf: dict, now: str
 def api_create_custom_field(request: Request, service_id: str, body: CustomFieldCreate):
     from datetime import UTC
 
-    from backend import config as svcconfig
     from backend import provision
     from backend.core import field_registry as lf_module
 
@@ -1240,7 +1234,7 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     new_custom = existing + [field_dict]
     new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now)
     cfg["log_fields"] = new_lf
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
     warnings = [e for e in errors if e.startswith("WARN:")]
 
     return {"ok": True, "field": field_dict, "warnings": warnings}
@@ -1250,7 +1244,6 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
 def api_update_custom_field(request: Request, service_id: str, field_name: str, body: CustomFieldUpdate):
     from datetime import UTC
 
-    from backend import config as svcconfig
     from backend import provision
     from backend.core import duckdb as _db
     from backend.core import field_registry as lf_module
@@ -1310,7 +1303,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
     now = datetime.now(UTC).isoformat()
     new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now)
     cfg["log_fields"] = new_lf
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
     warnings = [e for e in errors if e.startswith("WARN:")]
 
     return {"ok": True, "field": updated, "warnings": warnings}
@@ -1320,7 +1313,6 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
 def api_delete_custom_field(request: Request, service_id: str, field_name: str):
     from datetime import UTC
 
-    from backend import config as svcconfig
     from backend.core import field_registry as lf_module
 
     _require_service_scope(request, service_id)
@@ -1341,7 +1333,7 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
     now = datetime.now(UTC).isoformat()
     new_lf = _persist_log_fields(lf, new_custom, {**lf, "custom_fields": new_custom}, now)
     cfg["log_fields"] = new_lf
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
 
     return {"ok": True, "field": field}
 
@@ -1387,9 +1379,18 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
     )
 
 
-# response_model intentionally omitted: streams a JSON file download
-# (StreamingResponse with Content-Disposition), not an inline JSON body.
-@router.get("/services/{service_id}/custom-fields/export")
+# No response_model: this is a file download (StreamingResponse with
+# Content-Disposition), so the body schema is declared via ``responses`` instead.
+@router.get(
+    "/services/{service_id}/custom-fields/export",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "model": CustomFieldsExportFile,
+            "description": "JSON file download (Content-Disposition: attachment) holding the user-defined custom fields.",
+        }
+    },
+)
 def api_export_custom_fields(request: Request, service_id: str):
     import json
 
@@ -1416,7 +1417,6 @@ def api_export_custom_fields(request: Request, service_id: str):
 def api_import_custom_fields(request: Request, service_id: str, body: CustomFieldsImportBody):
     from datetime import UTC
 
-    from backend import config as svcconfig
     from backend import provision
     from backend.core import field_registry as lf_module
 
@@ -1490,7 +1490,7 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
         raise HTTPException(status_code=422, detail={"errors": fmt_errors})
     new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now, full=False)
     cfg["log_fields"] = new_lf
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
     return {"ok": True, "imported_count": len(fields_to_import)}
 
 

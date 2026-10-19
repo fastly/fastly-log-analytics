@@ -317,13 +317,13 @@ def test_executor_submit_failure_falls_back_to_inline_delete(ingest_local_env, m
 
     # Track inline-delete invocations to prove the fallback fired.
     inline_delete_calls: list[list[str]] = []
-    original_delete = ingest_module._delete_objects_robust
+    original_delete = ingest_module._delete_objects_robust_with_failures
 
     def _tracking_delete(client, bucket, keys):
         inline_delete_calls.append(list(keys))
         return original_delete(client, bucket, keys)
 
-    monkeypatch.setattr(ingest_module, "_delete_objects_robust", _tracking_delete)
+    monkeypatch.setattr(ingest_module, "_delete_objects_robust_with_failures", _tracking_delete)
 
     events = _drain(ingest(source=src, delete_after=True))
 
@@ -348,6 +348,29 @@ def test_executor_submit_failure_falls_back_to_inline_delete(ingest_local_env, m
     assert any(key in name for name in ingested), (
         f"file marked-ingested-AND-deleted contract broken; ingested={ingested!r}"
     )
+
+
+def test_partial_source_delete_failure_marks_only_affected_object_failed(ingest_local_env, monkeypatch):
+    from backend.core import ingest as ingest_module
+
+    log_dir = ingest_local_env["log_dir"]
+    src = ingest_local_env["src"]
+    key = "raw/2026-06-01/12/2026-06-01T12-00-00.delete-fails.gz"
+    _seed_local(log_dir, key, "2026-06-01T12:00:00Z")
+    _install_mock_fos(monkeypatch, log_dir, keys=[key])
+    monkeypatch.setattr(
+        ingest_module,
+        "_delete_objects_robust_with_failures",
+        lambda _client, _bucket, keys: (0, set(keys)),
+    )
+
+    done = next(event for event in _drain(ingest(source=src, delete_after=True)) if event["type"] == "done")
+
+    assert done["outcome_counters"]["source_delete_failures"] == 1
+    assert done["outcome_counters"]["objects_processed"] == 1
+    assert done["outcome_counters"]["objects_failed"] == 1
+    assert done["outcome_counters"]["objects_partial"] == 0
+    assert done["outcome_counters"]["objects_successful"] == 0
 
 
 # ── combined failure modes in a single ingest tick (audit follow-up) ────────

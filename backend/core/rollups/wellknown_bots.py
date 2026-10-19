@@ -28,6 +28,9 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from backend.utils.date_utils import parse_hour_key_strict
+from backend.utils.sql_validator import escape_sql_literal
+
 from ._common import parse_hour_token, quote_path_list
 
 logger = logging.getLogger(__name__)
@@ -127,21 +130,23 @@ def recompute_wellknown_bots_rollup(
     bots_root = _wellknown_bots_root(source)
     os.makedirs(bots_root, exist_ok=True)
     lock_key = source.get("name", "default")
-    pattern_sql = pattern.replace("'", "''")
-    version_sql = version.replace("'", "''")
+    pattern_sql = escape_sql_literal(pattern)
+    version_sql = escape_sql_literal(version)
 
     rebuilt = 0
     # :memory: connection reads only static, already-committed parquet
     # files — never the buffer-including per-service view. Matches the
     # isolation bundle_hours / compact_closed_days / the rollup readers use.
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         # Validate the source has the columns we need before per-hour
         # work — saves N×(failed COPY) on services without UA/IP fields.
         # Probe the first eligible hour's partition (closed hours share a
         # schema); a later hour missing the column falls through to the
         # per-hour COPY's own try/except.
-        probe_glob = os.path.join(data_root, f"timestamp_hour={eligible[0]}", "*.parquet").replace("'", "''")
+        probe_glob = escape_sql_literal(os.path.join(data_root, f"timestamp_hour={eligible[0]}", "*.parquet"))
         try:
             desc = con.execute(f"SELECT * FROM read_parquet('{probe_glob}', union_by_name=true) LIMIT 0").description
             cols = {d[0] for d in (desc or [])}
@@ -159,18 +164,18 @@ def recompute_wellknown_bots_rollup(
             # "Cannot open file: Is a directory"). Write to a unique
             # tmp file under the final hour-partition dir, then rename
             # to the canonical compacted_ name under the iceberg lock.
-            hour_glob = os.path.join(data_root, f"timestamp_hour={hour}", "*.parquet").replace("'", "''")
+            hour_glob = escape_sql_literal(os.path.join(data_root, f"timestamp_hour={hour}", "*.parquet"))
             # Defense-in-depth on top of the partition glob: a half-open
             # TIMESTAMPTZ range (absolute instants) is TZ-agnostic, unlike
             # strftime(timestamp,...) which renders in the connection's
             # session TZ. Matches build_per_hour_bundles / security_dims.
-            hour_dt = datetime.strptime(hour, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+            hour_dt = parse_hour_key_strict(hour)
             start_iso = hour_dt.isoformat()
             end_iso = (hour_dt + timedelta(hours=1)).isoformat()
             hour_dir = os.path.join(bots_root, f"hour={hour}")
             os.makedirs(hour_dir, exist_ok=True)
             tmp_path = os.path.join(hour_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
-            tmp_path_sql = tmp_path.replace("'", "''")
+            tmp_path_sql = escape_sql_literal(tmp_path)
             try:
                 con.execute(
                     f"COPY ("
@@ -316,10 +321,12 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
         import duckdb
 
         all_paths = [p for paths in hour_paths.values() for p in paths]
-        con = duckdb.connect(":memory:")
+        from backend.core.duckdb import get_memory_connection
+
+        con = get_memory_connection()
         try:
             paths_sql = quote_path_list(all_paths)
-            version_sql = version.replace("'", "''")
+            version_sql = escape_sql_literal(version)
             # One batched read of (hour, version) pairs across the tree.
             # Empty partitions contribute no row → invisible here (a current
             # empty re-builds harmlessly if it has data; a stale empty has no
@@ -483,7 +490,9 @@ def read_wellknown_bots_rollup(
     # connection avoids contending with the per-service writer pool.
     import duckdb
 
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         paths_sql = quote_path_list(paths)
         try:

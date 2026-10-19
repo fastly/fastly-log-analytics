@@ -2,43 +2,41 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import asyncio
 
 from fastapi import APIRouter, Depends
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
+    OriginAggregatesRequest,
     OriginAggregatesResponse,
+    OriginDrilldownRequest,
+    OriginDrilldownResponse,
+    OriginIpHealthRequest,
     OriginIpHealthResponse,
     OriginPathBreakdownResponse,
+    OriginPopLatencyRequest,
     OriginPopLatencyResponse,
+    OriginRequest,
+    OriginShieldingAnalysisRequest,
     OriginShieldingAnalysisResponse,
+    OriginSlowUrlsRequest,
     OriginSlowUrlsResponse,
     OriginStatusCodesResponse,
     OriginSummaryResponse,
+    OriginTimeseriesRequest,
     OriginTimeseriesResponse,
+    SectionName,
 )
 from backend.repositories import origin as repo
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
-# Section selector — names mirror OriginAggregatesResponse fields one-to-one so
-# the FE can request a subset. Coupling reflects the asyncio.gather partition
+
+# Section coupling (``SectionName`` lives in models/origin.py) reflects the asyncio.gather partition
 # inside get_aggregates so we never split a branch's reads across requests
 # (each branch checks out one pool conn and runs its reads serially on it).
-SectionName = Literal[
-    "summary",
-    "timeseries",
-    "slow_urls",
-    "status_codes",
-    "path_breakdown",
-    "pop_latency",
-    "ip_health",
-]
 
 # Branch 3 of get_aggregates' gather — timeseries + status_codes + path_breakdown
 # all run sequentially on extra_runners[1]. Splitting them across requests would
@@ -51,60 +49,6 @@ _TS_STATUS_PATH_TRIPLE: frozenset[str] = frozenset({"timeseries", "status_codes"
 _POP_IP_PAIR: frozenset[str] = frozenset({"pop_latency", "ip_health"})
 
 _expand_sections = make_section_expander(SectionName, union_groups=(_TS_STATUS_PATH_TRIPLE, _POP_IP_PAIR))
-
-
-class OriginRequest(FilteredRequest):
-    pass
-
-
-class OriginTimeseriesRequest(FilteredRequest):
-    bucket_minutes: Limit1440 = 5
-    split_by_leg: bool = False
-    metric: Literal["ttfb", "ttlb"] = "ttfb"
-    percentile: Literal["p50", "p95", "p99"] = "p95"
-
-
-class OriginSlowUrlsRequest(FilteredRequest):
-    limit: Limit100 = 20
-    min_requests: int = 10
-
-
-class OriginPopLatencyRequest(FilteredRequest):
-    limit: Limit100 = 30
-
-
-class OriginIpHealthRequest(FilteredRequest):
-    limit: Limit100 = 30
-
-
-class OriginShieldingAnalysisRequest(FilteredRequest):
-    limit: Limit200 = 50
-
-
-class OriginAggregatesRequest(FilteredRequest):
-    bucket_minutes: Limit1440 = 5
-    split_by_leg: bool = False
-    timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
-    timeseries_percentile: Literal["p50", "p95", "p99"] = "p95"
-    slow_urls_limit: Limit100 = 20
-    slow_urls_min_requests: int = 10
-    ip_health_limit: Limit100 = 30
-    pop_latency_limit: Limit100 = 30
-    sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional). When ``range_token`` is
-    # a recognized token, the SERVER resolves the scan window itself from
-    # (token, anchor) and ignores FE-supplied ``start_time``/``end_time`` on this
-    # path — so a crafted body can't widen the scan. The resolved bounds are
-    # still passed through ``ctx.clamp`` so the invite ceiling is enforced
-    # regardless of token (an analyst can't widen past their invite by picking
-    # "30d"). Unlike network-health this endpoint has no response memo to
-    # stabilize — the token exists purely so the FE first-paint React Query key
-    # is server-reproducible (it keys on the token + a quantized anchor instead
-    # of a client-now()-anchored absolute window), which is what makes the
-    # origin page SSR-seedable. Absent/unknown token → legacy absolute-bounds
-    # path unchanged. See backend/utils/time_window.py + the spec.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
@@ -135,16 +79,18 @@ async def origin_aggregates(
     # network-health, get_aggregates has no response memo to stabilize, so the
     # token is NOT threaded into the repo — it exists purely to make the FE's
     # first-paint key server-reproducible (the origin SSR-seed contract).
-    if is_valid_range_token(req.range_token):
-        # earliest_log_at drives the "auto" adaptive default; sourced from the
-        # persisted status snapshot (same field the bootstrap + /api/log-extents
-        # read — no DuckDB connection, no cron contention).
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
     sections = _expand_sections(req.sections)
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.origin import aggregates as high_scale_aggregates
+
+        res = await asyncio.to_thread(
+            high_scale_aggregates, high_scale_service, req, start_time, end_time, sections=sections
+        )
+        return OriginAggregatesResponse.with_telemetry(**res)
+
+    await ctx.prewarm_con()
     res = await repo.get_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -307,3 +253,22 @@ def origin_shielding_analysis(
         limit=req.limit,
     )
     return OriginShieldingAnalysisResponse.with_telemetry(**res)
+
+
+@router.post("/drilldown", response_model=OriginDrilldownResponse)
+@query_errors()
+def origin_drilldown(
+    req: OriginDrilldownRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    res = repo.get_drilldown(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
+        filters=req.filters,
+        dimension=req.dimension,
+        limit=req.limit,
+    )
+    return OriginDrilldownResponse.with_telemetry(**res)

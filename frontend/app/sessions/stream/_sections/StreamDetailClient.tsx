@@ -26,6 +26,7 @@ import { useStreamAggregates } from './useStreamAggregates'
 import { StreamTimeline } from './StreamTimeline'
 
 import { formatDuration } from '@/lib/date'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const NETWORK_LAYOUT = {
   yaxis: { title: { text: 'Throughput (kbps)' } },
@@ -64,10 +65,11 @@ export function StreamDetailClient() {
   } = useQuery({
     queryKey: ['stream-detail', activeServiceId, token],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST('/api/sessions/detail', {
+      const { data, error } = await client.POST('/api/sessions/detail', {
         signal,
         body: { session_token: token! },
       })
+      if (error) throw error
       return data
     },
     enabled: !!activeServiceId && !!token,
@@ -100,7 +102,7 @@ export function StreamDetailClient() {
   const isPartial = detailData?.data?.length === 500
 
   return (
-    <div className="space-y-6">
+    <div data-testid="stream-detail-client" className="space-y-6">
       <PageHeader
         title="Stream Session Details"
         description="CMCD streaming quality metrics and request-level timeline for a single session."
@@ -135,9 +137,19 @@ export function StreamDetailClient() {
         </Alert>
       )}
 
+      {aggregates && aggregates.summary.videoRequests === 0 && (
+        <Alert>
+          <Film className="h-4 w-4" />
+          <AlertTitle>No video segment requests</AlertTitle>
+          <AlertDescription>
+            This session only contains {aggregates.summary.totalRequests} request(s) without video segments (e.g. manifests or playlists). Video-specific streaming metrics require media segment requests.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Summary KPIs */}
       {isLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4 min-h-[120px] [contain-intrinsic-size:120px]">
           {['duration', 'bitrate', 'top-br', 'util', 'rebuf', 'startup', 'health'].map(k => (
             <Skeleton key={k} className="h-[120px] rounded-lg" />
           ))}
@@ -148,18 +160,20 @@ export function StreamDetailClient() {
 
       {/* Timeline chart */}
       {aggregates && (
-        <StreamTimeline timeline={aggregates.timeline} isLoading={isLoading} />
+        <div className="min-h-[260px] [contain-intrinsic-size:260px]">
+          <StreamTimeline timeline={aggregates.timeline} isLoading={isLoading} />
+        </div>
       )}
 
       {/* Analysis sections */}
       {aggregates && (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 min-h-[360px] [contain-intrinsic-size:360px]">
             <BitrateAnalysis aggregates={aggregates} isLoading={isLoading} />
             <BufferAnalysis aggregates={aggregates} isLoading={isLoading} />
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 min-h-[360px] [contain-intrinsic-size:360px]">
             <NetworkAnalysis aggregates={aggregates} isLoading={isLoading} />
             <ContentBreakdown aggregates={aggregates} isLoading={isLoading} />
           </div>
@@ -233,7 +247,7 @@ function BitrateAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
       x: aggregates.bitrateTiers.map(t => `${t.bitrate} kbps`),
       y: aggregates.bitrateTiers.map(t => t.count),
       type: 'bar' as const,
-      marker: { color: '#10b981' },
+      marker: { color: CHART_COLORS.success },
       text: aggregates.bitrateTiers.map(t => `${t.pct.toFixed(0)}%`),
       textposition: 'auto' as const,
     }]
@@ -274,8 +288,8 @@ function BufferAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Ret
       type: 'bar' as const,
       marker: {
         color: aggregates.bufferBuckets.map(b =>
-          b.label === '0 (empty)' ? '#ef4444' :
-          b.label === '< 2s' ? '#f59e0b' :
+          b.label === '0 (empty)' ? CHART_COLORS.danger :
+          b.label === '< 2s' ? CHART_COLORS.warning :
           '#6366f1'
         ),
       },
@@ -309,7 +323,7 @@ function NetworkAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
         y: nt.map(p => p.throughput),
         name: 'Throughput',
         type: 'scatter' as const,
-        line: { color: '#f59e0b' },
+        line: { color: CHART_COLORS.warning },
       })
     }
     if (nt.some(p => p.rtt != null)) {
@@ -319,7 +333,7 @@ function NetworkAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
         name: 'RTT',
         type: 'scatter' as const,
         yaxis: 'y2',
-        line: { color: '#ef4444', dash: 'dot' },
+        line: { color: CHART_COLORS.danger, dash: 'dot' },
       })
     }
     return traces

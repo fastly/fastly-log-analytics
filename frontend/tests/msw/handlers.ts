@@ -31,10 +31,37 @@
 
 import { http, HttpResponse, type JsonBodyType } from 'msw'
 
+import type { paths } from '@/types/api.generated'
+
 const API_BASE = 'http://127.0.0.1:8000'
 
 const ok = (body: JsonBodyType = {}) => () => HttpResponse.json(body)
 const okArray = () => () => HttpResponse.json([])
+
+type EnvelopeKeys =
+  | '_debug_queries'
+  | '_debug_calls'
+  | '_debug_sqlite'
+  | '_debug_postgres'
+  | '_is_cached'
+  | '_section_timings'
+type StripEnvelope<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T as K extends EnvelopeKeys ? never : K]: T[K] } : T
+type OkBody<P extends keyof paths, M extends keyof paths[P]> = paths[P][M] extends {
+  responses: { 200: { content: { 'application/json': infer T } } }
+}
+  ? StripEnvelope<T>
+  : never
+
+/**
+ * `ok()` with the body checked against the OpenAPI response schema, so a
+ * handler whose payload drifts from the backend contract fails `tsc`.
+ * `path` is the spec path (`{id}` style), not the MSW `:id` form. The
+ * response-envelope debug fields are optional in practice and omitted.
+ */
+const okFor =
+  <P extends keyof paths, M extends keyof paths[P]>(_path: P, _method: M, body: OkBody<P, M>) =>
+  () =>
+    HttpResponse.json(body as JsonBodyType)
 const noContent = () => () => new HttpResponse(null, { status: 204 })
 
 /**
@@ -60,7 +87,227 @@ export const handlers = [
     }),
   ),
 
-  http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.get(`${API_BASE}/api/health`, okFor('/api/health', 'get', { status: 'ok', version: 'test' })),
+  http.get(`${API_BASE}/api/query/schema/:service_id`, () =>
+    HttpResponse.json({ source: 'svc-default', table_name: 'logs', schema: [], columns: [] }),
+  ),
+  http.get(`${API_BASE}/api/admin/sync-status`, () =>
+    HttpResponse.json({ configured: false, access_level: 'read_write', state: 'idle' }),
+  ),
+  http.get(`${API_BASE}/api/admin/health`, () =>
+    HttpResponse.json({ status: 'ok', load: [0, 0, 0], recent_cron_failures: [] }),
+  ),
+  http.get(`${API_BASE}/api/admin/system-metrics`, () =>
+    HttpResponse.json({ load: [0, 0, 0], vcpus: 1, in_flight_runs: [], compaction: {} }),
+  ),
+  http.post(`${API_BASE}/api/admin/commit/:service_id`, () =>
+    HttpResponse.json({ type: 'done', message: 'ok' }),
+  ),
+  http.get(`${API_BASE}/api/admin/log-accounting/:service_id`, () =>
+    HttpResponse.json({
+      configured: true,
+      hours: 24,
+      buckets: [],
+      totals: { requests: 0, log_lines: 0, log_bytes: 0, ingested_rows: 0, gap: 0, gap_pct: 0 },
+      sustained_loss: null,
+    }),
+  ),
+  http.get(`${API_BASE}/api/admin/high-scale/retention-recommendation`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      recommended_hot_days: 1,
+      recommended_warm_days: 30,
+      reasoning: 'default',
+      volume_total_bytes: 1_000_000_000,
+      volume_total_source: 'request',
+      explicit_retention_days: null,
+      effective_retention_days: 30,
+    }),
+  ),
+  http.delete(`${API_BASE}/api/admin/slow-queries`, () =>
+    HttpResponse.json({ deleted: 0, service_id: 'svc-default' }),
+  ),
+  http.post(`${API_BASE}/api/logs/query`, () =>
+    HttpResponse.json({
+      rows: [],
+      total_count: 0,
+      has_more: false,
+      limit: 100,
+      offset: 0,
+      columns: [],
+      schema_columns: [],
+      missing_fields: [],
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/request-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'request',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/rum-facts/:domain`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'rum_vitals',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/cmcd-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'cmcd',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/aggregates`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      domain: 'request',
+      dimension: 'url',
+      request_count: 0,
+      top_values: [],
+      coverage: 1,
+      freshness_lag_seconds: 0,
+      exact: true,
+      approximation_error: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/queries`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      domain: 'request',
+      plan: {
+        tier: 'recent_facts',
+        sources: ['clickhouse_facts'],
+        queued: false,
+        bounded: false,
+        max_rows: 500,
+        reason: 'recent raw facts',
+      },
+      rows: [],
+      next_cursor: null,
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'request',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      job_id: null,
+    }),
+  ),
+  http.get(`${API_BASE}/api/high-scale/services/:service_id/queries/:job_id`, () =>
+    HttpResponse.json({
+      job_id: 'job-default',
+      state: 'completed',
+      rows: [],
+      row_count: 0,
+      output_bytes: 0,
+      truncated: false,
+      error: null,
+      created_at: '2026-01-01T00:00:00Z',
+      expires_at: '2026-01-01T00:15:00Z',
+      terminal_at: '2026-01-01T00:00:01Z',
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/queries/:job_id/cancel`, () =>
+    HttpResponse.json({ job_id: 'job-default', cancelled: true }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.get(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id/cancel`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'cancelled', cancelled: true }),
+  ),
+  http.get(`${API_BASE}/api/admin/clickhouse/status`, ({ request }) =>
+    HttpResponse.json({
+      service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',
+      enabled: false,
+      health: 'disabled',
+      schema_version: null,
+      publication_counts: null,
+      oldest_pending_age_seconds: null,
+      last_published_at: null,
+      active_generation: null,
+      expired_dataset_count: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/admin/clickhouse/replay`, () =>
+    HttpResponse.json(
+      { detail: { error: 'clickhouse_disabled', message: 'ClickHouse prototype disabled' } },
+      { status: 409 },
+    ),
+  ),
   http.get(`${API_BASE}/api/schema`, ok({ tables: [], custom_fields: [] })),
 
   // ── Log-fields catalog (gates every analytics page) ───────────────
@@ -212,11 +459,23 @@ export const handlers = [
       active_clients: [],
     }),
   ),
+  http.post(`${API_BASE}/api/security/bundle`, () =>
+    HttpResponse.json({ tls_fingerprints: [], bots: [], ngwaf_configured: false }),
+  ),
+  http.get(`${API_BASE}/api/security/bundle`, () =>
+    HttpResponse.json({ tls_fingerprints: [], bots: [], ngwaf_configured: false }),
+  ),
   http.post(`${API_BASE}/api/performance/aggregates`, () =>
     HttpResponse.json({ rows: [], columns: [], total: 0 }),
   ),
   http.post(`${API_BASE}/api/network-health`, () =>
     HttpResponse.json({ rows: [], total: 0 }),
+  ),
+  http.post(`${API_BASE}/api/network/bundle`, () =>
+    HttpResponse.json({ available: false, health: {}, quality: {}, pop_health: [], transport: {} }),
+  ),
+  http.get(`${API_BASE}/api/network/bundle`, () =>
+    HttpResponse.json({ available: false, health: {}, quality: {}, pop_health: [], transport: {} }),
   ),
   http.post(`${API_BASE}/api/usage/bandwidth`, () =>
     HttpResponse.json({ rows: [], total_bytes: 0 }),
@@ -250,16 +509,48 @@ export const handlers = [
   ),
 
   // ── Alerts ────────────────────────────────────────────────────────
-  http.get(`${API_BASE}/api/alerts/`, () => HttpResponse.json({ alerts: [] })),
-  http.get(`${API_BASE}/api/alerts/:service_id`, () => HttpResponse.json({ alerts: [] })),
+  http.get(`${API_BASE}/api/alerts/`, () => HttpResponse.json({ data: [] })),
+  http.get(`${API_BASE}/api/alerts/:service_id`, () => HttpResponse.json({ data: [] })),
   http.post(`${API_BASE}/api/alerts/`, () =>
-    HttpResponse.json({ alert_id: 'alert-test', ok: true }),
+    HttpResponse.json({ data: { id: 'alert-test', status: 'saved' } }),
+  ),
+  http.put(`${API_BASE}/api/alerts/:alert_id`, ({ params }) =>
+    HttpResponse.json({ data: { id: String(params.alert_id), status: 'updated' } }),
+  ),
+  http.post(`${API_BASE}/api/alerts/evaluate`, () =>
+    HttpResponse.json({ data: { service_id: 'svc-default', evaluated: 0, triggered: 0, results: [] } }),
   ),
   http.post(`${API_BASE}/api/alerts/preview`, () =>
-    HttpResponse.json({ rows: [], total: 0 }),
+    HttpResponse.json({ data: { series: [], threshold: 0, operator: '>', metric: '5xx_rate', window_min: 5 } }),
   ),
-  http.delete(`${API_BASE}/api/alerts/:alert_id`, noContent()),
-  http.patch(`${API_BASE}/api/alerts/:alert_id/enabled`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/alerts/:alert_id/test`, ({ params }) =>
+    HttpResponse.json({
+      data: {
+        alert_id: String(params.alert_id),
+        service_id: 'svc-default',
+        status: 'validated',
+        targets_tested: 1,
+        channel_type: 'webhook',
+      },
+    }),
+  ),
+  http.post(`${API_BASE}/api/alerts/:service_id/:alert_id/test`, ({ params }) =>
+    HttpResponse.json({
+      data: {
+        alert_id: String(params.alert_id),
+        service_id: String(params.service_id),
+        status: 'validated',
+        targets_tested: 1,
+        channel_type: 'webhook',
+      },
+    }),
+  ),
+  http.delete(`${API_BASE}/api/alerts/:alert_id`, () =>
+    HttpResponse.json({ data: { id: 'alert-test', status: 'deleted' } }),
+  ),
+  http.patch(`${API_BASE}/api/alerts/:alert_id/enabled`, ({ params }) =>
+    HttpResponse.json({ data: { id: String(params.alert_id), status: 'success' } }),
+  ),
 
   // ── Saved views ───────────────────────────────────────────────────
   http.get(`${API_BASE}/api/views/`, () => HttpResponse.json({ views: [] })),
@@ -317,8 +608,12 @@ export const handlers = [
     HttpResponse.json({ sources: [], rdns: { total: 0, pending: 0 } }),
   ),
   http.post(`${API_BASE}/api/admin/bot-sources/:source_id/refresh`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/bot-sources/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
+  http.post(`${API_BASE}/api/admin/bots/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/backfill`, ok({ enqueued: 0 })),
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/enrich`, ok({ enriched: 0 })),
+  http.post(`${API_BASE}/api/admin/rdns/enrich`, ok({ ok: true, summary: {} })),
+  http.get(`${API_BASE}/api/admin/rdns/stats`, okFor('/api/admin/rdns/stats', 'get', { ok: true, stats: {} })),
   http.get(`${API_BASE}/api/admin/system-jobs`, () => HttpResponse.json({ jobs: [] })),
   http.get(`${API_BASE}/api/admin/usage-logging`, () =>
     // GlobalSettings reads .enabled AND .retention_days.
@@ -326,7 +621,8 @@ export const handlers = [
   ),
   http.patch(`${API_BASE}/api/admin/usage-logging`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/commit-iceberg`, ok({ ok: true })),
-  http.post(`${API_BASE}/api/admin/ingest-logs`, ok({ ok: true, ingested: 0 })),
+  http.post(`${API_BASE}/api/admin/ducklake/migrate`, ok({ ok: true, started: true })),
+  http.post(`${API_BASE}/api/admin/ingest-logs`, okFor('/api/admin/ingest-logs', 'post', { ok: true })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),
   ),
@@ -350,6 +646,24 @@ export const handlers = [
   http.get(`${API_BASE}/api/cron-schedule`, () =>
     HttpResponse.json({ schedule: [], next_run_at: null }),
   ),
+  http.get(`${API_BASE}/api/admin/celery/status`, () =>
+    HttpResponse.json({ workers: [], schedule: [], queues: [] }),
+  ),
+  http.post(`${API_BASE}/api/admin/duckdb/recycle`, okFor('/api/admin/duckdb/recycle', 'post', { ok: true, status: 'skipped' })),
+  http.get(`${API_BASE}/api/admin/duckdb/status`, ok({ ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
+  http.post(
+    `${API_BASE}/api/admin/optimize/:service_id`,
+    ok({
+      files_rewritten: 0,
+      files_added: 0,
+      eligible_partitions: 0,
+      partition_errors: [],
+      error: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, ok({ ok: true, service_id: 'svc-default', stats: {} })),
+  http.post(`${API_BASE}/api/admin/rum/ledger/sweep/:service_id`, ok({ status: 'started', run_id: 1 })),
+  http.get(`${API_BASE}/api/admin/ngwaf/status`, ok({ ok: true })),
 
   // ── AppLayout always-on calls (every page render hits these) ─────
   // sync-status: header lag indicator (useSyncStatus) — every admin
@@ -458,6 +772,10 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/app-config/query-monitor`, () =>
     HttpResponse.json({ config: {} }),
   ),
+  http.get(`${API_BASE}/api/debug/recent-postgres`, () =>
+    HttpResponse.json({ rows: [] }),
+  ),
+  http.post(`${API_BASE}/api/debug/clear-postgres`, ok({ cleared: 0 })),
   http.get(`${API_BASE}/api/debug/recent-sqlite`, () =>
     HttpResponse.json({ rows: [] }),
   ),
@@ -474,7 +792,7 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/share/audit-logs`, () =>
     HttpResponse.json({ logs: [] }),
   ),
-  http.post(`${API_BASE}/api/admin/share/start`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/start`, okFor('/api/admin/share/start', 'post', {})),
   http.post(`${API_BASE}/api/admin/share/stop`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/panic`, ok({ ok: true })),
   http.get(`${API_BASE}/api/admin/share/wordphrase`, () =>
@@ -489,6 +807,7 @@ export const handlers = [
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/purge`, ok({ ok: true })),
 
   // ── Quarantine ───────────────────────────────────────────────────
   http.get(`${API_BASE}/api/admin/quarantine`, () =>
@@ -502,6 +821,9 @@ export const handlers = [
   ),
   http.get(`${API_BASE}/api/admin/quarantine/:quarantine_id/download`, () =>
     new HttpResponse('', { headers: { 'Content-Type': 'application/x-ndjson' } }),
+  ),
+  http.get(`${API_BASE}/api/admin/quarantine/download/:item_id`, () =>
+    new HttpResponse(new Uint8Array(), { headers: { 'Content-Type': 'application/octet-stream' } }),
   ),
   http.post(`${API_BASE}/api/admin/quarantine/purge`, ok({ ok: true, deleted: 0 })),
 
@@ -578,6 +900,9 @@ export const handlers = [
   http.post(`${API_BASE}/api/origin/shielding-analysis`, () =>
     HttpResponse.json({ shielding: [], origin: [] }),
   ),
+  http.post(`${API_BASE}/api/origin/drilldown`, () =>
+    HttpResponse.json({ has_data: false, total: 0, dimension: '', rows: [] }),
+  ),
   http.post(`${API_BASE}/api/performance/origin-ts`, () =>
     HttpResponse.json({ series: [], has_data: false }),
   ),
@@ -607,7 +932,7 @@ export const handlers = [
   // handlers here so a test that happens to trigger a page-hide or a
   // DataTable reorder doesn't trip the onUnhandledRequest='error'
   // guard.
-  http.post(`${API_BASE}/api/web-vitals`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/web-vitals`, okFor('/api/web-vitals', 'post', { ok: true })),
   http.post(`${API_BASE}/api/ux-events`, ok({ ok: true })),
 
 ]

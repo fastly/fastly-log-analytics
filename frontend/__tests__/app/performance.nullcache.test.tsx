@@ -34,7 +34,7 @@ vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).n
 vi.mock('@/lib/api', () => ({
   client: {
     GET: vi.fn(),
-    POST: vi.fn(async (_path: string, opts: any) => {
+    POST: vi.fn(async (_path: string, opts?: { body?: { sections?: string[] } }) => {
       const sections: string[] = opts?.body?.sections ?? []
       if (sections.includes('scatter')) {
         return {
@@ -51,7 +51,7 @@ vi.mock('@/lib/api', () => ({
     }),
     use: vi.fn(),
   },
-  extractApiError: vi.fn((e) => String(e)),
+  extractApiError: vi.fn((e: unknown) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
@@ -61,7 +61,7 @@ vi.mock('@/components/DataTable', () => ({
   ColumnVisibilityDropdown: () => null,
 }))
 vi.mock('@/components/AnalyticsCard', () => ({
-  AnalyticsCard: ({ title, isLoading, children }: any) => (
+  AnalyticsCard: ({ title, isLoading, children }: { title: React.ReactNode; isLoading?: boolean; children?: React.ReactNode }) => (
     <div data-testid="analytics-card" data-loading={String(!!isLoading)}>
       <h3>{title}</h3>
       {children}

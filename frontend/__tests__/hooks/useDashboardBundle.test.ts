@@ -3,8 +3,7 @@
  * /api/dashboard/bundle that returns aggregates + top_bots together in
  * a single response. The dashboard page reads BOTH directly off
  * bundleQuery.data (no separate cache keys), and the bundle is keyed on
- * the server-reproducible (rangeToken, anchor) pair so the SSR seed
- * (lib/ssr/dashboard.ts) byte-matches the first-paint key.
+ * the server-reproducible (rangeToken, anchor) pair.
  *
  * Tests assert (1) the bundle's queryKey shape (keyed on rangeToken/
  * anchor), (2) the enabled flag wires through, (3) it does NOT fan out
@@ -20,18 +19,19 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
+import type { FiltersPayload } from '@/types/filters'
 
 vi.mock('@/stores/serviceStore', () => {
-  const state: any = {
+  const state = {
     activeServiceId: 'svc-test',
     setActiveServiceId: vi.fn(),
     setServices: vi.fn(),
     setInitialized: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore, __state: state }
 })
 
@@ -60,7 +60,7 @@ const baseArgs = {
   // Realistic empty payload: buildFiltersPayload returns {} (column-keyed)
   // when no filters are active. The stale-view discriminator keys off
   // Object.keys(filterPayload).length, so an empty {} means "no filter".
-  filterPayload: {} as any,
+  filterPayload: {} as FiltersPayload,
   metric: 'requests',
   interval: '1m',
   fields: ['status'],
@@ -106,8 +106,26 @@ describe('useDashboardBundle', () => {
     })
     await waitFor(() => expect(result.current.data).toBeDefined())
     expect(hits).toBe(1)
-    expect((result.current.data as any).aggregates).toBeDefined()
-    expect((result.current.data as any).top_bots).toEqual([{ name: 'b', count: 1 }])
+    expect(result.current.data?.aggregates).toBeDefined()
+    expect(result.current.data?.top_bots).toEqual([{ name: 'b', count: 1 }])
+  })
+
+  it('does not automatically refetch the live relative range', async () => {
+    let hits = 0
+    server.use(
+      http.post(`${API_BASE}/api/dashboard/bundle`, () => {
+        hits++
+        return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
+      }),
+    )
+    const qc = makeClient()
+    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
+      wrapper: wrapperFor(qc),
+    })
+    await waitFor(() => expect(hits).toBe(1))
+    await new Promise(resolve => setTimeout(resolve, 5_100))
+    expect(hits).toBe(1)
   })
 
   it('does NOT fan out into separate aggregates/top-bots cache entries', async () => {
@@ -137,8 +155,8 @@ describe('useDashboardBundle', () => {
     expect(dashboardEntries).toEqual(['bundle'])
 
     // …and the merged payload is fully readable off the bundle result.
-    expect((result.current.data as any).aggregates).toEqual({ data: { status: { total: 2, top: [] } } })
-    expect((result.current.data as any).top_bots).toEqual([{ name: 'curl', count: 7 }])
+    expect(result.current.data?.aggregates).toEqual({ data: { status: { total: 2, top: [] } } })
+    expect(result.current.data?.top_bots).toEqual([{ name: 'curl', count: 7 }])
   })
 
   it('queryKey for the bundle is keyed on rangeKey + anchor (+ metric/interval/fields/sections)', async () => {
@@ -174,10 +192,10 @@ describe('useDashboardBundle', () => {
   })
 
   it('custom absolute range → body carries start/end (no range_token), keyed on abs:<start>|<end>', async () => {
-    let capturedBody: any = null
+    let capturedBody = null as Record<string, unknown> | null
     server.use(
       http.post(`${API_BASE}/api/dashboard/bundle`, async ({ request }) => {
-        capturedBody = await request.json()
+        capturedBody = (await request.json()) as Record<string, unknown>
         return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
       }),
     )
@@ -192,9 +210,9 @@ describe('useDashboardBundle', () => {
     await waitFor(() => expect(result.current.data).toBeDefined())
 
     // The scan window comes from the explicit bounds, not a token.
-    expect(capturedBody.start_time).toBe(baseArgs.startTime)
-    expect(capturedBody.end_time).toBe(baseArgs.endTime)
-    expect(capturedBody.range_token).toBeUndefined()
+    expect(capturedBody?.start_time).toBe(baseArgs.startTime)
+    expect(capturedBody?.end_time).toBe(baseArgs.endTime)
+    expect(capturedBody?.range_token).toBeUndefined()
 
     const bundleEntry = qc
       .getQueryCache()
@@ -204,10 +222,10 @@ describe('useDashboardBundle', () => {
   })
 
   it('forwards the sections selector through to the POST body and queryKey', async () => {
-    let capturedBody: any = null
+    let capturedBody = null as Record<string, unknown> | null
     server.use(
       http.post(`${API_BASE}/api/dashboard/bundle`, async ({ request }) => {
-        capturedBody = await request.json()
+        capturedBody = (await request.json()) as Record<string, unknown>
         return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
       }),
     )
@@ -253,6 +271,6 @@ describe('useDashboardBundle', () => {
     })
     await waitFor(() => expect(result.current.data).toBeDefined(), { timeout: 5_000 })
     expect(attempts).toBeGreaterThanOrEqual(2)
-    expect((result.current.data as any).aggregates.data.status.total).toBe(1)
+    expect(result.current.data?.aggregates?.data.status.total).toBe(1)
   })
 })

@@ -73,6 +73,7 @@ async function assertNoAxeViolations(page: import('@playwright/test').Page, rout
     .exclude('.recharts-wrapper')
     .exclude('[data-testid="plotly-host"]')
     .exclude('[data-empty-placeholder="true"]')
+    .exclude('[data-axe-ignore="true"]')
     .exclude('.maplibregl-map')
     .analyze()
 

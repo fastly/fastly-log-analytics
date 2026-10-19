@@ -13,34 +13,27 @@
  */
 import { render, screen, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { AppLayout } from '@/components/AppLayout'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
+import { partial } from '../helpers/partial'
+import type { BootstrapResponse } from '@/types/api'
 import React from 'react'
 
 // AppLayout now calls useQueryClient() to implement the navigation-cancel
 // pattern (cancel in-flight queries on route change). Tests need a real
 // QueryClientProvider in the tree or useQueryClient throws.
 function renderWithQueryClient(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
+  const queryClient = createTestQueryClient()
   return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
 }
 
 // Mock next/navigation
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/dashboard'),
-  useRouter: vi.fn(() => ({
-    replace: vi.fn(),
-    push: vi.fn(),
-    prefetch: vi.fn(),
-  })),
-  // AppLayout's <RawQueryModeProbe> consumes useSearchParams; stub it so
-  // the Suspense boundary renders cleanly under jsdom.
-  useSearchParams: vi.fn(() => new URLSearchParams()),
-}))
+// (navigationModuleMock also stubs useSearchParams, which AppLayout's
+// <RawQueryModeProbe> consumes inside its Suspense boundary.)
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
 // Mock custom hooks
 vi.mock('@/hooks/useBootstrap', () => ({
@@ -76,15 +69,17 @@ vi.mock('@/components/ui/scroll-area', () => ({
   ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
 
+type BootstrapData = BootstrapResponse
+
 // Real store for the test
 beforeEach(async () => {
   vi.clearAllMocks()
 
-  vi.mocked(useBootstrap).mockReturnValue({
-    data: { services: [{ id: 'test-svc', name: 'Test Service' }] },
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({ services: [{ service_id: 'test-svc', name: 'Test Service' }] }),
     isSuccess: true,
     isLoading: false,
-  } as any)
+  }))
 
   // Default useIsAnalyst implementation: mirror the prod hook's
   // serviceStore-accessLevel branch (the bootstrap-settings branch
@@ -134,18 +129,18 @@ test('hides restricted items for analysts', () => {
 })
 
 test('renders analyst watermark when bootstrap reports remote analyst', async () => {
-  vi.mocked(useBootstrap).mockReturnValue({
-    data: {
-      services: [{ id: 'test-svc', name: 'Test Service' }],
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({
+      services: [{ service_id: 'test-svc', name: 'Test Service' }],
       settings: {
         is_remote_analyst: true,
         analyst_email: 'jane@example.com',
         analyst_name: 'Jane Doe',
       },
-    },
+    }),
     isSuccess: true,
     isLoading: false,
-  } as any)
+  }))
   // useIsAnalyst reads its own QueryClient cache; flip it true for
   // this assertion so the watermark render gate (isAnalyst &&
   // (analystEmail || analystName)) opens.

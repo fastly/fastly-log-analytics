@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from backend.config import is_rum_enabled
+
 _AUTO_INJECTED_NAMES: set[str] = {
     # RUM fields
     "rum_cid",
@@ -115,6 +117,7 @@ class FeatureState:
 
     # Feature Toggles & Parameter Blocks
     rum_enabled: bool = False
+    rum_log_period: int | None = None  # Rotation period for RUM logs in seconds (e.g. 300)
     faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
     rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
 
@@ -130,9 +133,20 @@ class FeatureState:
         Raises:
             ValueError: if validation fails.
         """
-        # Validate log_period range
-        if not (30 <= self.log_period <= 3600):
-            raise ValueError(f"log_period must be in range [30, 3600], got {self.log_period}")
+        # Validate log_period range. [30, 3600] was this codebase's own
+        # invention, not a Fastly constraint -- confirmed live against the
+        # real API (fastly service logging s3 update --period 1) and
+        # Fastly's own API reference (no min/max documented for this
+        # field): period=1 is accepted and stored as-is. The provisioning
+        # wizard's own dropdown (StorageStep.tsx) already offers 1/5/10/20
+        # second options that this floor was silently rejecting. Applies to
+        # both the request-log and RUM S3 endpoints (desired_logging_
+        # endpoints() shares this one field between them).
+        if not (1 <= self.log_period <= 3600):
+            raise ValueError(f"log_period must be in range [1, 3600], got {self.log_period}")
+
+        if self.rum_log_period is not None and not (1 <= self.rum_log_period <= 3600):
+            raise ValueError(f"rum_log_period must be in range [1, 3600], got {self.rum_log_period}")
 
         # Validate sample_rate range
         if not (1 <= self.sample_rate <= 100):
@@ -141,7 +155,7 @@ class FeatureState:
         # Validate custom field names
         for field_dict in self.log_fields.custom_fields:
             field_name = field_dict.get("name", "")
-            if not re.match(r"^[a-z_][a-z0-9_]*$", field_name):
+            if not re.fullmatch(r"^[a-z_][a-z0-9_]*$", field_name):
                 raise ValueError(f"Custom field name '{field_name}' must be lowercase alphanumeric + underscore")
 
         # Validate cmcd settings
@@ -217,15 +231,15 @@ class FeatureState:
         logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
         rum_cfg = cfg.get("rum", {})
         rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
+        rum_log_period_raw = rum_cfg.get("log_period") if isinstance(rum_cfg, dict) else None
+        if rum_log_period_raw is None:
+            rum_log_period_raw = cfg.get("rum_log_period")
+        rum_log_period = int(rum_log_period_raw) if rum_log_period_raw is not None else None
         faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
         rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
 
         # Extract feature toggles
-        rum_enabled = cfg.get("rum_enabled", False)
-        if not rum_enabled:
-            rum_cfg = cfg.get("rum", {})
-            if isinstance(rum_cfg, dict):
-                rum_enabled = bool(rum_cfg.get("enabled", False))
+        rum_enabled = is_rum_enabled(cfg)
 
         # Extract and construct CMCD config
         cmcd_cfg = cfg.get("cmcd", {})
@@ -317,55 +331,12 @@ class FeatureState:
 
         # Auto-inject mandatory CMCD custom fields
         if cmcd_enabled:
-            cmcd_fields = [
-                ("cmcd_sid", "CMCD Session ID", "req.http.x-cmcd:sid"),
-                ("cmcd_cid", "CMCD Content ID", "req.http.x-cmcd:cid"),
-                ("cmcd_br", "Encoded Bitrate (kbps)", "req.http.x-cmcd:br"),
-                ("cmcd_bl", "Buffer Length (ms)", "req.http.x-cmcd:bl"),
-                ("cmcd_bs", "Buffer Starvation", "req.http.x-cmcd:bs"),
-                ("cmcd_d", "Object Duration (ms)", "req.http.x-cmcd:d"),
-                ("cmcd_dl", "Deadline (ms)", "req.http.x-cmcd:dl"),
-                ("cmcd_mtp", "Measured Throughput (kbps)", "req.http.x-cmcd:mtp"),
-                ("cmcd_ot", "Object Type", "req.http.x-cmcd:ot"),
-                ("cmcd_sf", "Streaming Format", "req.http.x-cmcd:sf"),
-                ("cmcd_st", "Stream Type", "req.http.x-cmcd:st"),
-                ("cmcd_su", "Startup", "req.http.x-cmcd:su"),
-                ("cmcd_tb", "Top Bitrate (kbps)", "req.http.x-cmcd:tb"),
-                ("cmcd_rtp", "Requested Max Throughput (kbps)", "req.http.x-cmcd:rtp"),
-            ]
+            from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 
             existing_names = {f.get("name") for f in injected_fields}
-            for field_name, label, vcl_expr in cmcd_fields:
-                if field_name not in existing_names:
-                    injected_fields.append(
-                        {
-                            "name": field_name,
-                            "label": label,
-                            "description": "Auto-injected by CMCD feature.",
-                            "vcl_log_expression": vcl_expr,
-                            "collection_stage": "edge",
-                            "duckdb_type": "BOOLEAN"
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                "INTEGER"
-                                if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"])
-                                else "VARCHAR"
-                            ),
-                            "value_type": "boolean"
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                "numeric"
-                                if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"])
-                                else "string"
-                            ),
-                            "bytes_estimate": 1
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                5 if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"]) else 40
-                            ),
-                            "enabled": True,
-                        }
-                    )
+            for field in _CMCD_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
 
         # Construct nested LogFieldsConfig
         log_fields_config = LogFieldsConfig(
@@ -392,6 +363,7 @@ class FeatureState:
             logging_endpoint_name=logging_endpoint_name,
             rum_endpoint_name=rum_endpoint_name,
             rum_enabled=rum_enabled,
+            rum_log_period=rum_log_period,
             faro_version=faro_version,
             rum_custom_condition=rum_custom_condition,
             cmcd=cmcd_config,
@@ -422,6 +394,7 @@ class FeatureState:
             "logging_endpoint_name": self.logging_endpoint_name,
             "rum_endpoint_name": self.rum_endpoint_name,
             "rum_enabled": self.rum_enabled,
+            "rum_log_period": self.rum_log_period,
             "faro_version": self.faro_version,
             "rum_custom_condition": self.rum_custom_condition,
             "cmcd_enabled": self.cmcd.enabled,

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Dialog,
@@ -18,12 +18,11 @@ import {
   panelDialogFooter,
   panelDialogHeaderMuted,
 } from '@/lib/panel-dialog'
-import type { components } from '@/types/api.generated'
 import { AnalystSchedulePanel, LogSyncSection } from './Schedule'
 import { NgwafSection, IcebergOptimizationSection } from './Triggers'
 import { Preview } from './Preview'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface CronSettingsModalProps {
   service: ServiceConfig | null
@@ -31,61 +30,84 @@ interface CronSettingsModalProps {
   onOpenChange: (open: boolean) => void
 }
 
-export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsModalProps) {
+function initialSettings(service: ServiceConfig | null) {
+  // RUM settings
+  const rumCfg = service?.rum as Record<string, unknown> | null | undefined
+  const rumSyncVal = typeof rumCfg?.enabled === 'boolean' ? rumCfg.enabled : undefined
+  const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
+  const initialRumPeriod = rumPeriodVal ?? service?.rum_log_period ?? service?.log_period ?? 300
+  const rumDeleteVal = typeof rumCfg?.delete_after === 'boolean' ? rumCfg.delete_after : undefined
+
+  return {
+    syncIntervalMins: String(service?.cron_sync?.interval_mins ?? 2),
+    pollingMode: service?.cron_sync?.polling_mode ?? 'adaptive',
+    syncEnabled: service?.cron_sync?.enabled ?? false,
+    deleteAfter: service?.cron_sync?.delete_after ?? false,
+    commitInterval: String(service?.cron_sync?.commit_interval_mins ?? 5),
+    syncLogEnabled: service?.cron_sync?.log_enabled !== false,
+    syncRetention: String(service?.cron_sync?.log_retention_days ?? 7),
+    dataRetention: String(service?.cron_sync?.data_retention_days ?? 30),
+    rumRetention: String(service?.cron_sync?.rum_retention_days ?? 30),
+    cacheRetention: String(service?.cron_sync?.cache_retention_days ?? 90),
+    rollupRetention: String(service?.cron_sync?.rollup_retention_months ?? 12),
+    compactEnabled: service?.cron_compact?.enabled ?? false,
+    compactLogEnabled: service?.cron_compact?.log_enabled !== false,
+    compactRetention: String(service?.cron_compact?.log_retention_days ?? 7),
+    ngwafInterval: String(service?.cron_ngwaf?.interval_mins ?? 5),
+    ngwafLogEnabled: service?.cron_ngwaf?.log_enabled !== false,
+    ngwafRetention: String(service?.cron_ngwaf?.log_retention_days ?? 7),
+    rumSyncEnabled: rumSyncVal ?? service?.rum_enabled ?? false,
+    rumLogPeriod: String(initialRumPeriod),
+    rumDeleteAfter: rumDeleteVal ?? service?.cron_sync?.delete_after ?? false,
+  }
+}
+
+/**
+ * The form seeds from `service` when it (re)opens: the body remounts per service and per open,
+ * so edits and the SSE preview never leak between sessions.
+ */
+export function CronSettingsModal(props: CronSettingsModalProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <CronSettingsModalBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModalProps) {
   const queryClient = useQueryClient()
-  const { lines, status, error, start, stop, reset } = useSSE()
+  const { lines, status, error, start, stop } = useSSE()
+  const init = initialSettings(service)
 
-  const [syncEnabled, setSyncEnabled] = useState(false)
-  const [deleteAfter, setDeleteAfter] = useState(false)
-  const [commitInterval, setCommitInterval] = useState('5')
-  const [syncLogEnabled, setSyncLogEnabled] = useState(true)
-  const [syncRetention, setSyncRetention] = useState('7')
+  const [syncEnabled, setSyncEnabled] = useState(init.syncEnabled)
+  const [deleteAfter, setDeleteAfter] = useState(init.deleteAfter)
+  const [commitInterval, setCommitInterval] = useState(init.commitInterval)
+  const [syncLogEnabled, setSyncLogEnabled] = useState(init.syncLogEnabled)
+  const [syncRetention, setSyncRetention] = useState(init.syncRetention)
 
-  const [dataRetention, setDataRetention] = useState('30')
-  const [rumRetention, setRumRetention] = useState('90')
-  const [cacheRetention, setCacheRetention] = useState('90')
+  const [dataRetention, setDataRetention] = useState(init.dataRetention)
+  const [rumRetention, setRumRetention] = useState(init.rumRetention)
+  const [cacheRetention, setCacheRetention] = useState(init.cacheRetention)
+  const [rollupRetention, setRollupRetention] = useState(init.rollupRetention)
 
-  const [compactEnabled, setCompactEnabled] = useState(false)
-  const [compactLogEnabled, setCompactLogEnabled] = useState(true)
-  const [compactRetention, setCompactRetention] = useState('7')
+  const [compactEnabled, setCompactEnabled] = useState(init.compactEnabled)
+  const [compactLogEnabled, setCompactLogEnabled] = useState(init.compactLogEnabled)
+  const [compactRetention, setCompactRetention] = useState(init.compactRetention)
 
-  const [ngwafInterval, setNgwafInterval] = useState('5')
-  const [ngwafLogEnabled, setNgwafLogEnabled] = useState(true)
-  const [ngwafRetention, setNgwafRetention] = useState('7')
+  const [ngwafInterval, setNgwafInterval] = useState(init.ngwafInterval)
+  const [ngwafLogEnabled, setNgwafLogEnabled] = useState(init.ngwafLogEnabled)
+  const [ngwafRetention, setNgwafRetention] = useState(init.ngwafRetention)
 
-  const [syncIntervalMins, setSyncIntervalMins] = useState('2')
-  const [rumSyncIntervalSeconds, setRumSyncIntervalSeconds] = useState('60')
-  const [rumDeleteAfter, setRumDeleteAfter] = useState(false)
+  const [syncIntervalMins, setSyncIntervalMins] = useState(init.syncIntervalMins)
+  const [pollingMode, setPollingMode] = useState<'regular' | 'adaptive'>(init.pollingMode)
+  const [rumSyncEnabled, setRumSyncEnabled] = useState(init.rumSyncEnabled)
+  const [rumLogPeriod, setRumLogPeriod] = useState(init.rumLogPeriod)
+  const [rumDeleteAfter, setRumDeleteAfter] = useState(init.rumDeleteAfter)
 
   const isAnalyst = service?.access_level === 'read_only'
-
-  useEffect(() => {
-    if (service && open) {
-      setSyncIntervalMins(String(service.cron_sync?.interval_mins ?? 2))
-      setSyncEnabled(service.cron_sync?.enabled ?? false)
-      setDeleteAfter(service.cron_sync?.delete_after ?? false)
-      setCommitInterval(String(service.cron_sync?.commit_interval_mins ?? 5))
-      setSyncLogEnabled(service.cron_sync?.log_enabled !== false)
-      setSyncRetention(String(service.cron_sync?.log_retention_days ?? 7))
-      setDataRetention(String(service.cron_sync?.data_retention_days ?? 30))
-      setRumRetention(String(service.cron_sync?.rum_retention_days ?? 30))
-      setCacheRetention(String(service.cron_sync?.cache_retention_days ?? 90))
-
-      setCompactEnabled(service.cron_compact?.enabled ?? false)
-      setCompactLogEnabled(service.cron_compact?.log_enabled !== false)
-      setCompactRetention(String(service.cron_compact?.log_retention_days ?? 7))
-
-      setNgwafInterval(String(service.cron_ngwaf?.interval_mins ?? 5))
-      setNgwafLogEnabled(service.cron_ngwaf?.log_enabled !== false)
-      setNgwafRetention(String(service.cron_ngwaf?.log_retention_days ?? 7))
-
-      // RUM settings
-      const syncIntervalsecs = service.cron_sync?.interval_mins ? service.cron_sync.interval_mins * 60 : 60
-      setRumSyncIntervalSeconds(String(syncIntervalsecs))
-      setRumDeleteAfter(service.cron_sync?.delete_after ?? false)
-    }
-    reset()
-  }, [service, open, reset, isAnalyst])
 
   const handleSave = () => {
     if (!service) return
@@ -95,7 +117,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
         cron_sync: {
           enabled: syncEnabled,
           interval_mins: intervalMins,
-          cache_retention_days: parseInt(cacheRetention)
+          cache_retention_days: parseInt(cacheRetention),
+        rollup_retention_months: parseInt(rollupRetention)
         },
       })
       return
@@ -105,12 +128,14 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       cron_sync: {
         enabled: syncEnabled,
         delete_after: deleteAfter,
+        polling_mode: pollingMode,
         commit_interval_mins: commitMins,
         log_enabled: syncLogEnabled,
         log_retention_days: parseInt(syncRetention),
         data_retention_days: parseInt(dataRetention),
         rum_retention_days: parseInt(rumRetention),
-        cache_retention_days: parseInt(cacheRetention)
+        cache_retention_days: parseInt(cacheRetention),
+        rollup_retention_months: parseInt(rollupRetention)
       },
       cron_compact: {
         enabled: compactEnabled,
@@ -126,7 +151,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       } : {}),
       ...(service.rum_enabled ? {
         rum: {
-          sync_interval_seconds: parseInt(rumSyncIntervalSeconds),
+          enabled: rumSyncEnabled,
+          log_period: parseInt(rumLogPeriod),
           delete_after: rumDeleteAfter,
         },
       } : {}),
@@ -190,12 +216,16 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
               <LogSyncSection
                 syncEnabled={syncEnabled}
                 setSyncEnabled={setSyncEnabled}
+                pollingMode={pollingMode}
+                setPollingMode={setPollingMode}
                 deleteAfter={deleteAfter}
                 setDeleteAfter={setDeleteAfter}
                 dataRetention={dataRetention}
                 setDataRetention={setDataRetention}
                 cacheRetention={cacheRetention}
                 setCacheRetention={setCacheRetention}
+                rollupRetention={rollupRetention}
+                setRollupRetention={setRollupRetention}
                 commitInterval={commitInterval}
                 setCommitInterval={setCommitInterval}
                 syncLogEnabled={syncLogEnabled}
@@ -209,10 +239,13 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
                 rumRetention={rumRetention}
                 setRumRetention={setRumRetention}
                 rumEnabled={service.rum_enabled ?? false}
-                rumSyncIntervalSeconds={rumSyncIntervalSeconds}
-                setRumSyncIntervalSeconds={setRumSyncIntervalSeconds}
+                rumSyncEnabled={rumSyncEnabled}
+                setRumSyncEnabled={setRumSyncEnabled}
+                rumLogPeriod={rumLogPeriod}
+                setRumLogPeriod={setRumLogPeriod}
                 rumDeleteAfter={rumDeleteAfter}
                 setRumDeleteAfter={setRumDeleteAfter}
+                serviceId={service.service_id}
               />
 
               {service.ngwaf_workspace_id && (

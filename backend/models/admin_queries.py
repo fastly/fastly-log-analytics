@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
-class _QueryRow(BaseModel):
+class _QueryRow(PassthroughModel):
     """Base for registry row payloads — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class QueryAttribution(_QueryRow):
@@ -124,7 +124,19 @@ class SlowQueriesResponse(BaseModel):
     threshold_ms: float
 
 
+class SlowQueriesClearResponse(BaseModel):
+    """Outcome of ``DELETE /api/admin/slow-queries``."""
+
+    deleted: int
+    service_id: str
+
+
 class QueryMonitorConfigResponse(BaseModel):
     """Nav-gating flag for the Live Query Monitor tab."""
 
     enabled: bool
+
+
+# Explicit aliases for callers referencing the spec schema names
+QueryDetailResponse = ActiveQueryRow
+SlowQueriesListResponse = SlowQueriesResponse

@@ -91,6 +91,37 @@ def test_startup_assertion_fatals_when_strict_data_dir_check_set(monkeypatch):
         main._enforce_proxy_headers_configured()
 
 
+@pytest.mark.parametrize("var", ["TRUSTED_PROXY_IPS", "UVICORN_FORWARDED_ALLOW_IPS"])
+@pytest.mark.parametrize("value", ["*", "127.0.0.1,*", "*,10.0.0.0/8"])
+def test_startup_assertion_rejects_wildcard_trust(monkeypatch, var, value):
+    """`*` in either trust variable means uvicorn honors XFF from ANY peer —
+    any direct client can stamp X-Forwarded-For: 127.0.0.1 and be classified
+    loopback-admin. The guard must refuse to boot, strict mode or not."""
+    from backend import main
+
+    monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)
+    monkeypatch.delenv("UVICORN_FORWARDED_ALLOW_IPS", raising=False)
+    monkeypatch.delenv("REQUIRE_PROXY_HEADERS", raising=False)
+    monkeypatch.delenv("STRICT_DATA_DIR_CHECK", raising=False)
+    monkeypatch.setenv(var, value)
+
+    with pytest.raises(RuntimeError, match="wildcard"):
+        main._enforce_proxy_headers_configured()
+
+
+def test_startup_assertion_accepts_pinned_subnet(monkeypatch):
+    """A CIDR-pinned trust set (the multipod compose topology) boots cleanly."""
+    from unittest.mock import patch
+
+    from backend import main
+
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "172.28.0.0/16")
+    monkeypatch.setenv("UVICORN_FORWARDED_ALLOW_IPS", "172.28.0.0/16")
+    with patch.object(main.logging, "info") as mock_info:
+        main._enforce_proxy_headers_configured()
+    assert mock_info.called
+
+
 # ── 2. uvicorn ProxyHeadersMiddleware end-to-end ───────────────────────────
 
 

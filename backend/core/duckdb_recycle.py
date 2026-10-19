@@ -104,16 +104,17 @@ def _sources_by_db_path() -> dict[str, list[dict]]:
             continue
         groups.setdefault(_db.db_path_for_source(src), []).append(src)
 
-        # If RUM is enabled for the service, register the isolated RUM source for recycling too
-        rum_cfg = cfg.get("rum") or {}
-        if rum_cfg.get("enabled") or cfg.get("rum_enabled"):
+        rum_cfg = cfg.get("rum")
+        rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+        rum_enabled = svcconfig.is_rum_enabled(cfg)
+        if rum_enabled:
             try:
                 from backend.core.duckdb import rum_source_for
 
                 rum_src = rum_source_for(src)
                 groups.setdefault(_db.db_path_for_source(rum_src), []).append(rum_src)
             except Exception:
-                pass
+                logger.debug("_sources_by_db_path: groups.setdefault failed (ignored)", exc_info=True)
     return groups
 
 
@@ -124,6 +125,17 @@ def _service_key(src: dict) -> str:
 def _lock_key(src: dict) -> str:
     # Matches iceberg.view._get_service_lock keying (source.get("name", "default")).
     return src.get("name", "default")
+
+
+def _trim_memory() -> None:
+    """Trigger Python GC and C allocator memory trim (glibc malloc_trim) if available."""
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        logger.debug("_trim_memory: ctypes.CDLL failed (ignored)", exc_info=True)
 
 
 def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
@@ -154,19 +166,20 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
 
         # Locks held → raise the barrier so no NEW connection opens for this file.
         _db.set_recycle_barrier(db_path, True)
+        retired_pools = {}
         try:
-            _pool.begin_drain_pools(service_keys)
-            drained = _pool.wait_pools_drained(service_keys, drain_timeout)
+            retired_pools = _pool.begin_drain_pools(service_keys)
+            drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
 
             # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
-            gc.collect()
+            _trim_memory()
             deadline = time.monotonic() + grace
             while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
                 time.sleep(0.05)
-                gc.collect()
+                _trim_memory()
             live = _db.live_connection_count(db_path)
         finally:
-            _pool.end_drain_pools(service_keys)
+            _pool.end_drain_pools(retired_pools or service_keys)
             _db.set_recycle_barrier(db_path, False)
     finally:
         for lock in reversed(acquired):
@@ -175,6 +188,7 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
             except RuntimeError:
                 pass
 
+    _trim_memory()
     rss_after = _db.current_rss_bytes()
     freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
     status = "recycled" if (drained and live == 0) else "incomplete"
@@ -216,7 +230,9 @@ def recycle_once(reason: str = "interval") -> str:
             results.append({"db_path": db_path, "status": "error", "error": str(e)})
     recycled = sum(1 for r in results if r.get("status") == "recycled")
     freed = sum(r.get("freed_bytes") or 0 for r in results if (r.get("freed_bytes") or 0) > 0)
-    return f"{reason}: recycled {recycled}/{len(results)} instance(s), freed ~{freed / 1e6:.0f}MB"
+    incomplete = sum(1 for r in results if r.get("status") in ("incomplete", "skipped_locked", "error"))
+    extra = f" (incomplete: {incomplete})" if incomplete else ""
+    return f"{reason}: recycled {recycled}/{len(results)} instance(s), freed ~{freed / 1e6:.0f}MB{extra}"
 
 
 # The ``@global_job``-decorated scheduler entry (``run_duckdb_recycle``) lives in

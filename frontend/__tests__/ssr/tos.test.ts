@@ -188,7 +188,7 @@ describe('fetchTosServerSide', () => {
   it('fail-closed: no Caddy marker + absent Host → null (drift / SSRF without a loopback Host)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1' // must not be reached
     mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-    mockHeaders.mockReturnValue({ get: (_k: string) => null })
+    mockHeaders.mockReturnValue({ get: () => null })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { fetchTosServerSide } = await import('@/lib/ssr/tos')
     const out = await fetchTosServerSide()

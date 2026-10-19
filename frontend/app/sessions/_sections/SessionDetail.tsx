@@ -32,9 +32,11 @@ import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { components } from '@/types/api.generated'
+import type { SessionDetailResponse, SessionsResponse } from '@/types/api'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
+type SessionDetailRow = SessionDetailResponse['data'][number]
 
 interface SessionDetailProps {
   selectedSession: SessionRow | null
@@ -81,25 +83,27 @@ export function SessionDetail({
     enabled: !!activeServiceId && !!selectedSession
   })
 
-  const detailColumns: ColumnDef<any>[] = React.useMemo(() => {
-    if (!detailData?.columns) return []
-    return detailData.columns.map(col => ({
+  const detailColumnNames = detailData?.columns
+  const detailColumns: ColumnDef<SessionDetailRow>[] = React.useMemo(() => {
+    if (!detailColumnNames) return []
+    return detailColumnNames.map(col => ({
       id: col,
       accessorFn: (row) => row[col],
       meta: { label: getFieldLabel(col) },
       header: getFieldLabel(col),
-      cell: ({ row }: { row: any }) => {
+      cell: ({ row }) => {
         const value = row.original[col]
+        const text = value == null ? '' : String(value)
         if (col === 'timestamp') return (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger render={
                 <span className="whitespace-nowrap font-mono text-xs  border-b border-dotted border-muted-foreground/30">
-                  {relative(value as string)}
+                  {relative(text)}
                 </span>
               } />
               <TooltipContent className="text-xs">
-                {full(value as string)} {abbr()}
+                {full(text)} {abbr()}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -109,15 +113,15 @@ export function SessionDetail({
           return <Badge variant={s >= 500 ? 'destructive' : s >= 400 ? 'outline' : 'secondary'}>{s}</Badge>
         }
         if (col === 'resp_bytes' || col === 'elapsed') {
-          return <span className="text-xs font-mono tabular-nums">{Number(value).toLocaleString()}</span>
+          return <span className="text-xs font-mono tabular-nums">{formatCount(Number(value))}</span>
         }
-        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, value as string)}</span>
-        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, value as string)}</span>
-        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, value as string)}</span>
-        return <span className="text-xs truncate max-w-[220px] inline-block">{String(value ?? '')}</span>
+        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, text)}</span>
+        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, text)}</span>
+        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, text)}</span>
+        return <span className="text-xs truncate max-w-[220px] inline-block">{text}</span>
       }
     }))
-  }, [detailData?.columns, relative, full, abbr, getFieldLabel])
+  }, [detailColumnNames, relative, full, abbr, getFieldLabel])
 
   const cmcdDetailCols = ['cmcd_ot', 'cmcd_br', 'cmcd_bl', 'cmcd_sf', 'cmcd_st']
 
@@ -144,7 +148,7 @@ export function SessionDetail({
 
   return (
     <Dialog open={!!selectedSession} onOpenChange={(open) => !open && setSelectedSession(null)}>
-      <DialogContent className="max-w-6xl max-h-[85vh] flex flex-col p-4 md:p-6 overflow-hidden">
+      <DialogContent data-testid="session-detail-dialog" className="max-w-6xl max-h-[85vh] flex flex-col p-4 md:p-6 overflow-hidden">
         <DialogHeader className="shrink-0 mb-2">            <DialogTitle className="flex items-center gap-2 text-base">
             <Users className="h-4 w-4" />
             Session: {selectedSession?.ip}
@@ -223,7 +227,7 @@ export function SessionDetail({
             {selectedSession?.asn ? `AS${selectedSession.asn}` : '—'}
           </MetadataItem>
           <MetadataItem label="Requests">
-            <span className="font-semibold">{selectedSession?.req_count?.toLocaleString()}</span>
+            <span className="font-semibold">{formatCountMaybe(selectedSession?.req_count)}</span>
           </MetadataItem>
           <MetadataItem label="Unique URLs">
             {selectedSession?.unique_urls ?? '—'}

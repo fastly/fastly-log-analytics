@@ -138,7 +138,7 @@ def _live_deregister(qid: int, error: BaseException | None) -> None:
         try:
             structlog.contextvars.unbind_contextvars("query_id")
         except Exception:
-            pass
+            logger.debug("_live_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)
 
 
 class InstrumentedCursor(sqlite3.Cursor):

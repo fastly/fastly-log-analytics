@@ -52,7 +52,13 @@ cd "$REPO_ROOT"
 SNAP_PATH="${1:-}"
 if [ -z "$SNAP_PATH" ]; then
   # Default to newest snapshot in ~/snapshots/.
-  SNAP_PATH="$(ls -1dt "$HOME/snapshots"/pre-v2.0-cutover-* 2>/dev/null | head -1 || true)"
+  SNAP_PATH=""
+  for candidate in "$HOME/snapshots"/pre-v2.0-cutover-*; do
+    [ -d "$candidate" ] || continue
+    if [ -z "$SNAP_PATH" ] || [ "$candidate" -nt "$SNAP_PATH" ]; then
+      SNAP_PATH="$candidate"
+    fi
+  done
   if [ -z "$SNAP_PATH" ]; then
     fail "no snapshot dir provided and no candidates under ~/snapshots/pre-v2.0-cutover-*"
     echo "      usage: $0 <snapshot-dir>" >&2

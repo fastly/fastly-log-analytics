@@ -12,6 +12,7 @@
 
 import type { QueryClient } from '@tanstack/react-query'
 import type { SyncStatus } from '@/hooks/useSyncStatus'
+import { queryKeys } from '@/lib/query-keys'
 
 // ── sync-status ───────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ import type { SyncStatus } from '@/hooks/useSyncStatus'
  * the shared cache. Mirrors the old ``useSyncStatusStream``.
  */
 export function applySyncStatus(qc: QueryClient, serviceId: string | null, data: unknown): void {
-  qc.setQueryData(['sync-status', serviceId], data as SyncStatus)
+  qc.setQueryData(queryKeys.syncStatus(serviceId), data as SyncStatus)
 }
 
 // ── system-metrics ────────────────────────────────────────────────────────────
@@ -55,22 +56,22 @@ export function applySystemMetrics(qc: QueryClient, serviceId: string | null, da
   if (!data || typeof data !== 'object') return
   const payload = data as SystemMetricsPayload
   if (payload.health_snapshot != null) {
-    qc.setQueryData(['admin', 'health-snapshot'], payload.health_snapshot)
+    qc.setQueryData(queryKeys.admin.healthSnapshot(), payload.health_snapshot)
   }
   if (payload.metric_history_1h != null) {
-    qc.setQueryData(['admin', 'metric-history-batch', '1h'], payload.metric_history_1h)
+    qc.setQueryData(queryKeys.admin.metricHistoryBatch('1h'), payload.metric_history_1h)
   }
   if (payload.queries_summary != null) {
-    qc.setQueryData(['admin', 'overview', 'queries-summary'], payload.queries_summary)
+    qc.setQueryData(queryKeys.admin.overviewQueriesSummary(), payload.queries_summary)
   }
   if (payload.slow_queries_count != null) {
-    qc.setQueryData(['admin', 'overview', 'slow-queries-count', serviceId], payload.slow_queries_count)
+    qc.setQueryData(queryKeys.admin.overviewSlowQueriesCount(serviceId), payload.slow_queries_count)
   }
   if (payload.log_accounting != null) {
-    qc.setQueryData(['admin', 'overview', 'log-accounting', serviceId], payload.log_accounting)
+    qc.setQueryData(queryKeys.admin.overviewLogAccounting(serviceId), payload.log_accounting)
   }
   if (payload.metadata_storage != null) {
-    qc.setQueryData(['admin', 'metadata-storage'], payload.metadata_storage)
+    qc.setQueryData(queryKeys.admin.metadataStorage(), payload.metadata_storage)
   }
   if (payload.system_jobs != null) {
     qc.setQueryData(['system-jobs'], payload.system_jobs)
@@ -87,7 +88,7 @@ export function applySystemMetrics(qc: QueryClient, serviceId: string | null, da
  */
 export function applyShare(qc: QueryClient, data: unknown): void {
   if (data === undefined) return
-  qc.setQueryData(['admin', 'share', 'live'], data)
+  qc.setQueryData(queryKeys.admin.shareLive(), data)
 }
 
 // ── cron-runs ─────────────────────────────────────────────────────────────────
@@ -105,6 +106,7 @@ const INVALIDATION_COALESCE_MS = 100
 // query cache alone.
 const ICEBERG_MUTATING_TASKS = new Set([
   'commit',
+  'optimize',
   'optimize_iceberg',
   'expire_snapshots',
   'metadata_sync',
@@ -153,19 +155,19 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     const due = new Set(pending)
     pending.clear()
     if (due.has('table')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'cron-logs', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) })
     }
     if (due.has('recent')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })
     }
     if (due.has('last-sync')) {
-      qc.invalidateQueries({ queryKey: ['last-sync', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
     }
     if (due.has('iceberg')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'iceberg'] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() })
     }
     if (due.has('schedule')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'cron-schedule', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) })
     }
     // The /logs Service History, Ingestion and Schema tabs have no
     // dedicated stream — they piggyback on these cron-complete events.
@@ -175,13 +177,13 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     // refetch when that tab is actually open; otherwise it just freshens
     // the cache for the next visit.
     if (due.has('audit')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'audit-logs', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(serviceId) })
     }
     if (due.has('ingested')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'ingested-files', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.ingestedFiles(serviceId) })
     }
     if (due.has('schema')) {
-      qc.invalidateQueries({ queryKey: ['admin', 'schema', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.schema(serviceId) })
     }
   }
 
@@ -227,7 +229,7 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     // last-sync needs BOTH start and completion sync events so the
     // badge can flip to "Last Sync: running" the moment a sync starts
     // and flip back to "Xs ago" the moment it completes.
-    if (payload.task === 'sync') {
+    if (payload.task === 'log_discovery') {
       schedule('last-sync')
     }
     // Iceberg panels only need to refresh once the mutating task

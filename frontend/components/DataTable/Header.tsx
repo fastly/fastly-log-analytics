@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { flexRender } from '@tanstack/react-table'
+import { flexRender, type Header } from '@tanstack/react-table'
 import { GripHorizontal, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -10,7 +10,7 @@ import { TableHead } from '@/components/ui/table'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-export const DraggableTableHeader = ({ header }: { header: any }) => {
+export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
   const {
     attributes,
     isDragging,
@@ -96,6 +96,8 @@ export const DraggableTableHeader = ({ header }: { header: any }) => {
           <GripHorizontal className="w-3.5 h-3.5" />
         </button>
         <div
+          // Pointer-only affordance: column resizing has no keyboard path, so the handle carries no role.
+          role="presentation"
           // Guard `getResizeHandler` against the column being removed
           // mid-render: when a column toggles off, the DOM header lingers
           // for one frame and tanstack-table's resize handler throws

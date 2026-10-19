@@ -13,13 +13,25 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolate_share_db(tmp_path, monkeypatch):
-    """Point the share DB at a per-test temp directory."""
+    """Point the share DB at a per-test temp directory and isolate state."""
     from backend.core import share_db
     from backend.utils import tunnel
 
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
     share_db.reset_for_tests()
     tunnel.reset_for_tests()
+    con = share_db.get_global_share_con()
+    try:
+        con.execute("DELETE FROM remote_sessions")
+        con.execute("DELETE FROM remote_invite_claim_tokens")
+        con.execute("DELETE FROM invite_services")
+        con.execute("DELETE FROM remote_invites")
+        con.execute("DELETE FROM remote_share_audit_logs")
+        con.execute("DELETE FROM share_settings")
+        con.execute("DELETE FROM share_tos_versions WHERE version != 'v1'")
+        con.commit()
+    except Exception:
+        con.rollback()
     yield
     share_db.close_all_connections()
     tunnel.reset_for_tests()

@@ -154,13 +154,12 @@ describe('showToast', () => {
 
   it('is a no-op when document is undefined (SSR-safe)', () => {
     const originalDocument = globalThis.document
-    // @ts-expect-error - simulating SSR where document is undefined.
-    delete globalThis.document
+    vi.stubGlobal('document', undefined)
     try {
       // Must not throw.
       expect(() => showToast('ssr-safe')).not.toThrow()
     } finally {
-      globalThis.document = originalDocument
+      vi.stubGlobal('document', originalDocument)
     }
   })
 })

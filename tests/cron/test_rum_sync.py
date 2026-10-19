@@ -1,7 +1,7 @@
 """Tests for the Faro bundle reconcile step in ``backend.cron.jobs.rum_sync``.
 
 Two seams to mock: FOS access (SigV4 HEAD over ``httpx.MockTransport``, same
-shape as ``tests/backend/provision/test_rum_assets.py``) and the Task 2
+shape as ``tests/provision/test_rum_assets.py``) and the Task 2
 functions (``download_and_upload_faro`` / ``detect_faro_version_change``,
 monkeypatched directly at their source module, ``backend.provision.rum_assets``
 — that is where the reconcile step's late ``from … import …`` resolves the
@@ -11,6 +11,7 @@ names on every call). No test makes a real network call.
 from __future__ import annotations
 
 import copy
+import sqlite3
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -53,6 +54,19 @@ _REAL_CLIENT = httpx.Client
 
 
 @pytest.fixture
+def rum_lease(monkeypatch):
+    """Stand-in for the per-(service, task) lease that ``cron_run`` acquires for rum_sync."""
+    lease = MagicMock()
+    lease.source = {"name": SERVICE_ID}
+    lease.start = MagicMock(return_value=7)
+    lease.log_cron_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: lease.source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lease.start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lease.log_cron_run)
+    return lease
+
+
+@pytest.fixture
 def config_store(monkeypatch):
     """In-memory config store backing ``svcconfig.load_config``/``save_config``.
 
@@ -69,8 +83,17 @@ def config_store(monkeypatch):
     def fake_save(service_id, new_cfg):
         store[service_id] = copy.deepcopy(new_cfg)
 
+    def fake_mutate(service_id, mutate, **kwargs):
+        cfg = fake_load(service_id)
+        if cfg is None:
+            return None
+        mutate(cfg)
+        fake_save(service_id, cfg)
+        return cfg
+
     monkeypatch.setattr("backend.config.load_config", fake_load)
     monkeypatch.setattr("backend.config.save_config", fake_save)
+    monkeypatch.setattr("backend.config.mutate_config", fake_mutate)
     return store
 
 
@@ -442,7 +465,7 @@ def test_download_failure_during_restore_does_not_raise(
     assert download_calls == [(SERVICE_ID, "2.9.0", "fake-fastly-token")]
 
 
-def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, frozen_now, monkeypatch):
+def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, frozen_now, monkeypatch, rum_lease):
     """Wiring-level check: if the Faro reconcile call somehow raises all the
     way out (belt-and-braces — the unit tests above show it shouldn't), the
     beacon-ingest cron body must still handle it as a normal cron failure —
@@ -460,7 +483,7 @@ def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, f
         ("done", 10),
     ]
 
-    def fake_ingest(service_id):
+    def fake_ingest(service_id, *args, **kwargs):
         yield from events
 
     monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", fake_ingest)
@@ -481,6 +504,54 @@ def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, f
         call.args[1]["message"] for call in add_progress.call_args_list if call.args[1]["type"] == "error"
     ]
     assert any("RUM sync failed" in m for m in error_messages)
+
+
+def test_faro_only_reconcile_failure_marks_standard_rum_run_warning(monkeypatch, rum_lease):
+    rum_lease.start.return_value = 42
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE cron_runs (id INTEGER, service_id TEXT, status TEXT)")
+    con.execute("INSERT INTO cron_runs VALUES (42, ?, 'success')", (SERVICE_ID,))
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
+    monkeypatch.setattr(
+        rum_sync_mod, "ingest_rum_logs", lambda service_id, *args, **kwargs: iter([("started", 42), ("done", 0)])
+    )
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert con.execute("SELECT status FROM cron_runs WHERE id = 42").fetchone() == ("warning",)
+    con.close()
+
+
+def test_standard_rum_data_plane_error_is_not_downgraded_to_warning(monkeypatch, rum_lease):
+    rum_lease.start.return_value = 43
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE cron_runs (id INTEGER, service_id TEXT, status TEXT)")
+    con.execute("INSERT INTO cron_runs VALUES (43, ?, 'success')", (SERVICE_ID,))
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
+
+    def failed_ingest(service_id, *args, **kwargs):
+        yield ("started", 43)
+        con.execute("UPDATE cron_runs SET status = 'error' WHERE id = 43")
+        con.commit()
+        yield ("error", "rum/beacon.log.gz", "corrupt gzip")
+        yield ("done", 0)
+
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", failed_ingest)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert con.execute("SELECT status FROM cron_runs WHERE id = 43").fetchone() == ("error",)
+    con.close()
 
 
 # ── skip conditions ──────────────────────────────────────────────────────
@@ -707,7 +778,7 @@ def test_restore_and_resync_pass_expected_current_version_for_compare_and_set(
     as ``expected_current_version`` to ``download_and_upload_faro`` — the
     compare-and-set guard that stops a slow cron re-sync from reverting a
     concurrent operator upgrade (see that function's docstring and
-    tests/backend/provision/test_rum_assets.py's dedicated race test)."""
+    tests/provision/test_rum_assets.py's dedicated race test)."""
     seen_kwargs: list[dict] = []
 
     async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
@@ -782,3 +853,56 @@ def test_skips_when_no_config(config_store, frozen_now, mock_fos, mock_download,
     rum_sync_mod._reconcile_faro_bundle("no-such-service", None)
 
     assert download_calls == []
+
+
+def test_rum_sync_not_deferred_by_in_flight_requests(monkeypatch, rum_lease):
+    """Mirroring commit 5a7541fd: RUM freshness requires that automated ticks
+    are never deferred by active queries."""
+    import os
+    from unittest.mock import patch
+
+    ingest_mock = MagicMock(return_value=iter([]))
+    monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", ingest_mock)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
+
+    with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standard"}):
+        rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert ingest_mock.called, "rum_sync must not be deferred by active queries"
+
+
+def test_rum_sync_triggers_commit_when_rows_ingested(monkeypatch, rum_lease):
+    """When RUM beacons are ingested (total > 0), trigger rum_commit immediately
+    so that RUM recency and table state achieve parity with request logs."""
+    from unittest.mock import MagicMock
+
+    mock_commit = MagicMock()
+    monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", mock_commit)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda sid, *a, **kw: iter([("started", 1), ("done", 25)]))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    mock_commit.assert_called_once_with(SERVICE_ID)
+
+
+def test_rum_sync_does_not_trigger_commit_when_zero_rows(monkeypatch, rum_lease):
+    """When no RUM beacons are ingested (total == 0), do not trigger rum_commit."""
+    from unittest.mock import MagicMock
+
+    mock_commit = MagicMock()
+    monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", mock_commit)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda sid, *a, **kw: iter([("started", 1), ("done", 0)]))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    mock_commit.assert_not_called()

@@ -11,7 +11,7 @@ This directory houses the formal, tracked developer utility scripts for **Real U
 * **What it does:** Uses `fastapi.testclient.TestClient` to post simulated Faro-compatible Web Vitals beacons (`LCP`, `CLS`, `INP`, page load times, browser, OS, and device properties) directly to the `/api/services/rum-beacon` endpoint. Then queries the analytics endpoint to verify p75 percentiles.
 * **How to run:**
   ```bash
-  uv run scripts/diagnostics/simulate_traffic.py
+  SERVICE_ID=<service-id> uv run scripts/diagnostics/simulate_traffic.py
   ```
 * **When to use:** Use this locally to seed your database with realistic, non-zero telemetry data to test the frontend dashboard widgets, graphs, and aggregations.
 
@@ -29,7 +29,7 @@ This directory houses the formal, tracked developer utility scripts for **Real U
 * **What it does:** Lists raw `.gz` logs stored in the Fastly Object Storage (FOS) raw RUM buffer, decompresses them on the fly, parses query-string payloads, and filters out non-zero Core Web Vitals to check real-world collection rates.
 * **How to run:**
   ```bash
-  uv run scripts/diagnostics/inspect_raw_rum.py
+  SERVICE_ID=<service-id> uv run scripts/diagnostics/inspect_raw_rum.py
   ```
 * **When to use:** Run this to audit production storage logs to confirm real user metrics are flowing correctly to S3-compatible storage.
 

@@ -9,19 +9,23 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
+import { adminFetch } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import type { ColumnDef } from '@tanstack/react-table'
+import type { ImpossibleDistanceData } from '@/components/Insights/types'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { HelpDialog } from '@/components/ui/help-dialog'
+import { formatCount } from '@/lib/format'
+import { downloadBlob } from '@/lib/utils'
 
 const ImpossibleDistanceModal = dynamic(
   () => import('@/components/Insights/ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
   { ssr: false }
 )
 
-type SecurityProxiesResponse = components['schemas']['SecurityProxiesResponse']
+type SecurityProxiesResponse = components['schemas']['SecurityAggregatesResponse']
 type ActiveClientItem = components['schemas']['ActiveClientItem']
 
 interface ProxyWatchdogSectionProps {
@@ -44,7 +48,7 @@ export function ProxyWatchdogSection({
   const [threshold, setThreshold] = useState<'High' | 'Medium' | 'Low'>('High')
   const [format, setFormat] = useState<'fastly-acl' | 'plain'>('fastly-acl')
   const [isExporting, setIsExporting] = useState(false)
-  const [selectedMapItem, setSelectedMapItem] = useState<any | null>(null)
+  const [selectedMapItem, setSelectedMapItem] = useState<ImpossibleDistanceData | null>(null)
 
   const [trafficHelpOpen, setTrafficHelpOpen] = useState(false)
   const [ispHelpOpen, setIspHelpOpen] = useState(false)
@@ -62,13 +66,13 @@ export function ProxyWatchdogSection({
     { id: 'tcp_rtt_ms', label: 'TCP RTT' },
   ], [])
 
-  const watchdogColumns = React.useMemo(() => [
+  const watchdogColumns = React.useMemo((): ColumnDef<ActiveClientItem>[] => [
     {
       accessorKey: 'ip',
       id: 'ip',
       header: 'IP Address',
-      cell: (info: any) => {
-        const ip = info.getValue()
+      cell: ({ row }) => {
+        const ip = row.original.ip
         return (
           <div className="flex items-center gap-1.5 min-w-0 w-full">
             <FilterValueCell
@@ -98,8 +102,8 @@ export function ProxyWatchdogSection({
       accessorKey: 'asn_name',
       id: 'asn_name',
       header: 'ASN / Network',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: ({ row }) => {
+        const val = row.original.asn_name
         return val ? (
           <span className="truncate block max-w-[200px]" title={val}>
             {val}
@@ -113,8 +117,8 @@ export function ProxyWatchdogSection({
       accessorKey: 'risk_level',
       id: 'risk_level',
       header: 'Risk Level',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: ({ row }) => {
+        const val = row.original.risk_level
         const isHigh = val === 'High'
         const isMedium = val === 'Medium'
         return (
@@ -131,13 +135,13 @@ export function ProxyWatchdogSection({
       accessorKey: 'distance_km',
       id: 'distance_km',
       header: 'Distance (km)',
-      cell: (info: any) => {
-        const row = info.row.original as ActiveClientItem
+      cell: ({ row: tableRow }) => {
+        const row = tableRow.original
         return (
           <div className="flex flex-col items-start w-full">
             <span className="font-mono">
               {row.distance_km !== null && row.distance_km !== undefined
-                ? row.distance_km.toLocaleString(undefined, { maximumFractionDigits: 1 })
+                ? formatCount(row.distance_km, { maximumFractionDigits: 1 })
                 : '—'}
             </span>
             {row.impossible_distance && (
@@ -181,8 +185,8 @@ export function ProxyWatchdogSection({
       accessorKey: 'rtt_min_ms',
       id: 'rtt_min_ms',
       header: 'RTT Min',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: ({ row }) => {
+        const val = row.original.rtt_min_ms
         return (
           <div className="font-mono">
             {val !== null && val !== undefined ? `${val.toFixed(1)} ms` : '—'}
@@ -194,8 +198,8 @@ export function ProxyWatchdogSection({
       accessorKey: 'tcp_rtt_ms',
       id: 'tcp_rtt_ms',
       header: 'TCP RTT',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: ({ row }) => {
+        const val = row.original.tcp_rtt_ms
         return (
           <div className="font-mono">
             {val !== null && val !== undefined ? `${val.toFixed(1)} ms` : '—'}
@@ -216,31 +220,17 @@ export function ProxyWatchdogSection({
       })
       const url = `/api/security/proxies/export?${params.toString()}`
 
-      const headers: Record<string, string> = {}
-      if (activeServiceId) {
-        headers['x-service-id'] = activeServiceId
-        headers['x-fastly-service-id'] = activeServiceId
-      }
-
-      const token = useAdminTokenStore.getState().token
-      if (token) {
-        headers['X-Admin-Token'] = token
-      }
-
-      const response = await fetch(url, { headers })
+      const response = await adminFetch(url, {
+        headers: activeServiceId ? { 'x-fastly-service-id': activeServiceId } : {},
+      })
       if (!response.ok) {
         throw new Error(`Export failed: ${response.statusText}`)
       }
 
-      const blob = await response.blob()
-      const blobUrl = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      window.URL.revokeObjectURL(blobUrl)
+      downloadBlob(
+        await response.blob(),
+        format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`,
+      )
     } catch (err) {
       console.error('Export error:', err)
     } finally {
@@ -308,14 +298,15 @@ export function ProxyWatchdogSection({
   return (
     <div className="space-y-6">
       {/* Top Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
           title="Active VPN & Proxy Users"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : activeProxiesCount.toLocaleString()}
+          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(activeProxiesCount)}
           sub="Unique suspicious IP addresses detected"
           icon={Globe}
           iconClassName="text-blue-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Active VPN & Proxy Users Detection"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
@@ -358,7 +349,7 @@ export function ProxyWatchdogSection({
                 className="text-2xl font-bold text-violet-600 dark:text-violet-400 hover:underline inline-flex items-center gap-1 group/link"
                 title="Open Tunnel Requests on Dashboard"
               >
-                {tunnelRequestsCount.toLocaleString()}
+                {formatCount(tunnelRequestsCount)}
                 <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity text-muted-foreground" />
               </a>
             )
@@ -367,6 +358,7 @@ export function ProxyWatchdogSection({
           icon={Activity}
           iconClassName="text-violet-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Tunnel Requests Volume"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
@@ -382,7 +374,7 @@ export function ProxyWatchdogSection({
               <div>
                 <h4 className="font-semibold text-foreground mb-1">Why this matters:</h4>
                 <p>
-                  Request volume is a key indicator of scraper velocity. An individual botnet using rotated proxy IPs might keep its "per-IP" rates extremely low to fly under the radar, but the aggregate "Tunnel Requests" volume will spike dramatically during active scanning.
+                  Request volume is a key indicator of scraper velocity. An individual botnet using rotated proxy IPs might keep its &quot;per-IP&quot; rates extremely low to fly under the radar, but the aggregate &quot;Tunnel Requests&quot; volume will spike dramatically during active scanning.
                 </p>
               </div>
             </div>
@@ -390,16 +382,17 @@ export function ProxyWatchdogSection({
         />
         <StatCard
           title="Impossible Distance Mismatches"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : distanceMismatchesCount.toLocaleString()}
+          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(distanceMismatchesCount)}
           sub="IP-to-latency geographical anomalies"
           icon={AlertTriangle}
           iconClassName="text-amber-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Impossible Distance Mismatch Auditing"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
               <p>
-                Geographical anomalies represent requests where the physical distance between the client's reported GeoIP location and the landing edge POP is physically incompatible with the recorded network latency.
+                Geographical anomalies represent requests where the physical distance between the client&apos;s reported GeoIP location and the landing edge POP is physically incompatible with the recorded network latency.
               </p>
               <div>
                 <h4 className="font-semibold text-foreground mb-1">The Physics Formula:</h4>
@@ -410,7 +403,7 @@ export function ProxyWatchdogSection({
                   distance_km &gt; (rtt_min_ms * 100.0 + 150.0)
                 </div>
                 <p>
-                  If a request landing in Tokyo with a 3ms RTT claims to be from Paris (distance &gt; 9,000 km), it breaks the speed of light. This proves the request's origin was masked.
+                  If a request landing in Tokyo with a 3ms RTT claims to be from Paris (distance &gt; 9,000 km), it breaks the speed of light. This proves the request&apos;s origin was masked.
                 </p>
               </div>
               <div>
@@ -427,7 +420,7 @@ export function ProxyWatchdogSection({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left column: Traffic Quality & Suspicious ISPs */}
         <div className="lg:col-span-1 space-y-6">
-          <Card>
+          <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -478,7 +471,7 @@ export function ProxyWatchdogSection({
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -529,12 +522,12 @@ export function ProxyWatchdogSection({
                         {hasAsn ? (
                           <a href={dashboardUrl} title={`Filter Dashboard by ${ispName}`}>
                             <Badge variant="outline" className="font-mono hover:bg-violet-50 dark:hover:bg-violet-950/30 hover:border-violet-300 dark:hover:border-violet-700 hover:text-violet-600 dark:hover:text-violet-400 cursor-pointer transition-colors">
-                              {Number(item.count || 0).toLocaleString()} reqs
+                              {formatCount(Number(item.count || 0))} reqs
                             </Badge>
                           </a>
                         ) : (
                           <Badge variant="outline" className="font-mono">
-                            {Number(item.count || 0).toLocaleString()} reqs
+                            {formatCount(Number(item.count || 0))} reqs
                           </Badge>
                         )}
                       </div>
@@ -549,7 +542,7 @@ export function ProxyWatchdogSection({
         {/* Right column: Export block & Active Clients */}
         <div className="lg:col-span-2 space-y-6">
           {/* Export block */}
-          <Card className="border-primary/20 bg-primary/5">
+          <Card className="border-primary/20 bg-primary/5 [contain-intrinsic-size:140px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -616,7 +609,7 @@ export function ProxyWatchdogSection({
           </Card>
 
           {/* Active Clients */}
-          <Card>
+          <Card className="min-h-[400px] [contain-intrinsic-size:600px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -674,7 +667,7 @@ export function ProxyWatchdogSection({
             <h4 className="font-semibold text-foreground mb-1">How it is determined:</h4>
             <ul className="list-disc pl-5 space-y-1">
               <li>
-                <strong className="text-foreground">Active Tunnel / Proxy:</strong> Triggered when a client's minimum edge latency is a tiny fraction (&lt;10%) of their actual TCP round-trip time. This means the client is terminating TCP nearby, but back-channeling through a proxy back-end.
+                <strong className="text-foreground">Active Tunnel / Proxy:</strong> Triggered when a client&apos;s minimum edge latency is a tiny fraction (&lt;10%) of their actual TCP round-trip time. This means the client is terminating TCP nearby, but back-channeling through a proxy back-end.
               </li>
               <li>
                 <strong className="text-foreground">WiFi / Mobile:</strong> Typical of standard commercial networks, showing standard Jitter, RTT ratios between 10% and 70%, and moderate packet overhead.
@@ -759,19 +752,19 @@ export function ProxyWatchdogSection({
             <h4 className="font-semibold text-foreground mb-1">Key Column Definitions:</h4>
             <ul className="list-disc pl-5 space-y-1">
               <li>
-                <strong className="text-foreground">IP Address:</strong> The client's IPv4/IPv6 edge address. Fully interactive (copy, filter, or open in the central query dashboard).
+                <strong className="text-foreground">IP Address:</strong> The client&apos;s IPv4/IPv6 edge address. Fully interactive (copy, filter, or open in the central query dashboard).
               </li>
               <li>
                 <strong className="text-foreground">Risk Level:</strong> Behavioral scoring threshold (High, Medium, Low) derived from distance anomalies, RTT ratios, and provider threat profiles.
               </li>
               <li>
-                <strong className="text-foreground">Distance:</strong> The physical distance (in km) between the edge landing POP and the client's registered geographic location.
+                <strong className="text-foreground">Distance:</strong> The physical distance (in km) between the edge landing POP and the client&apos;s registered geographic location.
               </li>
               <li>
                 <strong className="text-foreground">RTT Min:</strong> The minimum measured packet round-trip time between the client and the edge server.
               </li>
               <li>
-                <strong className="text-foreground">TCP RTT:</strong> The transport layer's established TCP round-trip. Anomalous differences between RTT Min and TCP RTT reveal tunnel boundaries.
+                <strong className="text-foreground">TCP RTT:</strong> The transport layer&apos;s established TCP round-trip. Anomalous differences between RTT Min and TCP RTT reveal tunnel boundaries.
               </li>
             </ul>
           </div>

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -32,6 +31,7 @@ from backend.core.duckdb import _clear_schema_cache
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
 from backend.repositories.origin import get_aggregates
+from tests._helpers.locks import noop_lock as _noop_lock
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
@@ -541,11 +541,6 @@ def test_parallel_gather_uses_return_exceptions_true():
 # (temp_table_create) is skipped and an ``origin:temp_skipped`` marker is
 # emitted. Partial-miss / filtered / <48h / split_by_leg / sub-minute keep the
 # temp path, byte-identical to pre-B behavior.
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
 
 
 def _rollup_base_table() -> str:

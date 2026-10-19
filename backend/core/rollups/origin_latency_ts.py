@@ -41,9 +41,9 @@ Eligibility: skip the service ENTIRELY when there is NO ttfb-latency column
 (no ``ottfb`` and no ``ttfb``) — there is nothing to roll up. When ``ottlb``
 is absent the ttlb_* columns are the constant 0 / NULL block.
 
-``lat`` expressions are replicated verbatim here rather than imported from
-``backend.repositories._base`` to avoid the import-graph cycle (rollups must
-NOT import ``repositories``; import-linter enforces this).
+``lat`` expressions come from :func:`backend.core.metric_expressions.origin_latency_us`
+(the canonical catalog — a ``backend.core`` leaf, so importing it does NOT
+create the rollups→repositories cycle that import-linter forbids).
 
 Output: ``rollups/hour_bundled/hour=H/origin_latency_ts.parquet``.
 
@@ -58,6 +58,7 @@ from __future__ import annotations
 import logging
 from typing import cast
 
+from .. import metric_expressions
 from ._common import (
     ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
     backfill_missing_bundles,
@@ -68,17 +69,11 @@ logger = logging.getLogger(__name__)
 
 
 def _ttfb_lat_expr(cols: set[str]) -> str | None:
-    """ttfb latency-us expression, matching origin_latency_us_expr in
-    ``backend.repositories._base`` (kept in sync rather than imported to dodge
-    the import cycle). Returns ``None`` when no ttfb-latency column exists.
+    """ttfb latency-us expression. Delegates to the canonical catalog
+    (:func:`backend.core.metric_expressions.origin_latency_us`); returns
+    ``None`` when no ttfb-latency column exists.
     """
-    if "ottfb" in cols and "ttfb" in cols:
-        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-    if "ottfb" in cols:
-        return '"ottfb"'
-    if "ttfb" in cols:
-        return '"ttfb" * 1000000.0'
-    return None
+    return metric_expressions.origin_latency_us(cols, absent=None)
 
 
 def build_origin_latency_ts_bundles(service_id: str, source: dict, hours: list[str]) -> int:

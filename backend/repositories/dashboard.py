@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -12,12 +13,14 @@ from typing import Any
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
     SectionTimer,
     _get_schema,
+    _rc_service_id,
     _safe_table,
     force_rebuild_view,
     get_source_extent,
@@ -39,6 +42,10 @@ from backend.repositories.utils.filters import build_where_clause
 # 500 entries × ~30MB = ~15GB worst case; in practice the working set is
 # much smaller, but the cap is a hard backstop.
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.log_throttle import log_once_per
+from backend.utils.sql_validator import escape_sql_literal
+
+logger = logging.getLogger(__name__)
 
 # Dashboard response cache disabled.
 #
@@ -179,6 +186,9 @@ def get_aggregates(
     include_conn_requests: bool | None = True,
     include_map_data: bool | None = True,
     include_top_n: bool | None = True,
+    _query_table: str | None = None,
+    _selected_aggregates: dict | None = None,
+    _dispatch_reason: str | None = None,
 ) -> dict:
     # Normalize tri-state (model passes None when the caller doesn't override).
     include_time_series = True if include_time_series is None else include_time_series
@@ -187,7 +197,7 @@ def get_aggregates(
     include_top_n = True if include_top_n is None else include_top_n
 
     source_name = src["name"]
-    table_name = _safe_table(source_name)
+    table_name = _query_table or _safe_table(source_name)
 
     lf_config = src.get("log_fields") or {}
     _custom_field_names = [
@@ -246,6 +256,8 @@ def get_aggregates(
     # bootstrap.py pattern. Negligible overhead (perf_counter is ~50ns).
     timer = SectionTimer()
     section_timings = timer.entries
+    if _dispatch_reason:
+        section_timings.append({"section": f"engine:{_dispatch_reason}", "time_ms": 0.0})
 
     runner = QueryRunner(con, src)
     interval = "1 minute"
@@ -317,10 +329,19 @@ def get_aggregates(
     # field_totals["url"] computed correctly via Q2, but results["url"]
     # ["total"] stuck at 0 because no rollup row arrived to trigger the
     # populate path. The temp-table fallback always populates totals.
-    from backend.core.duckdb import _cache_dir as _cache_dir_for_rollups
+    #
+    # The presence probe must match EVERY tier the reader can serve from
+    # (day_bundled / hour_bundled / day / hour), not just per-field hour.
+    # Day compaction deletes rollups/hour once a day closes, so probing
+    # only that tier reported "no rollups" for a fully-usable service and
+    # forced every unfiltered request onto the slow wide-temp base scan
+    # (prod 2026-10: 24h/30d /api/dashboard/bundle hung >120s → pool
+    # saturation → "Crunching logs..." timeout).
+    from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
+    from backend.core.rollups import rollups_present
 
-    rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
-    use_rollups = not filters and os.path.isdir(rollup_dir)
+    _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src))
+    use_rollups = not filters and rollups_present(src) and not _durable_blocked
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.
     #   - Fully-contained UTC days: served from the per-day compacted rollup.
@@ -347,7 +368,7 @@ def get_aggregates(
     # explode for virtual fields when the rollup is missing rows) can
     # query the base table directly even on the non-rollup path, where
     # the wide temp rewrites table_name/where_clause/params.
-    orig_table_name = _safe_table(source_name)
+    orig_table_name = table_name
     orig_where_clause = where_clause
     orig_params = list(params) if params is not None else []
 
@@ -358,7 +379,7 @@ def get_aggregates(
     # temp_table) the downstream queries read from, or None when the wide
     # temp build fails (the caller returns the empty shape).
     def _build_query_target() -> tuple[str, str, list, str | None] | None:
-        _table_name = _safe_table(source_name)
+        _table_name = orig_table_name
         _where = orig_where_clause
         _params = list(orig_params)
         if use_rollups:
@@ -388,6 +409,8 @@ def get_aggregates(
 
     built = _build_query_target()
     if built is None:
+        if _selected_aggregates is not None:
+            raise RuntimeError("Pinned DuckLake materialization failed")
         empty = {f: {"top": [], "total": 0} for f in fields}
         return {
             "data": empty,
@@ -454,11 +477,13 @@ def get_aggregates(
                         _where,
                         _params,
                         unfiltered_window=True,
+                        projected_fields=fields if include_top_n else None,
+                        actual_cols=actual_cols if include_top_n else None,
                     )
                     if rollup_count is not None:
                         return rollup_count
                 except Exception:
-                    pass
+                    logger.debug("_compute_count: step failed (ignored)", exc_info=True)
 
                 try:
                     return runner.execute(
@@ -509,6 +534,14 @@ def get_aggregates(
         else:
             total_rows = _compute_count(table_name, where_clause, params)
 
+        if _selected_aggregates is not None and (
+            sum(point["value"] for point in _selected_aggregates["time_series"]) != total_rows
+            or _selected_aggregates["country"]["total"] != field_totals.get("country")
+        ):
+            # Catch target loss between readiness and the aggregates using the
+            # DuckLake counts already needed for the unchanged response.
+            raise RuntimeError("Hybrid snapshot counts disagree")
+
         total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
         )
@@ -532,12 +565,16 @@ def get_aggregates(
         # stale temp table, re-materialize from the fresh view, and re-run
         # the count so the downstream per-field / time-series / map queries
         # below read live data.
-        if not _self_heal_attempted and should_self_heal_stale_view(
-            windowed_count=total_rows,
-            filters=filters,
-            latest_log_at=latest_log_at,
-            start_time=start_time,
-            end_time=end_time,
+        if (
+            _selected_aggregates is None
+            and not _self_heal_attempted
+            and should_self_heal_stale_view(
+                windowed_count=total_rows,
+                filters=filters,
+                latest_log_at=latest_log_at,
+                start_time=start_time,
+                end_time=end_time,
+            )
         ):
             _self_heal_attempted = True
             timer.call("view_self_heal_rebuild", lambda: force_rebuild_view(con, src))
@@ -547,7 +584,8 @@ def get_aggregates(
                 try:
                     con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
                 except Exception:
-                    pass
+                    if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                        logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
                 temp_table = None
             rebuilt = _build_query_target()
             if rebuilt is not None:
@@ -608,7 +646,9 @@ def get_aggregates(
         # they're the dominant rollup-path cost. The non-rollup path still
         # falls through to map_data via SQL.MAP_DATA_BY_COUNTRY.
         _need_topn_scan = include_top_n or (use_rollups and include_map_data and "country" in actual_cols)
-        if not _need_topn_scan:
+        if _selected_aggregates is not None:
+            results["country"] = _selected_aggregates["country"]
+        elif not _need_topn_scan:
             pass
         elif use_rollups:
             # Bump country's per-field limit to 500 so the map_data path
@@ -727,6 +767,18 @@ def get_aggregates(
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
                 return
+            if use_rollups:
+                rolled = runner.try_virtual_field_top_n_from_rollup(
+                    virtual_id,
+                    backing_col,
+                    start_time,
+                    end_time,
+                    has_filters=bool(filters),
+                    actual_cols=actual_cols,
+                )
+                if rolled is not None:
+                    results[virtual_id] = rolled
+                    return
             # Query the BASE table, not the temp: the temp's narrow
             # projection no longer carries waf_sig / edge_score_reason
             # (the virtual-field rollup serves them on the hot path).
@@ -797,7 +849,10 @@ def get_aggregates(
         t_ts_0 = time.perf_counter()
         time_series: list[dict] = []
         chart_metric_out = "requests"
-        if include_time_series and "timestamp" in actual_cols:
+        if _selected_aggregates is not None:
+            time_series = _selected_aggregates["time_series"]
+            interval = chart_interval
+        elif include_time_series and "timestamp" in actual_cols:
             interval = safe_interval(chart_interval, default=interval)
 
             sql_cache = "cache"
@@ -1013,7 +1068,8 @@ def get_aggregates(
             try:
                 con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # ── raw ───────────────────────────────────────────────────────────────────────
@@ -1107,7 +1163,7 @@ def get_field_values(
                         enrich_asn_labels(vals, src["name"])
                     return {"values": vals, "field": field, **runner.telemetry()}
         except Exception:
-            pass
+            logger.debug("get_field_values: step failed (ignored)", exc_info=True)
 
     # Verify table exists
     try:
@@ -1143,7 +1199,7 @@ def get_field_values(
         pattern = get_bot_regex_pattern(200)
         ua_filter = ""
         if pattern:
-            pattern_sql = pattern.replace("'", "''")
+            pattern_sql = escape_sql_literal(pattern)
             ua_filter = f"AND regexp_matches(ua, '{pattern_sql}')"
 
         # We query unique UAs to keep local bot-matching overhead manageable

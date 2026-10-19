@@ -25,8 +25,6 @@ export interface PerformanceSsrSeed {
 
 export function resolvePerformanceDefaultKey(
   now: Date = new Date(),
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
@@ -67,15 +65,12 @@ async function fetchPerformanceData(
  * then degrades to the client-fetch path (no partial seed).
  *
  * @param now         Render instant; floored to the anchor quantum. Injectable.
- * @param logExtents  bootstrap.log_extents for serviceId, if available. See
- *                    resolvePerformanceDefaultKey.
  */
 export async function fetchPerformanceServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-  logExtents?: unknown,
 ): Promise<PerformanceSsrSeed | null> {
-  const { rangeToken, anchor } = resolvePerformanceDefaultKey(now, logExtents)
+  const { rangeToken, anchor } = resolvePerformanceDefaultKey(now)
 
   if (!serviceId) return null
 

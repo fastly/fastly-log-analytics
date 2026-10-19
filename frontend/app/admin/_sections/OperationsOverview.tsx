@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react'
+import { formatCount } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import Link from 'next/link'
 import { Activity, Database, AlertTriangle } from 'lucide-react'
@@ -26,9 +27,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
-import { adminFetch } from '@/lib/api'
+import { adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
+import { queryKeys } from '@/lib/query-keys'
 
 const POLL_MS = 10_000
 
@@ -58,10 +60,14 @@ function useOpsOverviewSeed(): { seed: OpsOverviewSeed; seedServiceId: string | 
 
 export function OperationsOverview() {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div
+      className="grid grid-cols-1 md:grid-cols-4 gap-3 min-h-[108px] [contain-intrinsic-size:auto_108px]"
+      data-testid="admin-operations-overview"
+    >
       <LiveQueriesCard />
       <IngestHealthCard />
       <SlowQueriesTeaser />
+      <CeleryStatusCard />
     </div>
   )
 }
@@ -75,12 +81,10 @@ function LiveQueriesCard() {
   const seed = useOpsOverviewSeed().seed.queries_summary
   // Freshness via useAdminEventStream (mounted in SyncStatusBadge).
   // 5-min refetchInterval is a pure safety net.
-  const { data, isError } = useQuery<SummaryResponse>({
-    queryKey: ['admin', 'overview', 'queries-summary'],
+  const { data, isLoading, isFetching, isError } = useQuery<SummaryResponse>({
+    queryKey: queryKeys.admin.overviewQueriesSummary(),
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/queries/summary', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/queries/summary', '/api/admin/queries/summary', { signal })
     },
     initialData: seed,
     retry: false,
@@ -94,17 +98,20 @@ function LiveQueriesCard() {
       href="/admin/queries"
       icon={<Activity className="h-4 w-4" />}
       title="Live Queries"
-      primary={String(active)}
+      primary={isLoading && !data ? '—' : String(active)}
       primaryTone={active > 0 ? 'default' : 'muted'}
       secondary={
-        data?.by_db_type
-          ? Object.entries(data.by_db_type)
-              .filter(([, n]) => n > 0)
-              .map(([db, n]) => `${n} ${db}`)
-              .join(' · ') || 'idle'
-          : '—'
+        isLoading && !data
+          ? 'Inspecting background scheduler state...'
+          : data?.by_db_type
+            ? Object.entries(data.by_db_type)
+                .filter(([, n]) => n > 0)
+                .map(([db, n]) => `${n} ${db}`)
+                .join(' · ') || 'idle'
+            : '—'
       }
       isStale={isError && !!data}
+      isRefreshing={isFetching && !isLoading}
     />
   )
 }
@@ -123,12 +130,10 @@ function IngestHealthCard() {
   // changes). The gap is per-service, so the key MUST include the service id;
   // without it, switching services serves the previous service's cached gap.
   const seed = activeServiceId === seedServiceId ? opsSeed.log_accounting : undefined
-  const { data, isError } = useQuery<LogAccountingResponse>({
-    queryKey: ['admin', 'overview', 'log-accounting', activeServiceId],
+  const { data, isFetching, isLoading, isError } = useQuery<LogAccountingResponse>({
+    queryKey: queryKeys.admin.overviewLogAccounting(activeServiceId),
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/log-accounting?hours=24', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/log-accounting', '/api/admin/log-accounting?hours=24', { signal })
     },
     initialData: seed,
     enabled: !!activeServiceId,
@@ -173,7 +178,7 @@ function IngestHealthCard() {
   const secondary = isError
     ? 'unconfigured or credentials missing'
     : sustained
-      ? `sustained: ${sustained.n_buckets} bucket(s), ${sustained.total_lost_lines.toLocaleString()} lost`
+      ? `sustained: ${sustained.n_buckets} bucket(s), ${formatCount(sustained.total_lost_lines)} lost`
       : gapPct >= 0.02
         ? 'recent loss — check ingest accounting'
         : 'healthy · 24h'
@@ -192,6 +197,7 @@ function IngestHealthCard() {
       primaryTone={tone}
       secondary={secondary}
       isStale={isError && !!data}
+      isRefreshing={isFetching && !isLoading}
     />
   )
 }
@@ -205,8 +211,8 @@ function SlowQueriesTeaser() {
   // of size-bounded ("in last 2000-query window"), which is what an
   // operator actually wants; (2) survives restarts; (3) single indexed
   // COUNT(*) instead of shipping a 2000-row JSON payload.
-  // slow-queries/count is service-scoped (the backend 422s `service_id_required`
-  // without one). Gate it off on a fresh install so we don't spam 422s before
+  // slow-queries/count is service-scoped (the backend 400s `service_id_required`
+  // without one). Gate it off on a fresh install so we don't spam 400s before
   // any service — and any query exists — to count.
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { seed: opsSeed, seedServiceId } = useOpsOverviewSeed()
@@ -214,15 +220,14 @@ function SlowQueriesTeaser() {
   // id; gate the seed to the matching service to avoid flashing the previous
   // service's count on switch.
   const seed = activeServiceId === seedServiceId ? opsSeed.slow_queries_count : undefined
-  const { data, isError } = useQuery<{ count: number }>({
-    queryKey: ['admin', 'overview', 'slow-queries-count', activeServiceId],
+  const { data, isFetching, isLoading, isError } = useQuery<{ count: number }>({
+    queryKey: queryKeys.admin.overviewSlowQueriesCount(activeServiceId),
     queryFn: async ({ signal }) => {
-      const r = await adminFetch(
+      return adminJson(
+        '/api/admin/slow-queries/count',
         '/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000',
         { signal },
       )
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
     },
     initialData: seed,
     enabled: !!activeServiceId,
@@ -254,6 +259,7 @@ function SlowQueriesTeaser() {
       primaryTone={slowCount > 0 ? 'attention' : 'muted'}
       secondary={slowCount === 0 ? 'none ≥ 1s in last 24h' : '≥ 1s in last 24h'}
       isStale={isError && !!data}
+      isRefreshing={isFetching && !isLoading}
     />
   )
 }
@@ -270,6 +276,7 @@ function OverviewCard({
   primaryTone,
   secondary,
   isStale = false,
+  isRefreshing = false,
 }: {
   href: string
   icon: React.ReactNode
@@ -283,6 +290,7 @@ function OverviewCard({
    *  signal — the exact failure mode the post-2026-06-12 OperationsOverview
    *  was built to prevent. */
   isStale?: boolean
+  isRefreshing?: boolean
 }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   // Tone-driven classes for the primary metric. Keep these as literal
@@ -301,7 +309,11 @@ function OverviewCard({
             : 'text-foreground'
   return (
     <Link href={buildServiceHref(href, activeServiceId)} prefetch={false} className="block group">
-      <Card className="transition-colors group-hover:bg-muted/40 cursor-pointer">
+      <Card
+        className={`transition-all group-hover:bg-muted/40 cursor-pointer ${
+          isRefreshing ? 'opacity-40 pointer-events-none' : ''
+        }`}
+      >
         <CardContent className="p-4">
           <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
             <span className="flex items-center gap-1.5">
@@ -328,5 +340,53 @@ function OverviewCard({
         </CardContent>
       </Card>
     </Link>
+  )
+}
+
+
+// ── Card 4: Celery Status ───────────────────────────────────────────
+
+function CeleryStatusCard() {
+  const { data, isFetching, isLoading, isError } = useQuery({
+    queryKey: queryKeys.admin.overviewCeleryStatus(),
+    queryFn: async ({ signal }) => {
+      return adminJson<'/api/admin/celery/status'>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
+    },
+    retry: false,
+    staleTime: POLL_MS,
+    refetchInterval: POLL_MS,
+  })
+
+  const workers = data?.workers?.count ?? 0
+  const ingestQ = data?.queues?.['q.ingest'] ?? 0
+  const controlQ = data?.queues?.['q.control'] ?? 0
+  const deadLetters = data?.ledger?.dead_letter ?? 0
+  const quarantined = data?.ledger?.quarantined ?? 0
+
+  let primaryText = `${workers} workers`
+  let primaryTone: CardTone = workers > 0 ? 'default' : 'warning'
+  let secondaryText = `ingest: ${ingestQ} · control: ${controlQ}`
+
+  if (deadLetters > 0) {
+    primaryText = `${deadLetters} dead letters`
+    primaryTone = 'critical'
+    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+  } else if (quarantined > 0) {
+    primaryText = `${quarantined} quarantined`
+    primaryTone = 'attention'
+    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+  }
+
+  return (
+    <OverviewCard
+      href="/admin/queue"
+      icon={<Activity className="h-4 w-4" />}
+      title="Workers & Queues"
+      primary={primaryText}
+      primaryTone={primaryTone}
+      secondary={secondaryText}
+      isStale={isError && !!data}
+      isRefreshing={isFetching && !isLoading}
+    />
   )
 }

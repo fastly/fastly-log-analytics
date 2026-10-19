@@ -50,8 +50,8 @@
 #                   (defaults to <repo_root>/configs)
 #
 # Examples:
-#   scripts/pin-rum-faro-version.sh MviCL9Pd5vxBKYSxXEhQR1
-#   scripts/pin-rum-faro-version.sh MviCL9Pd5vxBKYSxXEhQR1 1.19.0
+#   scripts/pin-rum-faro-version.sh <service-id>
+#   scripts/pin-rum-faro-version.sh <service-id> 1.19.0
 #
 # Notes:
 #   This only pins the configuration. To trigger the download and upload

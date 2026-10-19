@@ -98,7 +98,7 @@ describe('mergePersistedConfig', () => {
       fos_access_key: 'LEAK',
       fos_secret_key: 'LEAK',
       cdn_secret: 'LEAK',
-    } as never
+    }
     const merged = mergePersistedConfig(dirty)
     expect(merged.fos_access_key).toBe('')
     expect(merged.fos_secret_key).toBe('')

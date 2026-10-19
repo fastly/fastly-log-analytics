@@ -1,9 +1,13 @@
 'use client'
 import React, { useState } from 'react'
+import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { components } from '@/types/api.generated'
+
+type BotSourceList = components['schemas']['BotSourcesResponse']
 import { SSEModal } from '@/components/SSEModal/SSEModal'
 import {
   Dialog,
@@ -37,8 +41,8 @@ function RebuildLocalViewButton() {
       const { error: apiError } = await client.POST('/api/admin/rebuild-local-view', {})
       if (apiError) throw new Error(extractApiError(apiError))
       setConfirmOpen(false)
-    } catch (e: any) {
-      setError(e?.message ?? 'rebuild failed')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'rebuild failed')
     } finally {
       setBusy(false)
     }
@@ -76,13 +80,7 @@ function RebuildLocalViewButton() {
 
 function fmtRelative(iso: string | null | undefined): string {
   if (!iso) return '—'
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 2) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  return formatElapsed(Math.floor((Date.now() - new Date(iso).getTime()) / 1000), ELAPSED_RELATIVE_AGO_JUST_NOW)
 }
 
 export function BotSourcesPanel() {
@@ -93,7 +91,7 @@ export function BotSourcesPanel() {
     queryKey: ['bot-sources'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/bot-sources", { signal })
-      return data as any
+      return data as BotSourceList
     },
     staleTime: 60_000,
   })
@@ -136,7 +134,7 @@ export function BotSourcesPanel() {
             </tr>
           </thead>
           <tbody>
-            {(botSourcesData?.sources ?? []).map((src: any) => (
+            {(botSourcesData?.sources ?? []).map((src: components['schemas']['BotSourceMeta']) => (
               <tr key={src.id} className="border-t">
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-1.5">
@@ -152,7 +150,7 @@ export function BotSourcesPanel() {
                   )}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {src.entry_count?.toLocaleString() ?? '—'}
+                  {src.entry_count != null ? formatCount(src.entry_count) : '—'}
                 </td>
                 <td className="px-3 py-2 text-right text-muted-foreground">
                   {fmtRelative(src.last_updated)}
@@ -181,10 +179,10 @@ export function BotSourcesPanel() {
         <div className="flex items-center gap-4 text-muted-foreground text-xs">
           <span className="flex items-center gap-1.5">
             <Wifi className="h-3.5 w-3.5" />
-            rDNS cache: <strong className="text-foreground">{botSourcesData?.rdns.total.toLocaleString() ?? '—'}</strong> IPs
+            rDNS cache: <strong className="text-foreground">{botSourcesData?.rdns.total != null ? formatCount(botSourcesData.rdns.total) : '—'}</strong> IPs
           </span>
           <span>
-            Pending: <strong className="text-foreground">{botSourcesData?.rdns.pending.toLocaleString() ?? '—'}</strong>
+            Pending: <strong className="text-foreground">{botSourcesData?.rdns.pending != null ? formatCount(botSourcesData.rdns.pending) : '—'}</strong>
           </span>
           <span>Last enrichment: {fmtRelative(botSourcesData?.rdns.last_enrichment_at ?? null)}</span>
         </div>

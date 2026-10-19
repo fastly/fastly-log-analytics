@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import type { components } from '@/types/api.generated'
 import {
   RefreshCw,
   ChevronDown,
@@ -25,6 +26,7 @@ import {
 // dropdown column picker above already covers hide/show.
 import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
 import { ColumnDef } from '@tanstack/react-table'
+import { queryKeys } from '@/lib/query-keys'
 
 export function ServiceHistoryTab({
   auditColumns,
@@ -35,8 +37,8 @@ export function ServiceHistoryTab({
   setEventFilter,
   activeServiceId,
 }: {
-  auditColumns: ColumnDef<any>[]
-  auditLogs: any
+  auditColumns: ColumnDef<components['schemas']['AuditLogEntry']>[]
+  auditLogs: components['schemas']['AuditLogsResponse'] | undefined
   isLoadingAudit: boolean
   isFetchingAudit: boolean
   eventFilter: string
@@ -84,8 +86,8 @@ export function ServiceHistoryTab({
                 <DropdownMenuContent align="end" className="w-auto min-w-[200px]">
                   {table
                     .getAllColumns()
-                    .filter((column: any) => column.getCanHide())
-                    .map((column: any) => {
+                    .filter((column) => column.getCanHide())
+                    .map((column) => {
                       return (
                         <DropdownMenuCheckboxItem
                           key={column.id}
@@ -104,7 +106,7 @@ export function ServiceHistoryTab({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs', activeServiceId] })}
+                onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(activeServiceId) })}
                 disabled={isFetchingAudit}
                 className="h-8 text-xs"
               >

@@ -30,10 +30,10 @@ export const BASELINE_OPTIONS = [
   { label: 'Last 30 Days', value: '720' },
 ]
 
-// The historical default (also the backend default): recent 1h vs previous 7d.
+// The historical default (also the backend default): recent 24h vs previous 7d.
 // Used whenever we have no extents to adapt to, so behavior is unchanged for
 // services with no data and on the server/first render.
-export const STATIC_DEFAULT = { window: '1', baseline: '168' } as const
+export const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
 // Hours of history available = now − earliest_log_at. The baseline period the
 // Insights query compares against reaches back (now − baseline − window), so
@@ -69,6 +69,5 @@ export function pickInsightsDefault(
   if (h < 24) return { window: '4', baseline: '1' } //  ~4–24h: last 4h vs previous hour
   if (h < 48) return { window: '4', baseline: '24' } // ~1–2d: last 4h vs previous day
   if (h < 168) return { window: '24', baseline: '24' } // ~2–7d: day over day
-  if (h < 720) return { window: '1', baseline: '168' } // ≥7d: today's static default (1h vs 7d)
-  return { window: '1', baseline: '720' } //                   ≥30d: 1h vs 30d
+  return { window: '24', baseline: '168' } //              ≥7d: prior 7 day period (24h vs 7d)
 }

@@ -27,7 +27,7 @@ export interface Attribution {
 
 export interface ActiveRow {
   query_id: number
-  db_type: 'DuckDB' | 'SQLite'
+  db_type: 'DuckDB' | 'Postgres' | 'SQLite'
   sql_preview: string
   sql: string | null
   sql_len: number
@@ -69,15 +69,23 @@ export type _ActiveRowParity = Expect<WireParity<ActiveRow, components['schemas'
 export type _CompletedRowParity = Expect<WireParity<CompletedRow, components['schemas']['CompletedQueryRow']>>
 export type _SnapshotParity = Expect<WireParity<SnapshotResponse, components['schemas']['SnapshotResponse']>>
 
+export interface SlowQueriesResult {
+  rows: CompletedRow[]
+  since_hours: number
+  threshold_ms: number
+}
+
+export type _SlowQueriesParity = Expect<WireParity<SlowQueriesResult, components['schemas']['SlowQueriesResponse']>>
+
 export interface MonitorConfig {
   enabled: boolean
 }
 
 export type ViewMode = 'all' | 'live' | 'past'
 
-/** DB-engine filter. ``'all'`` shows both; the other two narrow to a single
+/** DB-engine filter. ``'all'`` shows both; the other options narrow to a single
  *  engine and apply page-wide (Active + Slow + Recently Completed). */
-export type DbFilter = 'all' | 'DuckDB' | 'SQLite'
+export type DbFilter = 'all' | 'DuckDB' | 'Postgres' | 'SQLite'
 
 /** Active row plus an optional `_completed` field for rows promoted from
  *  the just-finished window. The table component renders these as faded

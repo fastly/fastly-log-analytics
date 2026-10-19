@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import React from 'react'
 
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
@@ -55,7 +55,7 @@ const status = {
       last_active_time: '2026-06-05T10:00:00Z',
     },
   ],
-} as unknown as ShareStatus
+} as ShareStatus
 
 // Data rows only (drop the header row).
 const bodyRows = () => screen.getAllByRole('row').slice(1)
@@ -89,4 +89,41 @@ test('clicking a column header re-sorts the rows', async () => {
   // Click again -> asc -> Alice before Bob.
   await user.click(screen.getByRole('button', { name: 'Name' }))
   expect(bodyRows()[0]).toHaveTextContent('Alice')
+})
+
+const stubClipboard = (writeText: () => Promise<void>) =>
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+const hasCheck = (btn: HTMLElement) => btn.querySelector('svg.lucide-check') !== null
+
+afterEach(() => vi.useRealTimers())
+
+test('share-card copy flips the icon for the copied row only, then resets', async () => {
+  vi.useFakeTimers()
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  stubClipboard(writeText)
+  render(<InvitationsPanel status={status} onRefresh={vi.fn()} onError={vi.fn()} />)
+  const [alice, bob] = screen.getAllByTitle('Copy share card')
+
+  await act(async () => {
+    fireEvent.click(alice)
+  })
+  expect(writeText).toHaveBeenCalledTimes(1)
+  expect(hasCheck(alice)).toBe(true)
+  expect(hasCheck(bob)).toBe(false)
+
+  await act(async () => {
+    vi.advanceTimersByTime(1500)
+  })
+  expect(hasCheck(alice)).toBe(false)
+})
+
+test('share-card copy does not show success when the clipboard write is rejected', async () => {
+  const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+  stubClipboard(writeText)
+  render(<InvitationsPanel status={status} onRefresh={vi.fn()} onError={vi.fn()} />)
+  const [alice] = screen.getAllByTitle('Copy share card')
+  await act(async () => {
+    fireEvent.click(alice)
+  })
+  expect(hasCheck(alice)).toBe(false)
 })

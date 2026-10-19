@@ -5,7 +5,7 @@
  * 127.0.0.1, which the backend classifies as admin/loopback, so /share-login
  * redirects to /dashboard and never renders the analyst SSO UI (the same
  * limitation that defers the passcode happy-path browser test — see
- * analyst-share-login.spec.ts). The SSO UI itself is covered by vitest
+ * zz-analyst-share-login-lockout.spec.ts). The SSO UI itself is covered by vitest
  * (ShareLoginForm.oauth.test.tsx).
  *
  * What we CAN — and do — assert here is the FULL handshake through the real

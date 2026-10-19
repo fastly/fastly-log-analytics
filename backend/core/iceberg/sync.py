@@ -20,14 +20,18 @@ import logging
 import os
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import datetime
+
+from backend.utils.date_utils import ensure_utc
 
 logger = logging.getLogger("backend.core.iceberg._core")
+_retry_sleep = time.sleep
 
 # Library imports the carved function references.
 
 # Late-bind helpers from the main _core module.
 from backend.core.iceberg import _core as _core_mod
+from backend.core.retry import retry_call
 
 
 def __getattr__(name: str):
@@ -152,7 +156,7 @@ def sync_data(
             source.get("service_id") or source.get("name") or ""
         )
     except Exception:
-        pass
+        logger.debug("sync_data: _meta.get_locally_compacted_basenames failed (ignored)", exc_info=True)
 
     if not start_time and not end_time and cached_snapshot and cached_snapshot[0] == table.metadata_location:
         try:
@@ -221,10 +225,7 @@ def sync_data(
 
             # Helper to normalize ISO strings to datetime for comparison
             def _parse_ts(ts_str: str) -> datetime:
-                dt = dateutil.parser.isoparse(ts_str)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-                return dt
+                return ensure_utc(dateutil.parser.isoparse(ts_str))
 
             st_dt = _parse_ts(start_time) if start_time else None
             et_dt = _parse_ts(end_time) if end_time else None
@@ -240,10 +241,12 @@ def sync_data(
 
             if start_time:
                 # start_time truthy ⇒ st_dt was set above; narrow for mypy.
-                assert st_dt is not None
+                if st_dt is None:
+                    raise RuntimeError("st_dt is unexpectedly None")
                 scan = scan.filter(gte("timestamp", st_dt.isoformat()))
             if end_time:
-                assert et_dt is not None
+                if et_dt is None:
+                    raise RuntimeError("et_dt is unexpectedly None")
                 scan = scan.filter(lte("timestamp", et_dt.isoformat()))
 
             for f in scan.plan_files():
@@ -361,29 +364,35 @@ def sync_data(
                 # usage_log row's elapsed reflects actual CDN service time,
                 # not the cumulative cost of retries.
                 cdn_elapsed_ms = 0.0
-                for attempt in range(3):
-                    try:
-                        t0 = time.time()
-                        # Go through ``_cdn_open`` (module-level indirection) so
-                        # tests can mock the network seam without poking into the
-                        # SSRF-hardened opener's internals.
-                        with _cdn_open(cdn_opener, req, 30) as response, open(tmp_path, "wb") as out_file:
-                            cdn_headers = response.headers
-                            shutil.copyfileobj(response, out_file)
-                        cdn_elapsed_ms = round((time.time() - t0) * 1000, 2)
-                        success = True
-                        break
-                    except urllib.error.HTTPError as e:
-                        last_err = e
-                        if e.code in (401, 403):
-                            # Don't retry on auth errors
-                            break
-                        if attempt < 2:
-                            time.sleep(1)
-                    except Exception as e:
-                        last_err = e
-                        if attempt < 2:
-                            time.sleep(1)
+
+                def _is_retryable_cdn_error(exc: BaseException) -> bool:
+                    # Auth failures won't recover on retry; everything else
+                    # (timeouts, resets, 5xx) is worth another attempt.
+                    return not (isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403))
+
+                def _download_once() -> None:
+                    nonlocal cdn_headers, cdn_elapsed_ms
+                    t0 = time.time()
+                    # Go through ``_cdn_open`` (module-level indirection) so
+                    # tests can mock the network seam without poking into the
+                    # SSRF-hardened opener's internals.
+                    with _cdn_open(cdn_opener, req, 30) as response, open(tmp_path, "wb") as out_file:
+                        cdn_headers = response.headers
+                        shutil.copyfileobj(response, out_file)
+                    cdn_elapsed_ms = round((time.time() - t0) * 1000, 2)
+
+                try:
+                    retry_call(
+                        _download_once,
+                        retry_on=_is_retryable_cdn_error,
+                        attempts=3,
+                        base_delay=1.0,
+                        multiplier=1.0,
+                        sleep=_retry_sleep,
+                    )
+                    success = True
+                except Exception as e:
+                    last_err = e
 
                 if not success:
                     raise RuntimeError(
@@ -408,7 +417,7 @@ def sync_data(
                         caller="sync_data_files",
                     )
                 except Exception:
-                    pass
+                    logger.debug("_download_file: record_cdn_call failed (ignored)", exc_info=True)
 
             with download_lock:
                 downloaded += 1
@@ -424,7 +433,7 @@ def sync_data(
                 try:
                     os.remove(tmp_path)
                 except Exception:
-                    pass
+                    logger.debug("_download_file: os.remove failed (ignored)", exc_info=True)
             raise e
 
     # Skip files whose basename is in the local-compacted registry: they
@@ -487,75 +496,85 @@ def sync_data(
     # a heavy sync — the catalog reload + manifest scan piles more reads onto
     # an already-busy bucket. We retry rate-limit errors only (with backoff);
     # other failures bubble straight to the warning so they stay visible.
-    import time as _time
-
     _MAX_RETRIES = 3
 
-    def _is_rate_limited(err: Exception) -> bool:
+    def _is_rate_limited(err: BaseException) -> bool:
         msg = str(err).lower()
         return any(
             tok in msg for tok in ("reduce your request rate", "errno 16", "slowdown", "throttl", "too many requests")
         )
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            source_key = source.get("name", "default")
-            with _core_mod._get_service_lock(source_key):
-                # Fast path: if commit_buffer's snapshot-delta update kept
-                # _core_mod._snapshot_files_cache aligned with the table we loaded in
-                # Phase 1, we can skip the catalog reload + full plan_files()
-                # scan entirely. Just flip any s3:// entries to local paths
-                # for files we just downloaded.
-                cached = _core_mod._snapshot_files_cache.get(cache_key)
-                if cached and cached[0] == table.metadata_location:
-                    _core_mod._reconcile_snapshot_cache_after_sync(source, table_name=table_name)
-                    _core_mod._view_cache.pop(cache_key, None)
-                    break
+    def _update_cache() -> None:
+        nonlocal table
+        source_key = source.get("name", "default")
+        with _core_mod._get_service_lock(source_key):
+            # Fast path: if commit_buffer's snapshot-delta update kept
+            # _core_mod._snapshot_files_cache aligned with the table we loaded in
+            # Phase 1, we can skip the catalog reload + full plan_files()
+            # scan entirely. Just flip any s3:// entries to local paths
+            # for files we just downloaded.
+            cached = _core_mod._snapshot_files_cache.get(cache_key)
+            if cached and cached[0] == table.metadata_location:
+                _core_mod._reconcile_snapshot_cache_after_sync(source, table_name=table_name)
+                _core_mod._view_cache.pop(cache_key, None)
+                return
 
-                # Slow path: cache miss/stale — re-resolve via catalog scan.
-                catalog = _core_mod._get_catalog(source)
-                table = _core_mod._load_table_cached(
-                    source, _core_mod._table_identifier(source, table_name=table_name), catalog
-                )
-                snap = table.current_snapshot()
-                snapshot_id = snap.snapshot_id if snap else None
+            # Slow path: cache miss/stale — re-resolve via catalog scan.
+            catalog = _core_mod._get_catalog(source)
+            table = _core_mod._load_table_cached(
+                source, _core_mod._table_identifier(source, table_name=table_name), catalog
+            )
+            snap = table.current_snapshot()
+            snapshot_id = snap.snapshot_id if snap else None
 
-                from backend.core.duckdb import _cache_dir
+            from backend.core.duckdb import _cache_dir
 
-                sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
-                data_dir = os.path.join(_cache_dir(source), sub_dir)
+            sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
+            data_dir = os.path.join(_cache_dir(source), sub_dir)
 
-                resolved_files = []
-                for f in table.scan().plan_files():
-                    uri = f.file.file_path
-                    resolved = _core_mod._cloud_uri_to_local_path(uri, data_dir)
-                    if resolved is None:
-                        continue
-                    local_path = resolved
-                    if os.path.exists(local_path):
-                        resolved_files.append(local_path)
-                    else:
-                        resolved_files.append(uri)
+            resolved_files = []
+            for f in table.scan().plan_files():
+                uri = f.file.file_path
+                resolved = _core_mod._cloud_uri_to_local_path(uri, data_dir)
+                if resolved is None:
+                    continue
+                local_path = resolved
+                if os.path.exists(local_path):
+                    resolved_files.append(local_path)
+                else:
+                    resolved_files.append(uri)
 
-                _core_mod._snapshot_files_cache[cache_key] = (
-                    table.metadata_location,
-                    snapshot_id,
-                    table.location(),
-                    resolved_files,
-                )
-                _core_mod._save_persistent_cache(source)
+            _core_mod._snapshot_files_cache[cache_key] = (
+                table.metadata_location,
+                snapshot_id,
+                table.location(),
+                resolved_files,
+            )
+            _core_mod._save_persistent_cache(source)
 
-                # Invalidate the view SQL cache so it generates a new union with local paths
-                _core_mod._view_cache.pop(source_key, None)
-            break  # success
-        except Exception as e:
-            if _is_rate_limited(e) and attempt < _MAX_RETRIES - 1:
-                backoff_s = 0.5 * (2**attempt)  # 0.5s, 1s, 2s
-                logger.info("[iceberg] FOS rate-limited during cache update, retrying in %.1fs", backoff_s)
-                _time.sleep(backoff_s)
-                continue
-            logger.warning("[iceberg] Failed to update cache after sync: %s", e)
-            break
+            # Invalidate the view SQL cache so it generates a new union with local paths
+            _core_mod._view_cache.pop(source_key, None)
+
+    retries_logged = 0
+
+    def _log_rate_limited(_exc: BaseException) -> None:
+        nonlocal retries_logged
+        backoff_s = 0.5 * (2**retries_logged)  # 0.5s, 1s, 2s
+        retries_logged += 1
+        logger.info("[iceberg] FOS rate-limited during cache update, retrying in %.1fs", backoff_s)
+
+    try:
+        retry_call(
+            _update_cache,
+            retry_on=_is_rate_limited,
+            attempts=_MAX_RETRIES,
+            base_delay=0.5,
+            multiplier=2.0,
+            before_retry=_log_rate_limited,
+            sleep=_retry_sleep,
+        )
+    except Exception as e:
+        logger.warning("[iceberg] Failed to update cache after sync: %s", e)
 
     return {
         "files_downloaded": downloaded,

@@ -1,5 +1,6 @@
 'use client'
 
+import { useDerivedState } from '@/hooks/useDerivedState'
 import React, { useState, useEffect } from 'react'
 import {
   Dialog,
@@ -26,9 +27,8 @@ import {
   panelDialogFooter,
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
-import type { components } from '@/types/api.generated'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface TeardownDialogProps {
   service: ServiceConfig | null
@@ -43,7 +43,8 @@ function isAnalyst(service: ServiceConfig | null) {
 
 export function TeardownDialog({ service, open, onOpenChange, onComplete }: TeardownDialogProps) {
   const [removeLogging, setRemoveLogging] = useState(true)
-  const [removeRum, setRemoveRum] = useState(false)
+  // Follows the service's RUM flag until the operator toggles it.
+  const [removeRum, setRemoveRum] = useDerivedState(service?.rum_enabled || false)
   const [removeBucket, setRemoveBucket] = useState(true)
   const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeCache, setRemoveCache] = useState(true)
@@ -56,13 +57,6 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   const [apiToken, setApiToken] = useState('')
 
   const { lines, status, error: sseError, start, stop, reset } = useSSE()
-
-  // Initialize and keep removeRum in sync when service loaded
-  useEffect(() => {
-    if (service) {
-      setRemoveRum(service.rum_enabled || false)
-    }
-  }, [service])
 
   // Reset state when dialog closes
   useEffect(() => {

@@ -46,18 +46,17 @@ def _normalize_params(text: str) -> str:
 
 
 def _changelog_breaking_section() -> str:
-    """Return the text of the most-recent ``### Breaking`` section — from the
-    first ``### Breaking`` heading to the next top-level ``## `` version
-    heading (or EOF)."""
+    """Return all ``### Breaking`` sections across the changelog."""
     with open(_CHANGELOG_PATH) as f:
         text = f.read()
-    start = text.find("### Breaking")
-    if start == -1:
-        return ""
-    rest = text[start:]
-    # Stop at the next version heading (lines beginning with "## ").
-    end = re.search(r"^## ", rest[len("### Breaking") :], flags=re.MULTILINE)
-    return rest if end is None else rest[: len("### Breaking") + end.start()]
+    headings = list(re.finditer(r"^### Breaking\s*$", text, flags=re.MULTILINE))
+    sections = []
+    for heading in headings:
+        section_start = heading.end()
+        next_version = re.search(r"^## ", text[section_start:], flags=re.MULTILINE)
+        section_end = section_start + next_version.start() if next_version else len(text)
+        sections.append(text[section_start:section_end])
+    return "\n".join(sections)
 
 
 def test_removed_paths_are_noted_in_changelog():

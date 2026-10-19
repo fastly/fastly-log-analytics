@@ -24,7 +24,8 @@ import {
 import { client, extractApiError } from '@/lib/api'
 
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { formatStamp, type AuditLog, type ShareStatus } from './utils'
+import { type AuditLog, type ShareStatus } from './utils'
+import { formatDeterministicUTC } from '@/lib/date'
 
 const EVENT_TYPE_FILTER_OPTIONS = [
   'ALL',
@@ -79,30 +80,34 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
   const [filteredLogs, setFilteredLogs] = React.useState<AuditLog[] | null>(null)
   const [loading, setLoading] = React.useState(false)
 
+  // The email filter follows the upstream `initialEmailFilter` (adjusted during render when it
+  // changes); the fetch for a provided filter runs in the effect below.
+  const [seenInitialEmail, setSeenInitialEmail] = React.useState(initialEmailFilter)
+  if (initialEmailFilter !== seenInitialEmail) {
+    setSeenInitialEmail(initialEmailFilter)
+    setFilters((f) => ({ ...f, email: initialEmailFilter || '' }))
+    if (!initialEmailFilter) setFilteredLogs(null)
+  }
+
   React.useEffect(() => {
-    if (initialEmailFilter) {
-      setFilters((f) => ({ ...f, email: initialEmailFilter }))
-      const autoApply = async () => {
-        setLoading(true)
-        onError('')
-        try {
-          const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
-          const { data, response } = await client.GET('/api/admin/share/audit-logs' as any, {
-            params: { query: params },
-          } as any)
-          if (!response.ok) throw new Error(`status ${response.status}`)
-          setFilteredLogs((data as any).audit_logs || [])
-        } catch (e: any) {
-          onError(extractApiError(e))
-        } finally {
-          setLoading(false)
-        }
+    if (!initialEmailFilter) return
+    const autoApply = async () => {
+      setLoading(true)
+      onError('')
+      try {
+        const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
+        const { data, response } = await client.GET('/api/admin/share/audit-logs', {
+          params: { query: params },
+        })
+        if (!response.ok) throw new Error(`status ${response.status}`)
+        setFilteredLogs(data?.audit_logs || [])
+      } catch (e) {
+        onError(extractApiError(e))
+      } finally {
+        setLoading(false)
       }
-      autoApply()
-    } else {
-      setFilters((f) => ({ ...f, email: '' }))
-      setFilteredLogs(null)
     }
+    autoApply()
   }, [initialEmailFilter, onError])
 
   const applyFilters = async () => {
@@ -116,12 +121,12 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       if (filters.email) params.email = filters.email
       if (filters.since) params.since = filters.since
       if (filters.until) params.until = filters.until
-      const { data, response } = await client.GET('/api/admin/share/audit-logs' as any, {
+      const { data, response } = await client.GET('/api/admin/share/audit-logs', {
         params: { query: params },
-      } as any)
+      })
       if (!response.ok) throw new Error(`status ${response.status}`)
-      setFilteredLogs((data as any).audit_logs || [])
-    } catch (e: any) {
+      setFilteredLogs(data?.audit_logs || [])
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setLoading(false)
@@ -232,7 +237,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             {sorted.map((row: AuditLog, i: number) => (
               <TableRow key={`${row.id || i}`}>
                 <TableCell className="text-muted-foreground align-top whitespace-nowrap">
-                  {formatStamp(row.timestamp)}
+                  {formatDeterministicUTC(row.timestamp)}
                 </TableCell>
                 <TableCell className="align-top">
                   <Badge variant="outline" className="text-[10px]">

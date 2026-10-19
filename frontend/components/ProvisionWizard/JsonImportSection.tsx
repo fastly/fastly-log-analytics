@@ -26,8 +26,8 @@ export function JsonImportSection({ onImport }: JsonImportSectionProps) {
       setOpen(false);
       setRaw("");
       setTimeout(() => setImported(false), 3000);
-    } catch (e: any) {
-      setParseError(e.message || "Invalid JSON");
+    } catch (e) {
+      setParseError(e instanceof Error && e.message ? e.message : "Invalid JSON");
     }
   };
 

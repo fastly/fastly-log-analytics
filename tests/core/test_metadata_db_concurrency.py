@@ -1,28 +1,20 @@
 """Concurrency tests for backend.core.metadata_db.
 
-The per-service SQLite layer holds the connection pool keyed by
-``(thread, service_id)`` and runs in WAL + ``synchronous=NORMAL`` mode.
-That should let multiple threads ingest into the same service file without
-``database is locked`` errors and without losing rows.
+The shared Postgres metadata store holds one pooled connection per thread
+(:mod:`backend.core.metadata.pg_connection`, ``autocommit=True``), tagged per
+``service_id`` on each ``get_con`` call. Multiple threads must be able to
+ingest into the same service concurrently without losing rows or
+deadlocking.
 
-If a future change drops WAL or introduces a long-held writer lock, these
-tests will surface the regression before it costs anyone a production sync.
+If a future change breaks that concurrency model, these tests will surface
+the regression before it costs anyone a production sync.
 """
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 from backend.core import metadata as metadata_db
-
-
-def test_wal_is_enabled_after_get_con():
-    """Loss of WAL would re-introduce writer-vs-reader contention. Pin it."""
-    sid = "svc-wal-pragma"
-    con = metadata_db.get_con(sid)
-    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal", f"expected WAL journal mode, got {mode!r}"
 
 
 def test_concurrent_inserts_no_lock_no_loss():
@@ -87,33 +79,33 @@ def test_concurrent_inserts_with_overlap_dedup_via_upsert():
 
 
 def test_teardown_then_get_con_recreates_schema():
-    """teardown() removes the .db file (and WAL/SHM/journal). The very next
-    ``get_con`` from any thread must lazily re-create the file with the
-    full schema — no leftover state, no missing-table errors on first
-    insert.
+    """``teardown()`` used to remove the per-service SQLite file (and
+    WAL/SHM/journal); the next ``get_con`` would lazily re-create it, and
+    the pre-teardown row was gone.
+
+    Under the shared Postgres metadata store there is no per-service file to
+    delete — every service's rows live in the SAME tables — so
+    ``teardown()`` is a no-op there (see its docstring in
+    ``backend/core/metadata/base.py``, and this task's report for why a new
+    destructive row-deletion semantic was NOT invented here without an
+    explicit product decision to do so). Pin the CURRENT contract instead:
+    ``teardown()`` doesn't raise, doesn't delete this service's rows, and
+    ``get_con``/inserts keep working normally afterwards.
     """
     sid = "svc-teardown-recreate"
 
-    # Seed something so the file definitely exists pre-teardown
     metadata_db.insert_ingested_files(sid, [("seed.gz", 1, 100)])
-    db_path = metadata_db.db_path(sid)
-    assert os.path.exists(db_path)
 
-    metadata_db.teardown(sid)
-    # All variants of the SQLite file must be gone
-    for suffix in ("", "-wal", "-shm", "-journal"):
-        assert not os.path.exists(db_path + suffix), f"{db_path + suffix} still exists after teardown"
+    metadata_db.teardown(sid)  # must not raise
 
-    # Reopening must succeed (no errors) and the schema must be back —
-    # i.e. the next insert hits a fully-formed ingested_files table, not
-    # a "no such table" error from a stale path-initialised cache entry.
     metadata_db.insert_ingested_files(sid, [("post-teardown.gz", 2, 200)])
     con = metadata_db.get_con(sid)
-    rows = con.execute("SELECT file_name FROM ingested_files").fetchall()
+    rows = con.execute("SELECT file_name FROM ingested_files WHERE source_name = ?", (sid,)).fetchall()
     names = {r[0] for r in rows}
     assert "post-teardown.gz" in names
-    # The pre-teardown row must NOT survive — file was deleted
-    assert "seed.gz" not in names
+    # No per-service file to delete under Postgres — the pre-teardown row
+    # is expected to survive (unlike the old SQLite-file-delete contract).
+    assert "seed.gz" in names
 
 
 def test_concurrent_teardown_and_writes_no_lost_post_teardown_data():
@@ -192,143 +184,22 @@ def test_threads_get_isolated_connections():
     assert len(set(ids)) == n_workers, f"expected {n_workers} distinct connection objects, got {len(set(ids))}: {ids}"
 
 
-def test_get_con_init_lock_times_out_when_held(monkeypatch):
-    """The per-key init lock must NOT block forever — a stuck thread inside
-    the connect+PRAGMA window once wedged every other cron tick for 10+
-    minutes (incident 2026-05-21). With the pool's acquire timeout, the
-    caller sees a clean ``OperationalError`` and the swallowing try/except
-    up the stack keeps the rest of the cron alive.
-    """
-    import sqlite3
-    import threading
-    import time
-
-    from backend.core.metadata.base import _pool as pool
-
-    # Lower the pool's timeout so the test finishes fast.
-    monkeypatch.setattr(pool, "_init_lock_timeout", 0.05)
-
-    sid = "svc-init-lock-timeout"
-
-    # Pre-inject a held lock for this service ID into the pool's per-key
-    # dict. The contender thread will find this lock and block on it.
-    held = threading.Lock()
-    holder_acquired = threading.Event()
-    holder_release = threading.Event()
-
-    def _hold_lock() -> None:
-        held.acquire()
-        holder_acquired.set()
-        holder_release.wait(timeout=30)
-        held.release()
-
-    holder = threading.Thread(target=_hold_lock, name="init-lock-holder", daemon=True)
-    holder.start()
-    try:
-        assert holder_acquired.wait(timeout=5), "holder thread never acquired lock"
-
-        with pool._key_locks_guard:
-            pool._key_locks[sid] = held
-
-        result: dict = {}
-
-        def _try_get() -> None:
-            start = time.monotonic()
-            try:
-                metadata_db.get_con(sid)
-                result["ok"] = True
-            except sqlite3.OperationalError as e:
-                result["err"] = str(e)
-            finally:
-                result["elapsed"] = time.monotonic() - start
-
-        contender = threading.Thread(target=_try_get, name="init-lock-contender", daemon=True)
-        contender.start()
-        contender.join(timeout=15)
-
-        assert not contender.is_alive(), "contender did not return within 15s — init lock acquire is unbounded"
-        assert "err" in result, f"expected OperationalError; got result={result}"
-        assert "_init_lock contended" in result["err"], (
-            f"error message must name the lock for debuggability; got {result['err']!r}"
-        )
-        assert result["elapsed"] <= 2.0, (
-            f"acquire fired at {result['elapsed']:.2f}s — expected to be very fast under mock timeout."
-        )
-    finally:
-        holder_release.set()
-        holder.join(timeout=5)
-        with pool._key_locks_guard:
-            pool._key_locks.pop(sid, None)
-
-
-# ── journal-mode mismatch on legacy DB (audit follow-up) ────────────────────
-
-
-def test_legacy_delete_mode_db_is_upgraded_to_wal_on_first_open():
-    """A pre-existing service DB file in journal_mode=DELETE (the SQLite
-    default before our pool started forcing WAL) must be upgraded to
-    WAL the first time the pool opens it. Pinned because the upgrade
-    is silent — without this test a regression that dropped the pragma
-    would re-introduce writer-vs-reader contention on any service whose
-    metadata.db was created before the WAL switchover.
-
-    Uses the autouse ``isolate_metadata_db`` sandbox via
-    ``metadata.base.db_path()`` rather than a tmp_path override.
-    """
-    import sqlite3
-
-    from backend.core.metadata import base as metadata_base
-
-    sid = "svc-legacy-upgrade"
-    legacy_path = metadata_base.db_path(sid)
-
-    # 1. Build a legacy DB file in DELETE mode and seed it with a row.
-    legacy = sqlite3.connect(legacy_path)
-    try:
-        legacy.execute("PRAGMA journal_mode = DELETE")
-        before = legacy.execute("PRAGMA journal_mode").fetchone()[0]
-        assert before.lower() == "delete", f"setup failed: legacy mode is {before!r}"
-        legacy.execute("CREATE TABLE legacy_marker (id INTEGER)")
-        legacy.execute("INSERT INTO legacy_marker VALUES (1)")
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    # 2. Open via the pool — must upgrade DELETE → WAL.
-    con = metadata_db.get_con(sid)
-    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal", f"pool did not upgrade legacy DELETE → WAL; got {mode!r}"
-
-    # 3. Legacy row must still be readable (no data loss in the upgrade).
-    # The pool's connection uses sqlite3.Row factory — coerce to tuples
-    # for the comparison.
-    rows = [tuple(r) for r in con.execute("SELECT id FROM legacy_marker").fetchall()]
-    assert rows == [(1,)], f"legacy row lost across WAL upgrade: {rows!r}"
-
-
-def test_wal_mode_persists_across_reopen():
-    """journal_mode = WAL is baked into the SQLite file header once switched
-    — pin that the persisted value survives a raw sqlite3.connect that
-    issues no pragmas, proving the pool's WAL pragma persisted to the
-    file header (not just to the in-memory connection).
-    """
-    import sqlite3
-
-    from backend.core.metadata import base as metadata_base
-
-    sid = "svc-wal-persist"
-    db_path = metadata_base.db_path(sid)
-
-    # First open via the pool → WAL.
-    con = metadata_db.get_con(sid)
-    first_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
-    assert first_mode.lower() == "wal"
-
-    # Open the same file with raw sqlite3 (no pragmas applied) — the
-    # header alone should report WAL.
-    raw = sqlite3.connect(db_path)
-    try:
-        raw_mode = raw.execute("PRAGMA journal_mode").fetchone()[0]
-        assert raw_mode.lower() == "wal", f"WAL did not persist in file header — raw open reports {raw_mode!r}."
-    finally:
-        raw.close()
+# Note: three tests that used to live here —
+# ``test_wal_is_enabled_after_get_con``, ``test_get_con_init_lock_times_out_when_held``,
+# ``test_legacy_delete_mode_db_is_upgraded_to_wal_on_first_open``, and
+# ``test_wal_mode_persists_across_reopen`` — pinned ``ThreadLocalPool``'s
+# SQLite-file mechanics: ``PRAGMA journal_mode=WAL``, the per-key
+# ``_init_lock`` used to serialize a cold-start connect+PRAGMA window, and
+# WAL's persistence in a SQLite file's header. None of that exists under the
+# shared Postgres metadata store (``backend.core.metadata.pg_connection``) —
+# there is no per-service file, no journal mode, and connection-pool
+# exhaustion is a completely different mechanism (``psycopg_pool``'s own
+# ``PoolTimeout``, sized via ``METADATA_PG_POOL_MAX`` — see
+# ``pg_connection.get_pg_pool``'s docstring for the sizing incident that
+# already covers the "don't block forever" concern these tests were pinning
+# for SQLite). Deleted rather than given a strained Postgres analog; the
+# concurrency invariant they were adjacent to (concurrent writes don't lose
+# data / don't deadlock) is what
+# ``test_concurrent_inserts_no_lock_no_loss`` and
+# ``test_concurrent_inserts_with_overlap_dedup_via_upsert`` above actually
+# pin, unchanged, against the real Postgres backend.

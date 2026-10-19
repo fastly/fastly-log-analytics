@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 import duckdb
@@ -14,6 +15,9 @@ from backend.repositories._base import (
     empty_schema_response,
 )
 from backend.repositories.utils.filters import build_where_clause
+from backend.utils.log_throttle import log_once_per
+
+logger = logging.getLogger(__name__)
 
 
 def get_assets_aggregates(
@@ -34,6 +38,9 @@ def get_assets_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
 
+    optional_fields = ["resp_header_content_encoding", "ttl"]
+    missing_fields = [f for f in optional_fields if f not in actual_cols]
+
     if not actual_cols:
         return empty_schema_response(
             asset_type_breakdown=[],
@@ -41,6 +48,7 @@ def get_assets_aggregates(
             compression_performance=[],
             large_uncompressed_assets=[],
             low_ttl_assets=[],
+            missing_fields=missing_fields,
             section_timings=section_timings,
             **runner.telemetry(),
         )
@@ -49,7 +57,10 @@ def get_assets_aggregates(
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
     timer.mark("build_where_clause", _t)
 
-    results = {**runner.telemetry()}
+    results = {
+        "missing_fields": missing_fields,
+        **runner.telemetry(),
+    }
 
     # Graceful defaults for optional columns
     encoding_expr = (
@@ -71,6 +82,7 @@ def get_assets_aggregates(
             compression_performance=[],
             large_uncompressed_assets=[],
             low_ttl_assets=[],
+            missing_fields=missing_fields,
             section_timings=section_timings,
             **runner.telemetry(),
         )
@@ -271,7 +283,8 @@ def get_assets_aggregates(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                if log_once_per("get_assets_aggregates: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_assets_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
     results["section_timings"] = section_timings
     return results

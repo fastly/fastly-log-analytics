@@ -20,10 +20,11 @@ by integration tests in CI.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from backend import config as svcconfig
 from backend.provision import fastly_api
 
 # ── delete_cdn_service ───────────────────────────────────────────────────
@@ -329,21 +330,30 @@ def test_ensure_cdn_service_missing_logging_service_id():
 # ── redeploy_cdn_vcl ────────────────────────────────────────────────────
 
 
+def _reconciler_writing_cdn_id(cdn_id: str, *, then_raise: Exception | None = None, version: int = 1) -> MagicMock:
+    """Stand-in for ``reconcile_cdn_service_state`` that persists the CDN id the way the real one does."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
+    def _reconcile(logging_service_id, token, status_cb=None, activate=True):
+        svcconfig.mutate_config(logging_service_id, lambda c: c.setdefault("fos_proxy", {}).update(service_id=cdn_id))
+        if then_raise is not None:
+            raise then_raise
+        return ReconciliationResult(service_id=cdn_id, activated_version=version)
+
+    return MagicMock(side_effect=_reconcile)
+
+
 def test_redeploy_cdn_vcl_success():
     """Verify redeploy_cdn_vcl maps cdn_service_id, writes rate_limiting to disk, and runs reconciler."""
-    import json
-
     from backend.provision.declarative.reconciler import ReconciliationResult
 
     mock_config = {"service_id": "service-id", "cdn_service_id": "cdn-id", "fos_proxy": {}}
+    svcconfig.save_config("service-id", dict(mock_config))
 
     with (
         patch("backend.config.list_configs", return_value=[mock_config]),
-        patch("pathlib.Path") as mock_path_class,
         patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile,
     ):
-        mock_path_inst = mock_path_class.return_value
-        mock_path_inst.read_text.return_value = json.dumps(mock_config)
         mock_reconcile.return_value = ReconciliationResult(
             service_id="cdn-id", activated_version=12, changes_applied=None
         )
@@ -351,10 +361,7 @@ def test_redeploy_cdn_vcl_success():
         result = fastly_api.redeploy_cdn_vcl("cdn-id", "tok", rate_limiting=False)
 
         assert result == 12
-        mock_path_class.assert_called_with("configs/service-id.json")
-        assert mock_path_inst.write_text.called
-        written_json = json.loads(mock_path_inst.write_text.call_args[0][0])
-        assert written_json["fos_proxy"]["rate_limiting_enabled"] is False
+        assert svcconfig.load_config("service-id")["fos_proxy"]["rate_limiting_enabled"] is False
         mock_reconcile.assert_called_with(
             logging_service_id="service-id",
             token="tok",
@@ -372,19 +379,15 @@ def test_redeploy_cdn_vcl_raises_when_no_mapping():
 
 def test_redeploy_cdn_vcl_propagates_reconciler_error():
     """Verify redeploy_cdn_vcl propagates exceptions from the reconciler."""
-    import json
-
     mock_config = {"service_id": "service-id", "cdn_service_id": "cdn-id", "fos_proxy": {}}
+    svcconfig.save_config("service-id", dict(mock_config))
     with (
         patch("backend.config.list_configs", return_value=[mock_config]),
-        patch("pathlib.Path") as mock_path_class,
         patch(
             "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
             side_effect=RuntimeError("reconciler failure"),
         ),
     ):
-        mock_path_inst = mock_path_class.return_value
-        mock_path_inst.read_text.return_value = json.dumps(mock_config)
         with pytest.raises(RuntimeError, match="reconciler failure"):
             fastly_api.redeploy_cdn_vcl("cdn-id", "tok")
 
@@ -473,7 +476,7 @@ def _run_update_logging_endpoint(cfg_in, stored_cfg):
 
 
 def test_update_logging_endpoint_preserves_custom_fields_when_incoming_omits_them():
-    """REGRESSION: 2026-08-12 SE-demo incident — the root cause. This
+    """REGRESSION: 2026-08-12 production incident — the root cause. This
     orchestrator assigned ``cfg["log_fields"]`` WHOLESALE over the stored
     config with no merge guard (unlike its cli.py and log-fields-set
     siblings). Callers build ``log_fields`` from groups alone, so the assign
@@ -526,7 +529,7 @@ def test_update_logging_endpoint_reasserts_cmcd_without_a_state_transition():
     stored = {
         "logging_enabled": True,
         "cmcd": {"enabled": True, "mode": "query_string", "version": 1},
-        # Already-stripped config — the broken state the SE-demo service was in.
+        # Already-stripped config — the broken state the affected service was in.
         "log_fields": {"schema_version": 2, "groups": ["A", "B"], "field_overrides": {}},
     }
 
@@ -676,32 +679,18 @@ def test_update_logging_endpoint_skips_flag_refresh_when_no_service_cfg():
 
 def test_ensure_cdn_service_success():
     """Verify ensure_cdn_service merges configs, writes them to disk, calls reconciler, and detects rate limiting."""
-    import json
-
-    from backend.provision.declarative.reconciler import ReconciliationResult
-
     input_cfg = {
         "logging_service_id": "log-svc-123",
         "cdn_service_name": "MyCDN",
         "cdn_url": "https://mycdn.example.com",
     }
-    mock_disk_cfg = {
-        "logging_service_id": "log-svc-123",
-        "cdn_service_name": "MyCDN",
-        "fos_proxy": {"service_id": "cdn-new-123"},
-    }
     statuses = []
+    mock_reconcile = _reconciler_writing_cdn_id("cdn-new-123")
 
     with (
-        patch("pathlib.Path") as mock_path_class,
-        patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile,
+        patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state", mock_reconcile),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True) as mock_detect,
     ):
-        mock_path_inst = mock_path_class.return_value
-        mock_path_inst.exists.return_value = False
-        mock_path_inst.read_text.return_value = json.dumps(mock_disk_cfg)
-        mock_reconcile.return_value = ReconciliationResult(service_id="cdn-new-123", activated_version=1)
-
         result = fastly_api.ensure_cdn_service(
             input_cfg,
             "AK",
@@ -715,9 +704,7 @@ def test_ensure_cdn_service_success():
             "name": "MyCDN",
             "rate_limiting": True,
         }
-        mock_path_class.assert_called_with("configs/log-svc-123.json")
-        assert mock_path_inst.write_text.called
-        written_json = json.loads(mock_path_inst.write_text.call_args[0][0])
+        written_json = svcconfig.load_config("log-svc-123")
         assert written_json["fos_access_key_id"] == "AK"
         assert written_json["fos_secret_access_key"] == "SK"
         assert written_json["cdn_service_name"] == "MyCDN"
@@ -733,52 +720,36 @@ def test_ensure_cdn_service_success():
 
 def test_ensure_cdn_service_rate_limiting_scenarios():
     """Verify ensure_cdn_service returns rate_limiting True, False, or None depending on proactive detection."""
-    import json
-
-    from backend.provision.declarative.reconciler import ReconciliationResult
-
     input_cfg = {
         "logging_service_id": "log-svc-123",
     }
-    mock_disk_cfg = {"logging_service_id": "log-svc-123", "fos_proxy": {"service_id": "cdn-new-123"}}
 
     for detection_val in (True, False, None):
         with (
-            patch("pathlib.Path") as mock_path_class,
-            patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile,
+            patch(
+                "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
+                _reconciler_writing_cdn_id("cdn-new-123"),
+            ),
             patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=detection_val),
         ):
-            mock_path_inst = mock_path_class.return_value
-            mock_path_inst.exists.return_value = False
-            mock_path_inst.read_text.return_value = json.dumps(mock_disk_cfg)
-            mock_reconcile.return_value = ReconciliationResult(service_id="cdn-new-123", activated_version=1)
-
             result = fastly_api.ensure_cdn_service(input_cfg, "AK", "SK", "tok")
             assert result["rate_limiting"] is detection_val
 
 
 def test_ensure_cdn_service_on_created_callback():
     """Verify on_created is called with the newly created cdn service id."""
-    import json
-
-    from backend.provision.declarative.reconciler import ReconciliationResult
-
     input_cfg = {
         "logging_service_id": "log-svc-123",
     }
-    mock_disk_cfg = {"logging_service_id": "log-svc-123", "fos_proxy": {"service_id": "cdn-new-123"}}
     created_ids = []
 
     with (
-        patch("pathlib.Path") as mock_path_class,
-        patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile,
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
+            _reconciler_writing_cdn_id("cdn-new-123"),
+        ),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
     ):
-        mock_path_inst = mock_path_class.return_value
-        mock_path_inst.exists.return_value = False
-        mock_path_inst.read_text.return_value = json.dumps(mock_disk_cfg)
-        mock_reconcile.return_value = ReconciliationResult(service_id="cdn-new-123", activated_version=1)
-
         fastly_api.ensure_cdn_service(input_cfg, "AK", "SK", "tok", on_created=created_ids.append)
         assert created_ids == ["cdn-new-123"]
 
@@ -1196,26 +1167,18 @@ def test_ensure_logging_endpoint_tolerates_none_custom_condition(custom_conditio
 
 def test_ensure_cdn_service_reports_created_id_before_later_failure():
     """Verify on_created is called with the cdn_service_id if the reconciler failed AFTER writing it to config."""
-    import json
-
     cfg = {
         "logging_service_id": "svc",
     }
-    mock_disk_cfg = {"logging_service_id": "svc", "fos_proxy": {"service_id": "cdn-new-123"}}
     created_ids = []
 
     with (
-        patch("pathlib.Path") as mock_path_class,
         patch(
             "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
-            side_effect=RuntimeError("Validation failed"),
+            _reconciler_writing_cdn_id("cdn-new-123", then_raise=RuntimeError("Validation failed")),
         ),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
     ):
-        mock_path_inst = mock_path_class.return_value
-        mock_path_inst.exists.return_value = True
-        mock_path_inst.read_text.return_value = json.dumps(mock_disk_cfg)
-
         with pytest.raises(RuntimeError, match="Validation failed"):
             fastly_api.ensure_cdn_service(cfg, "ak", "sk", "tok", on_created=created_ids.append)
 

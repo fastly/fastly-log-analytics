@@ -1,13 +1,11 @@
-"""Alert-rule CRUD against ``alerts`` table in per-service metadata SQLite."""
+"""Alert-rule CRUD against ``alerts`` table in PostgreSQL metadata store."""
 
 from __future__ import annotations
 
 import json
-import os
-import re
-import sqlite3
+from typing import Any
 
-from backend.core.metadata.base import db_path, get_con
+from backend.core.metadata.base import get_con
 
 _ALERT_COLUMNS = (
     "id, service_id, name, category, metric, evaluation_type, operator, threshold, "
@@ -15,18 +13,8 @@ _ALERT_COLUMNS = (
     "last_triggered_at, created_at, evaluation_scope, channels_json, zscore_threshold, baseline_period_days"
 )
 
-# Strip every non-[A-Za-z0-9_] char from the service_id before splicing it
-# into an ATTACH alias. Identifiers can't be parameterized, so the only
-# safe path is to validate. db_path() already format-validates the
-# service_id but the alias regex stays as belt-and-braces.
-_ATTACH_ALIAS_RE = re.compile(r"[^A-Za-z0-9_]")
 
-
-def _attach_alias(service_id: str) -> str:
-    return "svc_" + _ATTACH_ALIAS_RE.sub("_", service_id)
-
-
-def _row_to_alert(r: sqlite3.Row) -> dict:
+def _row_to_alert(r: Any) -> dict:
     return {
         "id": r["id"],
         "service_id": r["service_id"],
@@ -66,62 +54,17 @@ def list_alerts(service_id: str, filter_service_id: str | None = None) -> list[d
 def list_alerts_cross_service(service_ids: list[str], limit: int = 500) -> list[dict]:
     """Return the globally-newest ``limit`` alerts across all given services,
     sorted by ``created_at DESC``.
-
-    Replaces the per-service ``list_alerts`` loop the alerts repository
-    used to call N times. Each per-service call opened a SQLite
-    connection + scanned the alerts table; for the admin /api/alerts/
-    surface with K services that's N opens and N round-trips. This
-    helper:
-
-      1. Opens ONE transient connection.
-      2. ATTACHes each existing per-service metadata.db under a
-         sanitized alias (``svc_<id>``).
-      3. Runs a single ``UNION ALL ... ORDER BY created_at DESC LIMIT
-         ?`` against the attached schemas — SQLite plans the union
-         into one ordered scan with an in-RAM top-K heap, returning
-         only the globally-newest ``limit`` rows.
-      4. DETACHes everything in the finally block so the file handles
-         drop immediately even on error.
-
-    Returns the same row shape as :func:`list_alerts`. Services whose
-    metadata.db doesn't yet exist (fresh provision before any alert
-    write) are silently skipped — matches the pre-extraction semantics
-    where ``get_con(sid)`` would lazy-create an empty DB and
-    ``SELECT ... FROM alerts`` would return zero rows.
     """
     if not service_ids:
         return []
 
-    base = sqlite3.connect(":memory:")
-    base.row_factory = sqlite3.Row
-
-    attached: list[str] = []
-    try:
-        for sid in service_ids:
-            path = db_path(sid)
-            if not os.path.exists(path):
-                continue
-            alias = _attach_alias(sid)
-            # ATTACH supports parameterized path; alias must be literal.
-            base.execute(f"ATTACH DATABASE ? AS {alias}", (path,))
-            attached.append(alias)
-
-        if not attached:
-            return []
-
-        union_sql = " UNION ALL ".join(f"SELECT {_ALERT_COLUMNS} FROM {alias}.alerts" for alias in attached)
-        rows = base.execute(
-            f"{union_sql} ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [_row_to_alert(r) for r in rows]
-    finally:
-        for alias in attached:
-            try:
-                base.execute(f"DETACH DATABASE {alias}")
-            except sqlite3.OperationalError:
-                pass
-        base.close()
+    con = get_con(service_ids[0])
+    placeholders = ", ".join("?" for _ in service_ids)
+    rows = con.execute(
+        f"SELECT {_ALERT_COLUMNS} FROM alerts WHERE service_id IN ({placeholders}) ORDER BY created_at DESC LIMIT ?",
+        [*service_ids, limit],
+    ).fetchall()
+    return [_row_to_alert(r) for r in rows]
 
 
 def count_alerts(service_id: str) -> int:

@@ -360,4 +360,29 @@ __all__ = [
     "QUALITY_BAR_BY_GROUP",
     "QUALITY_COUNTRIES_DISTINCT",
     "QUALITY_SCATTER",
+    "POP_HEALTH_LIVE",
 ]
+
+
+# ── POP health live fallback (get_pop_health_rows) ────────────────────────────
+
+POP_HEALTH_LIVE = """
+            SELECT
+                pop,
+                COUNT(*) AS requests,
+                COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
+                ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
+                approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
+                approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
+                ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
+                SUM(resp_bytes) AS bandwidth_bytes
+            FROM {table_name}
+            WHERE timestamp >= ? AND timestamp <= ? AND pop IS NOT NULL AND pop != ''
+            GROUP BY pop
+            ORDER BY requests DESC
+        """
+"""Per-POP live aggregate when no pop-health rollup covers the window.
+
+``{table_name}`` is a ``_safe_table`` identifier; the two ``?`` params are the
+window bounds (tz-aware datetimes).
+"""

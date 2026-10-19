@@ -19,7 +19,12 @@ export function BackToAdminLink({
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const href = activeServiceId ? `/admin?service=${activeServiceId}` : '/admin'
   return (
-    <Link href={href} prefetch={prefetch} className={buttonVariants({ variant, size: 'sm' })}>
+    <Link
+      href={href}
+      prefetch={prefetch}
+      className={buttonVariants({ variant, size: 'sm' })}
+      data-testid="back-to-admin-link"
+    >
       <ArrowLeft className="h-4 w-4 mr-1" />
       Back to Admin
     </Link>

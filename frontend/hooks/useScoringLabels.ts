@@ -4,21 +4,13 @@ import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
+import type { components } from '@/types/api'
 
-export type LabelValue = 'good' | 'bad' | 'neutral'
+type LabelRowWire = components['schemas']['ScoringLabelRow']
 
-export interface LabelRow {
-  id: string
-  sid: string
-  label: LabelValue
-  notes?: string
-  sample_ip?: string
-  sample_ua?: string
-  sample_url?: string
-  flagged_by?: string
-  created_at?: string
-  updated_at?: string
-}
+export type LabelValue = LabelRowWire['label']
+
+export type LabelRow = LabelRowWire
 
 export interface ScoringLabelsResult {
   labels: LabelRow[]
@@ -57,11 +49,11 @@ export function useScoringLabels(serviceId: string, opts: Opts = {}): ScoringLab
     enabled: enabled && !!serviceId,
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/labels' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/labels',
+        { params: { path: { service_id: serviceId } } },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { labels: LabelRow[]; counts: Record<LabelValue, number> }
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 5 * 60_000,
   })

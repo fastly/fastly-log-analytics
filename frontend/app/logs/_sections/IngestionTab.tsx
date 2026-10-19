@@ -7,14 +7,17 @@ import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTable
 import { ColumnPicker } from '@/components/DataTable/ColumnPicker'
 import { Input } from '@/components/ui/input'
 import { ColumnDef } from '@tanstack/react-table'
+import type { components } from '@/types/api.generated'
+
+type IngestedFile = components['schemas']['IngestedFile']
 
 export function IngestionTab({
   ingestedColumns,
   ingestedFiles,
   isLoadingIngested,
 }: {
-  ingestedColumns: ColumnDef<any>[]
-  ingestedFiles: any
+  ingestedColumns: ColumnDef<IngestedFile>[]
+  ingestedFiles: components['schemas']['IngestedFilesResponse'] | undefined
   isLoadingIngested: boolean
 }) {
   return (

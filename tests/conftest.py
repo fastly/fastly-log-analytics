@@ -1,5 +1,8 @@
 import os as _os
 
+# Force OTEL_EXPORTER=none in test environments to avoid blocking/timeouts on shutdown
+_os.environ["OTEL_EXPORTER"] = "none"
+
 # 038: enable the telemetry overlay in API responses for the test
 # environment so existing assertions on ``_debug_queries`` /
 # ``_debug_calls`` keep passing. Production reads the env at
@@ -114,6 +117,43 @@ def _cassette_recorded_at(path) -> float | None:
         return _dt.datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None
+
+
+# ── Hang forensics ───────────────────────────────────────────────────────────
+import pytest as _pytest_for_hooks  # noqa: E402 - hook decorators below; `pytest` itself is imported later
+
+# pytest-timeout's "thread" method kills the whole xdist worker (os._exit) when a test passes the
+# 60s ceiling, and the stack dump it writes dies with the worker — CI then shows only
+# "worker crashed". Dump every thread's stack to a per-worker file shortly BEFORE that, so the next
+# CI failure names the blocked frame (the CI "Worker-crash diagnostics" step prints these files).
+_HANG_DUMP_AFTER_S = float(_os.environ.get("FLA_HANG_DUMP_AFTER_S", "45"))
+_hang_log = None
+
+
+def _hang_log_file():
+    global _hang_log
+    if _hang_log is None:
+        import tempfile
+
+        path = _os.path.join(tempfile.gettempdir(), f"fla-hang-{_os.getpid()}.log")
+        _hang_log = open(path, "a", buffering=1)  # noqa: SIM115 - lives for the worker's lifetime
+    return _hang_log
+
+
+@_pytest_for_hooks.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    import faulthandler
+
+    log = _hang_log_file()
+    log.write(f"--- {item.nodeid}\n")
+    faulthandler.dump_traceback_later(_HANG_DUMP_AFTER_S, repeat=False, file=log)
+
+
+@_pytest_for_hooks.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001 — pytest hook signature
+    import faulthandler
+
+    faulthandler.cancel_dump_traceback_later()
 
 
 def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
@@ -264,13 +304,129 @@ def reset_telemetry():
     start_call_tracking()
 
 
+_PG_SLOT_LOCK_BASE = 0x464C4100
+
+
+@pytest.fixture(scope="session")
+def _pg_worker_schema():
+    """Give this pytest process its own Postgres database for metadata storage.
+
+    The process claims an exclusive database slot (see below), resets it,
+    points ``METADATA_DSN`` / ``DUCKLAKE_CATALOG`` at it, then runs the real
+    schema bootstrap
+    (:func:`backend.core.metadata.pg_schema.ensure_pg_schema`) against it.
+    Two workers — or two concurrent pytest runs — therefore never see each
+    other's rows, and share nothing but the underlying server.
+
+    Runs once per worker process, before any test in that worker touches
+    metadata — the pool in ``pg_connection`` is a lazy module-level
+    singleton created on first ``get_pg_pool()`` call, so ``METADATA_DSN``
+    must be set before that first call happens anywhere in this process.
+    """
+    import psycopg
+
+    from backend.core.metadata import pg_connection, pg_schema
+
+    base_dsn = _os.environ.get(
+        "METADATA_DSN",
+        "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
+    )
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(base_dsn)
+    maint_dsn = urlunparse(parsed._replace(path="/postgres"))
+
+    import time
+
+    admin_conn = psycopg.connect(maint_dsn, autocommit=True)
+    # Claim a database slot with a session-level advisory lock (released when the
+    # connection closes, even if the process dies). Naming the database after the
+    # xdist worker id alone made two concurrent pytest runs (parallel agents,
+    # ``make ci`` beside a quick loop) share ``ducklake_test_gw0`` and wipe each
+    # other's live connections; slots are exclusive per live process instead.
+    # Slots are reset in place, never dropped: DROP DATABASE waits on a forced
+    # checkpoint, which stalls for minutes on a busy server.
+    slot = 0
+    while not admin_conn.execute("SELECT pg_try_advisory_lock(%s)", (_PG_SLOT_LOCK_BASE + slot,)).fetchone()[0]:
+        slot += 1
+    worker_db = f"ducklake_test_slot{slot}"
+    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (worker_db,)).fetchone():
+        # CREATE DATABASE clones template1 and fails with ObjectInUse while another
+        # session is cloning it; wait that out.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+                break
+            except psycopg.errors.ObjectInUse:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.25)
+
+    worker_dsn = urlunparse(parsed._replace(path=f"/{worker_db}"))
+    with psycopg.connect(worker_dsn, autocommit=True) as reset_conn:
+        for (schema,) in reset_conn.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'"
+        ).fetchall():
+            reset_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        reset_conn.execute("CREATE SCHEMA public")
+
+    _os.environ["METADATA_DSN"] = worker_dsn
+    _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
+
+    pg_schema.ensure_pg_schema(force=True)
+
+    yield worker_db, admin_conn
+
+    pg_connection.close_all_pg_connections()
+    pg_connection.reset_pg_pool_for_tests()
+    admin_conn.close()
+
+
+_PER_TEST_RESET_TABLES = (
+    "ingest_ledger",
+    "ingested_files",
+    "ingested_files_summary",
+    "quarantined_files",
+    "quarantine_evidence",
+    "job_runs",
+    "cron_runs",
+    "audit_logs",
+    "views",
+    "alerts",
+    "scoring_labels",
+    "scoring_audit",
+    "asn_names",
+    "usage_log",
+    "usage_log_hourly_summary",
+    "metric_snapshots",
+    "slow_queries",
+    "committed_buffers",
+    "local_compacted_files",
+    "ingest_in_flight",
+    "ngwaf_bots",
+    "ngwaf_sync_state",
+    "rdns",
+    "sources",
+    "remote_sessions",
+    "remote_invite_claim_tokens",
+    "invite_services",
+    "remote_invites",
+    "remote_share_audit_logs",
+)
+
+
 @pytest.fixture(autouse=True)
-def isolate_metadata_db(tmp_path, monkeypatch):
-    """Point metadata_db AND service-config data dirs at a per-test sandbox.
+def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
+    """Point metadata storage at this worker's isolated Postgres schema, and
+    service-config/DuckDB data dirs at a per-test sandbox.
 
     Operational metadata (alerts, views, audit, cron, sources, ingested_files,
-    asn_names, usage_log) all live in per-service SQLite at
-    ``data/services/{id}.metadata.db``.
+    asn_names, usage_log, share_db) lives in Postgres, scoped to this xdist
+    worker's own schema by :func:`_pg_worker_schema` — replacing the historical
+    per-service SQLite file at ``data/services/{id}.metadata.db`` (see ADR-15,
+    reversed by the SQLite -> Postgres metadata migration this fixture is
+    part of).
 
     The analytical DuckDB file lives at ``data/services/{id}.duckdb`` and is
     located via :func:`backend.config.duckdb_path` (which reads
@@ -281,6 +437,7 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     ``test-service-id.duckdb``, etc. Patch the four config-level DATA paths
     in parallel so the whole tree is sandboxed.
     """
+    import os
     from pathlib import Path
 
     from backend import config as svcconfig
@@ -301,22 +458,33 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(sandbox_services))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
+    try:
+        from backend.core.metadata import pg_connection
+
+        _pg_con = pg_connection.get_pg_thread_connection()
+        # Truncate only the tables that hold rows: a TRUNCATE recreates every listed relation, and
+        # doing all of them per test across N xdist workers made each reset take seconds.
+        _dirty = [
+            r[0]
+            for r in _pg_con.execute(
+                " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
+            ).fetchall()
+        ]
+        if _dirty:
+            _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
+        _pg_con.commit()
+    except Exception:
+        try:
+            _pg_con.rollback()
+        except Exception:
+            pass
+
     metadata_db._clear_ingested_filenames_cache()
 
-    # Per-service usage_log lives in its own SQLite file post-2026-06-12;
-    # it shares ``_DATA_DIR`` with metadata.db but uses its own thread-
-    # local pool + initialised-paths set, so isolate those too. Without
-    # this a test would either (a) collide on a real-disk file because
-    # _DATA_DIR was already cached, or (b) leak thread-local connections
-    # across test runs and emit ResourceWarning on shutdown.
+    # ``usage_log_db.db_path`` still derives from its own ``_DATA_DIR`` binding.
     from backend.core.metadata import usage_log_db as _usage_log_db
 
     monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
-    monkeypatch.setattr(_usage_log_db, "_initialized", set())
-    monkeypatch.setattr(_usage_log_db, "_local", __import__("threading").local())
 
     # Sandbox share_db connection pool and directory
     from backend.core.share_db import connection as _share_db_connection
@@ -348,6 +516,7 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", sandbox_configs)
     monkeypatch.setattr(svcconfig, "NGWAF_DATA_DIR", sandbox_ngwaf)
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", sandbox_cache)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", os.environ["DUCKLAKE_CATALOG"])
     monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", sandbox_system)
     # ``_ensured_dirs`` is a per-path memo for the mkdir storm — must be
     # cleared so _ensure_dirs() actually creates the new sandbox dirs.
@@ -359,8 +528,6 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     # ``my-bucket``, ``test-bucket`` directories into the repo root.
     # Redirect to the per-test sandbox while preserving the
     # ``_cache_dir_override`` escape hatch and the ``bucket`` shape.
-    import os as _os
-
     from backend.core import duckdb as _bk_duckdb
 
     sandbox_cache_root = sandbox_data / "cache"
@@ -369,7 +536,7 @@ def isolate_metadata_db(tmp_path, monkeypatch):
         if "_cache_dir_override" in source:
             return source["_cache_dir_override"]
         bucket = (source.get("bucket") or source.get("fos_bucket") or "default").strip()
-        return _os.path.join(str(sandbox_cache_root), bucket)
+        return os.path.join(str(sandbox_cache_root), bucket)
 
     monkeypatch.setattr(_bk_duckdb, "_cache_dir", _sandboxed_cache_dir)
 
@@ -378,10 +545,33 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     # spawns worker threads that open their own thread-local connections,
     # invisible to this fixture's ``_local``. Without this drain, those
     # connections live until GC and emit ResourceWarning at process exit.
+    # Postgres-aware: ``metadata_db.close_all_connections()`` (and the
+    # share_db one) dispatch to ``pg_connection.close_all_pg_connections()``
+    # under ``METADATA_DSN`` — same call, now returns pool connections
+    # instead of closing SQLite file handles.
     metadata_db.close_all_connections()
     _metric_snapshots.close_all_connections()
     _usage_log_db.close_all_connections()
     _share_db_connection.close_all_connections()
+
+    # Reset the shared Postgres schema state between tests. Every test in
+    # this worker reuses the SAME schema (created once in
+    # ``_pg_worker_schema``), so without this a row written by one test
+    # would leak into the next — the isolation the old per-test ``tmp_path``
+    # SQLite file gave us for free.
+    _pg_schema_name, _pg_admin_conn = _pg_worker_schema
+    _tables = [
+        r[0]
+        for r in _pg_admin_conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = %s", (_pg_schema_name,)
+        ).fetchall()
+    ]
+    if _tables:
+        _qualified = ", ".join(f'"{_pg_schema_name}"."{t}"' for t in _tables)
+        _pg_admin_conn.execute(f"TRUNCATE TABLE {_qualified} RESTART IDENTITY CASCADE")
+        from backend.core.metadata.pg_schema import _SEED_INITIAL_TOS_DDL
+
+        _pg_admin_conn.execute(_SEED_INITIAL_TOS_DDL)
 
 
 @pytest.fixture(autouse=True)
@@ -435,7 +625,9 @@ def in_memory_duckdb():
     con.close()
 
 
-def override_request_context(*, source, con, session=None, path="/test", time_bounds=None):
+def override_request_context(*, source, con=None, _con_override=None, session=None, path="/test", time_bounds=None):
+    if _con_override is not None:
+        con = _con_override
     """Return a ``build_request_context`` override that yields a RequestContext
     wired to ``source``/``con`` (read-only). Mirrors what the ``client`` fixture
     installs; router tests use it to inject a custom source or an analyst
@@ -453,7 +645,7 @@ def override_request_context(*, source, con, session=None, path="/test", time_bo
         yield RequestContext(
             service_id=source["service_id"],
             source=source,
-            con=con,
+            _con_override=con,
             telemetry=RequestTelemetry(request_method="POST", request_path=path),
             analyst_session=session,
             read_only=True,
@@ -568,3 +760,21 @@ def fos_source(s3_mock):
         "access_level": "read_write",
         "storage_mode": "cloud",
     }
+
+
+# Deterministic "now" for the active-hour seam tests: hour 12 (so "today" has a
+# closed hour to merge — kills the UTC-hour-00 skip) and minute 10 (so a 20-min
+# active window ends at :30, comfortably inside the hour — kills the latent
+# hour-rollover flake). The date is arbitrary; the in-memory harness has no
+# real-time dependency (bundles live in tmp; queries use seeded timestamps).
+_FROZEN_NOW = "2026-06-15 12:10:00+00:00"
+
+
+@pytest.fixture
+def frozen_clock():
+    """Freeze ``datetime.now`` (incl. the reader's function-local import) at
+    :data:`_FROZEN_NOW` so the closed/active-hour seam is deterministic."""
+    import time_machine
+
+    with time_machine.travel(_FROZEN_NOW, tick=False) as traveller:
+        yield traveller

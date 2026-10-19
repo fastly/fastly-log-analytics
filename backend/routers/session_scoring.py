@@ -25,27 +25,32 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
-from sse_starlette.sse import EventSourceResponse
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
+from backend.deps import require_admin
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.session_scoring import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
+    ScoringConfigCompositeResponse,
     ScoringCurvesResponse,
     ScoringEvaluationResponse,
     ScoringHealthResponse,
     ScoringLabelCreate,
+    ScoringLabelDeleteResponse,
+    ScoringLabelRow,
     ScoringLabelsListResponse,
     ScoringLabelUpdate,
     ScoringLatencyTimeseriesResponse,
     ScoringScoreDistributionResponse,
+    ScoringStatusResponse,
     ScoringThresholdPreviewResponse,
     ScoringTokenBody,
     ScoringTopFlaggedResponse,
 )
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, not_found
+from backend.utils.router_utils import make_error, not_found, resolve_fastly_token
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["session-scoring"], responses=DEFAULT_ERROR_RESPONSES)
@@ -108,16 +113,11 @@ def _finalize_cached(value, *, is_cached: bool) -> object:
     that return Pydantic responses. `_is_cached` is always included — it
     isn't sensitive and downstream verification depends on it.
     """
-    from backend.models.common import _debug_responses_enabled
+    from backend.utils.telemetry import debug_envelope
 
     if not isinstance(value, dict):
         return value
-    out = dict(value)
-    out["_is_cached"] = is_cached
-    if not _debug_responses_enabled():
-        out.pop("_debug_queries", None)
-        out.pop("_debug_calls", None)
-    return out
+    return debug_envelope(value, gated=True, is_cached=is_cached)
 
 
 def _cached(key: tuple, producer):
@@ -352,7 +352,7 @@ def _table_columns(service_id: str) -> set[str]:
 
     table = _safe_table_name(service_id)
     try:
-        rows = _query_logs(service_id, f"DESCRIBE {table}")
+        rows = _scoring_repo.describe_table(service_id, table)
     except Exception:  # noqa: BLE001 — view not ready / table missing → no columns
         return set()
     return {str(r.get("column_name")) for r in rows if r.get("column_name")}
@@ -415,21 +415,15 @@ def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[t
     return result
 
 
-def _resolve_token(service_id: str, override_token: str = "") -> str:
-    """Use the provided token, or fall back to the service-config's
-    fastly_api_key. Returns empty string if neither is available — the
-    caller raises an HTTPException in that case."""
-    if override_token:
-        return override_token
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        return cfg.get("fastly_api_key", "") or ""
-    return ""
+_resolve_token = resolve_fastly_token
 
 
-@router.post("/{service_id}/scoring/enable")
+@router.post("/{service_id}/scoring/enable", dependencies=[Depends(require_admin)])
+@router.post(
+    "/{service_id}/session-scoring/enable",
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
+)
 def scoring_enable(
     service_id: str = Path(..., description="Logging service ID to enable scoring on"),
     body: ScoringTokenBody | None = None,
@@ -449,11 +443,9 @@ def scoring_enable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring_cfg = cfg.get("scoring") or {}
-    scoring_cfg["enabled"] = True
-    cfg["scoring"] = scoring_cfg
-    svcconfig.save_config(service_id, cfg)
+    svcconfig.mutate_config(
+        service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
+    )
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_scoring
     from backend.provision.orchestrator import run_with_events
@@ -515,10 +507,15 @@ def scoring_enable(
                     err_event["link"] = e.link
             yield json.dumps(err_event)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
-@router.post("/{service_id}/scoring/disable")
+@router.post("/{service_id}/scoring/disable", dependencies=[Depends(require_admin)])
+@router.post(
+    "/{service_id}/session-scoring/disable",
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
+)
 def scoring_disable(
     service_id: str = Path(..., description="Logging service ID to disable scoring on"),
     body: ScoringTokenBody | None = None,
@@ -534,10 +531,11 @@ def scoring_disable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    if "scoring" in cfg:
-        cfg["scoring"]["enabled"] = False
-    svcconfig.save_config(service_id, cfg)
+    def _disable(c: dict) -> None:
+        if "scoring" in c:
+            c["scoring"]["enabled"] = False
+
+    svcconfig.mutate_config(service_id, _disable)
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_scoring
     from backend.provision.orchestrator import run_with_events
@@ -564,11 +562,17 @@ def scoring_disable(
             logger.exception("scoring_disable failed for %s", service_id)
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.get(
     "/{service_id}/scoring/analytics", response_model=ScoringAnalyticsResponse, response_model_exclude_unset=True
+)
+@router.get(
+    "/{service_id}/session-scoring/analytics",
+    response_model=ScoringAnalyticsResponse,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
 )
 def scoring_analytics_composite(
     request: Request,
@@ -613,7 +617,19 @@ def scoring_analytics_composite(
     return result
 
 
-@router.get("/{service_id}/scoring/config")
+@router.get(
+    "/{service_id}/scoring/config",
+    response_model=ScoringConfigCompositeResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/config",
+    response_model=ScoringConfigCompositeResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
+)
 def scoring_config_composite(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -645,7 +661,19 @@ def scoring_config_composite(
     }
 
 
-@router.get("/{service_id}/scoring/status")
+@router.get(
+    "/{service_id}/scoring/status",
+    response_model=ScoringStatusResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/status",
+    response_model=ScoringStatusResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
+)
 def scoring_status(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -790,6 +818,12 @@ def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str |
     response_model=ScoringLabelsListResponse,
     response_model_exclude_unset=True,
 )
+@router.get(
+    "/{service_id}/session-scoring/labels",
+    response_model=ScoringLabelsListResponse,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
+)
 def scoring_labels_list(
     request: Request,
     service_id: str = Path(..., description="Logging service ID"),
@@ -805,7 +839,13 @@ def scoring_labels_list(
     return {"labels": rows, "counts": counts}
 
 
-@router.post("/{service_id}/scoring/labels")
+@router.post("/{service_id}/scoring/labels", response_model=ScoringLabelRow, response_model_exclude_unset=True)
+@router.post(
+    "/{service_id}/session-scoring/labels",
+    response_model=ScoringLabelRow,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
+)
 def scoring_labels_create(
     body: ScoringLabelCreate,
     request: Request,
@@ -845,7 +885,15 @@ def scoring_labels_create(
     return row
 
 
-@router.patch("/{service_id}/scoring/labels/{label_id}")
+@router.patch(
+    "/{service_id}/scoring/labels/{label_id}", response_model=ScoringLabelRow, response_model_exclude_unset=True
+)
+@router.patch(
+    "/{service_id}/session-scoring/labels/{label_id}",
+    response_model=ScoringLabelRow,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
+)
 def scoring_labels_update(
     body: ScoringLabelUpdate,
     request: Request,
@@ -872,7 +920,17 @@ def scoring_labels_update(
     return row
 
 
-@router.delete("/{service_id}/scoring/labels/{label_id}")
+@router.delete(
+    "/{service_id}/scoring/labels/{label_id}",
+    response_model=ScoringLabelDeleteResponse,
+    response_model_exclude_unset=True,
+)
+@router.delete(
+    "/{service_id}/session-scoring/labels/{label_id}",
+    response_model=ScoringLabelDeleteResponse,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
+)
 def scoring_labels_delete(
     request: Request,
     service_id: str = Path(...),
@@ -927,32 +985,15 @@ def scoring_top_flagged(
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
-    sql = f"""
-        SELECT
-            timestamp,
-            edge_sid,
-            edge_score,
-            edge_score_l1,
-            edge_score_l2,
-            edge_cookie_compliance,
-            edge_score_reason,
-            ip,
-            ua,
-            url,
-            status,
-            country
-        FROM {src}
-        WHERE edge_score IS NOT NULL
-          AND {ts_pred}
-        ORDER BY edge_score DESC, timestamp DESC
-        LIMIT {int(limit)}
-    """
     # ``ip`` is masked for analysts by the response middleware's key-name
     # pass (the column is literally ``ip``); ``ua`` / ``url`` are left intact
     # because analysts triage flagged sessions on them.
     return _cached(
         ("top-flagged", service_id, since_hours, limit, win_disc),
-        lambda: {"rows": _isoformat_ts(_query_logs(service_id, sql), "timestamp"), "since_hours": since_hours},
+        lambda: {
+            "rows": _isoformat_ts(_scoring_repo.top_flagged_rows(service_id, src, ts_pred, limit), "timestamp"),
+            "since_hours": since_hours,
+        },
     )
 
 
@@ -974,25 +1015,12 @@ def scoring_score_distribution(
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
-    sql = f"""
-        SELECT
-            date_trunc('hour', timestamp) AS hour,
-            CASE
-                WHEN edge_score < 25 THEN '0-25'
-                WHEN edge_score < 50 THEN '25-50'
-                WHEN edge_score < 75 THEN '50-75'
-                ELSE '75-100'
-            END AS bucket,
-            COUNT(*) AS count
-        FROM {src}
-        WHERE edge_score IS NOT NULL
-          AND {ts_pred}
-        GROUP BY 1, 2
-        ORDER BY 1, 2
-    """
     return _cached(
         ("score-distribution", service_id, since_hours, win_disc),
-        lambda: {"rows": _isoformat_ts(_query_logs(service_id, sql), "hour"), "since_hours": since_hours},
+        lambda: {
+            "rows": _isoformat_ts(_scoring_repo.score_distribution_rows(service_id, src, ts_pred), "hour"),
+            "since_hours": since_hours,
+        },
     )
 
 
@@ -1013,21 +1041,12 @@ def scoring_compliance_breakdown(
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
-    sql = f"""
-        SELECT
-            date_trunc('hour', timestamp) AS hour,
-            edge_cookie_compliance AS compliance,
-            COUNT(*) AS count
-        FROM {src}
-        WHERE edge_cookie_compliance IS NOT NULL
-          AND edge_cookie_compliance != ''
-          AND {ts_pred}
-        GROUP BY 1, 2
-        ORDER BY 1, 2
-    """
     return _cached(
         ("compliance-breakdown", service_id, since_hours, win_disc),
-        lambda: {"rows": _isoformat_ts(_query_logs(service_id, sql), "hour"), "since_hours": since_hours},
+        lambda: {
+            "rows": _isoformat_ts(_scoring_repo.compliance_breakdown_rows(service_id, src, ts_pred), "hour"),
+            "since_hours": since_hours,
+        },
     )
 
 
@@ -1076,39 +1095,12 @@ def scoring_latency_timeseries(
     # (never interpolated from user input) so it's safe in the f-string SQL.
     bucket = "minute" if int(since_hours) <= 1 else "hour"
 
-    select_parts = [
-        f"date_trunc('{bucket}', timestamp) AS hour",
-        "COUNT(*) FILTER (WHERE edge_score IS NOT NULL) AS scored_count",
-        "COUNT(*) FILTER (WHERE edge_score_reason ILIKE '%compute-unavailable%') AS fail_open_count",
-        "COUNT(*) AS total_count",
-    ]
-    if has_rtt:
-        select_parts += [
-            "CAST(quantile_cont(edge_score_rtt_us, 0.5)  FILTER (WHERE edge_score_rtt_us IS NOT NULL) AS BIGINT) AS rtt_p50_us",
-            "CAST(quantile_cont(edge_score_rtt_us, 0.95) FILTER (WHERE edge_score_rtt_us IS NOT NULL) AS BIGINT) AS rtt_p95_us",
-            "CAST(quantile_cont(edge_score_rtt_us, 0.99) FILTER (WHERE edge_score_rtt_us IS NOT NULL) AS BIGINT) AS rtt_p99_us",
-        ]
-    if has_exec:
-        select_parts += [
-            "CAST(quantile_cont(edge_score_exec_us, 0.5)  FILTER (WHERE edge_score_exec_us IS NOT NULL) AS BIGINT) AS exec_p50_us",
-            "CAST(quantile_cont(edge_score_exec_us, 0.95) FILTER (WHERE edge_score_exec_us IS NOT NULL) AS BIGINT) AS exec_p95_us",
-        ]
-    select_sql = ",\n            ".join(select_parts)
-    sql = f"""
-        SELECT
-            {select_sql}
-        FROM {src}
-        -- Scored rows are edge requests even when the scoring restart left
-        -- edge != true on them; include them so the distribution isn't empty.
-        WHERE (edge = true OR edge_score IS NOT NULL)
-          AND {ts_pred}
-        GROUP BY 1
-        ORDER BY 1
-    """
     return _cached(
         ("latency-timeseries", service_id, since_hours, win_disc),
         lambda: {
-            "rows": _isoformat_ts(_query_logs(service_id, sql), "hour"),
+            "rows": _isoformat_ts(
+                _scoring_repo.latency_timeseries_rows(service_id, src, ts_pred, bucket, has_rtt, has_exec), "hour"
+            ),
             "since_hours": since_hours,
             "has_latency": has_rtt or has_exec,
             "granularity": bucket,
@@ -1145,109 +1137,9 @@ def scoring_health(
     src = _scoring_source(table, cols)
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
-    _rtt_cte = ",\n                edge_score_rtt_us" if has_rtt else ""
-    _exec_cte = ",\n                edge_score_exec_us" if has_exec else ""
-    _lat_parts: list[str] = []
-    if has_rtt:
-        # RTT over ALL routed edge rows (incl. fail-opens, which sit ≈the
-        # timeout budget) — that's the distribution to compare against the
-        # backend timeout when tuning the fail-open rate.
-        _lat_parts += [
-            "(SELECT quantile_cont(edge_score_rtt_us, 0.5)  FROM edge_rows WHERE edge_score_rtt_us IS NOT NULL) AS rtt_p50_us",
-            "(SELECT quantile_cont(edge_score_rtt_us, 0.95) FROM edge_rows WHERE edge_score_rtt_us IS NOT NULL) AS rtt_p95_us",
-            "(SELECT quantile_cont(edge_score_rtt_us, 0.99) FROM edge_rows WHERE edge_score_rtt_us IS NOT NULL) AS rtt_p99_us",
-            "(SELECT MAX(edge_score_rtt_us) FROM edge_rows)                                                     AS rtt_max_us",
-        ]
-    if has_exec:
-        # Exec over SCORED rows only (fail-opens never carry a self-time).
-        _lat_parts += [
-            "(SELECT quantile_cont(edge_score_exec_us, 0.5)  FROM scored WHERE edge_score_exec_us IS NOT NULL) AS exec_p50_us",
-            "(SELECT quantile_cont(edge_score_exec_us, 0.95) FROM scored WHERE edge_score_exec_us IS NOT NULL) AS exec_p95_us",
-        ]
-    _latency_select = (",\n            " + ",\n            ".join(_lat_parts)) if _lat_parts else ""
-
-    sql = f"""
-        WITH edge_rows AS (
-            SELECT
-                edge_score,
-                edge_score_l2,
-                edge_score_reason,
-                edge_cookie_compliance,
-                edge_sid{_rtt_cte}{_exec_cte}
-            FROM {src}
-            -- Scored rows ARE edge requests (the scorer only runs at the edge),
-            -- but the scoring restart means the capture VCL may not stamp
-            -- edge=true on them. Include them explicitly so scored traffic isn't
-            -- dropped from the health view (Fire Rate 0% despite live scoring).
-            WHERE (edge = true OR edge_score IS NOT NULL)
-              AND {ts_pred}
-        ),
-        scored AS (
-            SELECT * FROM edge_rows WHERE edge_score IS NOT NULL
-        ),
-        reason_rows AS (
-            SELECT trim(reason) AS reason
-            FROM (
-                SELECT unnest(string_split(edge_score_reason, ',')) AS reason
-                FROM scored
-                WHERE edge_score_reason IS NOT NULL AND edge_score_reason != ''
-            )
-            WHERE trim(reason) != ''
-        ),
-        top_reasons AS (
-            SELECT reason, COUNT(*) AS n
-            FROM reason_rows
-            GROUP BY reason
-            ORDER BY n DESC
-            LIMIT 10
-        ),
-        fail_open_reasons AS (
-            -- Fail-open breakdown by EXACT reason string so the operator can
-            -- tell compute-unavailable-503 (scorer timeout/unavailable) from
-            -- -500 (Wasm trap) / -401 (auth mismatch) / internal-error-keys
-            -- (KV/key load) — each is a distinct remediation. The VCL deliver
-            -- snippet rewrites every non-200 scorer response to
-            -- "compute-unavailable-<status>", so the scorer's 401-unauthorized
-            -- lands here as "compute-unavailable-401" (caught by the first
-            -- filter) — there is no bare "unauthorized" log reason (EC-05). The
-            -- Rust scorer returns 200 + a bare "internal-error-keys" reason on a
-            -- key-load failure (caught by the second filter). NOT limited (unlike
-            -- top_reasons) — fail-opens are rare and every class matters.
-            SELECT reason, COUNT(*) AS n
-            FROM reason_rows
-            WHERE reason ILIKE 'compute-unavailable%'
-               OR reason ILIKE 'internal-error%'
-            GROUP BY reason
-            ORDER BY n DESC
-        )
-        SELECT
-            (SELECT COUNT(*) FROM edge_rows)                                    AS total_edge_rows,
-            (SELECT COUNT(*) FROM scored)                                       AS scored_rows,
-            (SELECT COUNT(DISTINCT edge_sid) FROM scored WHERE edge_sid <> '') AS distinct_sids,
-            (SELECT AVG(edge_score) FROM scored)                                AS avg_score,
-            (SELECT quantile_cont(edge_score, 0.5) FROM scored)                 AS p50_score,
-            (SELECT quantile_cont(edge_score, 0.95) FROM scored)                AS p95_score,
-            (SELECT MAX(edge_score) FROM scored)                                AS max_score,
-            (SELECT COUNT(*) FROM scored
-              WHERE edge_score_reason ILIKE '%compute-unavailable%')            AS scorer_errors,
-            (SELECT list({{'reason': reason, 'count': n}}) FROM top_reasons)    AS top_reasons,
-            (SELECT list({{'reason': reason, 'count': n}}) FROM fail_open_reasons) AS fail_open_breakdown,
-            -- Matrix-staleness signal: fraction of scored rows whose L2
-            -- transition score is "high" (≥50), meaning the matrix gave
-            -- that transition low probability. When this fraction climbs
-            -- (3× baseline per research §7.5), the matrix is drifting
-            -- relative to current traffic and a retrain is warranted.
-            -- L2 of 0 means "didn't trip a rare-transition rule" — used
-            -- in the denominator of the staleness fraction filtered to
-            -- rows we ACTUALLY evaluated L2 on (excludes cookie-missing
-            -- shortcuts that bypass the matrix).
-            (SELECT COUNT(*) FROM scored WHERE edge_score_l2 IS NOT NULL)       AS l2_evaluated,
-            (SELECT COUNT(*) FROM scored WHERE edge_score_l2 >= 50)             AS l2_high_count{_latency_select}
-    """
 
     def _produce() -> dict:
-        rows = _query_logs(service_id, sql)
-        row = rows[0] if rows else {}
+        row = _scoring_repo.health_snapshot_row(service_id, src, ts_pred, has_rtt, has_exec)
         total = int(row.get("total_edge_rows") or 0)
         scored = int(row.get("scored_rows") or 0)
         fire_rate_pct = (scored / total * 100.0) if total else 0.0
@@ -1613,73 +1505,15 @@ def scoring_threshold_preview(
         # — handled by the separate branch below.
         flagged_good = flagged_bad = passed_good = passed_bad = 0
         labeled_pairs = [(s, lbl) for s, lbl in sid_to_label.items() if s]
+        counts_row = _scoring_repo.threshold_preview_counts(service_id, src, ts_pred, threshold_int, labeled_pairs)
+        total = int(counts_row.get("total") or 0)
+        flagged_total = int(counts_row.get("flagged_total") or 0)
+        passed_total = total - flagged_total
         if labeled_pairs:
-            values_placeholders = ", ".join("(?, ?)" for _ in labeled_pairs)
-            values_params: tuple = tuple(p for pair in labeled_pairs for p in pair)
-            single_sql = f"""
-                WITH sid_scores AS (
-                    SELECT edge_sid, MAX(edge_score) AS max_score
-                    FROM {src}
-                    -- edge_score IS NOT NULL already scopes to scored (edge)
-                    -- requests; an explicit edge = true would drop scored rows
-                    -- whose edge flag the scoring restart left unset.
-                    WHERE edge_score IS NOT NULL
-                      AND edge_sid IS NOT NULL
-                      AND edge_sid <> ''
-                      AND {ts_pred}
-                    GROUP BY edge_sid
-                ),
-                labels(edge_sid, label) AS (
-                    VALUES {values_placeholders}
-                ),
-                joined AS (
-                    SELECT s.max_score, l.label
-                    FROM sid_scores s
-                    LEFT JOIN labels l USING (edge_sid)
-                )
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN max_score >= {threshold_int} THEN 1 ELSE 0 END) AS flagged_total,
-                    SUM(CASE WHEN max_score >= {threshold_int} AND label = 'good' THEN 1 ELSE 0 END) AS flagged_good,
-                    SUM(CASE WHEN max_score >= {threshold_int} AND label = 'bad'  THEN 1 ELSE 0 END) AS flagged_bad,
-                    SUM(CASE WHEN max_score <  {threshold_int} AND label = 'good' THEN 1 ELSE 0 END) AS passed_good,
-                    SUM(CASE WHEN max_score <  {threshold_int} AND label = 'bad'  THEN 1 ELSE 0 END) AS passed_bad
-                FROM joined
-            """
-            rows = _query_logs(service_id, single_sql, values_params)
-            r = rows[0] if rows else {}
-            total = int(r.get("total") or 0)
-            flagged_total = int(r.get("flagged_total") or 0)
-            passed_total = total - flagged_total
-            flagged_good = int(r.get("flagged_good") or 0)
-            flagged_bad = int(r.get("flagged_bad") or 0)
-            passed_good = int(r.get("passed_good") or 0)
-            passed_bad = int(r.get("passed_bad") or 0)
-        else:
-            # No labels yet — single aggregate scan with no labels join.
-            agg_sql = f"""
-                WITH sid_scores AS (
-                    SELECT edge_sid, MAX(edge_score) AS max_score
-                    FROM {src}
-                    -- edge_score IS NOT NULL already scopes to scored (edge)
-                    -- requests; an explicit edge = true would drop scored rows
-                    -- whose edge flag the scoring restart left unset.
-                    WHERE edge_score IS NOT NULL
-                      AND edge_sid IS NOT NULL
-                      AND edge_sid <> ''
-                      AND {ts_pred}
-                    GROUP BY edge_sid
-                )
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN max_score >= {threshold_int} THEN 1 ELSE 0 END) AS flagged_total
-                FROM sid_scores
-            """
-            agg_rows = _query_logs(service_id, agg_sql)
-            agg = agg_rows[0] if agg_rows else {}
-            total = int(agg.get("total") or 0)
-            flagged_total = int(agg.get("flagged_total") or 0)
-            passed_total = total - flagged_total
+            flagged_good = int(counts_row.get("flagged_good") or 0)
+            flagged_bad = int(counts_row.get("flagged_bad") or 0)
+            passed_good = int(counts_row.get("passed_good") or 0)
+            passed_bad = int(counts_row.get("passed_bad") or 0)
 
         # Unlabeled buckets fall out by subtraction — every flagged/passed
         # sid that didn't match a label-row is unlabeled.

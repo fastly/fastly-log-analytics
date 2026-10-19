@@ -555,3 +555,69 @@ async def test_live_registry_tarball_verifies():
     assert isinstance(bundle, bytes)
     assert len(bundle) > 1000
     assert b"Faro" in bundle or b"faro" in bundle
+
+
+# ---------------------------------------------------------------------------
+# get_faro_versions_cached: the /rum/versions page-load path must not make an
+# uncached, multi-second external npm call on every request, nor fail the RUM
+# page when that external call is slow/unavailable. Measured in the
+# 2026-10-01 deploy run: every /rum/versions call hit registry.npmjs.org and
+# took 0.4-12s, escalating to a 21.5s timeout -> 503 under verify-phase load,
+# which hard-failed the dashboard verifier on all four environments.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_versions_cache():
+    faro_versions.reset_versions_cache()
+    yield
+    faro_versions.reset_versions_cache()
+
+
+async def test_cached_versions_fetches_once_within_ttl(monkeypatch):
+    """Two calls within the TTL hit the external registry exactly once."""
+    calls = {"n": 0}
+
+    async def _fake():
+        calls["n"] += 1
+        return ["2.10.0", "2.9.0"]
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _fake)
+
+    first = await faro_versions.get_faro_versions_cached()
+    second = await faro_versions.get_faro_versions_cached()
+
+    assert first == ["2.10.0", "2.9.0"]
+    assert second == first
+    assert calls["n"] == 1
+
+
+async def test_cached_versions_serves_stale_on_error(monkeypatch):
+    """After a successful fetch, a later registry failure returns the last
+    known list (stale) instead of raising."""
+
+    async def _ok():
+        return ["2.10.0", "2.9.0"]
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _ok)
+    assert await faro_versions.get_faro_versions_cached() == ["2.10.0", "2.9.0"]
+
+    # Force the cached entry to be expired, then make the registry fail.
+    faro_versions._versions_cache = (0.0, ["2.10.0", "2.9.0"])
+
+    async def _boom():
+        raise ValueError("registry down")
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _boom)
+    assert await faro_versions.get_faro_versions_cached() == ["2.10.0", "2.9.0"]
+
+
+async def test_cached_versions_empty_on_error_without_cache(monkeypatch):
+    """With no prior cached value, a registry failure returns [] rather than
+    raising, so the non-critical versions list never breaks the page."""
+
+    async def _boom():
+        raise ValueError("registry down")
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _boom)
+    assert await faro_versions.get_faro_versions_cached() == []

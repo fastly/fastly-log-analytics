@@ -3,6 +3,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests._helpers.config_fakes import mutate_via_save
 
 client = TestClient(app)
 
@@ -28,9 +29,11 @@ def test_custom_fields_persist_on_log_fields_update(mock_get_source, mock_save_c
     }
 
     # Simulate UI sending updated groups (but NO custom_fields)
-    response = client.post(
-        "/api/services/test-service/log-fields", json={"log_fields": {"groups": ["A", "B", "C"], "field_overrides": {}}}
-    )
+    with patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save_config)):
+        response = client.post(
+            "/api/services/test-service/log-fields",
+            json={"log_fields": {"groups": ["A", "B", "C"], "field_overrides": {}}},
+        )
 
     assert response.status_code == 200
 

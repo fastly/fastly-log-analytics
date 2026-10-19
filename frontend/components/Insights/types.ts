@@ -1,3 +1,11 @@
+import type { InsightCardData } from '@/types/api'
+
+type CardOf<Id extends InsightCardData['id']> = Extract<InsightCardData, { id: Id }>
+
+export type ImpossibleDistanceItem = CardOf<'impossible_distance'>['items'][number]
+export type RepeatedPatternsItem = CardOf<'repeated_patterns'>['items'][number]
+export type RepeatedPatternsFpItem = CardOf<'repeated_patterns_fp'>['items'][number]
+
 export interface ImpossibleDistanceData {
   label: string
   client_lat: number

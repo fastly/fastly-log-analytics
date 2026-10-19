@@ -5,6 +5,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Activity } from 'lucide-react'
 import type { TimelinePoint } from './useStreamAggregates'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const TIMELINE_LAYOUT = {
   yaxis: { title: { text: 'kbps' } },
@@ -35,14 +36,14 @@ export function StreamTimeline({ timeline, isLoading }: StreamTimelineProps) {
         y: timeline.map(p => p.bitrate),
         name: 'Bitrate',
         type: 'scatter' as const,
-        line: { color: '#10b981', shape: 'hv' },
+        line: { color: CHART_COLORS.success, shape: 'hv' },
       },
       {
         x: ts,
         y: timeline.map(p => p.throughput),
         name: 'Throughput',
         type: 'scatter' as const,
-        line: { color: '#f59e0b', dash: 'dot' },
+        line: { color: CHART_COLORS.warning, dash: 'dot' },
       },
       {
         x: ts,
@@ -65,7 +66,7 @@ export function StreamTimeline({ timeline, isLoading }: StreamTimelineProps) {
         y0: 0,
         y1: 1,
         yref: 'paper' as const,
-        line: { color: '#ef4444', width: 1.5, dash: 'dash' as const },
+        line: { color: CHART_COLORS.danger, width: 1.5, dash: 'dash' as const },
       }))
 
     const annotations = timeline

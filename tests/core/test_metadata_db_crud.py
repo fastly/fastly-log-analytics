@@ -18,6 +18,11 @@ import pytest
 
 from backend.core import metadata as metadata_db
 from backend.core.metadata import usage_log_db
+from backend.core.metadata.cron_log import (
+    _decode_outcome_counters,
+    _normalize_outcome_counters,
+    record_ingest_object_outcome,
+)
 
 
 @pytest.fixture
@@ -384,7 +389,11 @@ def test_get_log_accounting_counts_uses_file_date_fast_arm_when_populated(sid):
         "SELECT file_name, file_date FROM ingested_files WHERE source_name = ?",
         (sid,),
     ).fetchall()
-    assert all(r["file_date"] == "2026-05-15" for r in fd_rows), (
+    # Postgres's ``file_date DATE`` column round-trips as a real
+    # ``datetime.date`` object (psycopg auto-converts), not the plain ISO
+    # string SQLite returns for the same column — compare via ``str()`` so
+    # this assertion holds under both backends.
+    assert all(str(r["file_date"]) == "2026-05-15" for r in fd_rows), (
         f"insert_ingested_files should populate file_date; got {[dict(r) for r in fd_rows]}"
     )
 
@@ -595,6 +604,205 @@ def test_log_cron_run_updates_existing_when_run_id_provided(sid):
     assert row["rows_ingested"] == 1000
 
 
+def test_log_cron_run_persists_outcome_counters_as_json(sid):
+    run_id = metadata_db.start_cron_run(sid, "log_discovery")
+    counters = {
+        "valid_records": 3,
+        "malformed_records": 1,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 2,
+        "objects_processed": 2,
+        "objects_successful": 1,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
+
+    metadata_db.log_cron_run(
+        sid,
+        "log_discovery",
+        duration_s=1.0,
+        status="error",
+        files_downloaded=2,
+        rows_ingested=3,
+        corrupt_rows=1,
+        outcome_counters=counters,
+        run_id=run_id,
+    )
+
+    con = metadata_db.get_con(sid)
+    columns = con.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'cron_runs'"
+    ).fetchall()
+    assert "outcome_counters" in {row[0] for row in columns}
+
+    row = con.execute(
+        "SELECT status, files_downloaded, rows_ingested, corrupt_rows, outcome_counters FROM cron_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row[0:4] == ("error", 2, 3, 1)
+    assert json.loads(row[4]) == counters
+
+
+def test_record_ingest_object_outcome_replaces_its_origin_run_contribution(sid):
+    run_id = metadata_db.start_cron_run(sid, "log_discovery")
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?), "
+        "(?, ?, 'discovered', 'log_discovery', ?)",
+        (
+            sid,
+            "raw/request/object.log.gz",
+            run_id,
+            sid,
+            "raw/request/other.log.gz",
+            run_id,
+        ),
+    )
+    con.commit()
+
+    initial = {
+        "valid_records": 4,
+        "malformed_records": 0,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 0,
+        "objects_processed": 1,
+        "objects_successful": 1,
+        "objects_partial": 0,
+        "objects_failed": 0,
+    }
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", initial)
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", initial)
+    other = {**initial, "valid_records": 6}
+    assert record_ingest_object_outcome(sid, "raw/request/other.log.gz", other)
+
+    revised = {
+        **initial,
+        "malformed_records": 2,
+        "objects_successful": 0,
+        "objects_partial": 1,
+    }
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", revised)
+    expected_totals = {key: revised[key] + other[key] for key in revised}
+    metadata_db.log_cron_run(
+        sid,
+        "log_discovery",
+        duration_s=1.0,
+        status="success",
+        run_id=run_id,
+    )
+
+    row = con.execute(
+        "SELECT status, rows_ingested, corrupt_rows, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?",
+        (run_id, sid),
+    ).fetchone()
+    assert row["status"] == "error"
+    assert row["rows_ingested"] == 10
+    assert row["corrupt_rows"] == 2
+    assert json.loads(row["outcome_counters"]) == expected_totals
+    ledger_row = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
+        (sid, "raw/request/object.log.gz"),
+    ).fetchone()
+    assert json.loads(ledger_row[0]) == revised
+
+
+def test_record_ingest_object_outcome_returns_false_for_unknown_object(sid):
+    assert record_ingest_object_outcome(sid, "raw/request/missing.log.gz", {}) is False
+    assert (
+        metadata_db.get_con(sid)
+        .execute(
+            "SELECT count(*) FROM cron_runs WHERE service_id = ?",
+            (sid,),
+        )
+        .fetchone()[0]
+        == 0
+    )
+
+
+def test_record_ingest_object_outcome_rejects_missing_origin_run(sid):
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?)",
+        (sid, "raw/request/missing-run.log.gz", 987654),
+    )
+    con.commit()
+
+    with pytest.raises(RuntimeError, match="originating cron run 987654 is missing"):
+        record_ingest_object_outcome(sid, "raw/request/missing-run.log.gz", {"valid_records": 1})
+
+    row = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
+        (sid, "raw/request/missing-run.log.gz"),
+    ).fetchone()
+    assert row["outcome_counters"] == "{}"
+
+
+def test_record_ingest_object_outcome_rejects_mismatched_origin_task(sid):
+    run_id = metadata_db.start_cron_run(sid, "rum_discovery")
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?)",
+        (sid, "raw/request/wrong-task.log.gz", run_id),
+    )
+    con.commit()
+
+    with pytest.raises(RuntimeError, match="origin task does not match"):
+        record_ingest_object_outcome(sid, "raw/request/wrong-task.log.gz", {"valid_records": 1})
+
+    row = con.execute(
+        "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?",
+        (run_id, sid),
+    ).fetchone()
+    assert row["status"] == "running"
+    assert row["outcome_counters"] in (None, "{}")
+
+
+def test_normalize_outcome_counters_defaults_omitted_values_to_zero():
+    counters = _normalize_outcome_counters({"valid_records": 2})
+
+    assert counters["valid_records"] == 2
+    assert counters["malformed_records"] == 0
+    assert counters["objects_failed"] == 0
+    assert len(counters) == 10
+
+
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"unexpected": 1},
+        {"valid_records": -1},
+        {"valid_records": True},
+        {"valid_records": 1.5},
+    ],
+)
+def test_normalize_outcome_counters_rejects_unknown_and_invalid_values(counters):
+    with pytest.raises(ValueError):
+        _normalize_outcome_counters(counters)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("{broken", "invalid outcome_counters JSON"),
+        ("[]", "must be a JSON object"),
+        ('{"valid_records": -1}', "invalid outcome_counters values"),
+    ],
+)
+def test_decode_outcome_counters_rejects_malformed_persisted_state(raw, message):
+    with pytest.raises(RuntimeError, match=message):
+        _decode_outcome_counters(raw)
+
+
 def test_log_cron_run_inserts_when_no_run_id(sid):
     """Path used by code that didn't go through start_cron_run
     (retries, manual ingest). Pinned because losing this branch
@@ -646,6 +854,41 @@ def test_latest_cron_per_task_picks_latest_non_running_per_task(sid):
     assert out["optimize"]["duration_s"] == 3.0
 
 
+def test_latest_cron_per_task_excludes_boot_reap_sentinel_before_ranking(sid):
+    """``exclude_error_messages`` drops boot-reap rows BEFORE the per-task
+    ranking (mirrors backend/main.py's deep-health exclusion), so:
+      (a) a restart-interrupted cron whose newest row is the reap sentinel
+          is NOT surfaced as the task's latest run, and
+      (b) the exclusion reveals the real terminal run beneath the reap —
+          it must not merely hide the task. A genuine error that is the
+          latest NON-reap run still surfaces.
+    """
+    sentinel = "Process interrupted by server restart"
+
+    # Task A: a real success, then a boot-reap on top. Excluding the reap must
+    # reveal the success (not drop the task, not report an error).
+    ra1 = metadata_db.start_cron_run(sid, "insights_prewarmer")
+    metadata_db.log_cron_run(sid, "insights_prewarmer", duration_s=1.0, status="success", run_id=ra1)
+    ra2 = metadata_db.start_cron_run(sid, "insights_prewarmer")
+    metadata_db.log_cron_run(
+        sid, "insights_prewarmer", duration_s=0.0, status="error", run_id=ra2, error_message=sentinel
+    )
+
+    # Task B: a genuine (non-reap) error as the latest run — must still surface.
+    rb1 = metadata_db.start_cron_run(sid, "optimize")
+    metadata_db.log_cron_run(sid, "optimize", duration_s=2.0, status="error", run_id=rb1, error_message="real boom")
+
+    out = metadata_db.latest_cron_per_task(sid, exclude_error_messages=(sentinel,))
+    assert out["insights_prewarmer"]["status"] == "success", "reap must not mask the real latest run"
+    assert out["optimize"]["status"] == "error"
+    assert out["optimize"]["error_message"] == "real boom"
+
+    # Default behavior is unchanged: without the exclusion the reap IS latest.
+    out_default = metadata_db.latest_cron_per_task(sid)
+    assert out_default["insights_prewarmer"]["status"] == "error"
+    assert out_default["insights_prewarmer"]["error_message"] == sentinel
+
+
 def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     """The aggregate totals and per-type breakdown are derived from a single
     GROUP BY (operation_class, operation_type) scan. Pinned because the prior
@@ -667,6 +910,22 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
             duration_ms, function_name, process_context, bytes, count)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
+    )
+    summary_rows = [
+        (sid, "2026-05-25T10", "A", "PUT_OBJECT", 5, 300, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "A", "POST", 1, 50, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "B", "GET_OBJECT", 5, 500, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "CDN", "GET", 11, 3000, "2026-05-25T10:00:00Z"),
+    ]
+    con.executemany(
+        """INSERT INTO usage_log_hourly_summary
+           (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (service_id, hour, operation_class, operation_type)
+           DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count,
+                         bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
+                         last_updated = EXCLUDED.last_updated""",
+        summary_rows,
     )
     con.commit()
 
@@ -955,6 +1214,17 @@ def _seed_usage_log_row(
             process_context,
             "OK",
         ],
+    )
+    hour = timestamp[:13]
+    con.execute(
+        """INSERT INTO usage_log_hourly_summary
+            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT (service_id, hour, operation_class, operation_type)
+            DO UPDATE SET count = usage_log_hourly_summary.count + 1,
+                          bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
+                          last_updated = EXCLUDED.last_updated""",
+        [sid, hour, operation_class, operation_type, bytes_count, timestamp],
     )
     # ``get_usage_logs`` now opens a separate ``mode=ro`` connection per
     # call (decoupled from the cron writer), so the writer's uncommitted

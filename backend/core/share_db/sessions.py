@@ -8,12 +8,12 @@ Rows live in ``remote_sessions`` and are rehydrated by
 from __future__ import annotations
 
 import json
-import sqlite3
+from typing import Any
 
 from backend.core.share_db.connection import get_global_share_con
 
 
-def upsert_session(session: dict, *, con: sqlite3.Connection | None = None) -> None:
+def upsert_session(session: dict, *, con: Any = None) -> None:
     con = con or get_global_share_con()
     con.execute(
         """INSERT INTO remote_sessions(
@@ -46,13 +46,13 @@ def upsert_session(session: dict, *, con: sqlite3.Connection | None = None) -> N
     con.commit()
 
 
-def delete_session(session_id: str, *, con: sqlite3.Connection | None = None) -> None:
+def delete_session(session_id: str, *, con: Any = None) -> None:
     con = con or get_global_share_con()
     con.execute("DELETE FROM remote_sessions WHERE session_id=?", (session_id,))
     con.commit()
 
 
-def get_session(session_id: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+def get_session(session_id: str, *, con: Any = None) -> dict | None:
     con = con or get_global_share_con()
     row = con.execute("SELECT * FROM remote_sessions WHERE session_id=?", (session_id,)).fetchone()
     if row is None:
@@ -62,7 +62,7 @@ def get_session(session_id: str, *, con: sqlite3.Connection | None = None) -> di
     return rec
 
 
-def get_all_sessions(*, con: sqlite3.Connection | None = None) -> list[dict]:
+def get_all_sessions(*, con: Any = None) -> list[dict]:
     con = con or get_global_share_con()
     rows = con.execute("SELECT * FROM remote_sessions").fetchall()
     out: list[dict] = []

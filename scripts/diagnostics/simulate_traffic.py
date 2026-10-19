@@ -12,13 +12,13 @@ from fastapi.testclient import TestClient
 from backend.core.metadata import get_con
 from backend.main import app
 
-SERVICE_ID = os.getenv("SERVICE_ID", "rmWzCRA0lkAOs9Gnxvohs4")
+SERVICE_ID = os.getenv("SERVICE_ID")
 
 
 def generate_faro_beacon(path, lcp, cls, inp, load_time, browser, os, device):
     return {
         "meta": {
-            "page": {"url": f"https://fastly-se-demo.global.ssl.fastly.net{path}", "pathname": path},
+            "page": {"url": f"https://example.invalid{path}", "pathname": path},
             "browser": {"name": browser, "version": "120.0.0"},
             "os": {"name": os, "version": "14.1"},
             "device": {"type": device},
@@ -29,6 +29,8 @@ def generate_faro_beacon(path, lcp, cls, inp, load_time, browser, os, device):
 
 
 def run_audit():
+    if not SERVICE_ID:
+        raise SystemExit("SERVICE_ID is required")
     # 1. Clear existing beacons so we get a clean slate for the last 24h audit
     db = get_con(SERVICE_ID)
     db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (SERVICE_ID,))

@@ -12,9 +12,9 @@
  * never tear down the global-setup seed (other tests depend on it).
  * Test-fixture service ids only, per `infra-stays-local`.
  */
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
-async function provisionFreshService(page: any, sid: string) {
+async function provisionFreshService(page: Page, sid: string) {
   await page.goto('/admin')
   const messages = await page.evaluate(async (deployBody: Record<string, unknown>) => {
     const resp = await fetch('/api/provision/execute', {

@@ -11,6 +11,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
+import { queryKeys } from '@/lib/query-keys'
 
 let mockState: {
   activeServiceId: string | null
@@ -21,21 +22,27 @@ let mockState: {
 }
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockState) : mockState,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    { getState: () => mockState },
   )
-  useServiceStore.getState = () => mockState
   return { useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-function wrapper() {
-  const qc = createTestQueryClient({ queries: { gcTime: 0, staleTime: 0 } })
+// The hook gates its query on useSeededReady, which pre-seeds `null` into the
+// ['sync-status', id] cache entry (production seeds it from bootstrap). A fresh
+// seed satisfies the hook's 60 s staleTime, so no fetch fires until the entry is
+// stale or invalidated. Seed an already-stale entry to exercise the real queryFn;
+// gcTime Infinity keeps the observer-less seed alive until the hook mounts.
+function wrapper(opts: { staleSeed?: boolean } = {}) {
+  const qc = createTestQueryClient({ queries: { gcTime: Infinity, staleTime: 0 } })
+  if (opts.staleSeed) qc.setQueryData(queryKeys.syncStatus('svc-1'), null, { updatedAt: 0 })
   return makeQueryWrapper(qc)
 }
 
-describe.skip('useSyncStatus (MSW)', () => {
+describe('useSyncStatus (MSW)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockState = {
@@ -56,9 +63,9 @@ describe.skip('useSyncStatus (MSW)', () => {
       ),
     )
     const { useSyncStatus } = await import('@/hooks/useSyncStatus')
-    const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper() })
+    const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
-    await waitFor(() => expect(result.current.data).toBeDefined())
+    await waitFor(() => expect(result.current.data?.local_rows).toBe(12345))
     expect(result.current.data?.local_rows).toBe(12345)
     expect(result.current.data?.latest_log_at).toBe('2026-06-14T00:00:00Z')
   })
@@ -72,7 +79,7 @@ describe.skip('useSyncStatus (MSW)', () => {
       }),
     )
     const { useSyncStatus } = await import('@/hooks/useSyncStatus')
-    renderHook(() => useSyncStatus(), { wrapper: wrapper() })
+    renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await waitFor(() => expect(observedSkipFos).not.toBeNull())
     expect(observedSkipFos).toBe('true')
@@ -91,11 +98,12 @@ describe.skip('useSyncStatus (MSW)', () => {
       }),
     )
     const { useSyncStatus } = await import('@/hooks/useSyncStatus')
-    const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper() })
+    const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     // give react-query a tick to NOT fire
     await new Promise((r) => setTimeout(r, 50))
     expect(callCount).toBe(0)
-    expect(result.current.data).toBeUndefined()
+    // No fetch: the hook only exposes the null seed useSeededReady wrote.
+    expect(result.current.data).toBeNull()
   })
 })

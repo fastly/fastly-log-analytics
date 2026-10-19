@@ -11,7 +11,7 @@ contention pattern, different audit scope (security material).
 This module is the back-compat surface for the carved-up share_db package.
 The implementation lives in per-concern submodules:
 
-- ``connection`` — thread-local pool, PRAGMA setup, corruption self-heal
+- ``connection`` — thread-local Postgres connection routing
 - ``schema`` — _SCHEMA tables + MIGRATIONS dict + apply_pending
 - ``passcode`` — argon2id hashing + verify + cost-upgrade rehash + timing eq.
 - ``validation`` — name/email/PII/IP-whitelist parsing
@@ -31,7 +31,9 @@ from backend.core.share_db.audit import (
     get_last_login_by_email,
     get_share_audit_logs,
     log_share_audit_event,
+    purge_all_share_records,
     purge_old_audit_logs,
+    purge_stale_share_records,
 )
 from backend.core.share_db.connection import (
     close_all_connections,
@@ -175,6 +177,8 @@ __all__ = [
     "get_share_audit_logs",
     "get_last_login_by_email",
     "purge_old_audit_logs",
+    "purge_all_share_records",
+    "purge_stale_share_records",
     # TOS.
     "get_latest_tos",
     "publish_tos_version",

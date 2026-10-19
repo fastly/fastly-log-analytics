@@ -98,3 +98,14 @@ def test_with_telemetry_pulls_sqlite_collector(monkeypatch):
         assert len(resp.debug_sqlite) == 1
     finally:
         telemetry._SQLITE_QUERIES.set(None)
+
+
+def test_debug_query_params_absent_from_wire_unless_set(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "1")
+    producer_row = {"sql": "SELECT 1", "time_ms": 1.5, "engine": "DuckDB"}
+
+    plain = BaseResponse(debug_queries=[producer_row]).model_dump(by_alias=True, mode="json")
+    assert plain["_debug_queries"] == [{**producer_row, "is_cached": False}]
+
+    bound = BaseResponse(debug_queries=[{**producer_row, "params": ["a", 1]}]).model_dump(by_alias=True, mode="json")
+    assert bound["_debug_queries"][0]["params"] == ["a", 1]

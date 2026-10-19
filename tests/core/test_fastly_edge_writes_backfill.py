@@ -121,3 +121,48 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
         _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
         # log_synthetic_usage should NOT be called when the unbackfilled list is empty
         assert not log_synth.called
+
+
+def test_unbackfilled_lookup_scopes_usage_log_to_candidate_files(seeded_metadata_db):
+    """The anti-join must not load every historical fastly.edge URL each tick.
+
+    On a long-lived service usage_log holds ~450k fastly.edge rows while the
+    1h ``since`` window holds a few hundred files; fetching the whole URL set
+    cost ~5 s per log_discovery tick and delayed the next LIST.
+    """
+    from backend.core import metadata as metadata_db
+    from backend.core.metadata import usage_log_db
+
+    real_open = usage_log_db.open_readonly
+    fetched: list[int] = []
+
+    def _spy_open(service_id):
+        con = real_open(service_id)
+        orig_execute = con.execute
+
+        def _execute(sql, params=()):
+            cur = orig_execute(sql, params)
+            if "fastly.edge" in sql:
+                rows = cur.fetchall()
+                fetched.append(len(rows))
+
+                class _Rows:
+                    def fetchall(self_inner):
+                        return rows
+
+                return _Rows()
+            return cur
+
+        con.execute = _execute
+        return con
+
+    metadata_db.log_synthetic_usage(
+        seeded_metadata_db,
+        [{"method": "PUT_OBJECT", "path": f"s3://bkt/raw/old/{i}.log.gz", "bytes": 1} for i in range(50)],
+    )
+
+    with patch.object(usage_log_db, "open_readonly", _spy_open):
+        files = metadata_db.list_unbackfilled_fastly_edge_files(seeded_metadata_db, since="2000-01-01 00:00:00")
+
+    assert len(files) == 3
+    assert fetched and sum(fetched) == 0

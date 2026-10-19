@@ -17,6 +17,9 @@
 import React from 'react'
 import { act, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import type { TooltipInfo } from '@/components/Map/NetworkMap/OverlayLayer'
+import type { PlaybackControls as PlaybackControlsComponent } from '@/components/Map/NetworkMap/controls'
 
 // ---------------------------------------------------------------------------
 // Mocks must be declared before importing the component under test.
@@ -83,12 +86,12 @@ vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}))
 // but useMapInit / useMapData become no-op hooks. The test for tooltip
 // rendering captures the setTooltip callback the component passes to
 // useMapData so it can drive the portal branch directly.
-const mapDataCalls: Array<{ setTooltip: (t: any) => void }> = []
+const mapDataCalls: Array<{ setTooltip: (t: TooltipInfo | null) => void }> = []
 
 vi.mock('@/components/Map/NetworkMap/MapLayer', () => ({
   formatBucket: (iso: string) => (iso ? `LBL(${iso})` : ''),
   useMapInit: () => {},
-  useMapData: ({ setTooltip }: { setTooltip: (t: any) => void }) => {
+  useMapData: ({ setTooltip }: { setTooltip: (t: TooltipInfo | null) => void }) => {
     mapDataCalls.push({ setTooltip })
   },
 }))
@@ -97,10 +100,10 @@ vi.mock('@/components/Map/NetworkMap/MapLayer', () => ({
 // container passed in so we can assert against them without depending on the
 // real Select/Slider implementation. The latest props object is stashed in a
 // module-scoped ref so tests can drive setPlaying / inspect bucketIdx.
-const playbackProps: { current: Record<string, any> | null } = { current: null }
+const playbackProps: { current: React.ComponentProps<typeof PlaybackControlsComponent> | null } = { current: null }
 
 vi.mock('@/components/Map/NetworkMap/controls', () => ({
-  PlaybackControls: (props: Record<string, any>) => {
+  PlaybackControls: (props: React.ComponentProps<typeof PlaybackControlsComponent>) => {
     playbackProps.current = props
     return (
       <div
@@ -118,7 +121,7 @@ vi.mock('@/components/Map/NetworkMap/controls', () => ({
 // MapTooltip stub: assert it lands in document.body via createPortal by
 // rendering a marker with the metric prop.
 vi.mock('@/components/Map/NetworkMap/OverlayLayer', () => ({
-  MapTooltip: ({ info, metric }: { info: any; metric: string }) => (
+  MapTooltip: ({ info, metric }: { info: TooltipInfo | null; metric: string }) => (
     <div data-testid="map-tooltip" data-metric={metric}>
       {info?.city ?? ''}
     </div>
@@ -126,13 +129,6 @@ vi.mock('@/components/Map/NetworkMap/OverlayLayer', () => ({
 }))
 
 // jsdom lacks ResizeObserver; some downstream deps assume it exists.
-class MockResizeObserver {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-}
-;(globalThis as any).ResizeObserver = (globalThis as any).ResizeObserver || MockResizeObserver
-
 // Import AFTER mocks are registered.
 import { NetworkMap } from '@/components/Map/NetworkMap'
 
@@ -153,6 +149,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> =
 }
 
 beforeEach(() => {
+  stubResizeObserver()
   mapDataCalls.length = 0
   playbackProps.current = null
 })

@@ -13,16 +13,18 @@
  * resolve with a deterministic SessionDetailResponse shape and wait for
  * the timeline to render.
  */
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../../helpers/query'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
 import { SessionDetail } from '@/app/sessions/_sections/SessionDetail'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 // --- mocks --------------------------------------------------------------
 
@@ -30,7 +32,7 @@ const postMock = vi.fn()
 
 vi.mock('@/lib/api', () => ({
   client: {
-    POST: (...args: any[]) => postMock(...args),
+    POST: (...args: unknown[]) => postMock(...args),
     GET: vi.fn(),
     use: vi.fn(),
   },
@@ -45,7 +47,7 @@ vi.mock('@/hooks/useFieldLabel', () => ({
 
 // Virtualizer needs to enumerate every row for jsdom layout-free tests.
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count: number }) => ({
     getVirtualItems: () =>
       Array.from({ length: options.count }).map((_, i) => ({
         index: i,
@@ -63,11 +65,7 @@ vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
 // --- helpers ------------------------------------------------------------
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 afterEach(() => {
@@ -121,9 +119,7 @@ function makeListResponse(
 }
 
 function withProviders(ui: React.ReactNode) {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
-  })
+  const qc = createTestQueryClient({ queries: { gcTime: 0, staleTime: 0 } })
   return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
 }
 

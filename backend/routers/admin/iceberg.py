@@ -7,17 +7,17 @@ import os
 from typing import Literal
 
 from fastapi import Depends, HTTPException
-from sse_starlette.sse import EventSourceResponse
 
-from backend.deps import get_source
-from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest
+from backend.deps import get_source, require_admin
+from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest, SyncStartResponse
+from backend.models.admin_actions import DucklakeMigrateResponse, IcebergCalendarResponse
 from backend.utils.router_utils import (
-    SSE_PASSTHROUGH_HEADERS,
     make_error,
     query_errors,
     raise_internal,
     require_json_content_type,
 )
+from backend.utils.sse import sse_response
 
 from ._router import router
 
@@ -37,7 +37,7 @@ def iceberg_info_endpoint(
     return IcebergTableInfoResponse.with_telemetry(**result)
 
 
-@router.get("/admin/iceberg-calendar")
+@router.get("/admin/iceberg-calendar", response_model=IcebergCalendarResponse, response_model_exclude_unset=True)
 @query_errors(status_code=500)
 def iceberg_calendar_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
@@ -51,18 +51,39 @@ def iceberg_calendar_endpoint(
     return {**result, "_debug_calls": get_tracked_calls()}
 
 
-@router.post("/admin/commit-iceberg", status_code=202)
-def iceberg_commit_endpoint(source: dict = Depends(get_source)):
-    """Manually flush the local buffer to the Iceberg table.
+@router.post(
+    "/admin/commit-iceberg",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/commit/{service_id}",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def iceberg_commit_endpoint(
+    service_id: str | None = None,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    """Manually flush the local buffer to the DuckLake table.
 
     Returns 202 Accepted — the commit runs asynchronously in a worker
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(
+            status_code=403,
+            detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
+        )
+
     from backend.cron.jobs.commit import _run_commit
     from backend.utils.router_utils import start_or_resume_cron
 
-    return start_or_resume_cron(
+    res = start_or_resume_cron(
         source,
         "commit",
         _run_commit,
@@ -70,9 +91,12 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
         success_msg="Commit started.",
         in_progress_msg="Commit already running.",
     )
+    return SyncStartResponse(**res)
 
 
-@router.post("/admin/rebuild-local-view", status_code=202)
+@router.post(
+    "/admin/rebuild-local-view", status_code=202, response_model=SyncStartResponse, response_model_exclude_unset=True
+)
 def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     """One-button "fix it" for a stuck or stale local DuckDB view.
 
@@ -118,12 +142,51 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
         # cache-clearing the operator explicitly asked for.
         run_id = start_cron_run(source, "metadata_sync")
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=make_error("cron_busy", str(e), busy=True)) from e
+        logger.warning("cron_busy service_id=%s: %s", service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("cron_busy", "A sync run is already in progress", busy=True),
+        ) from e
 
     start_progress(run_id, service_id=service_id, task="metadata_sync")
     t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
     t.start()
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+
+
+@router.post(
+    "/admin/ducklake/migrate",
+    status_code=202,
+    response_model=DucklakeMigrateResponse,
+    response_model_exclude_unset=True,
+)
+def ducklake_migrate_endpoint(source: dict = Depends(get_source)):
+    """Adopt this service's legacy pyiceberg-era parquet into DuckLake.
+
+    The backend already runs this automatically on first boot under v3;
+    this endpoint is the explicit "run it now" button (and the retry path
+    after a failed sweep), so it bypasses the once-ever guard. Returns
+    202 Accepted — the adoption runs in a background thread (registering
+    thousands of files can take a while). Idempotent: files already
+    tracked by the DuckLake catalog are skipped, so re-running after a
+    partial failure is safe. The outcome lands as a ``ducklake_adopt``
+    row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
+    """
+    import threading
+
+    from backend.core.iceberg._ducklake_migration import run_legacy_adoption_once
+
+    service_id = source["name"]
+
+    def worker():
+        try:
+            result = run_legacy_adoption_once(service_id, force=True)
+            logger.info("ducklake migrate %s finished: %s", service_id, result)
+        except Exception:
+            logger.exception("ducklake migrate %s failed", service_id)
+
+    threading.Thread(target=worker, daemon=True, name=f"ducklake-migrate-{service_id}").start()
+    return {"ok": True, "message": "DuckLake adoption started.", "service_id": service_id}
 
 
 # response_model intentionally omitted: SSE progress stream (EventSourceResponse),
@@ -192,7 +255,7 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
             except _queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
@@ -250,4 +313,4 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
             except _queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())

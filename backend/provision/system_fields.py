@@ -20,7 +20,7 @@ feature's page renders all zeros with no error to explain why.
 Two production incidents came from exactly this:
 
   - 2026-06-02 — ``state_sync`` overwrote scoring's 8 fields on every tick.
-  - 2026-08-12 — the SE-demo service lost all 14 CMCD fields; CMCD had been
+  - 2026-08-12 — a production service lost all 14 CMCD fields; CMCD had been
     enabled since 2026-07-13 and never collected a single value.
 
 Route every such write through ``reconcile_system_custom_fields``, keyed on the
@@ -62,7 +62,7 @@ def reconcile_system_custom_fields(
     built from the same config in different orders end up with the same columns
     under different ids — and then ``add_files`` between them is impossible,
     because Iceberg binds by id. That is exactly what blocked recovery of the
-    2026-08 SE-demo rollback: 27 columns, identical names and types, different
+    2026-08 production rollback: 27 columns, identical names and types, different
     ids on each branch. Do not make this order depend on dict iteration,
     feature-toggle timing, or the incoming list.
     """

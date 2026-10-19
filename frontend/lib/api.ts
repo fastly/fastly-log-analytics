@@ -1,11 +1,24 @@
 import createClient from "openapi-fetch";
 import type { paths } from "@/types/api.generated";
+import type { StripIndex, WireParity } from "@/types/api";
 import { useAdminTokenStore } from "@/stores/adminTokenStore";
 import { useDebugStore } from "@/stores/debugStore";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useSessionRoleStore } from "@/stores/sessionRoleStore";
 import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
 import { isUserActive } from "@/lib/userActivity";
+
+let pageLoadId: string | null = null
+
+export function getPageLoadId(): string | null {
+  if (typeof window === "undefined") return null
+  if (!pageLoadId) {
+    pageLoadId = typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+  return pageLoadId
+}
 
 export function extractApiError(error: unknown): string {
   if (!error) return 'Unknown error'
@@ -102,6 +115,10 @@ export function adminFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers ?? {})
+  const currentPageLoadId = getPageLoadId()
+  if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
+    headers.set("X-Page-Load-ID", currentPageLoadId)
+  }
   try {
     const token = useAdminTokenStore.getState().token
     if (token && !headers.has("X-Admin-Token")) {
@@ -117,7 +134,10 @@ export function adminFetch(
   // service. Global admin endpoints (live-query registry, host metrics) ignore
   // it; path-scoped /api/services/{id}/* calls already carry the id.
   try {
-    const sid = useServiceStore.getState().activeServiceId
+    let sid = useServiceStore.getState().activeServiceId
+    if (!sid && typeof window !== "undefined") {
+      sid = new URLSearchParams(window.location.search).get("service");
+    }
     if (sid && !headers.has("x-service-id")) {
       headers.set("x-service-id", sid)
     }
@@ -129,6 +149,69 @@ export function adminFetch(
     }
   } catch { /* SSR pre-hydration — fall through without the header */ }
   return fetch(input, { ...init, headers })
+}
+
+type JsonOf<P extends keyof paths, M extends "get" | "post" = "get"> = paths[P] extends {
+  [K in M]: { responses: { 200: { content: { "application/json": infer T } } } }
+}
+  ? T
+  : never
+
+// A caller may pin a deliberate narrowing ``T`` of the wire type (required
+// fields, literal unions). The trailing guard argument is then required and
+// only type-checks while ``T`` keeps WireParity with the generated schema, so a
+// backend rename/removal still fails ``tsc`` at the call site.
+// Arrays compare element-wise; a free-dict wire shape (no declared keys) only
+// requires the local shape to be assignable to it.
+type ParityArgs<T, W> = [W] extends [T]
+  ? []
+  : W extends readonly (infer WE)[]
+    ? T extends readonly (infer TE)[]
+      ? ParityArgs<TE, WE>
+      : [wire_parity: "local type is not an array"]
+    : keyof StripIndex<W> extends never
+      ? [T] extends [W]
+        ? []
+        : [wire_parity: "local type is not assignable to the free-dict wire type"]
+      : WireParity<T, W> extends true
+        ? []
+        : [wire_parity: WireParity<T, W>]
+
+type AdminJsonResult<T> =
+  | { ok: true; status: number; data: T }
+  | { ok: false; status: number; statusText: string; data: null; errorText: string }
+
+// Typed JSON request over ``adminFetch`` that never throws on a non-2xx
+// status — for callers that branch on ``status`` (403 -> unauthorized) or fall
+// back to a default. ``spec`` is the OpenAPI path template the concrete ``url``
+// instantiates; it only exists to derive the response type from the generated
+// schema, so a backend model change fails ``tsc`` here instead of hiding
+// behind a hand-written cast.
+export async function adminJsonResult<
+  P extends keyof paths,
+  T = JsonOf<P>,
+  M extends "get" | "post" = "get",
+>(_spec: P, url: string, init: RequestInit = {}, ..._parity: ParityArgs<T, JsonOf<P, M>>): Promise<AdminJsonResult<T>> {
+  const r = await adminFetch(url, init)
+  if (!r.ok) return { ok: false, status: r.status, statusText: r.statusText, data: null, errorText: await r.text().catch(() => "") }
+  return { ok: true, status: r.status, data: (await r.json()) as T }
+}
+
+// Typed JSON request over ``adminFetch``. Throws on a non-2xx status.
+export async function adminJson<
+  P extends keyof paths,
+  T = JsonOf<P>,
+  M extends "get" | "post" = "get",
+>(
+  spec: P,
+  url: string,
+  init: RequestInit = {},
+  errorMessage: (status: number) => string = (status) => `status ${status}`,
+  ...parity: ParityArgs<T, JsonOf<P, M>>
+): Promise<T> {
+  const res = await adminJsonResult<P, T, M>(spec, url, init, ...parity)
+  if (!res.ok) throw new Error(errorMessage(res.status))
+  return res.data
 }
 
 // Paths that don't need an active service (bootstrap before service is
@@ -143,6 +226,8 @@ const SERVICELESS_PATH_PREFIXES = [
   "/api/login",
   "/api/health",
   "/api/debug",
+  "/api/admin/debug-settings", // Global setting editable before a service exists
+  "/api/admin/usage-logging",  // Global setting editable before a service exists
   "/api/provision",    // fresh-install flow: no active service exists yet —
                        // the wizard (validate/check-config/check-fos/…) MUST
                        // be exempt or step 1 aborts with "No active service".
@@ -161,6 +246,11 @@ const SERVICELESS_PATH_PREFIXES = [
   // are specific enough not to shadow the service-scoped /api/admin/* routes
   // (log-accounting, slow-queries/count).
   "/api/admin/health-snapshot",
+  "/api/admin/system-metrics",
+  "/api/admin/health",
+  "/api/admin/system-jobs",
+  "/api/admin/queries/summary",
+  "/api/admin/celery/status",
   "/api/admin/metric-history",
   // Bot intelligence sources + rDNS cache stats are GLOBAL — the backend
   // handlers (get_all_sources_meta / rdns stats) take no service param, so
@@ -229,6 +319,10 @@ function redirectToShareLoginIfSessionDead(): void {
 // Middleware to inject activeServiceId and handle errors
 client.use({
   async onRequest({ request }) {
+    const currentPageLoadId = getPageLoadId()
+    if (currentPageLoadId) {
+      request.headers.set("X-Page-Load-ID", currentPageLoadId)
+    }
     // The ``_debug_queries`` / ``_debug_calls`` envelope is ~40 KB on
     // /api/insights cold loads and ~5-15 KB on every other admin call.
     // Opt in via this header only when the admin Debug Panel toggle is
@@ -263,7 +357,11 @@ client.use({
     // touches a session). Set before the activeServiceId early-returns below.
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
 
-    const { activeServiceId } = useServiceStore.getState();
+    let { activeServiceId } = useServiceStore.getState();
+    if (!activeServiceId && typeof window !== "undefined") {
+      activeServiceId = new URLSearchParams(window.location.search).get("service");
+    }
+
     if (activeServiceId) {
       request.headers.set("x-service-id", activeServiceId);
       return request;

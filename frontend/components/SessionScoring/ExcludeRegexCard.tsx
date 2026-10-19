@@ -11,10 +11,8 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { client } from '@/lib/api'
-import type { components } from '@/types/api.generated'
-
-type ExcludeRegexResponse = components['schemas']['ScoringExcludeRegexState']
+import { client, extractApiError } from '@/lib/api'
+import { keyByOccurrence } from '@/lib/utils'
 
 interface ExcludeRegexCardProps {
   serviceId: string
@@ -52,11 +50,11 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
     queryKey: ['scoring-exclude-regex', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/exclude-regex' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/exclude-regex',
+        { params: { path: { service_id: serviceId } } },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as ExcludeRegexResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 60_000,
   })
@@ -93,22 +91,21 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
       // override the stored key, which is almost never the case in
       // practice. If the operator does need to override later, expose a
       // collapsible "advanced" affordance — don't make every edit prompt.
-      const { data: resp, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/exclude-regex' as any,
+      const { data: resp, error: errBody, response } = await client.PUT(
+        '/api/services/{service_id}/scoring/exclude-regex',
         {
           params: {
             path: { service_id: serviceId },
             query: { confirm: true },
           },
-          body: { regex } as any,
-        } as any,
+          body: { regex },
+        },
       )
-      if (!response.ok) {
+      if (!response.ok || !resp) {
         // Surface backend's structured detail.error to the toast/alert.
-        const err = (resp as any)?.detail?.error || (resp as any)?.detail || `HTTP ${response.status}`
-        throw new Error(typeof err === 'string' ? err : JSON.stringify(err))
+        throw new Error(errBody ? extractApiError(errBody) : `HTTP ${response.status}`)
       }
-      return resp as { ok: true; effective_regex: string; is_default: boolean; message: string; lint_warnings: string[] }
+      return resp
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-exclude-regex', serviceId] })
@@ -142,31 +139,26 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
       if (lintResult && lintResult.regex === regex) return
       setLintPending(true)
       try {
-        const { data: resp, response } = await client.POST(
-          '/api/services/{service_id}/scoring/exclude-regex/validate' as any,
+        const { data: r, error: errBody, response } = await client.POST(
+          '/api/services/{service_id}/scoring/exclude-regex/validate',
           {
             params: { path: { service_id: serviceId } },
-            body: { regex } as any,
-          } as any,
+            body: { regex },
+          },
         )
-        if (!response.ok) {
-          const err =
-            (resp as any)?.detail?.error || (resp as any)?.detail || `HTTP ${response.status}`
+        if (!response.ok || !r) {
           setLintResult({
             regex,
             ok: false,
-            error: typeof err === 'string' ? err : JSON.stringify(err),
+            error: errBody ? extractApiError(errBody) : `HTTP ${response.status}`,
             reason: 'http_error',
           })
           return
         }
-        const r = resp as
-          | { ok: true; lint_warnings: string[] }
-          | { ok: false; error: string; reason: string }
         if (r.ok) {
           setLintResult({ regex, ok: true, lint_warnings: r.lint_warnings || [] })
         } else {
-          setLintResult({ regex, ok: false, error: r.error, reason: r.reason })
+          setLintResult({ regex, ok: false, error: r.error ?? '', reason: r.reason ?? '' })
         }
       } catch (e) {
         setLintResult({
@@ -233,7 +225,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
             autoComplete="off"
           />
           <p className="text-[10px] text-muted-foreground">
-            VCL pattern compiled by Fastly's regex engine (RE2). No quotes / control chars; max 2 KB.
+            VCL pattern compiled by Fastly&apos;s regex engine (RE2). No quotes / control chars; max 2 KB.
             Hit <span className="font-semibold">Reset to default</span> to drop any custom override.
             Lint runs on blur and on publish.
           </p>
@@ -266,8 +258,8 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
               <AlertDescription className="text-xs">
                 <strong>Lint warnings (non-blocking):</strong>
                 <ul className="list-disc ml-4 mt-1">
-                  {lintResult.lint_warnings.slice(0, 5).map((w, i) => (
-                    <li key={i} className="font-mono text-[10px]">
+                  {keyByOccurrence(lintResult.lint_warnings.slice(0, 5), String).map(({ key, item: w }) => (
+                    <li key={key} className="font-mono text-[10px]">
                       {w}
                     </li>
                   ))}
@@ -305,8 +297,8 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
                 <div className="mt-2">
                   <strong>Lint warnings (non-blocking):</strong>
                   <ul className="list-disc ml-4 mt-1">
-                    {saveMut.data.lint_warnings.slice(0, 5).map((w, i) => (
-                      <li key={i} className="font-mono text-[10px]">{w}</li>
+                    {keyByOccurrence(saveMut.data.lint_warnings.slice(0, 5), String).map(({ key, item: w }) => (
+                      <li key={key} className="font-mono text-[10px]">{w}</li>
                     ))}
                   </ul>
                 </div>

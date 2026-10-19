@@ -7,6 +7,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount } from '@/lib/format'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type BotData = components['schemas']['BotMetrics']
 
@@ -31,7 +32,7 @@ export default function BotValueTab({ data }: { data?: BotData | null }) {
       labels: ['Bot Traffic', 'Human Traffic'],
       type: 'pie',
       hole: 0.5,
-      marker: { colors: ['#f59e0b', '#10b981'] },
+      marker: { colors: [CHART_COLORS.warning, CHART_COLORS.success] },
       textinfo: 'label+percent',
     }]
   }, [data])
@@ -42,7 +43,7 @@ export default function BotValueTab({ data }: { data?: BotData | null }) {
       x: data.top_bots.map(b => b.name),
       y: data.top_bots.map(b => b.count),
       type: 'bar',
-      marker: { color: '#f59e0b' },
+      marker: { color: CHART_COLORS.warning },
     }]
   }, [data])
 

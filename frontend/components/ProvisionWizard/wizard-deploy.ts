@@ -1,5 +1,6 @@
 "use client";
 
+import type { QueryClient } from "@tanstack/react-query";
 import { adminFetch, client } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { downloadBlob } from "@/lib/utils";
@@ -7,9 +8,11 @@ import type { Service } from "@/stores/serviceStore";
 import type {
   FosStatus,
   JoinPhase,
+  LakeInfo,
   ProvisionConfig,
   ProvisionService,
   Step,
+  WizardMode,
 } from "./types";
 import { clearDraft } from "./wizard-draft";
 
@@ -50,14 +53,15 @@ export async function runFetchTerraformPreview(
         edge_only: config.edge_only,
         custom_condition: config.custom_condition,
         log_period: String(config.log_period),
+        rum_log_period: String(config.rum_log_period || 300),
         cdn_service_name: config.cdn_service_name,
         cdn_prefix: config.cdn_prefix,
         cdn_shield: config.cdn_shield,
         log_fields: config.log_fields,
-      } as any,
+      },
     });
     if (data) {
-      const files = data as Record<string, string>;
+      const files = data;
       setTerraformFiles(files);
       // Instructions is the default (first) tab, so select its file on load
       // — otherwise the Instructions tab would open showing a stale .tf file.
@@ -100,6 +104,7 @@ export async function runExportTerraform(args: ExportTerraformArgs) {
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
     log_period: String(config.log_period),
+    rum_log_period: String(config.rum_log_period || 300),
     cdn_service_name: config.cdn_service_name,
     cdn_prefix: config.cdn_prefix,
     cdn_shield: config.cdn_shield,
@@ -134,15 +139,15 @@ export interface ModalCloseDeps {
   onOpenChange: (open: boolean) => void;
   selectedService: ProvisionService | null;
   setActiveServiceId: (id: string) => void;
-  queryClient: { invalidateQueries: (opts: any) => void };
+  queryClient: Pick<QueryClient, "invalidateQueries">;
   setStep: (s: Step) => void;
-  setMode: (m: any) => void;
+  setMode: (m: WizardMode) => void;
   setSearch: (s: string) => void;
   setSelectedService: (s: ProvisionService | null) => void;
   setIsDeploying: (b: boolean) => void;
   setFosStatus: (s: FosStatus) => void;
   setFosError: (s: string) => void;
-  setLakeInfo: (l: any) => void;
+  setLakeInfo: (l: LakeInfo | null) => void;
   setIsAnalyzing: (b: boolean) => void;
   setImportMode: (m: "all" | "range") => void;
   setSyncEnabled: (b: boolean) => void;
@@ -202,7 +207,7 @@ export function runDeploy(args: DeployArgs) {
   const { token, selectedService, config, setIsDeploying, start } = args;
   if (!selectedService) return;
   setIsDeploying(true);
-  const body: Record<string, any> = {
+  const body: Record<string, unknown> = {
     token,
     service_id: selectedService.id,
     service_name: selectedService.name,
@@ -214,6 +219,7 @@ export function runDeploy(args: DeployArgs) {
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
     log_period: String(config.log_period),
+    rum_log_period: String(config.rum_log_period || 300),
     cdn_service_name: config.cdn_service_name,
     cdn_shield: config.cdn_shield,
     enable_cron_sync: config.enable_cron_sync,
@@ -240,6 +246,7 @@ export function runDeploy(args: DeployArgs) {
 // ── runJoin (kicks off analyst join SSE) ──
 export interface JoinArgs {
   config: ProvisionConfig;
+  analystPathASupported: boolean;
   syncIntervalMins: string;
   syncEnabled: boolean;
   icebergMetadataLocation: string;
@@ -255,6 +262,7 @@ export interface JoinArgs {
 export function runJoin(args: JoinArgs) {
   const {
     config,
+    analystPathASupported,
     syncIntervalMins,
     syncEnabled,
     icebergMetadataLocation,
@@ -266,6 +274,7 @@ export function runJoin(args: JoinArgs) {
     reset,
     start,
   } = args;
+  if (!analystPathASupported) return;
   if (
     !config.endpoint_name ||
     !config.cdn_service_name ||
@@ -317,7 +326,7 @@ export interface AdminIngestArgs {
   setJoinedServiceId: (id: string) => void;
   setActiveServiceId: (id: string) => void;
   setServices: (services: Service[]) => void;
-  queryClient: { invalidateQueries: (opts: any) => void };
+  queryClient: Pick<QueryClient, "invalidateQueries">;
   setJoinPhase: (p: JoinPhase) => void;
   setStep: (s: Step) => void;
 }
@@ -372,10 +381,10 @@ export async function runAdminIngest(args: AdminIngestArgs) {
         rum_custom_condition: config.rum_custom_condition,
         fos_access_key: config.fos_access_key,
         fos_secret_key: config.fos_secret_key,
-      } as any,
+      },
     });
 
-    if ((data as any)?.ok) {
+    if (data?.ok) {
       setJoinedServiceId(selectedService.id);
       if (selectedService.id) {
         setActiveServiceId(selectedService.id);

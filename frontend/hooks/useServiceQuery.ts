@@ -2,6 +2,7 @@
 
 import { useQuery, type UseQueryOptions, type QueryFunctionContext } from '@tanstack/react-query'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
+import { keepPreviousWithinService } from '@/lib/query-placeholder'
 
 /**
  * Wraps useQuery with the standard enabled/placeholderData defaults every
@@ -11,26 +12,14 @@ import { useIsDataReady } from '@/hooks/useIsDataReady'
 export function useServiceQuery<T>(
   queryKey: unknown[],
   queryFn: (context: QueryFunctionContext) => Promise<T>,
-  options?: Omit<UseQueryOptions<T, Error, T, any>, 'queryKey' | 'queryFn' | 'placeholderData'>
+  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>
 ) {
   const isReady = useIsDataReady()
   return useQuery<T, Error, T>({
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
-    placeholderData: (previousData, previousQuery) => {
-      if (!previousQuery) return undefined
-      if (
-        Array.isArray(queryKey) &&
-        Array.isArray(previousQuery.queryKey) &&
-        queryKey.length > 2 &&
-        previousQuery.queryKey.length > 2 &&
-        queryKey[2] !== previousQuery.queryKey[2]
-      ) {
-        return undefined
-      }
-      return previousData
-    },
+    placeholderData: keepPreviousWithinService(queryKey),
     ...options,
   })
 }

@@ -101,23 +101,32 @@ def test_compaction_stats_returns_local_compaction_snapshot(client):
 # ── PATCH /api/admin/metadata-retention ────────────────────────────────────
 
 
+def _fake_mutate(saved: dict, base: dict | None = None):
+    """``backend.config.mutate_config`` stand-in: applies ``fn`` to ``base`` and records the result."""
+
+    def _mutate(sid, fn, **kwargs):
+        cfg = dict(base if base is not None else {"name": "svc", "service_id": "svc"})
+        fn(cfg)
+        saved["sid"] = sid
+        saved["cfg"] = cfg
+        return cfg
+
+    return _mutate
+
+
 def test_metadata_retention_patch_writes_config_and_audit(client):
-    """Body values flow into svcconfig.save_config; an audit row is
+    """Body values flow into svcconfig.mutate_config; an audit row is
     written; the resolved retention (defaults merged with cfg) comes
     back so the UI can confirm what was saved."""
     saved: dict = {}
     audit: list[dict] = []
-
-    def _save(sid, cfg):
-        saved["sid"] = sid
-        saved["cfg"] = cfg
 
     def _record(**kwargs):
         audit.append(kwargs)
 
     with (
         patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.save_config", side_effect=_save),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit", side_effect=_record),
     ):
@@ -141,6 +150,23 @@ def test_metadata_retention_patch_writes_config_and_audit(client):
     assert audit[0]["event_type"] == "metadata_retention_update"
 
 
+def test_metadata_retention_patch_merges_onto_freshly_read_retention(client):
+    """Keys the body omits survive from the config as read under the write lock."""
+    saved: dict = {}
+    base = {"name": "svc", "service_id": "svc", "metadata_retention": {"usage_log_days": 21, "cron_runs_days": 9}}
+
+    with (
+        patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved, base)),
+        patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        resp = client.patch("/api/admin/metadata-retention", json={"ingested_files_days": 30})
+
+    assert resp.status_code == 200
+    assert saved["cfg"]["metadata_retention"] == {"usage_log_days": 21, "cron_runs_days": 9, "ingested_files_days": 30}
+
+
 def test_metadata_retention_patch_404_when_service_missing(client):
     with patch("backend.config.load_config", return_value=None):
         resp = client.patch("/api/admin/metadata-retention", json={"usage_log_days": 7})
@@ -157,7 +183,7 @@ def test_metadata_retention_clamps_negative_to_zero(client):
 
     with (
         patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -179,7 +205,7 @@ def test_metadata_retention_force_disables_ingested_files_days_when_dedup_inacti
     saved: dict = {}
     with (
         patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=False),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -194,7 +220,7 @@ def test_metadata_retention_audit_failure_does_not_break_patch(client):
     500 here would mislead the FE into thinking the write failed."""
     with (
         patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.save_config"),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate({})),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit", side_effect=RuntimeError("audit-boom")),
     ):
@@ -400,8 +426,10 @@ def test_backfill_bundle_rollups_success(client):
         "backfill_origin_latency_ts_bundles",
         "backfill_network_rtt_bundles",
         "backfill_network_speed_bundles",
+        "backfill_network_quality_bundles",
         "backfill_verified_bots_ts_bundles",
         "backfill_perf_latency_bundles",
+        "backfill_pop_health_bundles",
         "backfill_security_dims_bundles",
         "backfill_perf_dims_bundles",
         "backfill_wellknown_bots_rollup",
@@ -413,15 +441,29 @@ def test_backfill_bundle_rollups_success(client):
         "compact_origin_latency_ts_closed_days_to_daily",
         "compact_network_rtt_closed_days_to_daily",
         "compact_network_speed_closed_days_to_daily",
+        "compact_network_quality_closed_days_to_daily",
         "compact_verified_bots_ts_closed_days_to_daily",
         "compact_perf_latency_closed_days_to_daily",
+        "compact_pop_health_closed_days_to_daily",
         "compact_security_dims_closed_days_to_daily",
         "compact_perf_dims_closed_days_to_daily",
         "compact_ngwaf_bots_closed_days_to_daily",
         "compact_overview_closed_days_to_daily",
     ]
 
-    with patch.multiple("backend.core.rollups", **{name: MagicMock(return_value=1) for name in mocks}):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def mock_get_connection(*args, **kwargs):
+        mock_con = MagicMock()
+        mock_con.execute.return_value.fetchone.return_value = (1,)
+        yield mock_con
+
+    with (
+        patch.multiple("backend.core.rollups", **{name: MagicMock(return_value=1) for name in mocks}),
+        patch("backend.core.duckdb.get_connection", mock_get_connection),
+        patch("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock()),
+    ):
         resp = client.post("/api/admin/backfill-bundle-rollups")
         assert resp.status_code == 200
         body = resp.json()

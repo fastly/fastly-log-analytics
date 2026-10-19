@@ -6,6 +6,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type NetworkData = components['schemas']['NetworkMetrics']
 
@@ -27,9 +28,9 @@ export default function NetworkValueTab({ data }: { data?: NetworkData | null })
       grouped[cat].y.push(p.value)
     }
     const colors: Record<string, string> = {
-      'HTTP/3': '#10b981',
+      'HTTP/3': CHART_COLORS.success,
       'HTTP/2': '#6366f1',
-      'HTTP/1.1': '#f59e0b',
+      'HTTP/1.1': CHART_COLORS.warning,
       'Other': '#6b7280',
     }
     return Object.entries(grouped).map(([cat, d]) => ({

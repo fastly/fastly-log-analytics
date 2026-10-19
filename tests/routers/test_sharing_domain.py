@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests._helpers.config_fakes import fake_mutate_config
 
 
 @pytest.fixture
@@ -60,13 +61,14 @@ def test_deploy_frontend_resolves_token_from_config(client):
     payload = {
         "service_name": "test-config-service",
         "domain_name": "config-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     mock_res = {
         "service_id": "service_config",
         "version": 2,
         "domain_name": "config-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     mock_configs = [
@@ -84,7 +86,7 @@ def test_deploy_frontend_resolves_token_from_config(client):
         mock_deploy.assert_called_once_with(
             service_name="test-config-service",
             domain_name="config-domain.global.ssl.fastly.net",
-            origin_host="34.123.30.195",
+            origin_host="203.0.113.10",
             origin_port=80,
             use_ssl=False,
             token="config-resolved-token",
@@ -97,13 +99,14 @@ def test_deploy_frontend_resolves_token_from_env(client):
     payload = {
         "service_name": "test-env-service",
         "domain_name": "env-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     mock_res = {
         "service_id": "service_env",
         "version": 3,
         "domain_name": "env-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     with (
@@ -117,7 +120,7 @@ def test_deploy_frontend_resolves_token_from_env(client):
         mock_deploy.assert_called_once_with(
             service_name="test-env-service",
             domain_name="env-domain.global.ssl.fastly.net",
-            origin_host="34.123.30.195",
+            origin_host="203.0.113.10",
             origin_port=80,
             use_ssl=False,
             token="env-resolved-token",
@@ -130,6 +133,7 @@ def test_deploy_frontend_missing_token_error(client):
     payload = {
         "service_name": "test-fail-service",
         "domain_name": "fail-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     with (
@@ -147,11 +151,25 @@ def test_deploy_frontend_missing_token_error(client):
         assert "Token is required" in response.json()["detail"]["message"]
 
 
+def test_deploy_frontend_requires_origin_host(client):
+    response = client.post(
+        "/api/sharing/deploy-frontend",
+        json={
+            "service_name": "test-service",
+            "domain_name": "test-domain.global.ssl.fastly.net",
+            "token_override": "test-token",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_deploy_frontend_fails_500(client):
     """Verify that a 500 error is returned when the deployment process raises an exception."""
     payload = {
         "service_name": "test-error-service",
         "domain_name": "error-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "some-token",
     }
 
@@ -212,22 +230,24 @@ def test_teardown_frontend_success(client):
             "service_id": "remote_service_123",
             "version": 1,
             "domain_name": "remote-domain.global.ssl.fastly.net",
-            "origin_host": "34.123.30.195",
+            "origin_host": "203.0.113.10",
         },
     }
 
+    saved: dict = {}
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config) as mock_load,
         patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
-        patch("backend.config.save_config") as mock_save,
+        patch("backend.config.mutate_config", side_effect=fake_mutate_config(mock_config, saved)) as mock_mutate,
     ):
         response = client.post("/api/sharing/teardown-frontend", json=payload)
         assert response.status_code == 200
         assert response.json()["ok"] is True
         mock_load.assert_called_once_with("service123")
         mock_delete.assert_called_once_with(remote_service_id="remote_service_123", token="teardown-token")
-        assert "remote_frontend" not in mock_config
-        mock_save.assert_called_once_with("service123", mock_config)
+        mock_mutate.assert_called_once()
+        assert mock_mutate.call_args.args[0] == "service123"
+        assert saved == {"service_id": "service123"}
 
 
 def test_teardown_frontend_already_removed(client):
@@ -245,13 +265,13 @@ def test_teardown_frontend_already_removed(client):
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
         patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
-        patch("backend.config.save_config") as mock_save,
+        patch("backend.config.mutate_config") as mock_mutate,
     ):
         response = client.post("/api/sharing/teardown-frontend", json=payload)
         assert response.status_code == 200
         assert response.json()["ok"] is True
         mock_delete.assert_not_called()
-        mock_save.assert_not_called()
+        mock_mutate.assert_not_called()
 
 
 def test_deploy_frontend_with_service_id_writes_config(client):
@@ -259,6 +279,7 @@ def test_deploy_frontend_with_service_id_writes_config(client):
     payload = {
         "service_name": "test-service",
         "domain_name": "test-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "token-123",
         "service_id": "logging-service-123",
     }
@@ -267,29 +288,29 @@ def test_deploy_frontend_with_service_id_writes_config(client):
         "service_id": "service_remote_id",
         "version": 1,
         "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     mock_config = {
         "service_id": "logging-service-123",
     }
 
+    saved: dict = {}
     with (
         patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
-        patch("backend.utils.router_utils.load_service_config", return_value=mock_config) as mock_load,
-        patch("backend.config.save_config") as mock_save,
+        patch("backend.config.mutate_config", side_effect=fake_mutate_config(mock_config, saved)) as mock_mutate,
     ):
         response = client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
         assert clean_res(response.json()) == mock_res
-        mock_load.assert_called_once_with("logging-service-123")
-        assert mock_config["remote_frontend"] == {
+        mock_mutate.assert_called_once()
+        assert mock_mutate.call_args.args[0] == "logging-service-123"
+        assert saved["remote_frontend"] == {
             "service_id": "service_remote_id",
             "version": 1,
             "domain_name": "test-domain.global.ssl.fastly.net",
-            "origin_host": "34.123.30.195",
+            "origin_host": "203.0.113.10",
         }
-        mock_save.assert_called_once_with("logging-service-123", mock_config)
 
 
 def test_deploy_frontend_with_service_id_save_config_error_graceful(client):
@@ -297,6 +318,7 @@ def test_deploy_frontend_with_service_id_save_config_error_graceful(client):
     payload = {
         "service_name": "test-service",
         "domain_name": "test-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "token-123",
         "service_id": "logging-service-123",
     }
@@ -305,12 +327,12 @@ def test_deploy_frontend_with_service_id_save_config_error_graceful(client):
         "service_id": "service_remote_id",
         "version": 1,
         "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     with (
         patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res),
-        patch("backend.utils.router_utils.load_service_config", side_effect=RuntimeError("filesystem full")),
+        patch("backend.config.mutate_config", side_effect=RuntimeError("filesystem full")),
     ):
         response = client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
@@ -338,7 +360,7 @@ def test_teardown_frontend_resolves_token_from_config(client):
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
         patch("backend.routers.sharing_domain.list_configs", return_value=mock_configs),
         patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
-        patch("backend.config.save_config"),
+        patch("backend.config.mutate_config"),
     ):
         response = client.post("/api/sharing/teardown-frontend", json=payload)
         assert response.status_code == 200
@@ -363,7 +385,7 @@ def test_teardown_frontend_resolves_token_from_env(client):
         patch("backend.routers.sharing_domain.list_configs", return_value=[]),
         patch.dict(os.environ, {"FASTLY_API_KEY": "env-teardown-token"}),
         patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
-        patch("backend.config.save_config"),
+        patch("backend.config.mutate_config"),
     ):
         response = client.post("/api/sharing/teardown-frontend", json=payload)
         assert response.status_code == 200

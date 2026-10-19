@@ -1,0 +1,336 @@
+from dataclasses import replace
+from datetime import UTC, datetime
+
+import pytest
+
+from backend.high_scale.archive_models import ServingWatermark
+from backend.high_scale.dashboard import aggregates, header_metrics
+from backend.high_scale.registry import HighScaleService
+from backend.models.dashboard import AggregatesRequest
+
+
+class FakeClient:
+    def execute(self, sql, params=None):
+        if "AS chart_bucket" in sql:
+            return [{"chart_bucket": "2026-09-15 19:00:00", "value": 12}]
+        if "AS bucket_start" in sql or "SELECT bucket_start" in sql:
+            return [{"bucket_start": "2026-09-15 19:00:00", "value": 12}]
+        if "AS v, count() AS c" in sql:
+            return [{"v": "/synthetic", "c": 12}]
+        if "count() AS c FROM request_facts" in sql:
+            return [{"c": 12}]
+        if "max(event_timestamp)" in sql:
+            domain = (params or {}).get("domain")
+            return [
+                {
+                    "total_rows": {"request": 12, "rum_vitals": 8, "rum_errors": 2}[domain],
+                    "earliest_log_at": {
+                        "request": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "rum_vitals": datetime(2026, 9, 15, 18, 1, tzinfo=UTC),
+                        "rum_errors": datetime(2026, 9, 15, 18, 2, tzinfo=UTC),
+                    }[domain],
+                    "latest_log_at": {
+                        "request": datetime(2026, 9, 15, 19, 0, tzinfo=UTC),
+                        "rum_vitals": datetime(2026, 9, 15, 19, 1, tzinfo=UTC),
+                        "rum_errors": datetime(2026, 9, 15, 19, 2, tzinfo=UTC),
+                    }[domain],
+                }
+            ]
+        return [
+            {"value": "/synthetic", "aggregate_count": 12, "total_count": 12},
+        ]
+
+
+def test_high_scale_dashboard_uses_clickhouse_aggregate_shape():
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url", "country"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.total_rows == 12
+    assert response.data["url"].total == 12
+    assert response.map_data
+    assert response.time_series[0].value == 12
+    assert response.time_series[0].time == "2026-09-15T19:00:00Z"
+
+
+def test_high_scale_dashboard_filtered_aggregates_returns_utc_iso_timestamps():
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+    response = aggregates(
+        service,
+        AggregatesRequest(
+            filters={"host": {"mode": "include", "values": ["example.com"]}},
+            chart_interval="1 minute",
+            chart_metric="requests",
+        ),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.time_series[0].value == 12
+    assert response.time_series[0].time == "2026-09-15T19:00:00Z"
+
+
+def test_high_scale_dashboard_returns_requested_supported_card_dimensions():
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["host", "method", "status", "cache", "ua"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert set(response.data) == {"host", "method", "status", "cache", "ua"}
+    assert all(field.total == 12 for field in response.data.values())
+
+
+def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    metrics = header_metrics(service)
+
+    assert metrics["request"] == {
+        "earliest_log_at": "2026-09-15T18:00:00+00:00",
+        "latest_log_at": "2026-09-15T19:00:00+00:00",
+        "total_rows": 12,
+        "last_sync_at": None,
+    }
+    assert metrics["rum"] == {
+        "earliest_log_at": "2026-09-15T18:01:00+00:00",
+        "latest_log_at": "2026-09-15T19:02:00+00:00",
+        "total_rows": 10,
+        "last_sync_at": None,
+    }
+    assert metrics["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
+    assert metrics["latest_log_at"] == "2026-09-15T19:00:00+00:00"
+    assert metrics["local_rows"] == 22
+
+
+def test_high_scale_dashboard_reuses_request_watermark_once_per_bundle():
+    calls = {"count": 0}
+
+    def request_watermark():
+        calls["count"] += 1
+        return ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        )
+
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=request_watermark,
+    )
+
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url", "country", "host"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert response.total_rows == 12
+    assert calls["count"] == 1
+
+
+def _service_with_watermark() -> HighScaleService:
+    return HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+
+def test_high_scale_aggregates_surfaces_watermark_extents():
+    response = aggregates(
+        _service_with_watermark(),
+        AggregatesRequest(fields=["url", "country"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+
+def test_high_scale_filtered_aggregates_surfaces_watermark_extents():
+    response = aggregates(
+        _service_with_watermark(),
+        AggregatesRequest(
+            filters={"host": {"mode": "include", "values": ["example.com"]}},
+            chart_interval="1 minute",
+            chart_metric="requests",
+        ),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+
+def test_high_scale_time_series_queries_through_in_flight_minute():
+    executed_sql: list[str] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed_sql.append(sql)
+            return super().execute(sql, params)
+
+    service = HighScaleService(
+        service_id="svc",
+        client=CapturingClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    aggregates(
+        service,
+        AggregatesRequest(fields=["url"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-15T19:00:00Z",
+    )
+
+    ts_queries = [s for s in executed_sql if "FROM request_aggregates" in s]
+    assert ts_queries, "expected request_aggregates query"
+    assert any("bucket_start <= {end:DateTime64(3)}" in q for q in ts_queries)
+
+
+@pytest.mark.parametrize(
+    ("interval", "seconds"),
+    [("1 minute", 60), ("5 minutes", 300), ("1 hour", 3600), ("1 day", 86400)],
+)
+def test_high_scale_time_series_groups_by_returned_interval(interval: str, seconds: int) -> None:
+    executed: list[tuple[str, dict]] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed.append((sql, params or {}))
+            return super().execute(sql, params)
+
+    service = replace(_service_with_watermark(), client=CapturingClient())
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url"], chart_interval=interval),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    query, params = next(
+        (sql, params) for sql, params in executed if "FROM request_aggregates" in sql and "AS value" in sql
+    )
+    assert "toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND)" in query
+    assert "GROUP BY chart_bucket ORDER BY chart_bucket" in query
+    assert params["bucket_seconds"] == seconds
+    assert response.interval == interval
+    assert response.time_series[0].value == 12
+
+
+def test_high_scale_one_second_chart_uses_request_facts() -> None:
+    executed: list[str] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed.append(sql)
+            return super().execute(sql, params)
+
+    service = replace(_service_with_watermark(), client=CapturingClient())
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url"], chart_interval="1 second"),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert any("toStartOfSecond(event_timestamp)" in sql for sql in executed)
+    assert not any("FROM request_aggregates" in sql for sql in executed)
+    assert response.interval == "1 second"

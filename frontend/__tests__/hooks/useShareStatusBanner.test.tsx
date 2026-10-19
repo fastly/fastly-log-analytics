@@ -15,7 +15,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
 
@@ -31,16 +31,16 @@ vi.mock('@/stores/serviceStore', () => {
     setServices: vi.fn(),
     setInitialized: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-function wrapperWithSeed(seedBootstrap?: any) {
+function wrapperWithSeed(seedBootstrap?: unknown) {
   const qc = createTestQueryClient({ queries: { gcTime: 0 } })
   if (seedBootstrap) qc.setQueryData(['bootstrap'], seedBootstrap)
   return makeQueryWrapper(qc)
@@ -100,6 +100,27 @@ describe('useShareStatusBanner', () => {
     await waitFor(() => expect(result.current.sharingActive).toBe(true))
   })
 
+  it('does not fetch while the tab is hidden', async () => {
+    let bannerHits = 0
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/banner`, () => {
+        bannerHits++
+        return HttpResponse.json({ sharing_active: false, public_url: null })
+      }),
+    )
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    try {
+      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      renderHook(() => useShareStatusBanner({ enabled: true }), { wrapper: wrapperWithSeed() })
+      await act(async () => {
+        await new Promise(r => setTimeout(r, 50))
+      })
+      expect(bannerHits).toBe(0)
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    }
+  })
+
   it('stops polling after unmount', async () => {
     let bannerHits = 0
     server.use(
@@ -122,5 +143,82 @@ describe('useShareStatusBanner', () => {
       await new Promise(r => setTimeout(r, 50))
     })
     expect(bannerHits).toBe(after)
+  })
+
+  it('keeps polling on the 15s cadence after a seeded mount', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let bannerHits = 0
+      server.use(
+        http.get(`${API_BASE}/api/admin/share/banner`, () => {
+          bannerHits++
+          return HttpResponse.json({ sharing_active: false, public_url: null })
+        }),
+      )
+      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), {
+        wrapper: wrapperWithSeed({ share_banner: { sharing_active: true, public_url: null } }),
+      })
+      expect(result.current.sharingActive).toBe(true)
+      expect(bannerHits).toBe(0)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_100)
+      })
+      await waitFor(() => expect(bannerHits).toBeGreaterThanOrEqual(1))
+      await waitFor(() => expect(result.current.sharingActive).toBe(false))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('aborts the in-flight banner request on unmount', async () => {
+    let aborted = false
+    let started = false
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/banner`, async ({ request }) => {
+        started = true
+        request.signal.addEventListener('abort', () => {
+          aborted = true
+        })
+        await new Promise((r) => setTimeout(r, 300))
+        return HttpResponse.json({ sharing_active: false, public_url: null })
+      }),
+    )
+    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { unmount } = renderHook(() => useShareStatusBanner({ enabled: true }), {
+      wrapper: wrapperWithSeed(),
+    })
+    await waitFor(() => expect(started).toBe(true))
+    unmount()
+    await waitFor(() => expect(aborted).toBe(true))
+  })
+
+  it('starts fetching once a hidden tab becomes visible', async () => {
+    let bannerHits = 0
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/banner`, () => {
+        bannerHits++
+        return HttpResponse.json({ sharing_active: true, public_url: 'https://v.test' })
+      }),
+    )
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    try {
+      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), { wrapper: wrapperWithSeed() })
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50))
+      })
+      expect(bannerHits).toBe(0)
+
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+      await waitFor(() => expect(bannerHits).toBeGreaterThanOrEqual(1))
+      await waitFor(() => expect(result.current.sharingActive).toBe(true))
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    }
   })
 })

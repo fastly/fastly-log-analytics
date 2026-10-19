@@ -7,12 +7,17 @@ helpers — so the two writers stay legible side-by-side.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
@@ -38,16 +43,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
                 r.get("cache"),
             ],
         )
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
 
 
 def test_build_origin_summary_writes_expected_columns(tmp_path):
@@ -123,6 +118,42 @@ def test_build_origin_summary_writes_expected_columns(tmp_path):
     assert row["ost_total_count"] == 10
     # 10 rows all have lat_us non-null (ottfb is non-null)
     assert row["lat_us_count"] == 10
+
+
+def test_build_origin_summary_handles_unsigned_latency_columns(tmp_path):
+    """Unsigned elapsed/ottlb columns must not underflow during subtraction."""
+    from backend.core.rollups import origin_summary
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-os"}
+    hour_token, hour_dt = _past_hour(2)
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE logs_os ("
+        "timestamp TIMESTAMPTZ, ottfb DOUBLE, ttfb DOUBLE, ottlb UBIGINT,"
+        "elapsed UBIGINT, ost INTEGER, obytes BIGINT, cache VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO logs_os VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [hour_dt, 100.0, 0.1, 294429, 119641, 200, 1000, "MISS"],
+    )
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.iceberg.execute_with_stale_view_retry",
+            side_effect=lambda c, _src, fn: fn(c),
+        ),
+    ):
+        assert origin_summary.build_origin_summary_bundles("svc-os", src, [hour_token]) == 1
+
+    bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "origin_summary.parquet"
+    row = pq.read_table(str(bundle)).to_pylist()[0]
+    assert row["cdn_ovh_p50_us"] == 119641.0 - 294429.0
 
 
 def test_build_origin_summary_skips_active_hour(tmp_path):

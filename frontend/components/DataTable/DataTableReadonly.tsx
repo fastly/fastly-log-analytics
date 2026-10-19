@@ -11,6 +11,7 @@ import {
   getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
+  type Table as TableInstance,
 } from '@tanstack/react-table'
 
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -60,7 +61,7 @@ interface DataTableReadonlyProps<TData, TValue> {
   title?: React.ReactNode
   compactToolbar?: boolean
   extraToolbarContent?: React.ReactNode
-  renderToolbar?: (table: any) => React.ReactNode
+  renderToolbar?: (table: TableInstance<TData>) => React.ReactNode
   hideToolbar?: boolean
   columnVisibility?: VisibilityState
   onColumnVisibilityChange?: (visibility: VisibilityState) => void
@@ -175,7 +176,7 @@ function DataTableReadonlyImpl<TData, TValue>({
     overscan: 10,
   })
 
-  const tableHeader = React.useMemo(() => (
+  const tableHeader = (
     <TableHeader>
       {table.getHeaderGroups().map((headerGroup) => (
         <TableRow key={headerGroup.id}>
@@ -185,8 +186,7 @@ function DataTableReadonlyImpl<TData, TValue>({
         </TableRow>
       ))}
     </TableHeader>
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [table, columnVisibility, columnSizing])
+  )
 
   return (
     <div className="w-full">

@@ -23,8 +23,10 @@ vi.mock('@/stores/serviceStore', () => {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector) => selector ? selector(state) : state)
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 
@@ -43,11 +45,7 @@ vi.mock('@/stores/filterStore', () => ({
   }),
 }))
 
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/security'),
-  useSearchParams: vi.fn(() => new URLSearchParams()),
-  useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/security'))
 
 // Mock heavy chart/section components so jsdom doesn't choke on plotly /
 // d3-driven layout. The smoke test only cares that the page assembles
@@ -66,7 +64,7 @@ vi.mock('@/app/security/_sections/NetworkSection', () => ({
 }))
 
 vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: any) => (
+  ReportLayout: ({ children, title }: { children: (args: Record<string, unknown>) => React.ReactNode; title: string }) => (
     <div>
       <h1>{title}</h1>
       {children({
@@ -93,7 +91,7 @@ afterEach(() => {
   errorSpy.mockRestore()
 })
 
-test('security page mounts and renders title', async () => {
+test('security page mounts and renders title and tab navigation', async () => {
   render(
     <QueryClientProvider client={queryClient}>
       <SecurityClient />
@@ -101,6 +99,9 @@ test('security page mounts and renders title', async () => {
   )
 
   expect(screen.getByText('Security')).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /waf activity/i })).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /threat intelligence/i })).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /vpn & proxy watchdog/i })).toBeInTheDocument()
 
   await waitFor(() => {
     expect(screen.getByTestId('bots-section')).toBeInTheDocument()

@@ -14,12 +14,14 @@ interface StatCardProps {
   icon?: React.ElementType
   iconClassName?: string
   loading?: boolean
+  loadingMessage?: string
   tooltip?: string
   helpContent?: React.ReactNode
   helpTitle?: string
+  className?: string
 }
 
-export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading, tooltip, helpContent, helpTitle }: StatCardProps) {
+export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading, loadingMessage, tooltip, helpContent, helpTitle, className }: StatCardProps) {
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
 
   const helpTrigger = helpContent ? (
@@ -57,7 +59,7 @@ export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading
 
   return (
     <>
-      <Card>
+      <Card className={className}>
         <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
           <div className="flex items-center gap-2">
             {Icon && <Icon className={cn("h-4 w-4 text-primary", iconClassName)} />}
@@ -69,7 +71,14 @@ export function StatCard({ title, value, sub, icon: Icon, iconClassName, loading
         </CardHeader>
         <CardContent>
           {loading ? (
-            <Skeleton className="h-8 w-24 mb-1" />
+            <div className="space-y-1">
+              <Skeleton className="h-8 w-24 mb-1" />
+              {loadingMessage && (
+                <span className="text-[11px] text-muted-foreground animate-pulse block">
+                  {loadingMessage}
+                </span>
+              )}
+            </div>
           ) : (
             <div className="text-2xl font-bold">{value}</div>
           )}

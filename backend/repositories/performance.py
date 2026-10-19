@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 import duckdb
@@ -11,14 +12,12 @@ from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
     _safe_table,
-    empty_schema_response,
     percentile_ms_expr,
-    safe_interval,
-    safe_iso,
-    time_bucket_select,
 )
-from backend.repositories._sql import dashboard as SQL_DASHBOARD
 from backend.repositories.utils.filters import build_where_clause
+from backend.utils.log_throttle import log_once_per
+
+logger = logging.getLogger(__name__)
 
 # Temp-table projection order for the section-aware narrowed temp. Mirrors the
 # origin/security ``_TEMP_COL_ORDER`` pattern: the temp is built for ONLY the
@@ -54,9 +53,15 @@ def get_performance_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(
-            top_urls=[], top_asns=[], ttl_dist=[], scatter=[], section_timings=section_timings, **runner.telemetry()
-        )
+        return {
+            "top_urls": [],
+            "top_asns": [],
+            "ttl_dist": [],
+            "scatter": [],
+            "waterfall": {},
+            "section_timings": section_timings,
+            **runner.telemetry(),
+        }
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -353,7 +358,8 @@ def get_performance_aggregates(
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                if log_once_per("get_performance_aggregates: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_performance_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
     # Backstop: any requested section left unpopulated (temp-create failure, or
     # a live section whose required column was absent) gets its empty default so
@@ -371,61 +377,3 @@ def get_performance_aggregates(
 
     results["section_timings"] = section_timings
     return results
-
-
-def get_origin_ts(
-    con: duckdb.DuckDBPyConnection,
-    src: dict,
-    start_time: str | None,
-    end_time: str | None,
-    filters: FiltersDict,
-    chart_interval: str = "1 minute",
-    origin_metric: str = "ttfb",
-    origin_percentile: str = "p95",
-) -> dict:
-    table_name = _safe_table(src["name"])
-    runner = QueryRunner(con, src)
-
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols:
-        return empty_schema_response(timeseries=[], **runner.telemetry())
-
-    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
-
-    metric_col = "ottfb" if origin_metric == "ttfb" else "ottlb"
-    is_microseconds = True
-
-    if metric_col not in actual_cols:
-        # Fallback to Group C ttfb if ottfb requested but missing. The
-        # ``return`` MUST be in the else — a prior misindentation made it
-        # unconditional, so the fallback set metric_col/is_microseconds and
-        # then got discarded by an always-empty return, silently giving
-        # ttfb-only (no-ottfb) services an empty origin-latency chart.
-        if origin_metric == "ttfb" and "ttfb" in actual_cols:
-            metric_col = "ttfb"
-            is_microseconds = False
-        else:
-            return empty_schema_response(timeseries=[], **runner.telemetry())
-
-    pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(origin_percentile, 0.95)
-    interval_str = safe_interval(chart_interval)
-
-    if is_microseconds:
-        val_expr = f"ROUND(COALESCE({percentile_ms_expr(f'"{metric_col}"', pct_val)}, 0), 2)"
-    else:
-        # Seconds to Milliseconds
-        val_expr = f'ROUND(COALESCE(PERCENTILE_CONT({pct_val}) WITHIN GROUP (ORDER BY "{metric_col}") * 1000.0, 0), 2)'
-
-    q = SQL_DASHBOARD.TIME_SERIES.format(
-        time_bucket_select=time_bucket_select(interval_str),
-        value_expr=val_expr,
-        table_name=table_name,
-        extra_where=f' AND "{metric_col}" IS NOT NULL',
-        where_clause=where_clause,
-    )
-    res_cursor = runner.execute_with_retry(q, params)
-    if res_cursor is None:
-        return empty_schema_response(timeseries=[], **runner.telemetry())
-
-    res = res_cursor.fetchall()
-    return {"timeseries": [{"time": safe_iso(r[0]), "value": r[1]} for r in res], **runner.telemetry()}

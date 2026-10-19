@@ -10,21 +10,16 @@ from __future__ import annotations
 
 import json
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
+import pytest
 
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
 
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _make_table_with_rows(table: str, hour_dt: datetime, rows: list[tuple[str, str]]) -> duckdb.DuckDBPyConnection:
@@ -230,6 +225,76 @@ def test_run_per_field_copy_copy_failure_cleans_tmp_and_continues(tmp_path):
     assert not (cache_root / "rollups" / "tmp" / "ip").exists()
     # country published successfully.
     assert any((cache_root / "rollups" / "hour" / "field=country").glob("hour=*/compacted_*.parquet"))
+
+
+def test_run_per_field_copy_self_heals_stale_view_on_copy(tmp_path):
+    """A transient DuckLake ``schema "lake" does not exist`` (Trap #35) on
+    the per-field COPY must self-heal via ``execute_with_stale_view_retry``
+    and still publish the field — not warn + skip it. Mirrors the
+    ip_spread SELECT self-heal so a cold-start lake detach race (every
+    field's COPY failing in one burst when a concurrent DETACH rips
+    ``lake`` out mid-loop) doesn't drop the rollup or flood the deploy
+    log-error gate with Catalog Errors."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-copy-heal"}
+    _, hour_dt = _past_hour(2)
+    table = "logs_svc_copy_heal"
+    real = _make_table_with_rows(table, hour_dt, [("1.1.1.1", "US"), ("2.2.2.2", "JP")])
+    where_sql = (
+        f"timestamp >= '{(hour_dt - timedelta(minutes=1)).isoformat()}' "
+        f"AND timestamp < '{(hour_dt + timedelta(hours=1)).isoformat()}'"
+    )
+
+    class _FlakyCopyCon:
+        """Delegates to a real con but fails the FIRST COPY with a
+        lake-detach Catalog Error, succeeding on retry."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._failed_once = False
+
+        def execute(self, sql, *a, **k):
+            if "COPY" in sql and not self._failed_once:
+                self._failed_once = True
+                raise duckdb.CatalogException(
+                    'Catalog Error: Table with name "lake.logs_svc_copy_heal" '
+                    'does not exist because schema "lake" does not exist.'
+                )
+            return self._inner.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    con = _FlakyCopyCon(real)
+
+    def _retry_double(c, _src, fn):
+        from backend.core.iceberg import is_stale_view_error
+
+        try:
+            return fn(c)
+        except Exception as e:  # noqa: BLE001
+            if not is_stale_view_error(e):
+                raise
+            return fn(c)
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.iceberg.execute_with_stale_view_retry",
+            side_effect=_retry_double,
+        ),
+    ):
+        recompute._run_per_field_copy("svc-copy-heal", src, table, where_sql, ["ip"])
+
+    # The field published despite the first COPY's transient lake error.
+    field_dir = cache_root / "rollups" / "hour" / "field=ip"
+    assert field_dir.exists()
+    assert list(field_dir.glob("hour=*/compacted_*.parquet"))
 
 
 # ── _run_ip_spread_per_field ────────────────────────────────────────────────
@@ -482,6 +547,76 @@ def test_run_ip_spread_per_field_empty_result_writes_nothing(tmp_path):
 
     # No parquet should land.
     assert not (cache_root / "rollups" / "hour_ip_spread" / "field=country").exists()
+
+
+def test_run_ip_spread_per_field_self_heals_stale_view_on_select(tmp_path):
+    """A transient DuckLake ``schema "lake" does not exist`` (Trap #35)
+    on the per-field ip_spread SELECT must self-heal via
+    ``execute_with_stale_view_retry`` and still publish the field —
+    not warn + skip it. Mirrors the describe-path self-heal so a
+    cold-start lake detach race doesn't drop the rollup (and doesn't
+    flood the deploy log-error gate with Catalog Errors)."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-heal"}
+    _, hour_dt = _past_hour(2)
+    table = "logs_svc_heal"
+    rows = [("1.1.1.1", "JP"), ("2.2.2.2", "JP"), ("3.3.3.3", "US")]
+    real = _make_table_with_rows(table, hour_dt, rows)
+    where_sql = (
+        f"timestamp >= '{(hour_dt - timedelta(minutes=1)).isoformat()}' "
+        f"AND timestamp < '{(hour_dt + timedelta(hours=1)).isoformat()}'"
+    )
+
+    class _FlakySelectCon:
+        """Delegates to a real con but fails the FIRST ip_spread SELECT
+        with a lake-detach Catalog Error, succeeding on retry."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._failed_once = False
+
+        def execute(self, sql, *a, **k):
+            if "ip_sample" in sql and not self._failed_once:
+                self._failed_once = True
+                raise duckdb.CatalogException(
+                    'Catalog Error: Table with name "lake.logs_svc_heal" does '
+                    'not exist because schema "lake" does not exist.'
+                )
+            return self._inner.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    con = _FlakySelectCon(real)
+
+    def _retry_double(c, _src, fn):
+        from backend.core.iceberg import is_stale_view_error
+
+        try:
+            return fn(c)
+        except Exception as e:  # noqa: BLE001
+            if not is_stale_view_error(e):
+                raise
+            return fn(c)
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.iceberg.execute_with_stale_view_retry",
+            side_effect=_retry_double,
+        ),
+    ):
+        recompute._run_ip_spread_per_field("svc-heal", src, table, where_sql, ["country"])
+
+    # The field published despite the first SELECT's transient lake error.
+    field_dir = cache_root / "rollups" / "hour_ip_spread" / "field=country"
+    assert field_dir.exists()
+    assert list(field_dir.glob("hour=*"))
 
 
 # ── recompute_touched_hours ─────────────────────────────────────────────────
@@ -830,6 +965,59 @@ def test_cleanup_old_rollups_deletes_hours_below_cutoff(tmp_path):
     assert (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").exists()
 
 
+def test_cleanup_old_rollups_sweeps_all_trees(tmp_path):
+    """Verifies that cleanup_old_rollups sweeps ip_spread, day, day_bundled,
+    and hour_bundled trees."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+
+    now = datetime.now(UTC)
+    old = (now - timedelta(days=30)).strftime("%Y-%m-%d-%H")
+    old_day = old[:10]
+    young = (now - timedelta(days=1)).strftime("%Y-%m-%d-%H")
+    young_day = young[:10]
+
+    # Create old and young entries across trees
+    (cache_root / "rollups" / "hour" / "field=ip" / f"hour={old}").mkdir(parents=True)
+    (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").mkdir(parents=True)
+
+    (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={old}").mkdir(parents=True)
+    (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={young}").mkdir(parents=True)
+
+    (cache_root / "rollups" / "day" / "field=ip" / f"day={old_day}").mkdir(parents=True)
+    (cache_root / "rollups" / "day" / "field=ip" / f"day={young_day}").mkdir(parents=True)
+
+    old_db = cache_root / "rollups" / "day_bundled" / f"day={old_day}"
+    old_db.mkdir(parents=True)
+    (old_db / "all_fields.parquet").write_bytes(b"x")
+
+    young_db = cache_root / "rollups" / "day_bundled" / f"day={young_day}"
+    young_db.mkdir(parents=True)
+    (young_db / "all_fields.parquet").write_bytes(b"x")
+
+    old_hb = cache_root / "rollups" / "hour_bundled" / f"hour={old}"
+    old_hb.mkdir(parents=True)
+    (old_hb / "all_fields.parquet").write_bytes(b"x")
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        deleted = recompute.cleanup_old_rollups("svc", {"name": "svc"}, max_age_days=7, hour_bundle_max_age_days=7)
+
+    # 1 from hour, 1 from hour_ip_spread, 1 from day_bundled, 1 from day, 1 from hour_bundled
+    assert deleted >= 5
+    assert not (cache_root / "rollups" / "hour" / "field=ip" / f"hour={old}").exists()
+    assert not (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={old}").exists()
+    assert not (cache_root / "rollups" / "day" / "field=ip" / f"day={old_day}").exists()
+    assert not (cache_root / "rollups" / "day_bundled" / f"day={old_day}").exists()
+    assert not (cache_root / "rollups" / "hour_bundled" / f"hour={old}").exists()
+
+    # Young preserved
+    assert (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").exists()
+    assert (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={young}").exists()
+    assert (cache_root / "rollups" / "day_bundled" / f"day={young_day}").exists()
+
+
 def test_cleanup_old_rollups_no_root_returns_zero(tmp_path):
     from backend.core.rollups import recompute
 
@@ -976,6 +1164,22 @@ def test_get_fields_includes_safe_custom_fields_skips_unsafe():
     assert "bad-with-dash" not in fields
     assert "disabled_cf" not in fields
     assert "hidden_cf" not in fields
+
+
+def test_get_fields_excludes_metrics_only_synthetic_fields():
+    """Regression test for a live production incident: METRICS-group
+    catalog entries (requests, hit_rate, p50_latency, ...) have vcl=None —
+    a chart-metric-only concept, never a real per-row column — so including
+    them here means the per-field rollup writer tries to SELECT a column
+    that doesn't exist in the raw/buffer parquet and errors."""
+    from backend.core.rollups._common import _get_fields
+
+    fields = _get_fields({"log_fields": {"custom_fields": []}})
+
+    assert "requests" not in fields
+    assert "hit_rate" not in fields
+    assert "p95_latency" not in fields
+    assert "country" in fields
 
 
 # ── _build_copy_query and _build_copy_ip_query NULL filters ─────────────────

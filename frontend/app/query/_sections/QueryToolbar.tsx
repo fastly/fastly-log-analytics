@@ -23,6 +23,9 @@ import {
 import { History, Bookmark, Download, X } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import type { QueryMode } from '../_sql_builder'
+import type { components } from '@/types/api.generated'
+
+type PresetQuery = components['schemas']['PresetQuery']
 
 interface HistoryEntry {
   sql: string
@@ -30,7 +33,7 @@ interface HistoryEntry {
 }
 
 interface QueryToolbarProps {
-  presets: any
+  presets: PresetQuery[] | undefined
   history: HistoryEntry[]
   mode: QueryMode
   onModeChange: (next: QueryMode) => void
@@ -79,7 +82,7 @@ export function QueryToolbar({
             <DropdownMenuGroup>
               <DropdownMenuLabel>Recommended Queries</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              {presets?.length ? presets.map((p: any) => (
+              {presets?.length ? presets.map((p) => (
                 <DropdownMenuItem
                   key={p.name}
                   className="flex-col items-start cursor-pointer py-2"
@@ -159,12 +162,17 @@ export function QueryToolbar({
             <SelectItem value="1000">Fetch 1,000 rows</SelectItem>
             <SelectItem value="5000">Fetch 5,000 rows</SelectItem>
             <SelectItem value="10000">Fetch 10,000 rows</SelectItem>
-            <SelectItem value="50000">Fetch 50,000 rows</SelectItem>
           </SelectContent>
         </Select>
 
         {canExport && (
-          <Button variant="outline" size="sm" className="h-8" onClick={onExportCsv}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8"
+            onClick={onExportCsv}
+            data-testid="query-csv-export-btn"
+          >
             <Download className="w-3.5 h-3.5 mr-2" />
             Export
           </Button>

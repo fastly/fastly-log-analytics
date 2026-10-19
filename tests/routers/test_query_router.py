@@ -273,7 +273,7 @@ def test_analyst_request_forwards_clamped_window_and_mask(client, in_memory_duck
     # build_request_context resolves from get_analyst_time_bounds in prod).
     app.dependency_overrides[build_request_context] = override_request_context(
         source=test_service_source,
-        con=in_memory_duckdb,
+        _con_override=in_memory_duckdb,
         session=session,
         path="/api/query",
         time_bounds=TimeBounds(start=start, end=end),
@@ -320,7 +320,7 @@ def test_presets_returns_repo_output_when_source_resolves(client):
     """Source resolves → router calls ``repo.get_presets`` and returns
     whatever it produces. The router itself doesn't shape the payload
     — that's the repo's job."""
-    fake_presets = [{"id": "p1", "name": "Top 5xx", "sql": "SELECT 1"}]
+    fake_presets = [{"id": "p1", "name": "Top 5xx", "description": "Top 5xx URLs", "sql": "SELECT 1"}]
     with (
         patch(
             "backend.core.duckdb.get_source_for_service",
@@ -350,3 +350,188 @@ def test_presets_does_not_acquire_a_duckdb_connection(client):
 
     assert resp.status_code == 200
     assert mock_get_connection.call_count == 0
+
+
+# ── End-to-end router + repository SELECT, AST safety, schema & masking ─────
+
+
+def test_query_select_executes_against_duckdb(client, in_memory_duckdb, monkeypatch):
+    """Valid SELECT statement executes against the service table and returns
+    tabular columns, rows, and telemetry."""
+    monkeypatch.setenv("DEBUG_RESPONSES", "1")
+    in_memory_duckdb.execute(
+        "CREATE TABLE IF NOT EXISTS logs_test_service (timestamp TIMESTAMPTZ, ip VARCHAR, url VARCHAR, status INTEGER)"
+    )
+    in_memory_duckdb.execute(
+        "INSERT INTO logs_test_service (timestamp, ip, url, status) "
+        "VALUES (TIMESTAMPTZ '2026-06-17T10:00:00Z', '203.0.113.42', '/index.html', 200)"
+    )
+    resp = client.post(
+        "/api/query",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"sql": "SELECT url, status FROM logs"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["columns"] == ["url", "status"]
+    assert body["row_count"] == 1
+    assert body["data"][0] == {"url": "/index.html", "status": 200}
+    assert isinstance(body["_debug_queries"], list) and len(body["_debug_queries"]) >= 1
+
+
+@pytest.mark.parametrize(
+    "unsafe_sql",
+    [
+        "INSERT INTO logs (url) VALUES ('/x')",
+        "UPDATE logs SET status = 500",
+        "DELETE FROM logs WHERE status = 200",
+        "DROP TABLE logs",
+        "ALTER TABLE logs ADD COLUMN extra VARCHAR",
+        "ATTACH ':memory:' AS ext_db",
+        "COPY logs TO '/tmp/out.parquet'",
+    ],
+)
+def test_query_ast_safety_rejects_non_select_statements(client, unsafe_sql):
+    """AST validator strictly rejects mutating and administrative SQL statements
+    with HTTP 403 sql_not_permitted."""
+    resp = client.post(
+        "/api/query",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"sql": unsafe_sql},
+    )
+    assert resp.status_code == 403, f"Expected 403 for {unsafe_sql!r}, got {resp.status_code}: {resp.text}"
+    detail = resp.json()["detail"]
+    assert detail["error"] == "sql_not_permitted"
+
+
+def test_query_syntax_error_rejected_cleanly(client):
+    """Malformed SQL syntax is rejected at parse time without leaking server paths."""
+    resp = client.post(
+        "/api/query",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"sql": "SELECT FROM WHERE ("},
+    )
+    assert resp.status_code in (400, 403)
+    detail = resp.json()["detail"]
+    assert detail["error"] in ("sql_not_permitted", "query_failed")
+    assert "parse error" in detail["message"].lower() or "syntax error" in detail["message"].lower()
+
+
+def test_query_wraps_execution_with_stale_view_retry(client):
+    """Verify execute_with_stale_view_retry wraps /api/query execution."""
+    with patch(
+        "backend.core.iceberg.execute_with_stale_view_retry",
+        return_value=_stub_result(),
+    ) as mock_retry:
+        resp = client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "SELECT 1"},
+        )
+    assert resp.status_code == 200
+    assert mock_retry.call_count == 1
+
+
+def test_query_remote_analyst_masks_ips_end_to_end(client, in_memory_duckdb, test_service_source):
+    """Analyst session with mask_ips=True redacts raw IP columns and masks IP-shaped values."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    in_memory_duckdb.execute(
+        "CREATE TABLE IF NOT EXISTS logs_test_service (timestamp TIMESTAMPTZ, ip VARCHAR, url VARCHAR, status INTEGER)"
+    )
+    in_memory_duckdb.execute(
+        "INSERT INTO logs_test_service (timestamp, ip, url, status) "
+        "VALUES (TIMESTAMPTZ '2026-06-17T09:30:00Z', '198.51.100.77', '198.51.100.88', 200)"
+    )
+    start = datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
+    end = datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
+    session = SimpleNamespace(
+        session_id="sess-mask",
+        pii_policy={"mask_ips": True},
+        service_ids=[test_service_source["service_id"]],
+    )
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        session=session,
+        path="/api/query",
+        time_bounds=TimeBounds(start=start, end=end),
+    )
+
+    resp = client.post(
+        "/api/query",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"sql": "SELECT ip, url AS leaked_ip FROM logs"},
+    )
+    assert resp.status_code == 200, resp.text
+    row = resp.json()["data"][0]
+    assert row["ip"] == "[redacted]"
+    assert row["leaked_ip"] == "198.51.100.xxx"
+
+
+def test_query_high_scale_validates_ast_and_masks_ips(client, monkeypatch):
+    """High-Scale /api/query enforces AST validation and IP masking."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("DEBUG_RESPONSES", "1")
+    fake_hs_client = SimpleNamespace(
+        execute=lambda sql: [{"client_ip": "203.0.113.9", "custom_fields['url']": "203.0.113.10"}]
+    )
+    fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=fake_hs_client)
+
+    with patch(
+        "backend.high_scale.registry.get_high_scale_service_registry",
+        return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
+    ):
+        # 1. Mutating query must 403
+        drop_resp = client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "DROP TABLE logs"},
+        )
+        assert drop_resp.status_code == 403
+        assert drop_resp.json()["detail"]["error"] == "sql_not_permitted"
+
+        # 2. Valid SELECT query succeeds and returns QueryResponse shape
+        ok_resp = client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "SELECT count(*) FROM logs"},
+        )
+        assert ok_resp.status_code == 200
+        body = ok_resp.json()
+        assert body["row_count"] == 1
+        assert len(body["_debug_queries"]) == 1
+        assert body["_debug_queries"][0]["engine"] == "ClickHouse"
+
+
+def test_query_schema_endpoint_returns_columns(client):
+    """GET /api/query/schema/{service_id} returns reflected schema columns."""
+    with patch(
+        "backend.config.get_status",
+        return_value={"schema": [{"column": "timestamp", "type": "TIMESTAMPTZ"}, {"column": "url", "type": "VARCHAR"}]},
+    ):
+        resp = client.get(f"/api/query/schema/{MOCK_SERVICE_ID}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source"] == "test_service"
+    assert len(body["schema"]) == 2
+    assert body["schema"][0]["column"] == "timestamp"
+
+
+def test_query_schema_endpoint_falls_back_when_empty(client):
+    """GET /api/query/schema/{service_id} returns fallback columns when live schema is empty."""
+    with (
+        patch("backend.config.get_status", return_value={}),
+        patch("backend.core.duckdb.get_schema", return_value=[]),
+    ):
+        resp = client.get(f"/api/query/schema/{MOCK_SERVICE_ID}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    col_names = {c["column"] for c in body["schema"]}
+    assert {"timestamp", "url", "status"}.issubset(col_names)

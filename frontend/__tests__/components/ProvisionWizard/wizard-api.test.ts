@@ -17,7 +17,7 @@
  * `__tests__/lib/api/custom-fields.test.ts`.
  */
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 
 import {
   buildValidateOnSuccess,
@@ -191,8 +191,8 @@ describe('runCheckConfig', () => {
   ): Parameters<typeof runCheckConfig>[0] {
     return {
       token: 'TOK',
-      selectedService: { id: 's1', name: 'svc' } as never,
-      selectedCdnService: { id: 'c1', name: 'cdn' } as never,
+      selectedService: { id: 's1', name: 'svc', provisioned: false },
+      selectedCdnService: { id: 'c1', name: 'cdn', provisioned: false },
       config: { ...INITIAL_CONFIG, fos_bucket_name: 'b' },
       setIsCheckingConfig: vi.fn(),
       setConfigStatus: vi.fn(),

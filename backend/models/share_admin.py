@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+from backend.models._base import PassthroughModel
 
 
 class ShareStartPayload(BaseModel):
@@ -121,10 +123,8 @@ class SettingsPayload(BaseModel):
 # key sets. Field lists derive from the producers (TunnelManager, share_db).
 
 
-class _ShareAdminRead(BaseModel):
+class _ShareAdminRead(PassthroughModel):
     """Base for share-admin responses — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ShareBannerResponse(_ShareAdminRead):
@@ -149,11 +149,13 @@ class InviteRecord(_ShareAdminRead):
     query_start_time: str | None = None
     query_end_time: str | None = None
     created_at: str | None = None
-    revoked: int | None = None
+    # Wire value is the SQLite INTEGER flag, 0 (active) or 1 (revoked), never a JSON
+    # boolean; the literal keeps the bytes unchanged while staying truthiness-compatible.
+    revoked: Literal[0, 1] | None = None
     tos_accepted_at: str | None = None
     tos_version: str | None = None
     allow_concurrent_sessions: bool | None = None
-    auth_method: str | None = None
+    auth_method: Literal["passcode", "oauth"] | None = None
     oauth_provider: str | None = None
     oauth_subject: str | None = None
     last_login_at: str | None = None
@@ -168,11 +170,76 @@ class ShareServiceEntry(_ShareAdminRead):
     remote_service_id: str | None = None
 
 
+class ShareSessionRecord(_ShareAdminRead):
+    """One live analyst session: ``AnalystSession.to_dict()`` (a dataclass
+    ``asdict``, so every key is always present)."""
+
+    session_id: str
+    invite_id: str
+    name: str
+    email: str
+    ip_address: str
+    user_agent: str
+    fingerprint_signature: str
+    pii_policy: dict[str, Any]
+    query_window_hours: int | None
+    query_start_time: str | None
+    query_end_time: str | None
+    login_time: str
+    last_active_time: str
+    last_activity: str | None
+    tos_pending: bool
+    service_ids: list[str]
+    auth_method: Literal["passcode", "oauth"]
+    oauth_provider: str | None
+
+
+class ShareAuditLogRow(_ShareAdminRead):
+    """One ``remote_share_audit_logs`` row (``SELECT *``)."""
+
+    id: int
+    timestamp: str
+    event_type: str
+    email: str | None
+    ip_address: str
+    details: str
+
+
+class ShareRateLimitFailure(_ShareAdminRead):
+    ip: str
+    count: int
+    window_s: int
+
+
+class ShareRateLimitLockout(_ShareAdminRead):
+    ip: str
+    remaining_s: int
+
+
+class ShareRateLimits(_ShareAdminRead):
+    """``LoginRateLimiter.snapshot()``."""
+
+    failures: list[ShareRateLimitFailure]
+    lockouts: list[ShareRateLimitLockout]
+
+
+class ShareTunnelUptimeEntry(_ShareAdminRead):
+    started_at: str
+    ended_at: str
+    duration_s: int
+    reason: str
+
+
+class ShareTelemetry(_ShareAdminRead):
+    """``TunnelManager.get_telemetry()``."""
+
+    heartbeat_unauth_count: int
+    current_uptime_s: int | None
+    tunnel_uptime_history: list[ShareTunnelUptimeEntry]
+
+
 class ShareStatusResponse(_ShareAdminRead):
-    """``build_share_status()``. The high-churn nested collections
-    (sessions / audit_logs / rate_limits / telemetry) stay free dicts:
-    their shapes are owned by TunnelManager internals and consumed
-    generically."""
+    """``build_share_status()``."""
 
     sharing_active: bool | None = None
     public_endpoint: str | None = None
@@ -183,10 +250,10 @@ class ShareStatusResponse(_ShareAdminRead):
     active_session_count: int | None = None
     services: list[ShareServiceEntry] | None = None
     invites: list[InviteRecord] | None = None
-    sessions: list[dict] | None = None
-    audit_logs: list[dict] | None = None
-    rate_limits: dict | None = None
-    telemetry: dict | None = None
+    sessions: list[ShareSessionRecord] | None = None
+    audit_logs: list[ShareAuditLogRow] | None = None
+    rate_limits: ShareRateLimits | None = None
+    telemetry: ShareTelemetry | None = None
 
 
 class ShareLiveResponse(_ShareAdminRead):
@@ -195,12 +262,12 @@ class ShareLiveResponse(_ShareAdminRead):
     sharing_active: bool | None = None
     public_url: str | None = None
     active_session_count: int | None = None
-    rate_limits: dict | None = None
-    telemetry: dict | None = None
+    rate_limits: ShareRateLimits | None = None
+    telemetry: ShareTelemetry | None = None
 
 
 class ShareAuditLogsResponse(_ShareAdminRead):
-    audit_logs: list[dict] | None = None
+    audit_logs: list[ShareAuditLogRow] | None = None
 
 
 class ShareStartResponse(_ShareAdminRead):

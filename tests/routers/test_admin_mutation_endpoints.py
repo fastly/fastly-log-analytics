@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from tests.conftest import MOCK_SERVICE_ID
 
 # ── POST /admin/pop-locations/refresh ──────────────────────────────────────
@@ -85,7 +86,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.sync._run_service_cron"),
+        patch("backend.cron.jobs.sync._run_log_discovery_cron"),
     ):
         resp = client.post(
             "/api/admin/ingest-logs",
@@ -98,7 +99,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     assert body["run_id"] == "run-123"
     assert "started" in body["message"].lower()
     # Read-write services run the regular sync (not metadata_sync)
-    assert started["task"] == "sync"
+    assert started["task"] == "log_discovery"
 
 
 def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_source):
@@ -129,6 +130,75 @@ def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_sou
     assert "metadata sync" in resp.json()["message"].lower()
 
 
+def test_sync_service_endpoint_starts_sync(client):
+    """POST /api/admin/sync/{service_id} triggers log_discovery and returns SyncStartResponse."""
+    started = {}
+
+    def fake_start_cron_run(src, task):
+        started["task"] = task
+        return "run-sync-789"
+
+    with (
+        patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron.jobs.sync._run_log_discovery_cron"),
+        patch("backend.repositories.dashboard.invalidate_service"),
+    ):
+        resp = client.post(
+            f"/api/admin/sync/{MOCK_SERVICE_ID}",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["run_id"] == "run-sync-789"
+    assert "started" in body["message"].lower()
+    assert started["task"] == "log_discovery"
+
+
+def test_sync_service_endpoint_rejects_analyst_session_with_403(client):
+    """Analyst Path B (remote share) is blocked with 403 by require_admin."""
+    from fastapi import HTTPException
+
+    from backend.deps import require_admin
+    from backend.main import app
+
+    def reject_admin():
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "admin_only", "message": "This operation requires admin access."},
+        )
+
+    app.dependency_overrides[require_admin] = reject_admin
+    try:
+        resp = client.post(
+            f"/api/admin/sync/{MOCK_SERVICE_ID}",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["error"] == "admin_only"
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+
+def test_sync_service_endpoint_rejects_read_only_source_with_403(client, test_service_source):
+    """Analyst Path A (read_only instance) is disabled from triggering log discovery."""
+    from backend.deps import get_source
+    from backend.main import app
+
+    app.dependency_overrides[get_source] = lambda: {**test_service_source, "access_level": "read_only"}
+    try:
+        resp = client.post(
+            f"/api/admin/sync/{MOCK_SERVICE_ID}",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        )
+        assert resp.status_code == 403
+        assert "read-only" in resp.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+
+
 def test_ingest_endpoint_503s_when_busy_and_no_active_run(client):
     """``start_cron_run`` raises RuntimeError (a different task is
     already running) AND we can't find an existing matching run in
@@ -139,7 +209,7 @@ def test_ingest_endpoint_503s_when_busy_and_no_active_run(client):
     # Clear any leftover metadata
     _run_metadata.clear()
 
-    with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("commit already running")):
+    with patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("commit already running")):
         resp = client.post(
             "/api/admin/ingest-logs",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -157,10 +227,10 @@ def test_ingest_endpoint_returns_existing_run_id_when_already_running(client, te
     from backend.cron_progress import _run_metadata
 
     _run_metadata.clear()
-    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "sync"}
+    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "log_discovery"}
 
     try:
-        with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("sync busy")):
+        with patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("sync busy")):
             resp = client.post(
                 "/api/admin/ingest-logs",
                 headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -395,7 +465,7 @@ def test_commit_iceberg_returns_existing_run_when_already_running(client, test_s
     _run_metadata["existing-commit"] = {"service_id": test_service_source["name"], "task": "commit"}
 
     try:
-        with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("commit busy")):
+        with patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("commit busy")):
             resp = client.post("/api/admin/commit-iceberg", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
     finally:
         _run_metadata.clear()

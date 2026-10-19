@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend import config as svcconfig
+from backend.core import quarantine
 from backend.core import reset as reset_mod
 from backend.core.metadata.base import get_con
 from tests.conftest import MOCK_SERVICE_ID
@@ -112,10 +113,26 @@ def fake_scheduler():
 def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_scheduler):
     _save_config()
     _seed_metadata_rows()
+    evidence = quarantine.capture_evidence(
+        MOCK_SERVICE_ID,
+        "request",
+        "raw/request/bad.gz",
+        b'{"invalid":\x00}\n',
+        line_ordinal=1,
+        byte_offset=0,
+        error_category="invalid_json",
+        error_text="invalid JSON",
+    )
+    evidence_path = quarantine._evidence_path(MOCK_SERVICE_ID, int(evidence["id"]))
+    assert evidence_path.exists()
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/meta/admin_state.json", Body=b"{}")
     s3_mock.put_object(Bucket="test-bucket", Key="errors/bad.bad.jsonl", Body=b"bad")
-    s3_mock.put_object(Bucket="test-bucket", Key="raw/2026/01/01/00/log.gz", Body=b"raw")
+    s3_mock.put_object(
+        Bucket="test-bucket",
+        Key="raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz",
+        Body=b"raw",
+    )
 
     events = list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
 
@@ -128,8 +145,10 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
         "committed_buffers",
         "local_compacted_files",
         "quarantined_files",
+        "quarantine_evidence",
     ):
         assert _table_count(table) == 0, f"{table} should be wiped"
+    assert not evidence_path.exists()
 
     for table in ("sources", "views", "alerts", "scoring_labels", "scoring_audit", "asn_names"):
         assert _table_count(table) == 1, f"{table} should be preserved"
@@ -141,7 +160,9 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     assert "iceberg/default/logs/data/foo.parquet" not in keys
     assert "iceberg/meta/admin_state.json" in keys, "iceberg/meta/ must survive the purge"
     assert "errors/bad.bad.jsonl" not in keys
-    assert "raw/2026/01/01/00/log.gz" in keys, "raw/ must be left alone when delete_raw_logs=False (default)"
+    assert "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz" in keys, (
+        "raw/ must be left alone when delete_raw_logs=False (default)"
+    )
 
     # Scheduler paused then resumed, and the config flag restored.
     assert fake_scheduler.call_count >= 2
@@ -151,12 +172,13 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
 
 def test_delete_raw_logs_true_purges_raw_prefix(s3_mock, fos_source, fake_scheduler):
     _save_config()
-    s3_mock.put_object(Bucket="test-bucket", Key="raw/2026/01/01/00/log.gz", Body=b"raw")
+    raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
+    s3_mock.put_object(Bucket="test-bucket", Key=raw_key, Body=b"raw")
 
     list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, delete_raw_logs=True, reload_scheduler=fake_scheduler))
 
     keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
-    assert "raw/2026/01/01/00/log.gz" not in keys
+    assert raw_key not in keys
 
 
 def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler):
@@ -320,3 +342,41 @@ def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_pa
         "Removed 4 local cache files so far...",
     ]
     assert not os.path.exists(tmp_path)
+
+
+def test_rum_pause_and_restore_flags_round_trip_without_inventing_rum_enabled():
+    """Restoring after a RUM reset must not create ``rum.enabled=False`` when the key never existed:
+    ``is_rum_enabled`` gives ``rum.enabled`` precedence, so a fabricated False silently disables RUM."""
+    from backend.config import is_rum_enabled
+    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
+
+    cfg = {"rum_enabled": True, "rum": {"faro_version": "1.2.3"}}
+    assert is_rum_enabled(cfg)
+
+    paused = _pause_rum_flags(cfg)
+    assert paused is not None
+    assert not is_rum_enabled(cfg)
+
+    _restore_rum_flags(cfg, paused)
+    assert "enabled" not in cfg["rum"]
+    assert cfg["rum_enabled"] is True
+    assert is_rum_enabled(cfg)
+
+
+def test_rum_pause_restore_keeps_an_explicit_rum_enabled_value():
+    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
+
+    cfg = {"rum_enabled": False, "rum": {"enabled": True}}
+    paused = _pause_rum_flags(cfg)
+    assert paused is not None
+    _restore_rum_flags(cfg, paused)
+    assert cfg["rum"]["enabled"] is True
+    assert cfg["rum_enabled"] is False
+
+
+def test_rum_pause_is_a_no_op_when_rum_is_not_enabled():
+    from backend.core.reset import _pause_rum_flags
+
+    cfg: dict = {"rum": {}}
+    assert _pause_rum_flags(cfg) is None
+    assert cfg == {"rum": {}}

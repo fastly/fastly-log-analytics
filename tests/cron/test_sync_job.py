@@ -1,6 +1,6 @@
 """Tests for :mod:`backend.cron.jobs.sync`.
 
-Pins the orchestration shape of ``_run_service_cron`` (per-tick FOS
+Pins the orchestration shape of ``_run_log_discovery_cron`` (per-tick FOS
 ingest) and ``_run_full_sweep`` (daily catch-net LIST). Both jobs are
 heavy wrappers around ``backend.core.ingest.ingest`` — these tests stub
 the ingest generator and assert the surrounding event/log/skip/error
@@ -17,11 +17,11 @@ actually performs. Module-level imports — ``_log_and_add_progress``,
 import time and the function body never re-resolves it.
 
 The ``_usage_log_phase`` inner helper defined inside
-``_run_service_cron`` cannot be intercepted at module level (it is a
+``_run_log_discovery_cron`` cannot be intercepted at module level (it is a
 local closure). Its body's source-module imports
 (``backfill_fastly_edge_writes``, ``reconcile_fastly_stats``,
 ``run_usage_log_cleanup``) ARE patchable on their source modules and we
-stub them out everywhere ``_run_service_cron`` is exercised so the
+stub them out everywhere ``_run_log_discovery_cron`` is exercised so the
 phase becomes a no-op that doesn't leak DB I/O.
 """
 
@@ -31,6 +31,15 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
+from backend.core.metadata.cron_log import CronLeaseHeldError
+from tests._helpers.config_fakes import fake_mutate_config
+
+
+@pytest.fixture(autouse=True)
+def clean_dev_no_crons(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
 
 # ── shared fixtures ─────────────────────────────────────────────────────────
 
@@ -50,7 +59,7 @@ def stub_progress(monkeypatch) -> dict[str, MagicMock]:
 
     The progress helpers (``start_progress`` / ``end_progress`` /
     ``cleanup_progress_and_reap``) are imported lazily inside
-    ``_run_service_cron``; patch their source module so the late
+    ``_run_log_discovery_cron``; patch their source module so the late
     ``from backend.cron_progress import …`` resolves to the mocks.
 
     The display/event/log helpers are bound at module level on
@@ -126,12 +135,12 @@ def stub_load_config(monkeypatch):
     cfg = {
         "service_id": "svc-1",
         "name": "svc-1",
-        "provisioning": {"cron_sync": {"enabled": True}},
+        "provisioning": {"cron_sync": {"enabled": True, "polling_mode": "regular"}},
     }
     load = MagicMock(return_value=cfg)
-    save = MagicMock()
+    save = MagicMock(side_effect=fake_mutate_config(lambda: cfg))
     monkeypatch.setattr("backend.config.load_config", load)
-    monkeypatch.setattr("backend.config.save_config", save)
+    monkeypatch.setattr("backend.config.mutate_config", save)
     return {"load": load, "save": save, "cfg": cfg}
 
 
@@ -144,25 +153,27 @@ def _make_ingest_events(events: list[dict]) -> Any:
     return _gen
 
 
-# ── _run_service_cron ────────────────────────────────────────────────────────
+# ── _run_log_discovery_cron ────────────────────────────────────────────────────────
 
 
-def test_returns_when_should_defer_cron_true(monkeypatch, stub_load_config):
-    """Active-request gate fires → ingest never called."""
+def test_scheduled_tick_is_not_deferred_by_in_flight_requests(monkeypatch, stub_load_config):
+    """Request freshness is the SLA: each deferral cost a full interval and the
+    dashboard's own polling kept the gate tripped, so the tick must proceed."""
     from backend.cron.jobs import sync as sync_mod
+    from backend.utils import active_requests
 
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: True)
-    ingest_mock = MagicMock()
-    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
-    get_src = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
+    active_requests._reset_for_tests()
+    active_requests.increment_active_requests()
+    try:
+        get_src = MagicMock(return_value=None)
+        monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+        sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
-    ingest_mock.assert_not_called()
-    # Config load never even runs — gate fires before.
-    stub_load_config["load"].assert_not_called()
-    get_src.assert_not_called()
+        stub_load_config["load"].assert_called_once_with("svc-1")
+        get_src.assert_called_once_with("svc-1")
+    finally:
+        active_requests._reset_for_tests()
 
 
 def test_skips_when_config_missing(monkeypatch):
@@ -175,7 +186,7 @@ def test_skips_when_config_missing(monkeypatch):
     get_src = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
 
-    sync_mod._run_service_cron.__wrapped__("ghost-svc")
+    sync_mod._run_log_discovery_cron.__wrapped__("ghost-svc")
 
     get_src.assert_not_called()
 
@@ -189,9 +200,71 @@ def test_skips_when_source_missing(monkeypatch, stub_load_config):
     start_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     start_cron.assert_not_called()
+
+
+def test_high_scale_discovery_persists_its_originating_run_id(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    source["deployment_mode"] = "high_scale"
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://broker")
+    discovery = MagicMock(return_value=1)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discovery)
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=521)
+
+    assert discovery.call_count == 5
+    assert all(call.kwargs["run_id"] == 521 for call in discovery.call_args_list)
+    assert log_cron.call_args.kwargs["run_id"] == 521
+
+
+def test_high_scale_discovery_rejects_missing_broker_without_listing(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
+    discover = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=522)
+
+    discover.assert_not_called()
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 522
+    assert "CELERY_BROKER_URL" in log_run.call_args.kwargs["error_message"]
+
+
+def test_high_scale_discovery_records_list_failure_on_its_run(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    discover = MagicMock(side_effect=OSError("FOS unavailable"))
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=523)
+
+    discover.assert_called_once()
+    assert discover.call_args.kwargs["run_id"] == 523
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 523
+    assert log_run.call_args.kwargs["error_message"] == "FOS unavailable"
 
 
 def test_read_only_skipped_without_force(monkeypatch, stub_load_config):
@@ -207,7 +280,7 @@ def test_read_only_skipped_without_force(monkeypatch, stub_load_config):
     start_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=False)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=False)
 
     start_cron.assert_not_called()
 
@@ -237,7 +310,7 @@ def test_read_only_runs_with_force(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
     # Ingest path ran: progress lifecycle + log_cron_run success.
     stub_progress["start_progress"].assert_called_once()
@@ -282,7 +355,7 @@ def test_sync_no_new_files_surfaces_reclaimed_count(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
     success_calls = [c for c in log_cron.call_args_list if c.args[3] == "success"]
     assert success_calls, "expected a success log_cron_run"
@@ -291,24 +364,195 @@ def test_sync_no_new_files_surfaces_reclaimed_count(
     assert "reclaim" in kwargs.get("summary", "").lower()
 
 
-def test_sync_status_published_before_slow_refresh_config_status(
+def test_log_discovery_persists_data_plane_outcomes_as_error(
     monkeypatch,
     stub_load_config,
     stub_progress,
     stub_post_ingest,
     stub_usage_log_phase,
 ):
-    """The live SSE snapshot must publish BEFORE refresh_config_status runs.
+    from backend.cron.jobs import sync as sync_mod
 
-    refresh_config_status does an uncached full-parquet rescan
-    (skip_fos=False, force=True) that can take 10-25s+ on a busy service;
-    compute_sync_status_cached's SQLite overlay already has a fresh
-    latest_log_at/local_rows without it. Publishing first keeps the header
-    badge's live update from being delayed behind (or lost during) that
-    slow rescan. See backend/cron/jobs/sync.py section-2 ordering."""
+    counters = {
+        "valid_records": 1,
+        "malformed_records": 1,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 0,
+        "objects_processed": 1,
+        "objects_successful": 0,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        MagicMock(return_value=_fake_src()),
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 1,
+                    "corrupt_rows": 1,
+                    "outcome_counters": counters,
+                }
+            ]
+        ),
+    )
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
+
+    terminal = [call for call in log_cron.call_args_list if call.args[3] == "error"]
+    assert terminal
+    assert terminal[-1].kwargs["outcome_counters"] == counters
+
+
+def test_adaptive_ingest_stops_after_empty_followup_and_aggregates_outcomes(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    pass_results = iter([2, 1, 0])
+    calls = []
+    sleeps = []
+
+    def ingest_fn(**kwargs):
+        count = next(pass_results)
+        calls.append(kwargs)
+        yield {
+            "type": "done",
+            "new_files": count,
+            "rows_inserted": count * 10,
+            "outcome_counters": {"valid_records": count * 10, "objects_processed": count},
+        }
+
+    monkeypatch.setattr(sync_mod.time, "sleep", sleeps.append)
+
+    events = list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=True, service_id="svc"))
+    done = events[-1]
+
+    assert len(calls) == 3
+    assert sleeps == [0.5, 0.5]
+    assert done["new_files"] == 3
+    assert done["rows_inserted"] == 30
+    assert done["outcome_counters"]["valid_records"] == 30
+    assert done["outcome_counters"]["objects_processed"] == 3
+
+
+def test_adaptive_ingest_publishes_rows_before_each_followup(monkeypatch):
+    """Rows from an intermediate pass must be published before the follow-up
+    sleep, not held until the end of the ~20 s polling window."""
+    from backend.cron.jobs import sync as sync_mod
+
+    pass_results = iter([2, 1, 0])
+    timeline: list[str] = []
+
+    def ingest_fn(**_kwargs):
+        count = next(pass_results)
+        timeline.append(f"pass:{count}")
+        yield {"type": "done", "new_files": count, "rows_inserted": count * 10}
+
+    monkeypatch.setattr(sync_mod.time, "sleep", lambda _s: timeline.append("sleep"))
+
+    list(
+        sync_mod._ingest_with_adaptive_followups(
+            ingest_fn, adaptive=True, after_pass=lambda: timeline.append("publish")
+        )
+    )
+
+    assert timeline == ["pass:2", "publish", "sleep", "pass:1", "publish", "sleep", "pass:0"]
+
+
+def test_adaptive_ingest_skips_publish_when_no_followup_runs(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    published: list[None] = []
+
+    def ingest_fn(**_kwargs):
+        yield {"type": "done", "new_files": 1, "rows_inserted": 5}
+
+    list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=False, after_pass=lambda: published.append(None)))
+
+    assert published == []
+
+
+def test_adaptive_ingest_obeys_twenty_second_followup_cap(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    now = [0.0]
+    calls = []
+
+    def monotonic():
+        return now[0]
+
+    def ingest_fn(**_kwargs):
+        calls.append(None)
+        now[0] = 18.0
+        yield {"type": "done", "new_files": 1}
+
+    monkeypatch.setattr(sync_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(sync_mod.time, "sleep", lambda _seconds: now.__setitem__(0, now[0] + 3))
+
+    list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=True))
+
+    assert len(calls) == 1
+
+
+def test_log_discovery_stands_down_for_a_high_scale_shared_source(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    """``provisioning.cron_sync.high_scale_shared_source=True`` must force
+    ``delete_after=False`` into ``ingest(...)`` regardless of the service's
+    own ``delete_after`` setting — this is the fix for legacy sync racing
+    an out-of-band high-scale consumer of the same raw FOS stream and
+    deleting objects it hasn't archived yet."""
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        MagicMock(return_value=_fake_src()),
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+
+    stub_load_config["cfg"]["provisioning"]["cron_sync"]["delete_after"] = True
+    stub_load_config["cfg"]["provisioning"]["cron_sync"]["high_scale_shared_source"] = True
+
+    ingest_mock = MagicMock(
+        side_effect=_make_ingest_events(
+            [{"type": "done", "new_files": 0, "rows_inserted": 0, "deleted_files": 0, "message": "ok"}]
+        )
+    )
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
+
+    from backend.cron.jobs import sync as sync_mod
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
+
+    assert ingest_mock.call_args.kwargs["delete_after"] is False
+
+
+def test_sync_status_published_after_request_extents_refresh(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    """Publish this ingest's request extent, not the previous tick's cache."""
     from backend.cron.jobs import sync as sync_mod
 
     calls: list[str] = []
+    status = {"latest_log_at": "2026-01-01T00:00:00Z"}
 
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr(
@@ -322,17 +566,18 @@ def test_sync_status_published_before_slow_refresh_config_status(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    def _fake_refresh_config_status(*args, **kwargs):
-        calls.append("refresh_config_status")
+    def _fake_refresh_config_status(*args, include_top_values=True, **kwargs):
+        calls.append(f"refresh_config_status(top_values={include_top_values})")
+        status["latest_log_at"] = "2026-01-02T00:00:00Z"
 
     monkeypatch.setattr("backend.core.duckdb.refresh_config_status", _fake_refresh_config_status)
 
     def _fake_compute_snapshot(service_id):
         calls.append("compute_sync_status_cached")
-        return {"latest_log_at": "2026-01-01T00:00:00Z"}
+        return dict(status)
 
     monkeypatch.setattr(
-        "backend.routers.admin.sync_status.compute_sync_status_cached",
+        "backend.sync_status_snapshot.compute_sync_status_cached",
         _fake_compute_snapshot,
     )
 
@@ -340,11 +585,50 @@ def test_sync_status_published_before_slow_refresh_config_status(
     fake_publisher.publish.side_effect = lambda *a, **k: calls.append("publish")
     monkeypatch.setattr("backend.sync_status_publisher.publisher", fake_publisher)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
-    assert calls == ["compute_sync_status_cached", "publish", "refresh_config_status"], (
-        f"sync-status must publish before the slow refresh_config_status rescan, got {calls}"
+    # The heavy top-values pass (~5 s on GCE) runs after publish so it never
+    # holds freshly ingested rows back from the header.
+    assert calls == [
+        "refresh_config_status(top_values=False)",
+        "compute_sync_status_cached",
+        "publish",
+        "refresh_config_status(top_values=True)",
+    ]
+    fake_publisher.publish.assert_called_once_with("svc-1", {"latest_log_at": "2026-01-02T00:00:00Z"})
+
+
+@pytest.mark.parametrize("heavy", [False, True])
+def test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    heavy,
+):
+    """The ~3 s usage-log phase sat between every tick's last ingest pass and
+    the next tick's first, widening the request-lag sawtooth; it is idempotent
+    and read at hourly grain, so it rides the 60 s heavy-refresh window."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "_claim_heavy_refresh", lambda sid: heavy)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
+    backfill = MagicMock(return_value=0)
+    cleanup = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.backfill_fastly_edge_writes", backfill)
+    monkeypatch.setattr("backend.core.duckdb.reconcile_fastly_stats", MagicMock(return_value=0))
+    monkeypatch.setattr("backend.utils.usage_logger.run_usage_log_cleanup", cleanup)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    assert backfill.called is heavy
+    assert cleanup.called is heavy
 
 
 def test_manual_sync_all_clears_time_range(
@@ -354,7 +638,7 @@ def test_manual_sync_all_clears_time_range(
     stub_usage_log_phase,
 ):
     """``is_manual=True`` (run_id supplied) with no start_time triggers
-    ``del prov['time_range']`` + ``save_config``."""
+    ``del prov['time_range']`` + ``mutate_config``."""
     from backend.cron.jobs import sync as sync_mod
 
     cfg = {
@@ -367,10 +651,7 @@ def test_manual_sync_all_clears_time_range(
     }
     saved: list[dict] = []
     monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=cfg))
-    monkeypatch.setattr(
-        "backend.config.save_config",
-        MagicMock(side_effect=lambda sid, c: saved.append(dict(c.get("provisioning", {})))),
-    )
+    monkeypatch.setattr("backend.config.mutate_config", fake_mutate_config(cfg, saves=saved))
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr(
         "backend.core.duckdb.get_source_for_service",
@@ -383,11 +664,11 @@ def test_manual_sync_all_clears_time_range(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", run_id=42)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=42)
 
-    # save_config was called with time_range removed from provisioning.
-    assert saved, "expected save_config to fire on manual sync-all"
-    assert "time_range" not in saved[-1], f"time_range still present: {saved[-1]}"
+    # mutate_config was called with time_range removed from provisioning.
+    assert saved, "expected mutate_config to fire on manual sync-all"
+    assert "time_range" not in saved[-1].get("provisioning", {}), f"time_range still present: {saved[-1]}"
 
 
 def test_disk_space_failure_logs_error_and_returns(
@@ -419,7 +700,7 @@ def test_disk_space_failure_logs_error_and_returns(
     ingest_mock = MagicMock()
     monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     ingest_mock.assert_not_called()
     log_cron.assert_called_once()
@@ -458,7 +739,7 @@ def test_ingest_error_event_logs_cron_with_processed_files(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     error_calls = [c for c in log_cron.call_args_list if c.args[3] == "error"]
     assert error_calls, "expected an error log_cron_run"
@@ -508,7 +789,8 @@ def test_ingest_done_event_records_summary_and_recompute_rollups(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+    assert sync_mod.wait_for_post_ingest_rollups("svc-1", timeout=5)
 
     success_calls = [c for c in log_cron.call_args_list if c.args[3] == "success"]
     assert success_calls, "expected log_cron_run success"
@@ -520,6 +802,91 @@ def test_ingest_done_event_records_summary_and_recompute_rollups(
     recompute.assert_called_once()
     _a, _b, hours_set = recompute.call_args.args
     assert hours_set == {"2026-06-15-09", "2026-06-15-10"}
+
+
+def test_rollup_recompute_does_not_block_discovery_tick(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    """Closed-hour rollup rebuilds can take minutes; running them inline held
+    the 10 s discovery job (max_instances=1) and let the FOS backlog grow to
+    minutes of request lag. The tick must return while the rollup is still
+    running."""
+    import threading
+
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    release = threading.Event()
+    started = threading.Event()
+
+    def _slow_recompute(_sid, _src, _hours):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr("backend.core.rollups.recompute_touched_hours", _slow_recompute)
+    monkeypatch.setattr("backend.core.rollups.recompute_wellknown_bots_rollup", MagicMock(return_value=0))
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 5,
+                    "deleted_files": 1,
+                    "touched_hours": ["2026-06-15-09"],
+                }
+            ]
+        ),
+    )
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-block")
+
+    assert started.wait(5), "rollup recompute never started"
+    assert not sync_mod.wait_for_post_ingest_rollups("svc-block", timeout=0.05)
+    release.set()
+    assert sync_mod.wait_for_post_ingest_rollups("svc-block", timeout=5)
+
+
+def test_post_ingest_rollups_coalesce_hours_queued_while_running(monkeypatch):
+    """Hours queued while a pass is running fold into ONE follow-up pass on the
+    same worker, so a slow rollup never spawns a pile of concurrent rebuilds."""
+    import threading
+
+    from backend.cron.jobs import sync as sync_mod
+
+    calls: list[set[str]] = []
+    threads: set[str] = set()
+    release = threading.Event()
+    first_started = threading.Event()
+
+    def _recompute(_sid, _src, hours):
+        threads.add(threading.current_thread().name)
+        calls.append(set(hours))
+        if len(calls) == 1:
+            first_started.set()
+            release.wait(5)
+
+    monkeypatch.setattr("backend.core.rollups.recompute_touched_hours", _recompute)
+    monkeypatch.setattr("backend.core.rollups.recompute_wellknown_bots_rollup", MagicMock(return_value=0))
+
+    src = _fake_src()
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-09"})
+    assert first_started.wait(5)
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-10"})
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-11", "2026-06-15-10"})
+    release.set()
+
+    assert sync_mod.wait_for_post_ingest_rollups("svc-coalesce", timeout=5)
+    assert calls == [{"2026-06-15-09"}, {"2026-06-15-10", "2026-06-15-11"}]
+    assert len(threads) == 1
 
 
 def test_ingest_exception_records_crashed(
@@ -548,7 +915,7 @@ def test_ingest_exception_records_crashed(
 
     monkeypatch.setattr("backend.core.ingest.ingest", _boom)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     error_calls = [c for c in log_cron.call_args_list if c.args[3] == "error"]
     assert error_calls
@@ -593,7 +960,7 @@ def test_ingest_without_terminal_done_event_finalizes_row(
         _make_ingest_events([{"type": "file_done", "current": 3, "total_inserted": 50, "total_corrupt": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     # No success/error status was logged (this is exactly the leak path) ...
     assert not [c for c in log_cron.call_args_list if c.args[3] in ("success", "error")], (
@@ -602,7 +969,7 @@ def test_ingest_without_terminal_done_event_finalizes_row(
     # ... so the finally backstop must have finalized the row instead.
     finalize.assert_called_once()
     args, kwargs = finalize.call_args
-    assert args[1] == "sync"
+    assert args[1] == "log_discovery"
     assert args[2] == 42
     stub_progress["end_progress"].assert_called_once()
 
@@ -632,7 +999,7 @@ def test_successful_done_does_not_double_finalize(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     finalize.assert_called_once()
     assert finalize.call_args.args[2] == 42
@@ -655,6 +1022,63 @@ def test_full_sweep_returns_silently_when_source_missing(monkeypatch, stub_load_
     start_cron.assert_not_called()
 
 
+def test_scheduled_discovery_persists_service_creation_time_as_range_start(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    service_id = "svc-creation-range"
+    source = _fake_src()
+    cfg = {"created_at": "2026-09-29T12:00:00Z", "provisioning": {"cron_sync": {"enabled": True}}}
+    save = MagicMock(side_effect=fake_mutate_config(cfg))
+    monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
+    monkeypatch.setattr("backend.config.mutate_config", save)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 108)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    discover = MagicMock(return_value=0)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+
+    sync_mod._run_log_discovery_cron.__wrapped__(service_id)
+
+    assert cfg["provisioning"]["time_range"] == {"start": "2026-09-29T12:00:00Z"}
+    assert source["time_range"] == cfg["provisioning"]["time_range"]
+    save.assert_called_once()
+    assert discover.call_count == 5
+
+
+def test_manual_discovery_clears_pinned_range_before_listing(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    service_id = "svc-manual-range"
+    source = _fake_src()
+    cfg = {
+        "provisioning": {
+            "cron_sync": {"enabled": True, "polling_mode": "adaptive"},
+            "time_range": {"start": "2026-09-01T00:00:00Z"},
+        }
+    }
+    save = MagicMock(side_effect=fake_mutate_config(cfg))
+    monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
+    monkeypatch.setattr("backend.config.mutate_config", save)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    discover = MagicMock(return_value=1)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+
+    sync_mod._run_log_discovery_cron.__wrapped__(service_id, force=True, run_id=109)
+
+    assert "time_range" not in cfg["provisioning"]
+    assert source["time_range"] is None
+    save.assert_called_once()
+    assert discover.call_count == 5
+    assert {call.kwargs["run_id"] for call in discover.call_args_list} == {109}
+
+
 def test_full_sweep_skipped_when_start_cron_run_raises(monkeypatch, stub_load_config):
     """``start_cron_run`` raising RuntimeError → log + return without
     starting progress."""
@@ -666,7 +1090,7 @@ def test_full_sweep_skipped_when_start_cron_run_raises(monkeypatch, stub_load_co
     )
     monkeypatch.setattr(
         "backend.core.duckdb.start_cron_run",
-        MagicMock(side_effect=RuntimeError("already running")),
+        MagicMock(side_effect=CronLeaseHeldError("already running")),
     )
     ingest_mock = MagicMock()
     monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
@@ -683,6 +1107,7 @@ def test_full_sweep_success_logs_new_files_count(
     monkeypatch,
     stub_load_config,
     stub_progress,
+    stub_post_ingest,
 ):
     """A clean ``done`` event with new_files > 0 → log_cron_run
     success with "Backfilled N late-arriving file(s)" summary."""
@@ -791,13 +1216,199 @@ def test_full_sweep_error_event_logs_with_processed_counts(
     assert "Full-sweep failed" in kwargs.get("summary", "")
 
 
+def test_full_sweep_defers_when_active_requests_present(monkeypatch, stub_load_config):
+    """When active requests are in flight, should_defer_cron returns True
+    and _run_full_sweep returns early without starting a cron run."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    start_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    start_cron.assert_not_called()
+
+
+def test_full_sweep_error_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress, stub_post_ingest):
+    """When corrupt rows are quarantined during a full sweep, the cron run status
+    must transition to 'error' and the summary must flag the quarantine."""
+    from backend.cron.jobs import sync as sync_mod
+
+    counters = {
+        "valid_records": 50,
+        "malformed_records": 3,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "objects_processed": 1,
+        "objects_successful": 0,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=101))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 50,
+                    "corrupt_rows": 3,
+                    "outcome_counters": counters,
+                    "corrupt_details": ["malformed line 1"],
+                }
+            ]
+        ),
+    )
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "error", "Corrupt rows must report error status"
+    assert "quarantined" in kwargs.get("summary", "").lower()
+    assert kwargs.get("corrupt_rows") == 3
+    assert kwargs.get("outcome_counters") == counters
+    assert kwargs.get("error_message") == "malformed line 1"
+
+
+def test_full_sweep_adaptive_budget_scales_with_buffer_backlog(monkeypatch, stub_load_config, stub_progress):
+    """When buffer backlog is high (>2000 files), dynamic budget scales max_files down to 5000."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=102))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.iceberg.buffer_backlog_stats",
+        MagicMock(return_value={"file_count": 3500, "total_bytes": 100_000_000}),
+    )
+
+    ingest_mock = MagicMock(return_value=iter([{"type": "done", "new_files": 0, "rows_inserted": 0}]))
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    assert ingest_mock.call_count == 1
+    _, kwargs = ingest_mock.call_args
+    assert kwargs["max_files"] == 5_000, "High buffer backlog must scale max_files down to 5000"
+    assert kwargs["max_seconds"] == 300
+
+
+def test_full_sweep_adaptive_budget_scales_up_when_buffer_clean(monkeypatch, stub_load_config, stub_progress):
+    """When buffer is healthy (<200 files), dynamic budget scales max_files up to 50,000."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=103))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.iceberg.buffer_backlog_stats",
+        MagicMock(return_value={"file_count": 50, "total_bytes": 1_000_000}),
+    )
+
+    ingest_mock = MagicMock(return_value=iter([{"type": "done", "new_files": 0, "rows_inserted": 0}]))
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    assert ingest_mock.call_count == 1
+    _, kwargs = ingest_mock.call_args
+    assert kwargs["max_files"] == 50_000, "Clean buffer must scale max_files up to 50,000"
+    assert kwargs["max_seconds"] == 1200
+
+
+def test_full_sweep_finalizes_duration(monkeypatch, stub_load_config, stub_progress):
+    """finalize_cron_duration must be called in finally block."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=104))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
+    )
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    finalize.assert_called_once()
+    assert finalize.call_args.args[1] == 104
+
+
+@pytest.mark.parametrize("discovered", [0, 3])
+def test_high_scale_full_sweep_attributes_discovery_to_its_own_run(monkeypatch, stub_load_config, discovered):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 104)
+    discover = MagicMock(return_value=discovered)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+    legacy_ingest = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.ingest", legacy_ingest)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    discover.assert_called_once_with("svc-1", run_id=104, originating_task="full_sync")
+    legacy_ingest.assert_not_called()
+    assert log_run.call_args.args[3] == "success"
+    assert log_run.call_args.kwargs["files_downloaded"] == discovered
+    assert log_run.call_args.kwargs["run_id"] == 104
+    assert ("discovered 3 unseen" if discovered else "no unseen files") in log_run.call_args.kwargs["summary"]
+    assert finalize.call_args.args[1] == 104
+
+
+def test_high_scale_full_sweep_records_discovery_failure_on_originating_run(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 105)
+    discover = MagicMock(side_effect=OSError("FOS listing unavailable"))
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    discover.assert_called_once_with("svc-1", run_id=105, originating_task="full_sync")
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 105
+    assert log_run.call_args.kwargs["error_message"] == "FOS listing unavailable"
+    assert finalize.call_args.args[1] == 105
+
+
 # ── Cron → ingest → metadata_db cascade (real ingest, moto S3) ────────────
 
 
-def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
+def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     s3_mock, fos_source, monkeypatch, tmp_path, stub_progress, stub_usage_log_phase
 ):
-    """End-to-end integration: ``_run_service_cron`` calls the REAL
+    """End-to-end integration: ``_run_log_discovery_cron`` calls the REAL
     ``backend.core.ingest.ingest`` against a moto-backed FOS bucket
     seeded with two gzip log files, and we assert the full writer-side
     cascade actually fired.
@@ -878,7 +1489,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
     # stubbed by stub_progress; no remaining usage-log helpers needed.
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
 
-    # Real ``_run_service_cron`` calls ``svcconfig.load_config`` to read
+    # Real ``_run_log_discovery_cron`` calls ``svcconfig.load_config`` to read
     # cron_sync.enabled + time_range; the lambda above returns a stub.
     # ``get_source_for_service`` must return our moto-bound source so
     # ingest can list the bucket. ``start_cron_run`` writes the
@@ -892,8 +1503,11 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
     base = datetime.now(UTC) - timedelta(hours=2)
     rows_per_file = 4
     seeded = [
-        ("raw/2026-05-21/10/2026-05-21T10-00-00.svc.gz", base),
-        ("raw/2026-05-21/10/2026-05-21T10-05-00.svc.gz", base + timedelta(minutes=5)),
+        ("raw/request/year=2026/month=05/day=21/hour=10/minute=00/2026-05-21T10-00-00.svc.gz", base),
+        (
+            "raw/request/year=2026/month=05/day=21/hour=10/minute=05/2026-05-21T10-05-00.svc.gz",
+            base + timedelta(minutes=5),
+        ),
     ]
     for key, ts in seeded:
         rows = [
@@ -919,7 +1533,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
     svc_name = fos_source["name"]
 
     # ── Drive the real cron — NO ingest stub ─────────────────────────────
-    sync_mod._run_service_cron.__wrapped__(svc_id, force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__(svc_id, force=True)
 
     # ── Contract 1: every ingested file landed in metadata_db ────────────
     ingested = metadata_db.list_ingested_files(svc_name)
@@ -933,7 +1547,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
         )
 
     # ── Contract 2: cron_runs transitioned started → completed ───────────
-    _total, runs = metadata_db.get_cron_runs(svc_name, task="sync", per_page=10)
+    _total, runs = metadata_db.get_cron_runs(svc_name, task="log_discovery", per_page=10)
     assert runs, "cron_runs has no rows — start_cron_run never fired"
     latest = runs[0]
     assert latest["status"] == "success", (
@@ -951,3 +1565,119 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
         "clear_in_flight must run after insert_ingested_files; leftover "
         "rows here would cause double-ingest on next restart."
     )
+
+
+# ── cron_run lifecycle (log_discovery) ──────────────────────────────────────
+
+
+def _lifecycle_env(monkeypatch, events, *, log_text="LOGTEXT"):
+    from backend.cron.jobs import sync as sync_mod  # noqa: F401
+
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    start = MagicMock(return_value=42)
+    log_cron = MagicMock()
+    order: list[str] = []
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.duckdb.finalize_cron_run_if_running",
+        lambda *a, **k: order.append(("backstop", a, k)) or True,
+    )
+    monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: order.append(("end_progress", rid)))
+    monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: log_text)
+    monkeypatch.setattr("backend.core.ingest.ingest", _make_ingest_events(events))
+    return start, log_cron, order
+
+
+def test_lifecycle_lease_held_skips_without_ingest_or_row(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    start, log_cron, order = _lifecycle_env(monkeypatch, [])
+    start.side_effect = CronLeaseHeldError("held")
+    ingest = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    ingest.assert_not_called()
+    log_cron.assert_not_called()
+    assert order == []
+
+
+def test_lifecycle_backstop_gets_context_and_runs_before_end_progress(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, _, order = _lifecycle_env(monkeypatch, [{"type": "done", "new_files": 0, "rows_inserted": 0}])
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    assert [o[0] for o in order] == ["backstop", "end_progress"]
+    _, args, kwargs = order[0]
+    assert args[1:] == ("log_discovery", 42)
+    assert kwargs["summary"] == "Sync exited without recording a terminal status"
+    assert kwargs["error_message"] == "orphaned run auto-finalized (no terminal ingest event)"
+    assert isinstance(kwargs["duration_s"], float)
+    assert order[1] == ("end_progress", 42)
+
+
+def test_lifecycle_error_event_row_shape(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    events = [
+        {"type": "file_done", "current": 3, "total_inserted": 50, "total_corrupt": 1},
+        {"type": "error", "message": "s3 timeout"},
+    ]
+    _, log_cron, _ = _lifecycle_env(monkeypatch, events)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    errors = [c for c in log_cron.call_args_list if c.args[3] == "error"]
+    assert len(errors) == 1
+    kwargs = errors[0].kwargs
+    assert kwargs["summary"] == "Ingestion failed after processing 3 files (50 rows)"
+    assert kwargs["error_message"] == "s3 timeout"
+    assert (kwargs["files_downloaded"], kwargs["rows_ingested"], kwargs["corrupt_rows"]) == (3, 50, 1)
+    assert kwargs["log_output"] == "LOGTEXT"
+    assert kwargs["run_id"] == 42
+
+
+def test_lifecycle_disk_failure_row_has_no_log_output(
+    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, log_cron, order = _lifecycle_env(monkeypatch, [])
+    monkeypatch.setattr(sync_mod, "_check_disk_space", lambda cache_dir, sid, name: (False, "disk full"))
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Sync aborted: disk full"
+    assert kwargs["error_message"] == "disk full"
+    assert kwargs["log_output"] is None
+    assert [o[0] for o in order] == ["backstop", "end_progress"]
+
+
+def test_lifecycle_high_scale_missing_broker_row_has_no_log_output(monkeypatch, stub_load_config, stub_progress):
+    from backend.cron.jobs import sync as sync_mod
+
+    _, log_cron, _ = _lifecycle_env(monkeypatch, [])
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Celery ingest misconfigured: no broker URL"
+    assert kwargs["error_message"] == "DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL"
+    assert kwargs["log_output"] is None

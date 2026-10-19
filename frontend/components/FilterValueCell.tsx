@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { useFilterStore } from '@/stores/filterStore'
 import { useMaskIps } from '@/hooks/useMaskIps'
 import { isIpFamilyField } from '@/lib/pii'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -76,6 +77,7 @@ export function FilterValueCell({
   const pageLabel = pageLabelFor(pathname)
   const shownValue = display ?? filters[0]?.value ?? ''
   const [open, setOpen] = React.useState(false)
+  const { copy } = useCopyToClipboard()
 
   const handleFilterHere = React.useCallback(() => {
     for (const f of filters) addFilter(f.column, f.value, 'include')
@@ -87,8 +89,8 @@ export function FilterValueCell({
 
   const handleCopy = React.useCallback(() => {
     const v = filters[0]?.value
-    if (v) navigator.clipboard?.writeText(v).catch(() => {})
-  }, [filters])
+    if (v) void copy(v)
+  }, [filters, copy])
 
   // Modifier-key shortcut: cmd/ctrl-click on the cell triggers "Filter
   // this page" directly without opening the menu. base-ui's Trigger has

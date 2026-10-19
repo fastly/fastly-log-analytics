@@ -1,7 +1,6 @@
 'use client'
 import React from 'react'
 import { ColumnDef } from '@tanstack/react-table'
-import type { components } from '@/types/api.generated'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -23,10 +22,11 @@ import {
   Bot,
   ChevronDown,
   KeyRound,
+  Eye,
 } from 'lucide-react'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 export interface ServiceColumnDeps {
   activeServiceId: string | null
@@ -44,6 +44,7 @@ export interface ServiceColumnDeps {
   setTeardownService: (s: ServiceConfig) => void
   setInviteService: (s: ServiceConfig) => void
   openNgwaf: (s: ServiceConfig) => void
+  openRum?: (s: ServiceConfig) => void
   openCredentials: (s: ServiceConfig) => void
 }
 
@@ -58,6 +59,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
     setTeardownService,
     setInviteService,
     openNgwaf,
+    openRum,
     openCredentials,
   } = deps
 
@@ -139,7 +141,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1">
-                {files.toLocaleString()} file{files === 1 ? '' : 's'}
+                {formatCount(files)} file{files === 1 ? '' : 's'}
                 {files > 0 && (
                   <Button
                     variant="ghost"
@@ -157,7 +159,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 )}
               </span>
               <span>•</span>
-              <span>{rows.toLocaleString()} rows</span>
+              <span>{formatCount(rows)} rows</span>
             </div>
           </div>
         ) : (
@@ -219,10 +221,15 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 <DropdownMenuItem onClick={() => setSettingsService(service)}>
                   <Settings2 className="mr-2 h-4 w-4" /> Log Settings
                 </DropdownMenuItem>
+                {openRum && (
+                  <DropdownMenuItem onClick={() => openRum(service)}>
+                    <Eye className="mr-2 h-4 w-4" /> RUM Configuration
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={() => openNgwaf(service)}>
                   <Bot className="mr-2 h-4 w-4" /> NGWAF Config
                 </DropdownMenuItem>
-                {service.access_level === 'read_write' && (
+                {service.access_level === 'read_write' && service.analyst_path_a_supported && (
                   <DropdownMenuItem onClick={() => setInviteService(service)}>
                     <UserPlus className="mr-2 h-4 w-4" /> Invite User
                   </DropdownMenuItem>

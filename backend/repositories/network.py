@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC
 from typing import Any
 
 import duckdb
+
+from backend.utils.log_throttle import log_once_per
+
+logger = logging.getLogger(__name__)
 
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
@@ -187,8 +192,16 @@ def _health_score(
     return round((1.0 - weighted) * 100, 1)
 
 
+def _rtt_congestion_expr() -> str:
+    """Subtract unsigned RTT columns without allowing UINT underflow."""
+    return "APPROX_QUANTILE(CAST(COALESCE(tcp_rtt, 0) AS BIGINT) - CAST(COALESCE(rtt_min, 0) AS BIGINT), 0.5)"
+
+
+import typing
+
+
 def get_health(
-    con: duckdb.DuckDBPyConnection,
+    con_factory: typing.Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -270,22 +283,34 @@ def get_health(
     if not force_refresh:
         cached = cache_get(_response_cache, cache_key)
         if cached is not None:
-            runner = QueryRunner(con, src)
-            return {**cached, **runner.telemetry()}
+            return {**cached, "telemetry": {}}
 
     table_name = _safe_table(src["name"])
 
-    runner = QueryRunner(con, src)
+    _runner: QueryRunner | None = None
+
+    def get_runner() -> QueryRunner:
+        nonlocal _runner
+        if _runner is None:
+            _runner = QueryRunner(con_factory(), src)
+        return _runner
 
     _t = _time.perf_counter()
-    actual_cols = set(runner.get_schema_cols())
+    from backend.core._duckdb_status import _SCHEMA_CACHE_TTL, _schema_cache
+
+    _now = _time.time()
+    _cache_key = (src["name"], table_name, True)
+    if _cache_key in _schema_cache and (_now - _schema_cache[_cache_key][0] < _SCHEMA_CACHE_TTL):
+        actual_cols = set(c["name"] for c in _schema_cache[_cache_key][1])
+    else:
+        actual_cols = set(get_runner().get_schema_cols())
     timer.mark("get_schema_cols", _t)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
         return {
             "available": False,
             "reason": "Enable Groups F and G (Network Quality) in your log field configuration.",
-            **runner.telemetry(),
+            **(_runner.telemetry() if _runner else {"telemetry": {}}),
         }
 
     has_ploss = "ploss" in actual_cols
@@ -327,14 +352,14 @@ def get_health(
                 span_secs = max(1, int((_et0 - _st0).total_seconds()))
                 bucket_seconds = max(bucket_seconds, span_secs // 8640)
     except Exception:
-        pass
+        logger.debug("get_health: step failed (ignored)", exc_info=True)
 
     bucket_ms = bucket_seconds * 1000
 
     ploss_expr = "AVG(ploss)" if has_ploss else "NULL"
     rtt_min_expr = "APPROX_QUANTILE(rtt_min, 0.5)" if has_rtt_min else "NULL"
     rtt_var_expr = "APPROX_QUANTILE(rtt_var, 0.5)" if has_rtt_var else "NULL"
-    congestion_expr = "APPROX_QUANTILE(COALESCE(tcp_rtt, 0) - COALESCE(rtt_min, 0), 0.5)" if has_rtt_min else "NULL"
+    congestion_expr = _rtt_congestion_expr() if has_rtt_min else "NULL"
 
     # ── Rollup fast path ────────────────────────────────────────────────────
     # Try the per-hour heatmap + geo rollup readers BEFORE building the temp
@@ -345,7 +370,7 @@ def get_health(
     # SECTIONS COVERED:
     #   "heatmap"  → runners.try_network_heatmap_from_rollup  (feeds heatmap,
     #                leaderboard, summary, buckets — all derived from heatmap_rows)
-    #   "map_geo"  → runner.try_network_geo_from_rollup  (feeds map_buckets,
+    #   "map_geo"  → get_runner().try_network_geo_from_rollup  (feeds map_buckets,
     #                cities, metro_leaderboard)
     #
     # The RTT-percentile and speed-distribution sections have their OWN rollup
@@ -368,14 +393,14 @@ def get_health(
     _hoist_net(
         "heatmap",
         _want_heatmap_query,
-        lambda: runner.try_network_heatmap_from_rollup(
+        lambda: get_runner().try_network_heatmap_from_rollup(
             start_time, end_time, has_filters=bool(filters), bucket_seconds=bucket_seconds
         ),
     )
     _hoist_net(
         "map_geo",
         _want_map_query or _want_metro_query,
-        lambda: runner.try_network_geo_from_rollup(
+        lambda: get_runner().try_network_geo_from_rollup(
             start_time, end_time, map_asn=map_asn, has_filters=bool(filters), bucket_seconds=bucket_seconds
         ),
     )
@@ -471,7 +496,7 @@ def get_health(
 
         def _build_temp_results() -> tuple[list[str], list[Any], list[Any], list[Any]]:
             _t0 = _time.perf_counter()
-            temp_name = runner.create_filtered_temp_table(
+            temp_name = get_runner().create_filtered_temp_table(
                 all_net_cols, list(actual_cols), table_name, where_clause, params
             )
             timer.mark("temp_table_create", _t0)
@@ -480,105 +505,117 @@ def get_health(
             _leader_temp_name[0] = temp_name
             countries_b: list[str] = []
             if has_country:
-                rows = runner.execute(
-                    f"SELECT DISTINCT country FROM {temp_name} WHERE 1=1"
-                    f" AND country IS NOT NULL AND country != '' ORDER BY country",
-                    [],
-                ).fetchall()
+                rows = (
+                    get_runner()
+                    .execute(
+                        f"SELECT DISTINCT country FROM {temp_name} WHERE 1=1"
+                        f" AND country IS NOT NULL AND country != '' ORDER BY country",
+                        [],
+                    )
+                    .fetchall()
+                )
                 countries_b = [r[0] for r in rows]
 
             heatmap_rows_b: list[Any] = []
             if _want_heatmap_query:
-                heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
-                    bucket_ms=bucket_ms,
-                    rtt_min_expr=rtt_min_expr,
-                    congestion_expr=congestion_expr,
-                    ploss_expr=ploss_expr,
-                    rtt_var_expr=rtt_var_expr,
-                    table=temp_name,
-                    where="1=1",
-                    row_limit=top_n * 200,
-                )
-                _t1 = _time.perf_counter()
-                heatmap_rows_b = runner.execute(heatmap_sql, []).fetchall()
-                timer.mark("heatmap_query", _t1)
+                if "heatmap" in _net_rolled:
+                    heatmap_rows_b = _net_rolled["heatmap"]
+                else:
+                    heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
+                        bucket_ms=bucket_ms,
+                        rtt_min_expr=rtt_min_expr,
+                        congestion_expr=congestion_expr,
+                        ploss_expr=ploss_expr,
+                        rtt_var_expr=rtt_var_expr,
+                        table=temp_name,
+                        where="1=1",
+                        row_limit=top_n * 200,
+                    )
+                    _t1 = _time.perf_counter()
+                    heatmap_rows_b = get_runner().execute(heatmap_sql, []).fetchall()
+                    timer.mark("heatmap_query", _t1)
 
             map_rows_b: list[Any] = []
-            if _want_map_query and has_country:
-                lat_col = "lat" if has_lat else "NULL"
-                lon_col = "lon" if has_lat else "NULL"
-                metro_col = "metro" if has_metro else "NULL"
-                city_col = "city" if "city" in actual_cols else "''"
-                # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
-                # references the same columns by name on both sides, so
-                # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
-                # binder. Prefix with the temp-table name when the column
-                # really exists; keep the NULL / '' literal otherwise.
-                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
-                join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
-                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
-
-                map_where = "1=1"
-                map_params: list[Any] = []
-                if map_asn != "all":
-                    map_where += " AND asn = ?"
-                    map_params.append(int(map_asn))
-
-                # Cap to top 5000 (country, city, bucket) cells by request
-                # volume — the map UI renders dots, and the long tail beyond a
-                # few thousand points is invisible. Without the cap the
-                # response body grew to 5.8MB on busy windows, dominating
-                # /network cold-load wall time via transfer + JSON parse.
-                # Re-sorted by (bucket, reqs DESC) after the cap to preserve
-                # the downstream chronological ordering the map expects.
-                map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
-                    city_col=city_col,
-                    lat_col=lat_col,
-                    lon_col=lon_col,
-                    metro_col=metro_col,
-                    join_city_col=join_city_col,
-                    join_lat_col=join_lat_col,
-                    join_lon_col=join_lon_col,
-                    join_metro_col=join_metro_col,
-                    bucket_ms=bucket_ms,
-                    ploss_expr=ploss_expr,
-                    table=temp_name,
-                    where=map_where,
-                )
-                _t2 = _time.perf_counter()
-                # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
-                # outer WHERE), so the asn filter placeholder must be bound
-                # twice. ``map_params`` is at most one element (the asn int)
-                # when ``map_asn != "all"``, empty otherwise.
-                map_rows_b = runner.execute(map_sql, map_params + map_params).fetchall()
-                timer.mark("map_query", _t2)
-
             metro_rows_b: list[Any] = []
-            if has_country:
-                metro_col_m = "metro" if has_metro else "NULL"
-                city_col = "city" if "city" in actual_cols else "''"
-                region_col = "region" if "region" in actual_cols else "''"
-                # Qualified-for-JOIN variants — same disambiguation pattern
-                # as map_query. The 2-pass CTE re-aliases these names on the
-                # top_cells side, so the JOIN ON needs table-qualified refs.
-                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
-                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
-                metro_sql = SQL.METRO_LEADERBOARD.format(
-                    city_col=city_col,
-                    region_col=region_col,
-                    metro_col=metro_col_m,
-                    join_city_col=join_city_col,
-                    join_region_col=join_region_col,
-                    join_metro_col=join_metro_col,
-                    ploss_expr=ploss_expr,
-                    table=temp_name,
-                    where="1=1",
-                )
-                _t3 = _time.perf_counter()
-                metro_rows_b = runner.execute(metro_sql, []).fetchall()
-                timer.mark("metro_query", _t3)
+            if "map_geo" in _net_rolled and map_asn == "all":
+                _geo = _net_rolled["map_geo"]
+                map_rows_b = _geo[0] if _geo else []
+                metro_rows_b = _geo[1] if _geo else []
+            else:
+                if _want_map_query and has_country:
+                    lat_col = "lat" if has_lat else "NULL"
+                    lon_col = "lon" if has_lat else "NULL"
+                    metro_col = "metro" if has_metro else "NULL"
+                    city_col = "city" if "city" in actual_cols else "''"
+                    # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
+                    # references the same columns by name on both sides, so
+                    # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
+                    # binder. Prefix with the temp-table name when the column
+                    # really exists; keep the NULL / '' literal otherwise.
+                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                    join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
+                    join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
+                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+
+                    map_where = "1=1"
+                    map_params: list[Any] = []
+                    if map_asn != "all":
+                        map_where += " AND asn = ?"
+                        map_params.append(int(map_asn))
+
+                    # Cap to top 5000 (country, city, bucket) cells by request
+                    # volume — the map UI renders dots, and the long tail beyond a
+                    # few thousand points is invisible. Without the cap the
+                    # response body grew to 5.8MB on busy windows, dominating
+                    # /network cold-load wall time via transfer + JSON parse.
+                    # Re-sorted by (bucket, reqs DESC) after the cap to preserve
+                    # the downstream chronological ordering the map expects.
+                    map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
+                        city_col=city_col,
+                        lat_col=lat_col,
+                        lon_col=lon_col,
+                        metro_col=metro_col,
+                        join_city_col=join_city_col,
+                        join_lat_col=join_lat_col,
+                        join_lon_col=join_lon_col,
+                        join_metro_col=join_metro_col,
+                        bucket_ms=bucket_ms,
+                        ploss_expr=ploss_expr,
+                        table=temp_name,
+                        where=map_where,
+                    )
+                    _t2 = _time.perf_counter()
+                    # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
+                    # outer WHERE), so the asn filter placeholder must be bound
+                    # twice. ``map_params`` is at most one element (the asn int)
+                    # when ``map_asn != "all"``, empty otherwise.
+                    map_rows_b = get_runner().execute(map_sql, map_params + map_params).fetchall()
+                    timer.mark("map_query", _t2)
+
+                if has_country:
+                    metro_col_m = "metro" if has_metro else "NULL"
+                    city_col = "city" if "city" in actual_cols else "''"
+                    region_col = "region" if "region" in actual_cols else "''"
+                    # Qualified-for-JOIN variants — same disambiguation pattern
+                    # as map_query. The 2-pass CTE re-aliases these names on the
+                    # top_cells side, so the JOIN ON needs table-qualified refs.
+                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                    join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
+                    metro_sql = SQL.METRO_LEADERBOARD.format(
+                        city_col=city_col,
+                        region_col=region_col,
+                        metro_col=metro_col_m,
+                        join_city_col=join_city_col,
+                        join_region_col=join_region_col,
+                        join_metro_col=join_metro_col,
+                        ploss_expr=ploss_expr,
+                        table=temp_name,
+                        where="1=1",
+                    )
+                    _t3 = _time.perf_counter()
+                    metro_rows_b = get_runner().execute(metro_sql, []).fetchall()
+                    timer.mark("metro_query", _t3)
 
             return countries_b, heatmap_rows_b, map_rows_b, metro_rows_b
 
@@ -588,7 +625,7 @@ def get_health(
             return {
                 "available": False,
                 "reason": "Data temporarily unavailable — view refresh failed. Retry in a moment.",
-                **runner.telemetry(),
+                **(_runner.telemetry() if _runner else {"telemetry": {}}),
             }
         if not is_leader:
             # This request never acquired its own temp table — it borrowed
@@ -637,7 +674,7 @@ def get_health(
             # Fallback to sparse buckets present in the query results
             all_buckets_set: set[str] = set()
             for r in heatmap_rows:
-                bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
+                bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
                 all_buckets_set.add(bucket)
 
             # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
@@ -646,7 +683,7 @@ def get_health(
             # from map_rows in that case so the per-bucket map cells survive.
             if not heatmap_rows and map_rows:
                 for r in map_rows:
-                    bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                    bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
                     all_buckets_set.add(bucket)
 
             all_buckets = sorted(all_buckets_set)
@@ -665,7 +702,7 @@ def get_health(
         asn_speed_mix: dict[int, dict[str, float]] = {}
         if _want_leaderboard and has_c_speed and top_asns:
             _t = _time.perf_counter()
-            rolled_speed = runner.try_network_speed_from_rollup(
+            rolled_speed = get_runner().try_network_speed_from_rollup(
                 start_time,
                 end_time,
                 top_asns=top_asns,
@@ -677,14 +714,18 @@ def get_health(
             elif t is not None:
                 placeholders = ",".join(["?"] * len(top_asns))
                 _t = _time.perf_counter()
-                speed_rows = runner.execute(
-                    SQL.SPEED_DISTRIBUTION_BY_ASN.format(
-                        table=t,
-                        where=w,
-                        placeholders=placeholders,
-                    ),
-                    p + top_asns,
-                ).fetchall()
+                speed_rows = (
+                    get_runner()
+                    .execute(
+                        SQL.SPEED_DISTRIBUTION_BY_ASN.format(
+                            table=t,
+                            where=w,
+                            placeholders=placeholders,
+                        ),
+                        p + top_asns,
+                    )
+                    .fetchall()
+                )
                 timer.mark("speed_distribution_query", _t)
             else:
                 speed_rows = []  # skip-temp path + speed rollup missed → no fallback
@@ -708,7 +749,7 @@ def get_health(
             asn = int(r[0])
             if asn not in top_asn_set:
                 continue
-            bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
+            bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
             tp = float(r[2]) if r[2] is not None else None
             rtt = float(r[3]) if r[3] is not None else None
             rtt_base = float(r[4]) if r[4] is not None else None
@@ -780,7 +821,7 @@ def get_health(
                 lat = float(r[2]) if r[2] is not None else None
                 lon = float(r[3]) if r[3] is not None else None
                 metro_raw = r[4]
-                bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
                 rtt = float(r[6]) if r[6] is not None else None
                 pkt = float(r[7]) if r[7] is not None else None
                 err = float(r[8]) if r[8] is not None else None
@@ -883,7 +924,7 @@ def get_health(
         asn_rtt_pct: dict[int, dict[str, float | None]] = {}
         if _want_leaderboard and top_asns:
             _t = _time.perf_counter()
-            rolled = runner.try_network_rtt_from_rollup(
+            rolled = get_runner().try_network_rtt_from_rollup(
                 start_time,
                 end_time,
                 top_asns=top_asns,
@@ -895,14 +936,18 @@ def get_health(
             elif t is not None:
                 placeholders = ",".join(["?"] * len(top_asns))
                 _t = _time.perf_counter()
-                pct_rows = runner.execute(
-                    SQL.RTT_PERCENTILES_BY_ASN.format(
-                        table=t,
-                        where=w,
-                        placeholders=placeholders,
-                    ),
-                    p + top_asns,
-                ).fetchall()
+                pct_rows = (
+                    get_runner()
+                    .execute(
+                        SQL.RTT_PERCENTILES_BY_ASN.format(
+                            table=t,
+                            where=w,
+                            placeholders=placeholders,
+                        ),
+                        p + top_asns,
+                    )
+                    .fetchall()
+                )
                 timer.mark("rtt_percentiles_query", _t)
                 for row in pct_rows:
                     asn_v = int(row[0])
@@ -984,21 +1029,17 @@ def get_health(
 
         worst_country = None
         if has_country and map_buckets:
-            latest_cities = map_buckets[-1]["cities"]
-            # M-4: the prior ``reqs > 10`` floor frequently left worst_country
-            # blank on low-traffic 24h windows, rendering "Worst Region: --"
-            # alongside a populated Worst ASN. Drop to 1 so the panel
-            # surfaces something whenever the data has any city signal at
-            # all — operators reading "--" assumed the page was broken.
-            sig_countries = [c for c in latest_cities if c["reqs"] >= 1]
-            if sig_countries:
-                wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
-                # Resolve the interned city name for the worst-country label.
-                idx = wc.get("city_idx", -1)
-                city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
-                city_name = city_entry["name"] if city_entry else ""
-                label = format_city_label(city_name, wc["country"])
-                worst_country = {"label": label, "score": wc["health_score"]}
+            for b in reversed(map_buckets):
+                cities_in_b = b.get("cities") or []
+                sig_countries = [c for c in cities_in_b if c.get("reqs", 0) >= 1]
+                if sig_countries:
+                    wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
+                    idx = wc.get("city_idx", -1)
+                    city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
+                    city_name = city_entry["name"] if city_entry else ""
+                    label = format_city_label(city_name, wc["country"])
+                    worst_country = {"label": label, "score": wc["health_score"]}
+                    break
 
         payload: dict[str, Any] = {
             "available": True,
@@ -1007,7 +1048,7 @@ def get_health(
             "countries": countries,
             "has_metro": has_metro,
             "section_timings": section_timings,
-            **runner.telemetry(),
+            **(_runner.telemetry() if _runner else {"telemetry": {}}),
         }
         if _want("buckets"):
             payload["buckets"] = all_buckets
@@ -1045,13 +1086,14 @@ def get_health(
     finally:
         if temp_table is not None:
             try:
-                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                if log_once_per("get_health: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_health: DROP TABLE failed (ignored)", exc_info=True)
 
 
 def get_quality(
-    con: duckdb.DuckDBPyConnection,
+    con_factory: typing.Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -1066,10 +1108,33 @@ def get_quality(
 
     table_name = _safe_table(src["name"])
 
-    runner = QueryRunner(con, src)
+    _runner: QueryRunner | None = None
+
+    def get_runner() -> QueryRunner:
+        nonlocal _runner
+        if _runner is None:
+            _runner = QueryRunner(con_factory(), src)
+        return _runner
 
     _t = _time.perf_counter()
-    actual_cols = set(runner.get_schema_cols())
+    rolled = get_runner().try_network_quality_from_rollup(
+        start_time, end_time, has_filters=bool(filters), region_country=region_country
+    )
+    if rolled is not None:
+        timer.mark("network_quality_rollup", _t)
+        return {
+            **rolled,
+            **get_runner().telemetry(),
+        }
+
+    from backend.core._duckdb_status import _SCHEMA_CACHE_TTL, _schema_cache
+
+    _now = _time.time()
+    _cache_key = (src["name"], table_name, True)
+    if _cache_key in _schema_cache and (_now - _schema_cache[_cache_key][0] < _SCHEMA_CACHE_TTL):
+        actual_cols = set(c["name"] for c in _schema_cache[_cache_key][1])
+    else:
+        actual_cols = set(get_runner().get_schema_cols())
     timer.mark("get_schema_cols", _t)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
@@ -1082,13 +1147,13 @@ def get_quality(
             "by_pop": [],
             "scatter": [],
             "countries": [],
-            **runner.telemetry(),
+            **get_runner().telemetry(),
         }
 
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
 
     try:
-        runner.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+        get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
     except duckdb.CatalogException:
         return {
             "available": False,
@@ -1099,7 +1164,7 @@ def get_quality(
             "by_pop": [],
             "scatter": [],
             "countries": [],
-            **runner.telemetry(),
+            **get_runner().telemetry(),
         }
 
     # ── Temp table optimization ──────────────────────────────────────────
@@ -1117,7 +1182,7 @@ def get_quality(
     ]
 
     _t0 = _time.perf_counter()
-    temp_table = runner.create_filtered_temp_table(quality_cols, actual_cols, table_name, where_clause, params)
+    temp_table = get_runner().create_filtered_temp_table(quality_cols, actual_cols, table_name, where_clause, params)
     timer.mark("temp_table_create", _t0)
 
     if temp_table is not None:
@@ -1145,7 +1210,7 @@ def get_quality(
                 extra_where=extra_where,
             )
             _t = _time.perf_counter()
-            rows = runner.execute(sql, query_params + (extra_params or [])).fetchall()
+            rows = get_runner().execute(sql, query_params + (extra_params or [])).fetchall()
             timer.mark(f"quality_bar:{group_col}", _t)
             return [
                 {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])}
@@ -1157,7 +1222,7 @@ def get_quality(
             where_clause=query_where,
         )
         _t = _time.perf_counter()
-        countries = [r[0] for r in runner.execute(countries_sql, query_params).fetchall()]
+        countries = [r[0] for r in get_runner().execute(countries_sql, query_params).fetchall()]
         timer.mark("countries_distinct", _t)
 
         by_country = run_bar("country")
@@ -1168,7 +1233,7 @@ def get_quality(
             try:
                 _db.enrich_asn_labels(by_asn, src["name"])
             except Exception:
-                pass
+                logger.debug("get_quality: _db.enrich_asn_labels failed (ignored)", exc_info=True)
         by_region = (
             run_bar("region", extra_where=" AND country = ?", extra_params=[region_country])
             if "region" in actual_cols
@@ -1188,7 +1253,7 @@ def get_quality(
             _t = _time.perf_counter()
             scatter = [
                 {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
-                for r in runner.execute(scatter_sql, query_params).fetchall()
+                for r in get_runner().execute(scatter_sql, query_params).fetchall()
             ]
             timer.mark("scatter_query", _t)
 
@@ -1202,15 +1267,209 @@ def get_quality(
             "scatter": scatter,
             "countries": countries,
             "section_timings": section_timings,
-            **runner.telemetry(),
+            **get_runner().telemetry(),
         }
 
     finally:
         if temp_table is not None:
             try:
-                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
-                pass
+                if log_once_per("get_quality: DROP TABLE failed (ignored)", 60):
+                    logger.debug("get_quality: DROP TABLE failed (ignored)", exc_info=True)
+
+
+def get_transport_metrics(
+    con_factory: Any,
+    src: dict[str, Any],
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None = None,
+) -> dict[str, Any]:
+    import time as _time
+
+    timer = SectionTimer()
+    table_name = _safe_table(src["name"])
+    runner: QueryRunner | None = None
+
+    def get_runner() -> QueryRunner:
+        nonlocal runner
+        if runner is None:
+            c = con_factory() if callable(con_factory) else con_factory
+            runner = QueryRunner(c, src)
+        return runner
+
+    actual_cols = set(get_runner().get_schema_cols())
+    optional_fields = ["tcp_rtt", "retrans", "ploss", "delivery_rate"]
+    missing_fields = [f for f in optional_fields if f not in actual_cols]
+    has_transport_data = len(missing_fields) < len(optional_fields)
+
+    default_resp = {
+        "has_transport_data": has_transport_data,
+        "tcp_rtt_p50_ms": None,
+        "tcp_rtt_p90_ms": None,
+        "tcp_rtt_p95_ms": None,
+        "tcp_rtt_p99_ms": None,
+        "retrans_rate_pct": None,
+        "packet_loss_pct": None,
+        "delivery_rate_mbps": None,
+        "bandwidth_bytes": 0,
+        "total_requests": 0,
+        "protocol_distribution": [],
+        "missing_fields": missing_fields,
+        "section_timings": timer.entries,
+        **get_runner().telemetry(),
+    }
+
+    try:
+        get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+    except Exception:
+        return default_resp
+
+    if filters is None:
+        filters = {}
+
+    params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
+
+    select_parts = ["COUNT(*) AS total_reqs"]
+    if "resp_bytes" in actual_cols:
+        select_parts.append("COALESCE(SUM(resp_bytes), 0) AS total_bytes")
+    elif "bytes" in actual_cols:
+        select_parts.append("COALESCE(SUM(bytes), 0) AS total_bytes")
+    else:
+        select_parts.append("0 AS total_bytes")
+
+    if "tcp_rtt" in actual_cols:
+        select_parts.extend(
+            [
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.50) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p50",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.90) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p90",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.95) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p95",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.99) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p99",
+            ]
+        )
+    else:
+        select_parts.extend(["NULL AS rtt_p50", "NULL AS rtt_p90", "NULL AS rtt_p95", "NULL AS rtt_p99"])
+
+    if "retrans" in actual_cols:
+        select_parts.append("AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans")
+    else:
+        select_parts.append("NULL AS avg_retrans")
+
+    if "ploss" in actual_cols:
+        select_parts.append("AVG(CAST(ploss AS DOUBLE)) FILTER (WHERE ploss IS NOT NULL) * 100.0 AS avg_ploss_pct")
+    else:
+        select_parts.append("NULL AS avg_ploss_pct")
+
+    if "delivery_rate" in actual_cols:
+        select_parts.append(
+            "AVG(CAST(delivery_rate AS DOUBLE)) FILTER (WHERE delivery_rate IS NOT NULL AND delivery_rate > 0) * 8.0 / 1e6 AS avg_del_rate_mbps"
+        )
+    else:
+        select_parts.append("NULL AS avg_del_rate_mbps")
+
+    main_sql = f"SELECT {', '.join(select_parts)} FROM {table_name} WHERE {where_clause}"
+    _t0 = _time.perf_counter()
+    try:
+        row = get_runner().execute(main_sql, params).fetchone()
+        timer.mark("transport_aggregates", _t0)
+        if row:
+            total_requests = int(row[0] or 0)
+            bandwidth_bytes = int(row[1] or 0)
+            tcp_rtt_p50 = round(float(row[2]), 2) if row[2] is not None else None
+            tcp_rtt_p90 = round(float(row[3]), 2) if row[3] is not None else None
+            tcp_rtt_p95 = round(float(row[4]), 2) if row[4] is not None else None
+            tcp_rtt_p99 = round(float(row[5]), 2) if row[5] is not None else None
+            retrans_rate = round(float(row[6]), 3) if row[6] is not None else None
+            packet_loss = round(float(row[7]), 3) if row[7] is not None else None
+            delivery_rate = round(float(row[8]), 2) if row[8] is not None else None
+        else:
+            total_requests = 0
+            bandwidth_bytes = 0
+            tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
+            retrans_rate = packet_loss = delivery_rate = None
+    except Exception as e:
+        logger.warning("Failed to query transport aggregates: %s", e)
+        return default_resp
+
+    protocol_distribution = []
+    proto_col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
+    if proto_col:
+        _t1 = _time.perf_counter()
+        proto_sql = f"""
+            SELECT
+                CASE
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('3.0', '3', 'HTTP/3') THEN 'HTTP/3'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('2.0', '2', 'HTTP/2') THEN 'HTTP/2'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.1', 'HTTP/1.1') THEN 'HTTP/1.1'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.0', 'HTTP/1.0') THEN 'HTTP/1.0'
+                    ELSE COALESCE(CAST({proto_col} AS VARCHAR), 'Other')
+                END AS proto_clean,
+                COUNT(*) AS reqs
+            FROM {table_name}
+            WHERE {where_clause}
+            GROUP BY proto_clean
+            ORDER BY reqs DESC
+        """
+        try:
+            proto_rows = get_runner().execute(proto_sql, params).fetchall()
+            timer.mark("protocol_distribution", _t1)
+            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+            for r in proto_rows:
+                p_name = str(r[0])
+                p_cnt = int(r[1])
+                p_pct = round(p_cnt * 100.0 / sum_proto_reqs, 2)
+                protocol_distribution.append(
+                    {
+                        "protocol": p_name,
+                        "requests": p_cnt,
+                        "share_pct": p_pct,
+                    }
+                )
+        except Exception as e:
+            logger.warning("Failed to query protocol distribution: %s", e)
+    elif "transport" in actual_cols:
+        _t1 = _time.perf_counter()
+        proto_sql = f"""
+            SELECT
+                UPPER(COALESCE(CAST(transport AS VARCHAR), 'TCP')) AS proto_clean,
+                COUNT(*) AS reqs
+            FROM {table_name}
+            WHERE {where_clause}
+            GROUP BY proto_clean
+            ORDER BY reqs DESC
+        """
+        try:
+            proto_rows = get_runner().execute(proto_sql, params).fetchall()
+            timer.mark("protocol_distribution", _t1)
+            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+            for r in proto_rows:
+                protocol_distribution.append(
+                    {
+                        "protocol": str(r[0]),
+                        "requests": int(r[1]),
+                        "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
+                    }
+                )
+        except Exception:
+            logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)
+
+    return {
+        "has_transport_data": has_transport_data,
+        "tcp_rtt_p50_ms": tcp_rtt_p50,
+        "tcp_rtt_p90_ms": tcp_rtt_p90,
+        "tcp_rtt_p95_ms": tcp_rtt_p95,
+        "tcp_rtt_p99_ms": tcp_rtt_p99,
+        "retrans_rate_pct": retrans_rate,
+        "packet_loss_pct": packet_loss,
+        "delivery_rate_mbps": delivery_rate,
+        "bandwidth_bytes": bandwidth_bytes,
+        "total_requests": total_requests,
+        "protocol_distribution": protocol_distribution,
+        "missing_fields": missing_fields,
+        "section_timings": timer.entries,
+        **get_runner().telemetry(),
+    }
 
 
 # A-3 (CacheRegistry): register the network response cache (also
@@ -1218,3 +1477,11 @@ def get_quality(
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("network._response_cache", _response_cache)
+
+
+def get_pop_health_rows(con, table_name: str, start: Any, end: Any) -> list[tuple]:
+    """Live per-POP aggregate rows for ``[start, end]`` (rollup-miss fallback)."""
+    from backend.utils.telemetry import track_query
+
+    with track_query(con, SQL.POP_HEALTH_LIVE.format(table_name=table_name), [start, end], "pop_health") as cursor:
+        return cursor.fetchall()

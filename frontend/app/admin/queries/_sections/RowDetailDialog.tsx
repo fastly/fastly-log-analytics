@@ -17,7 +17,7 @@
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Copy, X } from 'lucide-react'
-import { adminFetch } from '@/lib/api'
+import { adminJson } from '@/lib/api'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -30,8 +30,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
+import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { queryKeys } from '@/lib/query-keys'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow
 
@@ -60,11 +62,13 @@ export function RowDetailDialog({
   // sql_preview we have.
   const isLive = row !== null && isActivePromoted(row) && !row._completed
   const { data: fullRow } = useQuery<AnyRow>({
-    queryKey: ['admin', 'query-monitor', 'detail', row?.query_id ?? null],
+    queryKey: queryKeys.admin.queryMonitorDetail(row?.query_id ?? null),
     queryFn: async ({ signal }) => {
-      const r = await adminFetch(`/api/admin/queries/${row!.query_id}`, { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson<'/api/admin/queries/{qid}', ActiveRow>(
+        '/api/admin/queries/{qid}',
+        `/api/admin/queries/${row!.query_id}`,
+        { signal },
+      )
     },
     enabled: row !== null && isLive,
     refetchInterval: 2000,
@@ -138,7 +142,7 @@ export function RowDetailDialog({
           <div>
             <span className="text-muted-foreground">Duration:</span>{' '}
             <span className={`font-mono ${durationColor(display.duration_ms)}`}>
-              {formatDuration(display.duration_ms)}
+              {formatDurationMs(display.duration_ms)}
             </span>
           </div>
           {attr.cron_job && (
@@ -197,21 +201,8 @@ export function RowDetailDialog({
  *  the Clipboard API is unavailable (e.g. insecure context); copying SQL
  *  is convenience, not safety-critical. */
 function CopySqlButton({ sql }: { sql: string }) {
-  const [copied, setCopied] = React.useState(false)
-  React.useEffect(() => {
-    if (!copied) return
-    const t = setTimeout(() => setCopied(false), 1500)
-    return () => clearTimeout(t)
-  }, [copied])
-  const onClick = async () => {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return
-    try {
-      await navigator.clipboard.writeText(sql)
-      setCopied(true)
-    } catch {
-      // ignore — common in non-secure contexts and on permission denial
-    }
-  }
+  const { copied, copy } = useCopyToClipboard(1500)
+  const onClick = () => copy(sql)
   return (
     <Button
       variant="outline"

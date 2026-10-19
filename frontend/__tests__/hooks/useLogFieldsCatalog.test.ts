@@ -20,10 +20,10 @@ vi.mock('@/stores/serviceStore', () => {
     setServices: vi.fn(),
     setInitialized: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 
@@ -55,7 +55,7 @@ describe('useLogFieldsCatalog (MSW)', () => {
 
     await waitFor(() => expect(result.current.data).toBeDefined())
     expect(result.current.data?.fields).toEqual([{ id: 'status', label: 'HTTP Status' }])
-    expect((result.current.data as any).custom_fields).toEqual([
+    expect((result.current.data as { custom_fields?: unknown } | undefined)?.custom_fields).toEqual([
       { name: 'x-edge-ts', duckdb_type: 'VARCHAR' },
     ])
   })

@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'vitest'
-import { formatValue, formatBytes, calculateDelta } from '@/lib/format'
+import { describe, it, expect, vi } from 'vitest'
+import { formatValue, formatBytes, calculateDelta, formatCount, formatCountMaybe, formatAbbreviatedCount } from '@/lib/format'
+
+describe('formatCount', () => {
+  it('matches Number.prototype.toLocaleString() byte-for-byte', () => {
+    for (const n of [0, 5, 42, 1000, 1234567, -9876, 1234.5, 0.125]) {
+      expect(formatCount(n)).toBe(n.toLocaleString())
+    }
+  })
+
+  it('passes through Intl.NumberFormatOptions', () => {
+    expect(formatCount(3.14159, { maximumFractionDigits: 1 })).toBe(
+      (3.14159).toLocaleString(undefined, { maximumFractionDigits: 1 }),
+    )
+  })
+})
 
 describe('formatBytes', () => {
   it('formats bytes correctly', () => {
@@ -59,18 +73,13 @@ describe('formatValue', () => {
 
   // Branch coverage: Intl.DisplayNames throw path (line 32 catch)
   it('falls back to raw country code when Intl.DisplayNames throws', () => {
-    const originalDN = Intl.DisplayNames
-    // @ts-expect-error — stubbing for test
-    Intl.DisplayNames = class {
-      constructor() {
-        throw new Error('boom')
-      }
-    }
+    const displayNames = vi.spyOn(Intl, 'DisplayNames').mockImplementation(function () {
+      throw new Error('boom')
+    })
     try {
       expect(formatValue('country', 'US')).toBe('US')
     } finally {
-      // @ts-expect-error — restoring stub
-      Intl.DisplayNames = originalDN
+      displayNames.mockRestore()
     }
   })
 })
@@ -84,5 +93,24 @@ describe('calculateDelta', () => {
   it('returns null for zero or undefined baseline', () => {
     expect(calculateDelta(100, 0)).toBe(null)
     expect(calculateDelta(100, undefined)).toBe(null)
+  })
+})
+
+describe('formatCountMaybe', () => {
+  it('returns undefined for null/undefined and formats numbers like formatCount', () => {
+    expect(formatCountMaybe(undefined)).toBeUndefined()
+    expect(formatCountMaybe(null)).toBeUndefined()
+    expect(formatCountMaybe(1234567)).toBe(formatCount(1234567))
+    expect(formatCountMaybe(0)).toBe('0')
+  })
+})
+
+describe('formatAbbreviatedCount', () => {
+  it('abbreviates with K/M/B and configurable M/B precision', () => {
+    expect(formatAbbreviatedCount(999)).toBe('999')
+    expect(formatAbbreviatedCount(1500)).toBe('1.5K')
+    expect(formatAbbreviatedCount(2_345_678)).toBe('2.3M')
+    expect(formatAbbreviatedCount(2_345_678, 2)).toBe('2.35M')
+    expect(formatAbbreviatedCount(3_210_000_000, 2)).toBe('3.21B')
   })
 })

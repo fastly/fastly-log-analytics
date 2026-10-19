@@ -9,10 +9,12 @@ built by the helpers in ``backend.utils.router_utils`` (``bad_request``,
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
-class ErrorDetail(BaseModel):
+class ErrorDetail(PassthroughModel):
     """Inner detail object for the canonical error envelope.
 
     Allows extra fields because a handful of historical 403 sites attach
@@ -22,8 +24,6 @@ class ErrorDetail(BaseModel):
     frontend's ``extractApiError`` already keys on ``detail.error`` and
     ignores extras.
     """
-
-    model_config = ConfigDict(extra="allow")
 
     error: str
     """Machine-readable code the frontend keys on (e.g. ``"not_found"``)."""

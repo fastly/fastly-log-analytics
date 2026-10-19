@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
+import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +14,7 @@ import {
   Activity,
   Trash2,
   Pencil,
+  Send,
 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import {
@@ -21,7 +23,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { VisibilityState } from '@tanstack/react-table'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 
 type Alert = components["schemas"]["Alert"]
@@ -60,6 +62,7 @@ export function AlertsList({
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const queryClient = useQueryClient()
   const [togglingId, setTogglingId] = React.useState<string | null>(null)
+  const [testingId, setTestingId] = React.useState<string | null>(null)
   const { relative, full, abbr } = useDateFormat()
 
   const toggleEnabled = React.useCallback(async (alert: Alert, newEnabled: boolean) => {
@@ -69,9 +72,9 @@ export function AlertsList({
     await queryClient.cancelQueries({ queryKey })
 
     const previous = queryClient.getQueryData(queryKey)
-    queryClient.setQueryData(queryKey, (old: any) => ({
+    queryClient.setQueryData(queryKey, (old: { data?: Alert[] } | undefined) => ({
       ...old,
-      data: old?.data?.map((a: Alert) =>
+      data: old?.data?.map((a) =>
         a.id === alert.id ? { ...a, enabled: newEnabled } : a
       ),
     }))
@@ -91,26 +94,57 @@ export function AlertsList({
     }
   }, [activeServiceId, queryClient])
 
-  const columns = React.useMemo(() => [
+  const testNotification = React.useCallback(async (alert: Alert) => {
+    if (!alert.id) return
+    setTestingId(alert.id)
+    try {
+      const { data, error } = await client.POST("/api/alerts/{alert_id}/test", {
+        params: { path: { alert_id: alert.id } },
+        body: {
+          service_id: activeServiceId || alert.service_id,
+          channel_type: "webhook",
+          dry_run: true,
+        },
+      })
+      if (error) {
+        showToast(extractApiError(error) || 'Failed to test alert notification', 'error')
+        return
+      }
+      const dispatched = data?.data?.targets_tested ?? 0
+      showToast(
+        dispatched > 0
+          ? `Validated ${dispatched} notification channel${dispatched === 1 ? '' : 's'}`
+          : 'Alert rule validated (no external channels configured)',
+        'success'
+      )
+    } catch (err) {
+      console.error('Failed to test alert notification', err)
+      showToast(extractApiError(err) || 'Failed to test alert notification', 'error')
+    } finally {
+      setTestingId(null)
+    }
+  }, [activeServiceId])
+
+  const columns = React.useMemo<ColumnDef<Alert>[]>(() => [
     {
       accessorKey: 'name',
       header: 'Alert Name',
-      cell: (info: any) => <span className="font-medium">{info.getValue()}</span>
+      cell: (info) => <span className="font-medium">{info.row.original.name}</span>
     },
     {
       accessorKey: 'category',
       header: 'Category',
-      cell: (info: any) => (
+      cell: (info) => (
         <Badge variant="secondary" className="capitalize">
-          {info.getValue()?.replace('_', ' ') || 'Reliability'}
+          {info.row.original.category?.replace('_', ' ') || 'Reliability'}
         </Badge>
       )
     },
     {
       accessorKey: 'metric',
       header: 'Metric',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: (info) => {
+        const val = info.row.original.metric
         const codes = info.row.original.status_codes
         const scope = info.row.original.evaluation_scope
         let display = val.replace(/_/g, ' ')
@@ -138,7 +172,7 @@ export function AlertsList({
     {
       id: 'condition',
       header: 'Condition',
-      cell: (info: any) => {
+      cell: (info) => {
         const a = info.row.original
         const windowStr = a.window_min < 1 ? `${Math.round(a.window_min * 60)}s` : `${a.window_min}m`
         const evalType = a.evaluation_type || 'absolute'
@@ -173,8 +207,8 @@ export function AlertsList({
     {
       accessorKey: 'last_triggered_at',
       header: 'Last Triggered',
-      cell: (info: any) => {
-        const val = info.getValue()
+      cell: (info) => {
+        const val = info.row.original.last_triggered_at
         if (!val) return <span className="text-muted-foreground text-xs italic">Never</span>
         const alert = info.row.original
 
@@ -187,7 +221,7 @@ export function AlertsList({
         params.set('end_time', end.toISOString())
 
         // Map alert metric to dashboard metric
-        let dashboardMetric = alert.metric
+        let dashboardMetric: string = alert.metric
         if (alert.metric === '5xx_rate') dashboardMetric = '5xx'
         if (alert.metric === '4xx_rate') dashboardMetric = '4xx'
         if (alert.metric === 'specific_status_rate') dashboardMetric = 'requests'
@@ -244,23 +278,29 @@ export function AlertsList({
     {
       accessorKey: 'enabled',
       header: 'Enabled?',
-      cell: (info: any) => {
+      cell: (info) => {
         const isPending = togglingId === info.row.original.id
         // Analysts get a read-only display: the PATCH /enabled endpoint
         // 403s for them, so showing an active Switch invites a click
         // that does nothing.
         if (isAnalyst) {
           return (
-            <Badge variant={info.getValue() ? 'secondary' : 'outline'} className="text-[10px]">
-              {info.getValue() ? 'On' : 'Off'}
+            <Badge
+              variant={info.row.original.enabled ? 'secondary' : 'outline'}
+              className="text-[10px]"
+              data-testid={`analyst-alert-enabled-${info.row.original.id}`}
+            >
+              {info.row.original.enabled ? 'On' : 'Off'}
             </Badge>
           )
         }
         return (
           <Switch
-            checked={info.getValue()}
+            checked={info.row.original.enabled}
             onCheckedChange={(checked) => toggleEnabled(info.row.original, checked)}
             disabled={isPending}
+            data-testid={`toggle-alert-${info.row.original.id}`}
+            aria-label={`Toggle alert ${info.row.original.name}`}
             className={isPending ? 'opacity-50 cursor-wait' : undefined}
           />
         )
@@ -271,12 +311,25 @@ export function AlertsList({
       : [{
         id: 'actions',
         header: '',
-        cell: (info: any) => (
+        cell: (info) => (
           <div className="flex items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Test alert notification"
+              data-testid={`test-alert-${info.row.original.id}`}
+              className="h-8 w-8 text-muted-foreground hover:text-primary"
+              onClick={() => testNotification(info.row.original)}
+              disabled={testingId === info.row.original.id}
+              title="Test alert notification"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               aria-label="Edit alert"
+              data-testid={`edit-alert-${info.row.original.id}`}
               className="h-8 w-8 text-muted-foreground hover:text-primary"
               onClick={() => onEdit(info.row.original)}
               title="Edit alert"
@@ -287,16 +340,17 @@ export function AlertsList({
               variant="ghost"
               size="icon"
               aria-label="Delete alert"
+              data-testid={`delete-alert-${info.row.original.id}`}
               className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={() => onDelete(info.row.original.id)}
+              onClick={() => { const id = info.row.original.id; if (id) onDelete(id) }}
               title="Delete alert"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>
         )
-      }])
-  ], [togglingId, relative, full, abbr, toggleEnabled, onEdit, onDelete, isAnalyst])
+      } satisfies ColumnDef<Alert>])
+  ], [togglingId, testingId, relative, full, abbr, toggleEnabled, testNotification, onEdit, onDelete, isAnalyst, activeServiceId])
 
   return (
     <DataTable

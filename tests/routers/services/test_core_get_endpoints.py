@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from tests.conftest import MOCK_SERVICE_ID
 
 
@@ -345,7 +346,7 @@ def test_cron_schedule_returns_schedules_list(client):
     next_run_time + last_run_status. Pinned because the Settings
     panel renders the per-task row from this exact shape."""
     fake_per_task = {
-        "sync": {
+        "log_discovery": {
             "started_at": "2026-05-18T00:00:00Z",
             "status": "ok",
             "duration_s": 1.2,
@@ -366,8 +367,8 @@ def test_cron_schedule_returns_schedules_list(client):
 
     assert resp.status_code == 200
     schedules = resp.json()["schedules"]
-    # The sync task has no scheduled job but has a last_run — should appear
-    sync_entries = [s for s in schedules if s["task"] == "sync"]
+    # The log_discovery task has no scheduled job but has a last_run — should appear
+    sync_entries = [s for s in schedules if s["task"] == "log_discovery"]
     assert len(sync_entries) == 1
     assert sync_entries[0]["last_run_status"] == "ok"
     assert sync_entries[0]["next_run_time"] is None
@@ -530,7 +531,7 @@ def test_update_logging_settings_streams_done_event_and_persists_config(client, 
     ):
         resp = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update",
-            params={"period": 120, "sample_rate": 50, "prefix": "new-prefix", "edge_only": True},
+            params={"period": 120, "sample_rate": 50, "edge_only": True},
         )
 
     assert resp.status_code == 200
@@ -540,7 +541,7 @@ def test_update_logging_settings_streams_done_event_and_persists_config(client, 
     # Config was persisted with the new values
     fresh = config.load_config(MOCK_SERVICE_ID)
     assert fresh["log_period"] == 120
-    assert fresh["fos_prefix"] == "new-prefix"
+    assert fresh["fos_prefix"] == ""
     assert fresh["provisioning"]["sample_rate"] == 50
     assert fresh["provisioning"]["edge_only"] is True
 
@@ -1217,7 +1218,7 @@ def test_cron_settings_sse_warns_but_proceeds_when_crontab_sync_fails(client, tm
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     with (
-        patch("backend.provision._sync_crontab", side_effect=RuntimeError("scheduler busy")),
+        patch("backend.provision._sync_crontab", side_effect=CronLeaseHeldError("scheduler busy")),
         patch("backend.core.metadata.record_audit"),
     ):
         resp = client.post(
@@ -1395,10 +1396,20 @@ def test_cron_log_hooks_bust_cache(monkeypatch):
     _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
 
     # We mock out database and publisher side-effects so we can test the cron_log hooks
-    # in complete isolation.
+    # in complete isolation. `_retry_on_locked` was removed when retry was unified
+    # (the Postgres pool is autocommit, so there's no SQLITE_BUSY equivalent to retry);
+    # the write paths now call their inner `_write()` directly, so we stub `get_con`
+    # with a cursor that satisfies every path (lease acquired, row id, running status).
+    fake_cursor = MagicMock()
+    fake_cursor.rowcount = 1
+    fake_cursor.lastrowid = 123
+    fake_cursor.fetchone.return_value = {"status": "running", "outcome_counters": None}
+    fake_cursor.fetchall.return_value = []
+    fake_con = MagicMock()
+    fake_con.execute.return_value = fake_cursor
+
     with (
-        patch("backend.core.metadata.cron_log.get_con"),
-        patch("backend.core.metadata.cron_log._retry_on_locked", return_value=123),
+        patch("backend.core.metadata.cron_log.get_con", return_value=fake_con),
         patch("backend.cron_runs_publisher.publisher.publish"),
     ):
         from backend.core.metadata.cron_log import finalize_cron_run_if_running, log_cron_run, start_cron_run

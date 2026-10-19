@@ -20,7 +20,7 @@ Lifecycle:
   * Pool is created lazily on first checkout for a service.
   * Idle connections are stored in a LIFO queue (recently-used first, so the
     OS page cache stays hot on the file descriptors that are currently warm).
-  * Pool size is bounded by ``max_size`` (default 8 per service). When the
+  * Pool size is bounded by ``max_size`` (default 12 per service). When the
     pool is empty and ``in_use < max_size``, the next checkout creates a new
     connection. When ``in_use == max_size``, waiters block on a Condition.
   * If a request returns a connection that errored mid-query, the connection
@@ -35,9 +35,20 @@ Lifecycle:
 
 Concurrency:
   * Multiple connections to the same DuckDB file on the same process are safe
-    — they share the in-memory database state.
-  * All connections open with ``read_only=False`` (``get_connection`` forces
-    this) so cron write connections never conflict with pool connections.
+    — they share the in-memory database state. In durable serving mode each
+    pooled connection is instead an independent in-memory DuckDB instance.
+  * File-backed connections open with ``read_only=False`` (``get_connection``
+    forces this) so cron write connections never conflict with pool
+    connections. Durable serving connections never open the native service
+    file and attach DuckLake read-only.
+  * That safety is WITHIN ONE PROCESS only for the file-backed path. DuckDB
+    takes a process-exclusive lock on a read-write single-file database, so a
+    SECOND backend process (e.g. a second pod sharing the PVC) fails every
+    checkout with ``Could not set lock on file``; the retry loop below
+    classifies it transient and surfaces ``DBBusyError`` -> 503 on every data
+    request. Durable serving avoids this file ownership, though pod-local
+    accelerators remain a separate constraint. See
+    docs/adr/18-serving-tier-single-pod.md.
 
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a
@@ -54,8 +65,11 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
+from typing import Any
 
 import duckdb
+
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +79,11 @@ def _pool_enabled() -> bool:
 
 
 def _pool_max_size() -> int:
-    raw = os.getenv("DUCKDB_POOL_MAX_SIZE", "8")
+    raw = os.getenv("DUCKDB_POOL_MAX_SIZE", "12")
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return 8
+        return 12
 
 
 def _pool_conn_memory_limit() -> str | None:
@@ -174,22 +188,6 @@ def _pool_sweep_enabled() -> bool:
     return os.getenv("DUCKDB_POOL_SWEEP", "0").lower() in ("1", "true", "yes", "on")
 
 
-def _pool_conn_threads() -> int:
-    """Per-pool-connection DuckDB thread count.
-
-    Defaults to 1 to prevent oversubscription on the 4-core VM
-    (8 conns × 4 threads = 32 threads). Override via
-    ``DUCKDB_POOL_CONN_THREADS`` env var.
-    """
-    raw = os.getenv("DUCKDB_POOL_CONN_THREADS", "1")
-    if not raw:
-        return 1
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 1
-
-
 # Per-connection state tracking. DuckDB connection objects are slotted
 # C types — they don't accept arbitrary attribute assignment — so we
 # keep our metadata in a module-level dict keyed by id(con). Entries are
@@ -229,6 +227,10 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     if src is None:
         return None
     try:
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(src):
+            return None
         from backend.core.iceberg._core import _buffer_dir
 
         if src.get("name", "").endswith("::rum"):
@@ -239,7 +241,8 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
                 try:
                     mtimes.append(os.path.getmtime(p))
                 except Exception:
-                    pass
+                    if log_once_per("_safe_buffer_mtime: mtimes.append failed (ignored)", 60):
+                        logger.debug("_safe_buffer_mtime: mtimes.append failed (ignored)", exc_info=True)
             return max(mtimes) if mtimes else None
 
         path = _buffer_dir(src)
@@ -337,7 +340,14 @@ class _Pool:
         self._rebind_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._rebind_wait_samples_lock = threading.Lock()
 
-    def acquire(self, src: dict, max_wait: float, *, skip_view_update: bool = False) -> duckdb.DuckDBPyConnection:
+    def acquire(
+        self,
+        src: dict,
+        max_wait: float,
+        *,
+        skip_view_update: bool = False,
+        reuse_only: bool = False,
+    ) -> duckdb.DuckDBPyConnection:
         # Phase 6 telemetry: time how long this checkout spends WAITING for
         # an idle connection (the saturated path). Both fast-path (idle
         # ready) and fresh-build paths record ~0 ms here; only contention
@@ -370,6 +380,10 @@ class _Pool:
                 # if the recycle overruns the checkout budget we fall back to
                 # rejecting (_PoolBusy) so a hung recycle can't strand the request.
                 if self._draining:
+                    if reuse_only:
+                        # Best-effort parallel checkout: never wait out a
+                        # recycle. Fall straight back to serial.
+                        raise _PoolBusy(f"pool for {self.service_key} draining for recycle")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._drain_rejects_total += 1
@@ -384,6 +398,17 @@ class _Pool:
                     break  # fall through to UNLOCKED _prepare_checkout
                 except queue.Empty:
                     pass
+
+                # Reuse-only (best-effort parallel) checkout: an idle conn was
+                # NOT instantly available, so bail immediately. Building fresh
+                # here is exactly the wedge — a cold build is admitted under
+                # the cap, then stalls in the serialized DuckLake attach while
+                # holding a slot, so concurrent second-checkouts drain the
+                # pool and every request 503s (prod 2026-10-01, Local Std).
+                # Not a real saturation, so don't inflate the reject counter;
+                # the caller (dashboard bundle) just runs serially on ctx.con.
+                if reuse_only:
+                    raise _PoolBusy(f"pool for {self.service_key} has no idle connection (reuse_only)")
 
                 # Capacity available: build a new one outside the lock
                 if self._in_use < self.max_size:
@@ -403,7 +428,8 @@ class _Pool:
                             {"service": self.service_key, "outcome": "timeout"},
                         )
                     except Exception:
-                        pass
+                        if log_once_per("acquire: thread_wait_histogram failed (ignored)", 60):
+                            logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
                     self._record_wait_sample(wait_ms)
                     self._saturated_rejects_total += 1
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
@@ -428,7 +454,8 @@ class _Pool:
         except Exception:
             # OTel SDK not initialised (tests) or histogram creation failed —
             # never let telemetry instrumentation break a checkout.
-            pass
+            if log_once_per("acquire: thread_wait_histogram failed (ignored)", 60):
+                logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
         self._record_wait_sample(wait_ms)
 
         # Outside lock. Both branches can call ``update_iceberg_view`` which
@@ -439,6 +466,13 @@ class _Pool:
         # and the FastAPI thread pool then fills with stuck checkouts until
         # the backend stops accepting new connections.
         if reused_con is not None:
+            # Verify (or restore, after a file-mode writer's detach) the shared lake attach.
+            from backend.core.iceberg._ducklake import _ducklake_attach
+
+            if not _ducklake_attach(reused_con, src, read_only=True):
+                self._discard(reused_con)
+                raise RuntimeError("Failed to re-attach DuckLake")
+
             if skip_view_update:
                 # Caller has guaranteed the view state is fresh for the
                 # duration of this acquire (in-request extras after a
@@ -474,17 +508,6 @@ class _Pool:
                         mem_limit,
                         e,
                     )
-            conn_threads = _pool_conn_threads()
-            if conn_threads is not None:
-                try:
-                    con.execute(f"SET threads = {conn_threads}")
-                except Exception as e:
-                    logger.warning(
-                        "[pool] %s: failed to apply DUCKDB_POOL_CONN_THREADS=%d: %s",
-                        self.service_key,
-                        conn_threads,
-                        e,
-                    )
             self._stamp_fingerprint(con, src)
             return con
         except Exception:
@@ -505,6 +528,13 @@ class _Pool:
         if errored or self._draining:
             self._discard(con)
             return
+
+        # Never DETACH lake here: connections to the same service file share one
+        # DuckDB instance, so a release-time detach evicts lake from every sibling
+        # still mid-query (AGENTS.md Trap #35). Writers don't need it — Postgres
+        # mode writes on a separate in-memory connection and file mode detaches
+        # and re-attaches itself in _ducklake_write_connection.
+
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see
         # _pool_sweep_enabled). Runs outside the lock — TEMP tables live
@@ -547,7 +577,8 @@ class _Pool:
         try:
             con.close()
         except Exception:
-            pass
+            if log_once_per("release: con.close failed (ignored)", 60):
+                logger.debug("release: con.close failed (ignored)", exc_info=True)
         with self._cond:
             self._in_use -= 1
             self._cond.notify()
@@ -557,7 +588,8 @@ class _Pool:
         try:
             con.close()
         except Exception:
-            pass
+            if log_once_per("_discard: con.close failed (ignored)", 60):
+                logger.debug("_discard: con.close failed (ignored)", exc_info=True)
         with self._cond:
             self._in_use -= 1
             self._discarded_total += 1
@@ -582,7 +614,8 @@ class _Pool:
                 try:
                     con.close()
                 except Exception:
-                    pass
+                    if log_once_per("begin_drain: con.close failed (ignored)", 60):
+                        logger.debug("begin_drain: con.close failed (ignored)", exc_info=True)
                 self._in_use -= 1
             self._cond.notify_all()
 
@@ -631,7 +664,8 @@ class _Pool:
                 try:
                     con.close()
                 except Exception:
-                    pass
+                    if log_once_per("discard_idle: con.close failed (ignored)", 60):
+                        logger.debug("discard_idle: con.close failed (ignored)", exc_info=True)
                 self._in_use -= 1
                 closed += 1
             self._cond.notify_all()
@@ -747,7 +781,8 @@ class _Pool:
                     try:
                         con.close()
                     except Exception:
-                        pass
+                        if log_once_per("warm_idle: con.close failed (ignored)", 60):
+                            logger.debug("warm_idle: con.close failed (ignored)", exc_info=True)
                     self._in_use -= 1
                     self._cond.notify()
         # SRE-16: stamp the wall-clock so the admin surface can show view /
@@ -758,7 +793,8 @@ class _Pool:
 
             self._last_warmed_at = iso_z_now()
         except Exception:
-            pass
+            if log_once_per("warm_idle: iso_z_now failed (ignored)", 60):
+                logger.debug("warm_idle: iso_z_now failed (ignored)", exc_info=True)
 
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
@@ -848,6 +884,7 @@ class _PoolBusy(Exception):
 
 
 _pools: dict[str, _Pool] = {}
+_retired_pools: dict[str, _Pool] = {}
 _pools_lock = threading.Lock()
 
 
@@ -863,7 +900,7 @@ def _get_pool(service_key: str, max_size: int | None = None) -> _Pool:
 
 
 @contextmanager
-def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: bool = False):
+def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: bool = False, reuse_only: bool = False):
     """Yield a fully-configured DuckDB connection from the per-service pool.
 
     Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
@@ -888,6 +925,11 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
     if not _pool_enabled():
         from backend.core.duckdb import get_connection
 
+        if reuse_only:
+            # No pool ⇒ no idle connection to reuse. The reuse-only contract
+            # is "hand back a spare or bail" — never build on this path — so
+            # the caller falls back to serial execution.
+            raise _PoolBusy("pool disabled, no idle connection to reuse (reuse_only)")
         raw_con = get_connection(source=src, read_only=True, max_wait=max_wait)
         wrapped = _instrument(raw_con, service_key=src.get("name") or src.get("service_id"))
         try:
@@ -896,12 +938,13 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
             try:
                 raw_con.close()
             except Exception:
-                pass
+                if log_once_per("checkout_connection: raw_con.close failed (ignored)", 60):
+                    logger.debug("checkout_connection: raw_con.close failed (ignored)", exc_info=True)
         return
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    raw_con = pool.acquire(src, max_wait=max_wait, skip_view_update=skip_view_update)
+    raw_con = pool.acquire(src, max_wait=max_wait, skip_view_update=skip_view_update, reuse_only=reuse_only)
     wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:
@@ -927,7 +970,8 @@ def _instrument(raw_con, *, service_key: str | None):
 
         return InstrumentedDuckDBConnection(raw_con, service_id=service_key)
     except Exception:
-        logger.debug("DuckDB live-instrumentation skipped", exc_info=True)
+        if log_once_per("DuckDB live-instrumentation skipped", 60):
+            logger.debug("DuckDB live-instrumentation skipped", exc_info=True)
         return raw_con
 
 
@@ -997,42 +1041,68 @@ def get_all_stats() -> list[dict]:
         return [pool.stats() for pool in _pools.values()]
 
 
-def _existing_pools(service_keys) -> list[_Pool]:
-    """Resolve the subset of ``service_keys`` that have a live pool (no create)."""
-    with _pools_lock:
-        return [p for k in service_keys if (p := _pools.get(k)) is not None]
+def begin_drain_pools(service_keys) -> dict[str, _Pool]:
+    """Put every existing pool for ``service_keys`` into draining mode and swap them.
 
+    This implements 'Blue/Green' connection pool swapping: we instantly retire the
+    old ('Blue') pool instance and remove/pop it from the active ``_pools`` mapping, so
+    that any new incoming web requests instantly construct and checkout from a fresh,
+    clean active 'Green' pool instance with 0ms delay and zero blocking.
 
-def begin_drain_pools(service_keys) -> None:
-    """Put every existing pool for ``service_keys`` into draining mode.
-
-    Used by the DuckDB instance recycle: ALL pools sharing a db file must drain
-    together (a single un-drained pool keeps handing out conns and pins the
-    shared instance). Call before ``wait_pools_drained``.
+    The retired pool object continues to gracefully drain and close its active
+    connections in the background, and is safely garbage-collected once in_use reaches 0.
     """
-    for pool in _existing_pools(service_keys):
-        pool.begin_drain()
+    retired = {}
+    with _pools_lock:
+        for k in service_keys:
+            pool = _pools.get(k)
+            if pool is not None:
+                pool.begin_drain()
+                retired[k] = pool
+                _retired_pools[k] = pool
+                _pools.pop(k, None)
+    return retired
 
 
-def wait_pools_drained(service_keys, timeout: float) -> bool:
+def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
     """Wait (up to ``timeout`` total) for every drained pool to reach in_use==0.
 
     Returns True iff all pools drained within the shared deadline.
     """
-    pools = _existing_pools(service_keys)
+    targets: list[_Pool] = []
+    if isinstance(pools_or_keys, dict):
+        targets = list(pools_or_keys.values())
+    elif isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        targets = pools_or_keys
+    else:
+        # Fallback to string keys for backward compatibility
+        with _pools_lock:
+            targets = [p for k in pools_or_keys if (p := (_retired_pools.get(k) or _pools.get(k))) is not None]
+
     deadline = time.monotonic() + timeout
     ok = True
-    for pool in pools:
+    for pool in targets:
         remaining = max(0.0, deadline - time.monotonic())
         if not pool.wait_drained(remaining):
             ok = False
     return ok
 
 
-def end_drain_pools(service_keys) -> None:
-    """Take every existing pool for ``service_keys`` out of draining mode."""
-    for pool in _existing_pools(service_keys):
-        pool.end_drain()
+def end_drain_pools(pools_or_keys) -> None:
+    """Take every existing pool out of draining mode (no-op for swapped pools)."""
+    if isinstance(pools_or_keys, dict):
+        for pool in pools_or_keys.values():
+            pool.end_drain()
+        return
+    if isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        for pool in pools_or_keys:
+            pool.end_drain()
+        return
+    with _pools_lock:
+        for k in pools_or_keys:
+            pool = _retired_pools.pop(k, None) or _pools.get(k)
+            if pool is not None:
+                pool.end_drain()
 
 
 def reset_pool_for_service(service_key: str) -> int:
@@ -1066,7 +1136,34 @@ def shutdown_all() -> None:
             try:
                 con.close()
             except Exception:
-                pass
+                if log_once_per("shutdown_all: con.close failed (ignored)", 60):
+                    logger.debug("shutdown_all: con.close failed (ignored)", exc_info=True)
+
+
+def get_pool_status() -> dict[str, Any]:
+    """Return status and connection metrics across all active and retired pools."""
+    with _pools_lock:
+        pools_info = {}
+        for k, pool in _pools.items():
+            pools_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "max_size": pool.max_size,
+                "created_total": pool._created_total,
+                "reused_total": pool._reused_total,
+                "draining": pool._draining,
+            }
+        retired_info = {}
+        for k, pool in _retired_pools.items():
+            retired_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "draining": pool._draining,
+            }
+    return {
+        "pools": pools_info,
+        "retired_pools": retired_info,
+    }
 
 
 # R-1: drain the per-connection metadata dict between tests so a recycled

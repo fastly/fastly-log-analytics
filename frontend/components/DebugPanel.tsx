@@ -10,25 +10,18 @@ import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
+import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
-interface DebugQuery {
-  id: string
-  sql: string
-  time_ms: number
-  is_cached?: boolean
-}
+type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & { id: string; is_cached?: boolean }
 
-interface DebugCall {
+type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   id: string
-  service: string
   caller?: string
-  method: string
-  path: string
   status: string
-  time_ms: number
   details?: string
 }
 
@@ -37,17 +30,9 @@ interface CopyButtonProps {
 }
 
 function CopyButton({ text }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy text: ', err)
-    }
-  }
+  const handleCopy = () => copy(text)
 
   return (
     <Button
@@ -158,6 +143,7 @@ export function DebugPanel() {
       _debug_queries?: DebugQuery[]
       _debug_calls?: DebugCall[]
       _debug_sqlite?: SqliteEntry[]
+      _debug_postgres?: SqliteEntry[]
       _is_cached?: boolean
     }
 
@@ -196,8 +182,10 @@ export function DebugPanel() {
       let callCounter = 0
 
       const extractSqlite = (data: DebugData) => {
-        if (!enabled || !Array.isArray(data._debug_sqlite)) return
-        for (const sq of data._debug_sqlite) {
+        if (!enabled) return
+        const rawStatements = data._debug_postgres ?? data._debug_sqlite
+        if (!Array.isArray(rawStatements)) return
+        for (const sq of rawStatements) {
           if (!seenSqliteSeq.has(sq.seq)) {
             extractedSqlite.push(sq)
             seenSqliteSeq.add(sq.seq)
@@ -302,11 +290,11 @@ export function DebugPanel() {
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
 
-  const duckDbCopyText = `DuckDB Queries (Total Time: ${totalQueryTime.toFixed(2)}ms)
-${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.is_cached ? ', Cached' : ''}):
+  const duckDbCopyText = `Data Queries (DuckDB/ClickHouse) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
-  const sqliteCopyText = `SQLite Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
+  const sqliteCopyText = `Postgres Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
 ${sqliteEntries.map((q) => `[${q.ts}] #${q.seq} ${q.op} (${q.time_ms.toFixed(2)}ms, rows: ${q.rows}):
 ${q.sql}`).join('\n\n')}`
 
@@ -322,7 +310,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-primary/10 p-1.5 rounded-md">
                 <Database className="h-4 w-4 text-primary" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries (DuckDB / ClickHouse)</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -348,8 +336,14 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               {queries.map((q, i) => (
                 <div key={q.id} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
-                    <span className="text-muted-foreground font-semibold">
-                      QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
+                    <span className="text-muted-foreground font-semibold flex items-center gap-2">
+                      QUERY #{i + 1}
+                      {q.engine && (
+                        <Badge variant="outline" className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                          {q.engine}
+                        </Badge>
+                      )}
+                      {q.is_cached && <span className="text-blue-500 text-[10px]">(CACHED)</span>}
                     </span>
                     <Badge variant={q.time_ms > 1000 ? "destructive" : q.time_ms > 200 ? "secondary" : "outline"} className="font-mono">
                       {q.time_ms}ms
@@ -370,7 +364,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-emerald-500/10 p-1.5 rounded-md">
                 <HardDrive className="h-4 w-4 text-emerald-500" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">SQLite Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Postgres Queries</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -380,7 +374,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                 {isSqliteOpen ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
                 {isSqliteOpen ? 'Hide' : 'Show'} {sqliteEntries.length} statements
               </Button>
-              <div className="flex items-center rounded-md border overflow-hidden" role="group" aria-label="SQLite statement scope">
+              <div className="flex items-center rounded-md border overflow-hidden" role="group" aria-label="Postgres statement scope">
                 <button
                   type="button"
                   className={`h-6 text-[10px] px-2 ${sqliteScope === 'page' ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground'}`}
@@ -404,7 +398,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                   size="sm"
                   className="h-6 text-[10px] px-2 text-muted-foreground"
                   onClick={clearSqlite}
-                  title="Clear the SQLite capture buffer"
+                  title="Clear the Postgres capture buffer"
                 >
                   <Trash2 className="h-3 w-3 mr-1" />
                   Clear
@@ -439,8 +433,8 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               {sqliteEntries.length === 0 ? (
                 <div className="text-muted-foreground text-xs italic p-4 text-center border rounded-md bg-muted/20">
                   {sqliteScope === 'page'
-                    ? 'No SQLite statements were executed by this page’s API requests. Switch to Process-wide to see cron/background activity.'
-                    : 'No SQLite statements captured yet. Statements appear here as cron jobs and metadata reads execute.'}
+                    ? 'No Postgres statements were executed by this page’s API requests. Switch to Process-wide to see cron/background activity.'
+                    : 'No Postgres statements captured yet. Statements appear here as cron jobs and metadata reads execute.'}
                 </div>
               ) : (
                 [...sqliteEntries].reverse().map((q) => (

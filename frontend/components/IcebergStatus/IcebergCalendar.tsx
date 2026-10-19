@@ -20,6 +20,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { queryKeys } from '@/lib/query-keys'
 
 export function IcebergCalendar() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -27,10 +28,10 @@ export function IcebergCalendar() {
   // Freshness via useAdminEventStream invalidation (prefix-matches
   // ['admin', 'iceberg']). 5-min interval is a pure safety net.
   const { data: calendar, isLoading } = useQuery({
-    queryKey: ['admin', 'iceberg', 'calendar', activeServiceId],
+    queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/iceberg-calendar")
-      return data as any
+      return data
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,
@@ -55,7 +56,7 @@ export function IcebergCalendar() {
   return (
     <Card className="shadow-none border-muted/60">
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-semibold">Iceberg Storage Distribution</CardTitle>
+        <CardTitle className="text-sm font-semibold">DuckLake Storage Distribution</CardTitle>
         <CardDescription className="text-xs">
           Physical data file counts and sizes partitioned by day.
         </CardDescription>
@@ -69,7 +70,9 @@ export function IcebergCalendar() {
           <>
             <div className="flex flex-wrap gap-1">
               {days.map((date) => {
-                const dayData = (calendar as any)?.[date]
+                const entry = calendar?.[date]
+                // The open-keyed payload also carries array-valued debug-envelope keys.
+                const dayData = Array.isArray(entry) ? undefined : entry
                 const hasData = !!dayData
 
                 return (
@@ -81,7 +84,7 @@ export function IcebergCalendar() {
                       <TooltipTrigger
                         render={
                           <span
-                            className="inline-block rounded-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            className="inline-block rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             tabIndex={0}
                             role="button"
                             aria-label={hasData
@@ -92,10 +95,10 @@ export function IcebergCalendar() {
                       >
                         <div
                           className={cn(
-                            "h-4 w-4 rounded-[2px] transition-colors border ",
+                            "h-4 w-4 rounded-sm transition-colors border ",
                             hasData
                               ? "bg-blue-500 border-blue-600/20 hover:bg-blue-400"
-                              : "bg-muted/30 border-muted-foreground/10 hover:bg-muted/50"
+                              : "bg-muted/30 border-border/50 hover:bg-muted/50"
                           )}
                         />
                       </TooltipTrigger>
@@ -126,11 +129,11 @@ export function IcebergCalendar() {
 
         <div className="mt-4 flex items-center gap-4 text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
             <div className="flex items-center gap-1.5">
-                <div className="h-2 w-2 rounded-[1px] bg-blue-500" />
+                <div className="h-2 w-2 rounded-sm bg-blue-500" />
                 <span>Committed Data</span>
             </div>
             <div className="flex items-center gap-1.5">
-                <div className="h-2 w-2 rounded-[1px] bg-muted/30 border" />
+                <div className="h-2 w-2 rounded-sm bg-muted/30 border" />
                 <span>No Data</span>
             </div>
         </div>

@@ -9,7 +9,9 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
+import { client } from '@/lib/api'
 
+import { formatCount } from '@/lib/format'
 // Generated from the /scoring/health response_model — single source of truth.
 type HealthResponse = components['schemas']['ScoringHealthResponse']
 type FailOpenBucket = NonNullable<components['schemas']['ScoringReasonCount']>
@@ -37,11 +39,10 @@ export function ScorerFailOpenBreakdownCard({
   serviceId,
   sinceHours = 24,
 }: ScorerFailOpenBreakdownCardProps) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<HealthResponse>(
-    ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/health', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   const buckets = data?.fail_open_breakdown ?? []
@@ -78,7 +79,7 @@ export function ScorerFailOpenBreakdownCard({
       ) : (
         <div className="space-y-3">
           <div className="text-xs text-muted-foreground">
-            <span className="font-mono tabular-nums text-foreground">{total.toLocaleString()}</span>{' '}
+            <span className="font-mono tabular-nums text-foreground">{formatCount(total)}</span>{' '}
             fail-open {total === 1 ? 'row' : 'rows'} across{' '}
             <span className="font-mono tabular-nums text-foreground">{buckets.length}</span>{' '}
             {buckets.length === 1 ? 'class' : 'classes'}.
@@ -118,7 +119,7 @@ function FailOpenRow({ bucket, max }: { bucket: FailOpenBucket; max: number }) {
         <code className="mt-1 block truncate text-[10px] text-muted-foreground">{bucket.reason}</code>
       </div>
       <span className="shrink-0 font-mono tabular-nums text-foreground">
-        {(bucket.count ?? 0).toLocaleString()}
+        {formatCount(bucket.count ?? 0)}
       </span>
     </div>
   )

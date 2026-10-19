@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import ipaddress
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from backend.utils.date_utils import iso_z_now
+from backend.utils.http import http_get_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,10 @@ _matcher_cache: dict = {}  # keys: "fn", "mtime"
 # adding up.
 _source_cache: dict[str, tuple[int, list[dict]]] = {}
 _source_cache_lock = threading.Lock()
+
+# Pre-compiled IP network feeds for high-performance IP-based bot matching.
+_compiled_ip_feeds: dict = {}
+_compiled_ip_feeds_lock = threading.Lock()
 
 
 def _cache_path(source_id: str) -> Path:
@@ -146,9 +154,7 @@ def fetch_external_cidrs(source_config: dict) -> list[str]:
         return []
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "fastly-log-analysis/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            content = resp.read().decode()
+        content = http_get_text(url, timeout=15)
 
         try:
             data = json.loads(content)
@@ -190,15 +196,37 @@ def fetch_external_cidrs(source_config: dict) -> list[str]:
         return []
 
 
+def _atomic_write_cache(source_id: str, envelope: dict) -> None:
+    """Atomically write the source cache envelope to disk using a temp file."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _cache_path(source_id)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(_CACHE_DIR),
+    )
+    payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def fetch_and_cache_source(source_id: str) -> dict:
     """Fetch the source URL, write the cache file, return updated metadata."""
     src = next((s for s in BOT_SOURCES if s["id"] == source_id), None)
     if src is None:
         raise ValueError(f"Unknown bot source: {source_id!r}")
 
-    req = urllib.request.Request(src["url"], headers={"User-Agent": "fastly-log-analysis/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw_content = resp.read().decode()
+    raw_content = http_get_text(src["url"], timeout=30)
 
     if source_id == "well-known-bots":
         raw = json.loads(raw_content)
@@ -273,18 +301,23 @@ def fetch_and_cache_source(source_id: str) -> dict:
             }
         ]
 
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     entry_count = len(cidrs) if src.get("type") == "ip" else len(entries)
     envelope = {
         "last_updated": iso_z_now(),
         "entry_count": entry_count,
         "entries": entries,
     }
-    _cache_path(source_id).write_text(json.dumps(envelope, separators=(",", ":")))
+    _atomic_write_cache(source_id, envelope)
 
-    # Invalidate the in-process matcher so next call rebuilds
+    # Invalidate all in-process caches so next call rebuilds
     with _matcher_lock:
         _matcher_cache.clear()
+    with _source_cache_lock:
+        _source_cache.pop(source_id, None)
+    with _compiled_ip_feeds_lock:
+        _compiled_ip_feeds.clear()
+    with _version_cache_lock:
+        _version_cache.clear()
 
     logger.info("👾 \x1b[36m[bots]\x1b[0m Cached %d entries for %s", entry_count, source_id)
     return {
@@ -341,7 +374,7 @@ def get_all_sources_meta() -> list[dict]:
                 meta["last_updated"] = envelope.get("last_updated")
                 meta["entry_count"] = envelope.get("entry_count")
             except Exception:
-                pass
+                logger.debug("get_all_sources_meta: step failed (ignored)", exc_info=True)
         result.append(meta)
     return result
 
@@ -366,6 +399,15 @@ def refresh_all_sources() -> list[dict]:
                 results.append(fetch_and_cache_source(src["id"]))
             except Exception as e:
                 logger.error("[bot_sources] Failed to refresh %s: %s", src["id"], e)
+                results.append(
+                    {
+                        "id": src["id"],
+                        "name": src.get("name", src["id"]),
+                        "error": str(e),
+                        "entry_count": 0,
+                        "failed": True,
+                    }
+                )
     return results
 
 
@@ -508,13 +550,6 @@ def get_bot_regex_pattern(limit: int = 500) -> str | None:
     return "(?i)" + "|".join(re.escape(lit) for lit in literals)
 
 
-import ipaddress
-from typing import Any
-
-_compiled_ip_feeds: dict = {}
-_compiled_ip_feeds_lock = threading.Lock()
-
-
 def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
     """Compile enabled IP source CIDR ranges into Network objects once for high-performance match."""
     current_mtime = _cache_mtime()
@@ -587,7 +622,7 @@ def enrich_bot_metadata(df: Any) -> None:
                         if matched_feed:
                             break
                 except Exception:
-                    pass
+                    logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
 
             if not matches:
                 if matched_feed:
@@ -615,38 +650,34 @@ def enrich_bot_metadata(df: Any) -> None:
 
     # 2. NG-WAF Verified Bot Enrichment
     if "waf_req_id" in df.columns:
-        import os
-        import sqlite3
+        from backend.core.metadata import pg_connection
 
-        from backend import config as svcconfig
-
-        ngwaf_db = svcconfig.ngwaf_db_path()
-        if not os.path.exists(ngwaf_db):
+        # Normalize each waf_req_id once: None for missing/sentinel
+        # values, str(x) otherwise. Both the IN-list and the per-row
+        # output then read from this single pass.
+        norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
+        waf_ids = [n for n in norm if n]
+        if not waf_ids:
             df["_ngwaf_bot_name"] = None
         else:
-            # Normalize each waf_req_id once: None for missing/sentinel
-            # values, str(x) otherwise. Both the IN-list and the per-row
-            # output then read from this single pass.
-            norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
-            waf_ids = [n for n in norm if n]
-            if not waf_ids:
-                df["_ngwaf_bot_name"] = None
-            else:
+            try:
+                pconn = pg_connection.get_pg_readonly_connection()
                 try:
-                    placeholders = ",".join("?" * len(waf_ids))
-                    # mode=ro: pure SELECT, no schema or row writes — opening
-                    # read-only skips SQLite's shared-lock acquisition entirely
-                    # and lets concurrent NGWAF sync writers proceed unimpeded.
-                    sq = sqlite3.connect(f"file:{ngwaf_db}?mode=ro", uri=True)
-                    rows = sq.execute(
+                    placeholders = ",".join("?" for _ in waf_ids)
+                    cur = pconn.execute(
                         f"SELECT waf_req_id, bot_name FROM ngwaf_bots WHERE waf_req_id IN ({placeholders})",
                         waf_ids,
-                    ).fetchall()
-                    sq.close()
-                    bot_map = {r[0]: r[1] for r in rows}
-                    df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]
-                except Exception:
-                    df["_ngwaf_bot_name"] = None
+                    )
+                    rows = cur.fetchall()
+                finally:
+                    pconn.close()
+                bot_map = {
+                    (r["waf_req_id"] if isinstance(r, dict) else r[0]): (r["bot_name"] if isinstance(r, dict) else r[1])
+                    for r in rows
+                }
+                df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]
+            except Exception:
+                df["_ngwaf_bot_name"] = None
 
 
 # R-1: drain the matcher + source caches between tests. Both are
@@ -658,3 +689,4 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 _CacheRegistry.register("utils.bot_sources._matcher_cache", _matcher_cache)
 _CacheRegistry.register("utils.bot_sources._source_cache", _source_cache)
 _CacheRegistry.register("utils.bot_sources._compiled_ip_feeds", _compiled_ip_feeds)
+_CacheRegistry.register("utils.bot_sources._version_cache", _version_cache)

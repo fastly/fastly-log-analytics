@@ -617,3 +617,62 @@ def test_safe_audit_email_sanitizes_and_bounds():
     out = _safe_audit_email("a@b.com\nLOGIN_SUCCESS forged-line")
     assert "\n" not in out and "\r" not in out
     assert len(_safe_audit_email("x" * 9999)) <= 254
+
+
+def test_claim_revoked_invite_returns_410(client):
+    """When an invite is revoked before its one-shot claim token is redeemed,
+    POST /api/share/claim/{token} returns 410 invite_gone."""
+    invite = _seed_invite(email="revoked-claim@example.com")
+    token = share_db.create_claim_token(invite["id"], ttl_hours=1)
+    share_db.revoke_remote_invite(invite["id"])
+    r = client.post(
+        f"/api/share/claim/{token}",
+        headers={"X-Page-Load-ID": "pl-claim-410"},
+    )
+    assert r.status_code == 410
+    assert r.json()["detail"]["error"] == "invite_gone"
+
+
+def test_login_lockout_returns_429_with_retry_after(client):
+    """Brute-force rate limiting locks the client IP after 5 failures and
+    returns HTTP 429 with retry_after_s and Retry-After header."""
+    _activate_share()
+    _seed_invite(email="lockout-target@example.com")
+    headers = {
+        "X-Remote-Analyst": "1",
+        "Host": "testserver",
+        "Origin": "https://testserver",
+        "X-Forwarded-For": "198.51.100.77",
+        "X-Page-Load-ID": "pl-lockout-test",
+    }
+    for _ in range(5):
+        r_fail = client.post(
+            "/api/share/login",
+            json={"email": "lockout-target@example.com", "passcode": "wrong-passcode"},
+            headers=headers,
+        )
+        assert r_fail.status_code == 401
+
+    r_locked = client.post(
+        "/api/share/login",
+        json={"email": "lockout-target@example.com", "passcode": "ocean-breeze-cabin-42"},
+        headers=headers,
+    )
+    assert r_locked.status_code == 429
+    detail = r_locked.json()["detail"]
+    assert detail["error"] == "rate_limited"
+    assert detail["retry_after_s"] > 0
+    assert int(r_locked.headers.get("retry-after", "0")) > 0
+
+
+def test_auth_config_returns_typed_schema_with_page_load_id(client):
+    """GET /api/share/auth-config returns typed AuthConfigResponse and accepts X-Page-Load-ID."""
+    r = client.get(
+        "/api/share/auth-config",
+        headers={"X-Page-Load-ID": "pl-auth-cfg-1"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body.keys()) == {"passcode_enabled", "providers"}
+    assert isinstance(body["passcode_enabled"], bool)
+    assert isinstance(body["providers"], list)

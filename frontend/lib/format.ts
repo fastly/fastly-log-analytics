@@ -19,6 +19,79 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Binary byte formatter with fixed per-unit decimals (B as-is, KB/MB 1 decimal,
+ * GB 2 decimals) and strict 1024 thresholds. ``maxUnit: 'MB'`` keeps counting
+ * in MB past 1 GiB. Distinct from ``formatBytes`` above, which bumps units at
+ * 1000 and trims trailing zeros.
+ */
+export function formatBytesTiered(
+  bytes: number | null | undefined,
+  options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {},
+): string {
+  const { maxUnit = 'MB', nullText = '–' } = options
+  if (bytes == null) return nullText
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (maxUnit === 'MB' || bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+export interface ElapsedOptions {
+  /** Seconds at which the minute / hour / day units take over. */
+  minutesFrom?: number
+  hoursFrom?: number
+  /** ``Infinity`` caps the ladder at hours. */
+  daysFrom?: number
+  rounding?: 'floor' | 'round'
+  /** Fixed decimals for the hour / day units (0 = integer via ``rounding``). */
+  fractionDigits?: { hours?: number; days?: number }
+  /** Below this many seconds, render ``just now`` (no suffix). */
+  justNowBelow?: number
+  suffix?: string
+}
+
+/** Compact elapsed-time ladder: 45s / 12m / 3h / 6d, parameterised so every
+ *  caller keeps its own thresholds, rounding and decimals. */
+export function formatElapsed(seconds: number, options: ElapsedOptions = {}): string {
+  const {
+    minutesFrom = 60,
+    hoursFrom = 3600,
+    daysFrom = 86400,
+    rounding = 'floor',
+    fractionDigits = {},
+    justNowBelow,
+    suffix = '',
+  } = options
+  const r = rounding === 'round' ? Math.round : Math.floor
+  const unit = (value: number, digits: number | undefined, label: string) =>
+    `${digits ? value.toFixed(digits) : r(value)}${label}${suffix}`
+  if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
+  if (seconds < minutesFrom) return unit(seconds, 0, 's')
+  if (seconds < hoursFrom) return unit(seconds / 60, 0, 'm')
+  if (seconds < daysFrom) return unit(seconds / 3600, fractionDigits.hours, 'h')
+  return unit(seconds / 86400, fractionDigits.days, 'd')
+}
+
+/** BotSourcesPanel: "just now" under 2 minutes, then m / h / d ago. */
+export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
+/** ResumeBanner: s / m / h / d ago. */
+export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
+/** SystemHealthCard: 45s / 12m / 3.4h / 6.2d, rounded. */
+export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
+  rounding: 'round',
+  minutesFrom: 90,
+  hoursFrom: 5400,
+  daysFrom: 172800,
+  fractionDigits: { hours: 1, days: 1 },
+}
+/** HighScaleRequestFactsPanel: 45s / 12m / 3.4h (never days), rounded. */
+export const ELAPSED_FRESHNESS: ElapsedOptions = {
+  rounding: 'round',
+  daysFrom: Infinity,
+  fractionDigits: { hours: 1 },
+}
+
+/**
  * Resolve an ISO-3166 alpha-2 country code to its English display name.
  *
  * Intl.DisplayNames is constructed PER CALL (not memoised at module scope)
@@ -45,6 +118,41 @@ export function formatCompactCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(n)
+}
+
+/**
+ * Abbreviated count with a K/M/B suffix (``1_500`` -> "1.5K", ``2_345_678`` ->
+ * "2.3M" at the default one decimal). ``millionDecimals`` sets the precision
+ * of the M and B forms; K is always one decimal. Below 1000 it falls through to
+ * ``formatCount``.
+ */
+export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(millionDecimals) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(millionDecimals) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return formatCount(n)
+}
+
+/**
+ * Locale-grouped number (e.g. 1234567 → "1,234,567"). Thin wrapper over
+ * ``Intl.NumberFormat`` — byte-identical to ``n.toLocaleString()`` with the
+ * same options, but centralized so analytics UI can't drift back into inline
+ * ``.toLocaleString()`` calls (enforced by the ESLint ban in analytics dirs).
+ *
+ * Pass ``Intl.NumberFormatOptions`` for precision control, e.g.
+ * ``formatCount(n, { maximumFractionDigits: 1 })``.
+ */
+export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
+  return new Intl.NumberFormat(undefined, options).format(n)
+}
+
+/**
+ * ``formatCount`` for possibly-missing values — the drop-in for
+ * ``n?.toLocaleString()``: ``undefined`` in, ``undefined`` out, so callers keep
+ * their ``?? '—'`` fallbacks.
+ */
+export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
+  return n == null ? undefined : formatCount(n, options)
 }
 
 /**

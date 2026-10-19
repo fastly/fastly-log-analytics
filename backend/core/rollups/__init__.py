@@ -108,11 +108,13 @@ from ._common import (
     _slow_urls_bundle_path,
     _time_series_bundle_path,
     _verified_bots_ts_bundle_path,
+    rollups_present,
 )
 from .day_bundles import (
     backfill_day_bundles,
     bundle_days,
     compact_closed_days_to_daily,
+    compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
@@ -122,13 +124,16 @@ from .day_bundles import (
     compact_overview_closed_days_to_daily,
     compact_perf_dims_closed_days_to_daily,
     compact_perf_latency_closed_days_to_daily,
+    compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
+    retire_compacted_hour_bundles,
 )
 from .hour_bundles import (
     _cleanup_per_field_after_bundle,
     bundle_hours,
 )
+from .network_quality import backfill_network_quality_bundles, build_network_quality_bundles
 from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
 from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
 from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
@@ -139,6 +144,7 @@ from .origin_summary import backfill_origin_summary_bundles, build_origin_summar
 from .overview import backfill_overview_bundles, build_overview_bundles
 from .perf_dims import backfill_perf_dims_bundles, build_perf_dims_bundles
 from .perf_latency import backfill_perf_latency_bundles, build_perf_latency_bundles
+from .pop_health import backfill_pop_health_bundles, build_pop_health_bundles
 from .recompute import (
     _run_per_field_copy,
     backfill_missing_hour_bundles,
@@ -179,6 +185,8 @@ __all__ = [
     "build_network_summary_bundles",
     "backfill_network_summary_bundles",
     "build_network_speed_bundles",
+    "build_network_quality_bundles",
+    "backfill_network_quality_bundles",
     "backfill_network_speed_bundles",
     "build_ngwaf_bots_bundles",
     "backfill_ngwaf_bots_bundles",
@@ -186,6 +194,8 @@ __all__ = [
     "backfill_verified_bots_ts_bundles",
     "build_perf_latency_bundles",
     "backfill_perf_latency_bundles",
+    "build_pop_health_bundles",
+    "backfill_pop_health_bundles",
     "build_perf_dims_bundles",
     "backfill_perf_dims_bundles",
     "build_security_dims_bundles",
@@ -199,12 +209,15 @@ __all__ = [
     "compact_origin_dims_closed_days_to_daily",
     "compact_origin_latency_ts_closed_days_to_daily",
     "compact_network_rtt_closed_days_to_daily",
+    "compact_network_quality_closed_days_to_daily",
     "compact_network_speed_closed_days_to_daily",
     "compact_ngwaf_bots_closed_days_to_daily",
     "compact_verified_bots_ts_closed_days_to_daily",
     "compact_perf_latency_closed_days_to_daily",
+    "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
+    "retire_compacted_hour_bundles",
     "recompute_touched_hours",
     "backfill_rollups",
     "backfill_missing_hour_bundles",
@@ -250,6 +263,7 @@ __all__ = [
     "_day_rollups_root",
     "_hour_bundled_root",
     "_day_bundled_root",
+    "rollups_present",
     "_markers_path",
     "_load_markers",
     "_save_markers",

@@ -1,0 +1,195 @@
+> [!NOTE]
+> **Cron Specification Status: IMPLEMENTED; FULLY VERIFIED**
+> All Section 9 checklist items verified against Standard, High-Scale, and test suite contracts.
+
+# Background Job Specification: `log_discovery_{service_id}`
+
+## 1. Overview & Objectives
+- **Job Identifier:** `log_discovery_{service_id}` (historically `sync_{service_id}`)
+- **Category:** Core Ingestion & Stream Ingestion Data Plane
+- **Purpose:** Continuously discovers and ingests new `.gz` log files streamed from Fastly Real-Time Log Streaming to Fastly Object Storage (FOS) under `raw/request/**/*.gz`.
+- **Why It Runs:** Log data is streamed into FOS continuously. Without discovery and ingestion, new CDN events never enter the analytics pipeline.
+
+---
+
+## 2. Scheduling & Cadence
+- **Trigger Type:** Interval timer (`interval`)
+- **Default Schedule:** Derived from `log_period`:
+  - `interval_seconds = max(5, log_period // 2)` if `log_period >= 60`, otherwise `max(5, log_period)`.
+- **Configurable Overrides:**
+  - `provisioning.cron_sync.interval_mins` (takes top UI priority).
+  - `provisioning.cron_sync.interval_seconds` (written by provisioning scripts).
+  - Minimum hardcoded clamp: 5 seconds.
+- **Jitter & Misfire Policy:**
+  - Jitter: 2 seconds (1s if interval < 5s).
+  - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
+
+---
+
+## 3. Architecture Execution Matrix
+| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+|---|---|---|---|
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads FOS `raw/request/**/*.gz`, transforms to Parquet in local buffer `cache/{bucket}/`, updates session DuckDB `logs` view. | Acquires per-service ingest lock. Gated by `FLA_DEV_NO_CRONS=1` (skips execution). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Workers | Scans five recent minute prefixes, inserts discovered keys into PostgreSQL `ingest_ledger` with `discovered` state and their originating task/run ID, and dispatches Celery conversion tasks (`convert_batch_files`). Older missed objects are caught by the separate four-hour `ledger_sweep` FOS diff. Workers must resolve outcomes against each ledger row's origin; redispatch does not overwrite it. | Distributed PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Never opens local DuckDB. |
+
+---
+
+## 4. Role & Permissions Matrix
+| Role | Job State | Manual API Trigger | Data Visibility |
+|---|---|---|---|
+| **Admin (`read_write`)** | Active | `POST /api/admin/sync/{service_id}` | Full access to raw ingestion status and logs. |
+| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Skips ingest; uses `sync_metadata_{service_id}` pull model instead. |
+| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side ingested state; no cron interaction. |
+
+---
+
+## 5. Execution Lifecycle & Step-by-Step Logic
+### Standard Mode:
+1. **Pre-Flight Checks:** Verify service configuration and FOS credentials. Check `FLA_DEV_NO_CRONS=1` (exits immediately if set).
+   - Unlike the maintenance crons, `log_discovery` has no start-of-tick active-request gate (`should_defer_cron`). Each deferred tick waited a full interval, and dashboard/SSE polling kept the gate tripped, which chained 20–30 s of request lag. In-flight API requests still get priority mid-tick through `yield_to_api`.
+2. **FOS LIST Call:** Executes `FosS3FileSystem.ls(f"{bucket}/{prefix}/raw/request/")` with pagination.
+3. **Filter Known Keys:** Checks discovered keys against PostgreSQL `ingested_files` metadata.
+4. **Download & Transform:**
+   - Downloads new `.gz` chunks in parallel using thread pool.
+   - Decompresses gzip stream in memory, extracts custom VCL expressions and standard log schema.
+   - Converts rows to size-optimized Parquet files in `cache/{bucket}/`.
+5. **View Update:** Calls `update_iceberg_view()` to stitch local Parquet buffer files into the DuckDB `logs` view.
+   - Adaptive polling re-lists FOS up to twice more, at 3 s intervals, within a 20 s window.
+   - Before each follow-up pass, the rows from the previous pass are published: view refresh, header-only `refresh_config_status`, and an SSE snapshot.
+   - Before this, rows stayed invisible until the window closed, which added up to about 20 s of request lag.
+6. **Ingest Tracking Update:** Records successfully ingested files in PostgreSQL `ingested_files`.
+7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 60s, or on a forced run):
+   - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
+   - Runs after the header-only status refresh has been published, so this pass (about 5 s on a busy service) never delays the rows the tick just ingested.
+   - Runs the usage-log phase: `backfill_fastly_edge_writes()`, `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation), and `run_usage_log_cleanup()`.
+   - The usage-log phase costs about 3 s. Running it on every tick delayed the next tick's first FOS poll and widened request lag; all three steps are idempotent and the Usage Log page reads at hourly grain.
+8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records a stable, zero-filled counter schema shared with RUM ingestion: `valid_records`, `malformed_records`, `corrupt_containers`, `quarantine_capture_failures`, `source_delete_failures`, and `cap_evictions`. It also records source-object counters for `objects_processed`, `objects_successful`, `objects_partial`, and `objects_failed`.
+   - If records ingest successfully but FOS deletion fails after bounded retries, the
+     object is counted as `objects_failed` and `source_delete_failures` is incremented.
+   - Standard mode retains exact failed object keys from asynchronous batch deletion and its inline fallback; partial bulk-delete responses do not distribute failures across unrelated objects.
+9. **Post-Ingest Rollups (off-tick):** The touched hours are handed to a per-service,
+   single-flight background worker (`schedule_post_ingest_rollups` in
+   `backend/cron/jobs/sync.py`) that runs `recompute_touched_hours` and
+   `recompute_wellknown_bots_rollup`. Hours queued while a recompute is running are
+   coalesced into the next pass. These recomputes take 90–170 s on a busy service. Run
+   inline, they held the tick past its interval, so with `max_instances=1` most ticks
+   were skipped and request lag grew past a minute.
+
+### High-Scale Mode:
+1. Issues FOS LIST on the five recent minute prefixes. The separate
+   `ledger_sweep` job diffs a four-hour FOS lookback against the ledger to
+   catch objects missed by the frequent discovery scan.
+2. Performs batch inserts into `ingest_ledger` with `service_id`, `object_key`, `size_bytes`, `status`, `discovered_at`, `originating_task`, and `originating_run_id`. Existing rows retain their first discovery origin on conflict.
+3. Claims ledger rows through `_ledger_claim_batch`, fencing each conversion attempt by its lease generation.
+4. Enqueues conversion tasks to Celery queue (`convert_batch_files.delay(...)`).
+5. **Stateless Workers:** Worker processes skip local DuckDB heavy refresh to avoid file-lock contention with readers; autocomplete cache updates run on the serving web-pod.
+6. **Isolated High-Scale Worker Plane:** Services bound to the high-scale registry are
+   ingested by `backend/high_scale/worker.py` into ClickHouse, not by this job. Each page's
+   objects are processed concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4 per pod).
+   Per-object work is round-trip bound: FOS GET/PUT plus about 15 Postgres and 7 ClickHouse
+   calls, about 3 s for a 1–3 row object. Serial processing could not keep up with seeded
+   arrival rates.
+7. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as a separate exact-byte item under `data/services/{service_id}/quarantine/`; corrupt gzip containers are captured as one complete gzip item. Metadata records request/RUM source type, original FOS key, line ordinal, byte offset/length when known, normalized error category, bounded error text, and SHA-256. The source FOS object is always deleted after processing, even if capture fails; capture failures are recorded and the run is marked `error`. Quarantine is diagnostic evidence, not a re-ingest queue. High-Scale workers and the serving backend share the evidence directory; PostgreSQL advisory locking serializes evidence writes and FIFO-cap enforcement across them.
+
+---
+
+## 6. Telemetry, Timing & Query Audit Contract
+- **100% Query & API Call Capture:**
+  - **FOS S3 API Calls:** Every `LIST` and `GET` operation is attributed to `cron.log_discovery` in the PostgreSQL `usage_log` table.
+  - **PostgreSQL Operations:** `ingested_files`, `cron_runs`, and outcome-counter writes use the shared instrumented metadata connection.
+  - **DuckDB Operations:** Serving queries use the existing request/query instrumentation.
+  - **Fastly API Calls:** Reconcile calls to Fastly `/stats/aggregate` must log latency and response codes.
+- **Timing & Resource Budgets:**
+  - Standard discovery tick (steady-state, 0 new files): < 250ms total execution.
+  - Ingestion processing: > 50,000 logs/sec per core.
+  - Metadata transaction wait is measured through the shared Postgres connection instrumentation.
+- **Audit Checklist:**
+  - Confirm zero Class A API call proliferation (validate LIST pagination).
+  - Verify `ingested_files` query uses primary index on `filename`.
+  - Confirm heavy refresh is strictly clamped to the 60s throttle window.
+
+---
+
+## 7. Failure Modes & Recovery Runbooks
+- **FOS Rate Limiting / 429:** Bounded exponential backoff with retry; exhausted failures mark the run `error`, record the source key and error, and continue other files where safe.
+- **Corrupted `.gz` File / Bad Rows:** Captures exact local evidence when possible, records the error when capture fails, deletes the FOS source regardless, marks the run `error`, and continues the remaining batch. Every line receives a durable success/failure outcome.
+- **FOS Deletion Failure:** Bounded retry is attempted. If deletion still fails, the run is marked `error`, the source key and deletion error are recorded, and other files continue.
+
+### Quarantine retention and admin surface
+- The cap is 1,000 items per service, shared by malformed lines and corrupt gzip items.
+- There is no age-based expiry and no configurable override. New writes enforce the cap
+  immediately by evicting oldest individual items; failures are recorded while other
+  eligible evictions continue.
+- Evidence is admin/read-write only. Both Analyst Path A and Analyst Path B are denied by
+  backend authorization, regardless of UI visibility.
+- The UI treats each line/container as an individual item, paginates results, and supports
+  error-category filtering. It shows source identity, byte/line offsets, error details,
+  and the SHA-256 digest; the operator can download exact bytes or purge one item.
+- `GET /api/admin/quarantine/summary` reports item/byte counts, request/RUM counts,
+  category counts, and time extents. `GET /api/admin/quarantine/download/{item_id}`
+  streams exact bytes with a 50 MiB limit. `POST /api/admin/quarantine/purge` purges
+  one item via `item_id` or all items when omitted. No separate quarantine cron is required.
+- **Stale Buffer View Race:** Handled via `execute_with_stale_view_retry()` clearing view cache and rebuilding.
+
+---
+
+## 8. Manual Trigger Endpoints & Admin Controls
+- **Trigger Ingestion:** `POST /api/admin/sync/{service_id}` (supports `?force=true`).
+- **Inspect Live Progress:** `GET /api/admin/cron/progress/{service_id}` (SSE stream).
+- **Inspect Status:** `GET /api/admin/sync-status?service_id={service_id}`.
+
+---
+
+## 9. AI Session Automated Verification Checklist
+- [x] 1. Trigger `POST /api/admin/sync/{service_id}` with synthetic `.gz` files in FOS; verify HTTP 200 response.
+- [x] 2. Confirm execution records in `cron_runs` with status `success` and non-zero `files_ingested`.
+- [x] 3. Verify the PostgreSQL `usage_log` table attributes FOS Class A LIST and Class B GET calls to `cron.log_discovery`.
+- [x] 4. Confirm new rows immediately queryable via `GET /api/dashboard/bundle`.
+- [x] 5. Confirm heavy refresh phases (`update_top_values` and the usage-log phase) run no more than once per 60s. Pinned by `test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks`.
+- [x] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
+- [x] 7. In High-Scale mode, verify source objects transition `discovered → claimed → acknowledged` (`high_scale_source_objects` for the isolated worker plane; `ingest_ledger` for Celery).
+- [x] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
+  immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
+
+## 10. Marketplace Comparison & Design Decisions
+
+The design was compared with the failure-handling patterns documented by Amazon Data
+Firehose, Apache Kafka Connect, and Amazon S3:
+
+| Marketplace pattern | Reference behavior | Decision for `log_discovery` |
+|---|---|---|
+| Batch transformation with bounded retries | Firehose retries failed transformation invocations, then emits the unprocessed batch as explicit failure evidence instead of acknowledging it as successful. | Retry transient FOS/download failures with a bound; preserve explicit per-source and per-record failure outcomes after exhaustion. |
+| At-least-once delivery | Firehose documents at-least-once delivery and possible duplicates during retryable delivery timeouts. | Treat source processing as at-least-once, use the existing ingested-file/ledger deduplication, and never make deletion the success criterion by itself. |
+| Durable dead-letter/error records | Firehose writes failed records with raw data and error metadata to a processing-failed prefix. | Keep malformed lines and corrupt containers as local diagnostic evidence with source identity, offsets, bounded error text, and integrity hashes; quarantine is not a re-ingest queue. |
+| Offset/watermark ownership | Kafka Connect persists offsets and supports exactly-once source support only when the source and sink transaction model can guarantee it. | Keep discovery, conversion, acknowledgement, and commit state explicit; do not claim exactly-once semantics across FOS, local evidence, DuckLake, and deletion. |
+| Recovery from accidental deletion | S3 Versioning preserves prior object versions and delete markers when enabled. | Do not depend on bucket versioning being enabled; record deletion failures as unacknowledged sources and retry through the normal discovery/reconciliation path. |
+
+These comparisons reinforce the existing choices: bounded retries, explicit error states,
+durable failure evidence, idempotent deduplication, and conservative source acknowledgement.
+They also rule out silently treating quarantine-capture failure or source-delete failure as a
+successful ingest.
+
+References:
+
+- [Amazon Data Firehose transformation failure handling](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation-failure-handling.html)
+- [Amazon Data Firehose delivery semantics](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html)
+- [Apache Kafka Connect configuration and exactly-once source support](https://kafka.apache.org/41/generated/connect_config.html)
+- [Amazon S3 Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
+
+## 11. Downstream Page Contract Check
+
+The page specifications were checked before implementation because Cron 1 supplies the
+freshness, status, progress, and role boundaries consumed by the UI:
+
+| Page specification | Cron 1 dependency | Implementation constraint |
+|---|---|---|
+| [`/dashboard`](../../pages/dashboard.md) | `latest_log_at`, adaptive empty/young-service windows, and stale-view recovery | A successful discovery must not publish a false freshness timestamp; partial or empty runs must preserve the existing extent semantics. |
+| [`/admin`](../../pages/admin/overview.md) | `sync-status`, `cron_runs`, `cron_progress`, queued-file counts, and manual Sync Now | Keep the documented counter schema and progress lifecycle stable so the admin status cards and SSE progress stream remain truthful. |
+| [`/admin/queue`](../../pages/admin/queue.md) | High-Scale `ingest_ledger` states and recovery visibility | Discovery owns `discovered`/dispatch state; workers and ledger sweeps own later transitions. Diagnostic quarantine must not be presented as an automatic retry queue without an explicit, separate admin action. |
+| [`/rum`](../../pages/rum.md), [`/admin/rum`](../../pages/admin/rum.md) | Shared request/RUM ingestion outcomes and Standard/High-Scale topology | The request contract is the template for analogous RUM behavior, but the page specifications still contain legacy `rum_sync` naming that must be corrected during the dedicated RUM page/doc session. |
+| [`/admin/usage-log`](../../pages/admin/usage-log.md) | FOS LIST/GET attribution and cost counters | Every discovery storage call must retain the `cron.log_discovery` process context and emit the stable usage categories used by the cost page. |
+
+The review also found two page-documentation follow-ups that are intentionally not being
+implemented in this Cron 1 session: replace stale `rum_sync` references in the RUM page
+specifications, and reconcile `/admin/queue`'s “retry quarantined file” wording with the
+agreed rule that quarantine is diagnostic evidence rather than a re-ingest queue.

@@ -24,10 +24,15 @@
  */
 
 import type { FeatureCollection } from 'geojson'
-import type { Map as MapLibreMap } from 'maplibre-gl'
+import type { Map as MapLibreMap, MapOptions } from 'maplibre-gl'
 import type { GeometryCollection, Topology } from 'topojson-specification'
 
 import { countryFill, countryOutline } from './colors'
+
+declare const sampleMap: MapLibreMap
+
+/** What `Map.setPaintProperty` accepts for a fill colour: a colour string or a style expression. */
+export type MapFillColor = Parameters<typeof sampleMap.setPaintProperty<'fill-color'>>[2]
 
 export const WORLD_SOURCE_ID = 'world'
 export const COUNTRIES_LAYER_ID = 'countries'
@@ -126,4 +131,67 @@ export function updateCountryBaseLayerTheme(map: MapLibreMap, isDark: boolean): 
   if (!map.getLayer(COUNTRIES_LAYER_ID)) return
   map.setPaintProperty(COUNTRIES_LAYER_ID, 'fill-color', countryFill(isDark))
   map.setPaintProperty(COUNTRIES_LAYER_ID, 'fill-outline-color', countryOutline(isDark))
+}
+
+export interface BaseMapOptions {
+  renderWorldCopies: boolean
+  zoom: number
+  /** A plain wheel scrolls the page; zoom needs Cmd/Ctrl + wheel. */
+  cooperativeGestures: boolean
+  /** CSS colour for the style's background layer (default transparent). */
+  background?: string
+  /** 3D globe projection (edge-to-shield arcs read as great-circle paths). */
+  globe?: boolean
+  /** Disable rotate-by-drag and touch-rotate (flat maps). */
+  lockRotation?: boolean
+  /** NavigationControl compass button (default true). */
+  showCompass?: boolean
+}
+
+/**
+ * Shared MapLibre bootstrap: empty style with one background layer, the same
+ * centre, and a top-right NavigationControl. Takes the maplibre-gl namespace as
+ * an argument so this module stays a type-only dependency (consumers choose
+ * static vs dynamic import). Callers add their own sources, layers and extra
+ * controls.
+ */
+export function createBaseMap(
+  maplibre: typeof import('maplibre-gl'),
+  container: HTMLElement,
+  opts: BaseMapOptions,
+): MapLibreMap {
+  // preserveDrawingBuffer is the legacy top-level option the four maps shipped
+  // with; it is no longer in MapOptions' types, so the object is cast.
+  const options = {
+    container,
+    renderWorldCopies: opts.renderWorldCopies,
+    preserveDrawingBuffer: true,
+    style: {
+      version: 8,
+      ...(opts.globe ? { projection: { type: 'globe' as const } } : {}),
+      sources: {},
+      layers: [
+        {
+          id: 'background',
+          type: 'background',
+          paint: { 'background-color': opts.background ?? 'transparent' },
+        },
+      ],
+    },
+    center: [0, 20],
+    zoom: opts.zoom,
+    cooperativeGestures: opts.cooperativeGestures,
+    ...(opts.lockRotation ? { dragRotate: false, touchZoomRotate: false } : {}),
+  } as MapOptions
+  const map = new maplibre.Map(options)
+  map.addControl(new maplibre.NavigationControl({ showCompass: opts.showCompass ?? true }), 'top-right')
+  return map
+}
+
+/** MapLibre injects focusable controls and a canvas that duplicate the chart's
+ *  a11y table; take them out of the tab order once the map has loaded. */
+export function removeMapTabStops(container: HTMLElement | null): void {
+  container
+    ?.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
+    .forEach((el) => el.setAttribute('tabindex', '-1'))
 }

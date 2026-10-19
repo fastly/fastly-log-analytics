@@ -36,7 +36,6 @@ import logging
 
 from ._common import (
     NETWORK_GEO_BUNDLE_FILENAME,
-    backfill_missing_bundles,
     build_per_hour_bundles,
 )
 
@@ -67,7 +66,8 @@ def build_network_geo_bundles(service_id: str, source: dict, hours: list[str]) -
         }
 
     def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
-        assert isinstance(ctx, dict)
+        if not isinstance(ctx, dict):
+            raise RuntimeError("isinstance(ctx, dict) must hold")
         city_col = "CAST(city AS VARCHAR)" if ctx["has_city"] else "CAST('' AS VARCHAR)"
         lat_col = "CAST(lat AS DOUBLE)" if ctx["has_lat"] else "CAST(NULL AS DOUBLE)"
         lon_col = "CAST(lon AS DOUBLE)" if ctx["has_lat"] else "CAST(NULL AS DOUBLE)"
@@ -120,22 +120,5 @@ def build_network_geo_bundles(service_id: str, source: dict, hours: list[str]) -
         label="network_geo",
         eligibility=eligibility,
         build_copy_sql=build_copy_sql,
-        logger=logger,
-    )
-
-
-def backfill_network_geo_bundles(service_id: str, source: dict) -> int:
-    """Self-heal pass: build network_geo.parquet for every closed hour
-    that has all_fields.parquet but no network_geo.parquet yet.
-
-    Mirrors :func:`backfill_network_heatmap_bundles`. Idempotent — skips
-    already-built hours. Returns the number of bundles written.
-    """
-    return backfill_missing_bundles(
-        service_id,
-        source,
-        bundle_filename=NETWORK_GEO_BUNDLE_FILENAME,
-        label="network_geo",
-        builder=build_network_geo_bundles,
         logger=logger,
     )

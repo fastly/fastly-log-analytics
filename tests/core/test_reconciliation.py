@@ -4,15 +4,18 @@ Coverage rationale: the module was at 10% (covers stats, age-based
 cleanup, and rollup-cleanup coordination). The two functions exercised
 here — ``get_metadata_storage_stats`` and ``cleanup_metadata`` — are
 the operational surface admins see in the storage stats endpoint and
-the cleanup-now SSE. Both call into per-service SQLite via the
-``isolate_metadata_db`` fixture (autouse, see ``tests/conftest.py``).
+the cleanup-now SSE. Both call into the shared Postgres metadata store via
+the ``isolate_metadata_db`` fixture (autouse, see ``tests/conftest.py``).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from backend.core import metadata as metadata_db
 from backend.core.metadata import reconciliation
 from backend.core.metadata import usage_log_db as _usage_log_db
+from backend.utils.date_utils import iso_z
 
 
 def _con(service_id: str):
@@ -22,15 +25,25 @@ def _con(service_id: str):
 def _seed_usage_log(service_id: str, rows: int, days_ago: int = 0) -> None:
     """Insert ``rows`` usage_log entries dated ``days_ago`` in the past.
 
-    ``usage_log`` lives in its own per-service SQLite (v2.0 cutover); seed
+    ``usage_log`` lives in its own per-service database; seed
     via :func:`backend.core.metadata.usage_log_db.get_con` so the row
     counts/cleanup paths see them.
     """
     con = _usage_log_db.get_con(service_id)
+    now_dt = datetime.now(UTC) - timedelta(days=days_ago)
+    now_ts = iso_z(now_dt)
+    hour = now_ts[:13]
     con.executemany(
         "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, bytes, count) "
-        f"VALUES (datetime('now', '-{days_ago} days'), ?, 'A', 'PUT_OBJECT', 0, 1)",
-        [(service_id,) for _ in range(rows)],
+        "VALUES (?, ?, 'A', 'PUT_OBJECT', 0, 1)",
+        [(now_ts, service_id) for _ in range(rows)],
+    )
+    con.execute(
+        """INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+           VALUES (?, ?, 'A', 'PUT_OBJECT', ?, 0, ?)
+           ON CONFLICT (service_id, hour, operation_class, operation_type)
+           DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, last_updated = EXCLUDED.last_updated""",
+        (service_id, hour, rows, now_ts),
     )
     con.commit()
 
@@ -97,7 +110,9 @@ def test_stats_tables_sql_names_all_exist_in_schema():
     """
     sid = "svc-stats-schema"
     con = _con(sid)  # initialises base schema + pending migrations
-    existing = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    existing = {
+        r[0] for r in con.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()").fetchall()
+    }
     for sql_table, _out_key in reconciliation._STATS_TABLES:
         if sql_table == "usage_log":
             continue
@@ -149,6 +164,23 @@ def test_dedup_active_returns_false_when_delete_after_false(monkeypatch):
     assert reconciliation.is_ingested_files_dedup_active(sid) is False
 
 
+def test_dedup_active_returns_false_for_high_scale_shared_source_even_with_delete_after_true(monkeypatch):
+    """A high-scale shared source forces raw deletion off regardless of
+    ``delete_after`` — since raw files persist, ``ingested_files`` remains
+    the only thing stopping full_sync from re-ingesting everything."""
+    sid = "svc-high-scale-shared"
+
+    def _fake_load_config(s: str):
+        return {
+            "provisioning": {"cron_sync": {"delete_after": True, "high_scale_shared_source": True}},
+        }
+
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "load_config", _fake_load_config)
+    assert reconciliation.is_ingested_files_dedup_active(sid) is False
+
+
 # ── cleanup_metadata ─────────────────────────────────────────────────────────
 
 
@@ -161,7 +193,10 @@ def test_cleanup_deletes_aged_usage_log_rows():
 
     assert result["deleted"]["usage_log"] == 5
     assert result["after"]["usage_log"] == 3
-    assert result["vacuumed"] is True  # Anything deleted → VACUUM runs
+    # Vacuum is a SQLite-file concept skipped entirely under Postgres (see
+    # test_cleanup_skips_vacuum_under_postgres) — Postgres reclaims space via
+    # its own autovacuum daemon, outside application control.
+    assert result["vacuumed"] is False
     assert result["duration_s"] >= 0
 
 
@@ -235,6 +270,87 @@ def test_cleanup_force_disables_ingested_files_when_delete_after_false(monkeypat
     assert override_msgs, "expected status event explaining the override"
 
 
+def test_cleanup_trims_rum_ingested_files_past_raw_retention_window():
+    """RUM raw objects are deleted inline as they go (gap 2), and any age-based
+    backstop deletes within log_retention_days (default 90d). Metadata cleanup
+    trims RUM ingested_files older than that window so ingested_files does not
+    grow without limit."""
+    sid = "svc-cleanup-rum-dedup"
+    _seed_ingested_file(sid, 3, days_ago=400)
+    con = _con(sid)
+    # Seed 4 RUM files 400 days ago (past the 91-day raw retention window)
+    # and 2 RUM files 10 days ago (within the 91-day window)
+    con.executemany(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'fos', ?, datetime('now', '-400 days'), 1, 100)",
+        [(f"raw/rum/old-{t}-{i}.gz", t) for t in ("client_vitals", "client_errors") for i in range(2)],
+    )
+    con.executemany(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'fos', ?, datetime('now', '-10 days'), 1, 100)",
+        [(f"raw/rum/recent-{t}.gz", t) for t in ("client_vitals", "client_errors")],
+    )
+    con.commit()
+
+    result = reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 1})
+
+    # 3 request files (400d old, cutoff 1d) + 4 RUM files (400d old, cutoff 91d) = 7 deleted
+    assert result["deleted"]["ingested_files"] == 7
+    # 2 recent RUM files (10d old, within 91d window) survive
+    assert result["after"]["ingested_files"] == 2
+    remaining = [
+        r["file_name"]
+        for r in _con(sid).execute("SELECT file_name FROM ingested_files WHERE source_name = 'fos'").fetchall()
+    ]
+    assert all("recent-" in fn for fn in remaining)
+
+
+def test_cleanup_rum_trimming_causes_no_reingest(monkeypatch):
+    """Gap 6 & Gap 2: Proving that trimming aged RUM ingested_files rows does not
+    cause re-ingest because raw objects were deleted inline and discovery is incremental."""
+    from unittest.mock import MagicMock
+
+    from backend.core.rum_ingest import ingest_rum_logs
+
+    sid = "svc-cleanup-no-reingest"
+    con = _con(sid)
+    # 1. File was previously ingested 400 days ago
+    old_file_key = "s3://test-bucket/raw/rum/year=2025/month=08/day=01/hour=12/minute=00/old.json.gz"
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'test_service', 'client_vitals', datetime('now', '-400 days'), 1, 100)",
+        (old_file_key,),
+    )
+    con.commit()
+
+    # 2. Cleanup runs and trims the 400d old record
+    reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 1})
+    assert con.execute("SELECT COUNT(*) FROM ingested_files WHERE file_name = ?", (old_file_key,)).fetchone()[0] == 0
+
+    # 3. Next rum_sync runs against FOS:
+    # Per the Gap 2 contract, old.json.gz was deleted upon ingest, so FOS has no such file.
+    # Furthermore, incremental minute-prefix listing only scans recent minutes.
+    mock_s3 = MagicMock()
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = [{"Contents": []}]
+    mock_s3.get_paginator.return_value = mock_paginator
+
+    monkeypatch.setattr("backend.core.rum_ingest._get_fos_client", lambda src: mock_s3)
+    monkeypatch.setattr(
+        "backend.core.rum_ingest.get_source_for_service",
+        lambda s: {"name": sid, "bucket": "test-bucket", "service_id": sid},
+    )
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda s: con)
+    monkeypatch.setattr("backend.core.rum_ingest.start_cron_run", lambda s, t: 1)
+    monkeypatch.setattr("backend.core.rum_ingest.log_cron_run", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.core.rum_ingest.finalize_cron_run_if_running", lambda *a, **kw: None)
+
+    events = list(ingest_rum_logs(sid))
+    # Must report 0 rows ingested — NO re-ingest!
+    assert events == [("started", 1), ("done", 0)]
+    assert con.execute("SELECT COUNT(*) FROM ingested_files").fetchone()[0] == 0
+
+
 def test_cleanup_on_event_callback_failure_does_not_abort():
     sid = "svc-cleanup-bad-callback"
     _seed_usage_log(sid, 3, days_ago=10)
@@ -264,6 +380,14 @@ def test_cleanup_non_int_retention_falls_back_to_disabled():
     assert result["deleted"]["usage_log"] == 0
 
 
+def test_postgres_retention_casts_text_timestamps():
+    assert reconciliation._retention_timestamp_expr("ingested_at", True) == "CAST(ingested_at AS TIMESTAMPTZ)"
+    assert reconciliation._retention_timestamp_expr("started_at", True) == "CAST(started_at AS TIMESTAMPTZ)"
+    assert reconciliation._retention_timestamp_expr("ingested_at", False) == "ingested_at"
+    assert reconciliation._table_uses_postgres("cron_runs", True) is True
+    assert reconciliation._table_uses_postgres("usage_log", True) is False
+
+
 def test_cleanup_rollups_skipped_when_rollups_days_zero():
     sid = "svc-cleanup-no-rollups"
     _seed_usage_log(sid, 1, days_ago=400)
@@ -271,72 +395,33 @@ def test_cleanup_rollups_skipped_when_rollups_days_zero():
     assert result["rollups_deleted"] == 0
 
 
-def test_cleanup_first_run_switches_db_to_incremental_vacuum_mode():
-    """First-ever cleanup on a fresh DB (auto_vacuum defaults to NONE) must
-    flip the file into INCREMENTAL mode via the one-time full VACUUM —
-    every subsequent cleanup then takes the cheap chunked path instead of
-    repeating a full-file exclusive-lock rewrite."""
-    sid = "svc-cleanup-vacuum-mode"
+def test_cleanup_skips_vacuum_under_postgres():
+    """auto_vacuum/incremental_vacuum/freelist_count are SQLite-file
+    concepts with no Postgres equivalent (Postgres reclaims space via its
+    own autovacuum daemon). Under the (now sole) Postgres metadata backend
+    the DELETE trim must still run, but the vacuum branch must be skipped
+    rather than executing PRAGMA statements a Postgres connection can't run.
+    """
+    sid = "svc-cleanup-pg-skip"
     _seed_usage_log(sid, 5, days_ago=10)
 
     result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
-    assert result["vacuumed"] is True
 
-    con = _con(sid)
-    mode = con.execute("PRAGMA auto_vacuum").fetchone()[0]
-    assert mode == 2  # INCREMENTAL
+    assert result["deleted"]["usage_log"] == 5
+    assert result["vacuumed"] is False
 
 
-def _seed_padded_cron_runs(service_id: str, rows: int, days_ago: int) -> None:
-    """Like ``_seed_cron_run`` but with a large ``log_output`` blob so the
-    rows span multiple SQLite pages — deleting them must free enough pages
-    for ``PRAGMA freelist_count`` to register nonzero, which a handful of
-    tiny rows (as in ``_seed_cron_run``) would not reliably do."""
-    con = _con(service_id)
-    blob = "x" * 2000
-    con.executemany(
-        "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys, log_output) "
-        f"VALUES ('sync', datetime('now', '-{days_ago} days'), 1.0, 'success', '[]', ?)",
-        [(blob,) for _ in range(rows)],
-    )
-    con.commit()
-
-
-def test_cleanup_second_run_uses_chunked_incremental_vacuum_not_full_vacuum():
-    """Once a DB is already in INCREMENTAL mode, cleanup must reclaim space
-    via ``PRAGMA incremental_vacuum(N)`` chunks — NOT another bare VACUUM,
-    which holds an exclusive lock for the whole file rewrite and starves
-    concurrent writers (slow_queries insert, ingested_files upsert) even
-    past the 30s busy_timeout.
-
-    Seeds ``cron_runs`` (lives in metadata.db, the file the vacuum step
-    actually operates on) rather than ``usage_log`` (a separate per-service
-    file) so the DELETE genuinely frees pages in metadata.db and exercises
-    the incremental_vacuum loop rather than short-circuiting on
-    ``freelist_count == 0``.
-    """
-    sid = "svc-cleanup-vacuum-chunked"
-    _seed_padded_cron_runs(sid, 200, days_ago=400)
-    reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})  # pays the one-time mode switch
-
-    con = _con(sid)
-    assert con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
-
-    _seed_padded_cron_runs(sid, 200, days_ago=400)
-    executed: list[str] = []
-    con.set_trace_callback(lambda sql: executed.append(sql))
-    try:
-        result = reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})
-    finally:
-        con.set_trace_callback(None)
-
-    assert result["vacuumed"] is True
-    assert not any(sql.strip().upper() == "VACUUM" for sql in executed), (
-        f"second cleanup re-ran a full VACUUM instead of incremental_vacuum: {executed}"
-    )
-    assert any("incremental_vacuum" in sql.lower() for sql in executed), (
-        f"expected PRAGMA incremental_vacuum to run on steady-state cleanup: {executed}"
-    )
+# Note: the historical ``test_cleanup_first_run_switches_db_to_incremental_
+# vacuum_mode`` and ``test_cleanup_second_run_uses_chunked_incremental_
+# vacuum_not_full_vacuum`` tests pinned SQLite-only file mechanics
+# (``PRAGMA auto_vacuum``, ``PRAGMA incremental_vacuum``, ``PRAGMA
+# freelist_count``, ``sqlite3.Connection.set_trace_callback``) that have no
+# Postgres equivalent and no longer run under any backend — deleted rather
+# than given a strained Postgres analog. The invariant they guarded
+# ("cleanup reclaims space without holding a long exclusive lock") is
+# Postgres's own autovacuum's job now, outside application control; see
+# ``test_cleanup_skips_vacuum_under_postgres`` above for the behavior this
+# module is actually responsible for under Postgres.
 
 
 def test_cleanup_rollups_skipped_when_source_missing(monkeypatch):
@@ -429,3 +514,15 @@ def test_cleanup_skips_summary_recompute_when_nothing_trimmed():
     summary = metadata_db.get_ingested_files_status_summary(sid)
     assert summary["file_count"] == 42
     assert summary["total_rows"] == 4242
+
+
+def test_storage_stats_report_postgres_relation_sizes_for_every_table():
+    sid = "svc-stats-bytes"
+    _seed_usage_log(sid, 2)
+    _seed_cron_run(sid, 1)
+    stats = reconciliation.get_metadata_storage_stats(sid, force=True)
+    for table in ("usage_log", "cron_runs", "ingested_files"):
+        size = stats["tables"][table]["bytes"]
+        assert isinstance(size, int) and size >= 0, f"{table} bytes should be a pg_total_relation_size int"
+    assert stats["tables"]["cron_runs"]["bytes"] > 0
+    assert stats["db_bytes"] is None

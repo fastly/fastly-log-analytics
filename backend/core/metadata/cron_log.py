@@ -1,4 +1,4 @@
-"""Cron-run history + scoring audit in metadata SQLite.
+"""Cron-run history + scoring audit in shared Postgres metadata store.
 
 Backs the ``cron_runs`` and ``scoring_audit`` tables. Provides the start /
 update / log / purge / reap surface used by the scheduler and the per-task
@@ -9,108 +9,172 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import statistics
-import time
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS, _TASK_ORPHAN_THRESHOLD_MINS, get_con, get_con_readonly
+import psycopg
+
+from backend.core.metadata.base import get_con, get_con_readonly
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+
+
+class CronLeaseHeldError(RuntimeError):
+    """The (service_id, task) lease is held by another run; callers should skip, not fail."""
+
 
 logger = logging.getLogger(__name__)
 
-# Cron bookkeeping writes converge: sync / commit / local-compact / metadata_sync
-# all fire on the same minute boundary and write the one per-service metadata.db.
-# ``PRAGMA busy_timeout=30000`` (see sqlite_pool.DEFAULT_PRAGMAS) absorbs ordinary
-# lock-queueing, but an *immediate* SQLITE_BUSY bypasses the busy handler — a WAL
-# snapshot conflict, or a checkpoint that couldn't drain while the disk was full
-# (the 2026-06-23 incident bloated the WAL to 4 MB). Those surface as
-# "database is locked" and used to crash the whole cron tick with a traceback.
-# They are transient: roll back and retry the whole write unit a few times with
-# short backoff. A lock that survives every attempt re-raises (a real problem,
-# not contention). See [[colima-disk-full-stalls-ingestion]].
-_LOCKED_RETRY_ATTEMPTS = 4
-_LOCKED_RETRY_BASE_SLEEP_S = 0.05
+OUTCOME_COUNTER_KEYS = (
+    "valid_records",
+    "malformed_records",
+    "corrupt_containers",
+    "quarantine_capture_failures",
+    "source_delete_failures",
+    "cap_evictions",
+    "objects_processed",
+    "objects_successful",
+    "objects_partial",
+    "objects_failed",
+)
 
 
-def _retry_on_locked[T](con: sqlite3.Connection, fn: Callable[[], T]) -> T:
-    """Run ``fn`` (a complete, idempotent write+commit unit), retrying on a
-    transient ``OperationalError: database is locked``.
+def _normalize_outcome_counters(counters: dict[str, int] | None) -> dict[str, int]:
+    values = counters or {}
+    unknown = set(values) - set(OUTCOME_COUNTER_KEYS)
+    if unknown:
+        raise ValueError(f"unknown ingestion outcome counter(s): {', '.join(sorted(unknown))}")
+    normalized: dict[str, int] = {}
+    for key in OUTCOME_COUNTER_KEYS:
+        value = values.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"ingestion outcome counter {key!r} must be a non-negative integer")
+        normalized[key] = value
+    return normalized
 
-    Each attempt rolls back first so a half-open transaction never leaves a
-    stale WAL snapshot pinned for the retry. ``fn`` must be safe to re-run after
-    a rollback — the cron writers acquire the write lock on their first
-    statement, so a lock failure means nothing was committed and the redo can't
-    double-write. Non-lock errors (e.g. the ``RuntimeError`` start_cron_run
-    raises when a run is already in progress) propagate immediately.
-    """
-    for attempt in range(_LOCKED_RETRY_ATTEMPTS):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt == _LOCKED_RETRY_ATTEMPTS - 1:
-                raise
-            try:
-                con.rollback()
-            except sqlite3.Error:
-                pass
-            logger.debug(
-                "[cron_log] transient DB lock (attempt %d/%d), retrying: %s", attempt + 1, _LOCKED_RETRY_ATTEMPTS, e
-            )
-            time.sleep(_LOCKED_RETRY_BASE_SLEEP_S * (2**attempt))
-    # Unreachable: the loop either returns fn()'s value or re-raises on the
-    # final attempt. Present so type-checkers see a terminal path.
-    raise AssertionError("unreachable")  # pragma: no cover
+
+def _decode_outcome_counters(raw: str | None) -> dict[str, int]:
+    if not raw:
+        return _normalize_outcome_counters(None)
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("invalid outcome_counters JSON in metadata") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("outcome_counters metadata must be a JSON object")
+    try:
+        return _normalize_outcome_counters(parsed)
+    except ValueError as exc:
+        raise RuntimeError("invalid outcome_counters values in metadata") from exc
+
+
+def _begin_metadata_write(con: Any) -> None:
+    con.execute("BEGIN")
+
+
+def _lock_cron_run(con: Any, service_id: str, run_id: int) -> None:
+    con.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+        (service_id, run_id),
+    )
+
+
+def _publish_cron_run_change(service_id: str, run_id: int, task: str, status: str) -> None:
+    try:
+        from backend.cron_runs_publisher import publisher
+
+        publisher.publish(
+            service_id,
+            {
+                "event": "cron_run_changed",
+                "run_id": run_id,
+                "task": task,
+                "status": status,
+                "ts": iso_z_now(),
+            },
+        )
+    except Exception:
+        logger.exception("[cron_log] cron-runs SSE publish failed for %s/%s", service_id, task)
 
 
 def start_cron_run(service_id: str, task: str) -> int:
-    """Create a 'running' cron run row, reaping orphans first.
+    import time
 
-    Raises RuntimeError if a run of the same task is already in progress
-    (within the orphan threshold). Returns the new row id.
-    """
     con = get_con(service_id)
     started_at = iso_z_now()
-    # Per-task orphan cutoff (sync is short — see _TASK_ORPHAN_THRESHOLD_MINS).
-    threshold_mins = _TASK_ORPHAN_THRESHOLD_MINS.get(task, _ORPHAN_THRESHOLD_MINS)
-    time_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=threshold_mins))
+    now = time.time()
 
     def _write() -> int:
-        # Reap orphans first (rows still 'running' but older than the threshold).
+        # Reap orphans based on heartbeat.
+        # Any cron_runs row that is 'running' but has no active lease is an
+        # orphan. Idempotent under concurrent callers (SQLite same-thread;
+        # Postgres multi-pod): a second UPDATE hitting the same rows after
+        # the first already flipped them just matches zero rows.
         con.execute(
-            "UPDATE cron_runs SET status = 'error', "
-            "error_message = COALESCE(error_message, 'Process interrupted') "
-            "WHERE task = ? AND status = 'running' AND started_at < ?",
-            (task, time_cutoff),
+            """UPDATE cron_runs SET status = 'error',
+               error_message = COALESCE(error_message, 'Process interrupted (heartbeat lost)')
+               WHERE service_id = ? AND task = ? AND status = 'running'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM job_runs
+                     WHERE service_id = cron_runs.service_id
+                       AND job_name = cron_runs.task
+                       AND status = 'running'
+                       AND (heartbeat_at + lease_ttl_s) >= ?
+                 )""",
+            (service_id, task, now),
         )
 
-        busy = con.execute(
-            "SELECT count(*) AS n FROM cron_runs WHERE task = ? AND status = 'running'",
-            (task,),
-        ).fetchone()
-        if busy and busy["n"] > 0:
+        # Also clean up expired job_runs — reaping an EXPIRED lease first is
+        # what makes the atomic insert below correct: by the time it runs,
+        # any row still literally status='running' is non-expired (had it
+        # expired, this statement would already have reaped it), so the
+        # unique-index conflict below means a genuinely active lease, not a
+        # stale one blocking a legitimate new run.
+        con.execute(
+            """UPDATE job_runs SET status = 'reaped'
+               WHERE service_id = ? AND job_name = ? AND status = 'running'
+                 AND (heartbeat_at + lease_ttl_s) < ?""",
+            (service_id, task, now),
+        )
+
+        # Acquire the lease atomically. idx_job_runs_running_lease (a unique
+        # index on (service_id, job_name) WHERE status='running') is the
+        # conflict target — ON CONFLICT DO NOTHING means at most one of any
+        # number of concurrent callers gets rowcount=1; everyone else gets
+        # rowcount=0 and must back off. This replaces a check-then-insert
+        # (SELECT count, then INSERT) that only stayed race-free because a
+        # single SQLite writer connection serializes both statements inside
+        # one transaction — a guarantee autocommit-mode Postgres does NOT
+        # give multiple pods racing the same (service_id, task).
+        lease_ttl_s = 60
+        lease_cur = con.execute(
+            "INSERT INTO job_runs (service_id, job_name, started_at, heartbeat_at, lease_ttl_s, status) "
+            "VALUES (?, ?, ?, ?, ?, 'running') "
+            "ON CONFLICT (service_id, job_name) WHERE status = 'running' DO NOTHING",
+            (service_id, task, now, now, lease_ttl_s),
+        )
+        if not lease_cur.rowcount:
             con.commit()
-            raise RuntimeError(f"Task '{task}' is already running for this service.")
+            raise CronLeaseHeldError(f"Task '{task}' is already running for this service.")
 
         cur = con.execute(
-            "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys) "
-            "VALUES (?, ?, 0.0, 'running', '[]')",
-            (task, started_at),
+            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys) "
+            "VALUES (?, ?, ?, 0.0, 'running', '[]')",
+            (service_id, task, started_at),
         )
         con.commit()
         return int(cur.lastrowid or 0)
 
-    # Retry the whole reap→guard→insert unit on a transient lock so a
-    # converging cron minute can't crash the tick (see _retry_on_locked).
-    new_id = _retry_on_locked(con, _write)
+    # Run the whole reap→guard→insert unit so a converging cron minute
+    # can't crash the tick.
+    new_id = _write()
 
     try:
         from backend.utils.cache_registry import CacheRegistry
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("start_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle any connected /api/cron-runs/stream subscribers that a run
     # just started. Same defensive contract as the sync-status publish
@@ -149,6 +213,7 @@ def log_cron_run(
     parquet_files_created: int = 0,
     parquet_files_optimized: int = 0,
     parquet_keys: list | None = None,
+    outcome_counters: dict[str, int] | None = None,
     summary: str | None = None,
     log_output: str | None = None,
     run_id: int | None = None,
@@ -162,87 +227,210 @@ def log_cron_run(
     con = get_con(service_id)
     started_at = iso_z(datetime.now(UTC) - timedelta(seconds=max(duration_s, 0)))
     keys_json = json.dumps(parquet_keys or [])
+    outcome_counters = _normalize_outcome_counters(outcome_counters) if outcome_counters is not None else None
+    final_status = status
 
     def _write() -> None:
-        if run_id is not None:
+        nonlocal final_status
+        import time
+
+        final_rows_ingested = rows_ingested
+        final_corrupt_rows = corrupt_rows
+        _begin_metadata_write(con)
+        try:
+            if run_id is not None:
+                _lock_cron_run(con, service_id, run_id)
+                lock_clause = " FOR UPDATE"
+                existing = con.execute(
+                    "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
+                    (run_id, service_id),
+                ).fetchone()
+                existing_raw_counters = existing["outcome_counters"] if existing else None
+                has_existing_counters = bool(existing_raw_counters and json.loads(existing_raw_counters))
+                existing_counters = _decode_outcome_counters(existing_raw_counters) if has_existing_counters else None
+                current_status = existing["status"] if existing else None
+                if outcome_counters is None:
+                    merged_counters = existing_counters
+                elif existing_counters is not None and current_status == "running":
+                    merged_counters = {
+                        key: existing_counters[key] + outcome_counters[key] for key in OUTCOME_COUNTER_KEYS
+                    }
+                else:
+                    merged_counters = existing_counters or outcome_counters
+                final_status = "error" if current_status == "error" else status
+            else:
+                merged_counters = outcome_counters
+
+            now = time.time()
             con.execute(
-                """UPDATE cron_runs SET
-                    duration_s = ?, status = ?, error_message = ?,
-                    files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
-                    parquet_files_created = ?, parquet_files_optimized = ?,
-                    parquet_keys = ?, summary = ?, log_output = ?
-                   WHERE id = ?""",
-                (
-                    duration_s,
-                    status,
-                    error_message,
-                    files_downloaded,
-                    files_deleted_fos,
-                    rows_ingested,
-                    corrupt_rows,
-                    parquet_files_created,
-                    parquet_files_optimized,
-                    keys_json,
-                    summary,
-                    log_output,
-                    run_id,
-                ),
+                "UPDATE job_runs SET status = ?, finished_at = ? "
+                "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                (final_status, now, service_id, task),
             )
-        else:
-            con.execute(
-                """INSERT INTO cron_runs (task, started_at, duration_s, status, error_message,
-                    files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                    parquet_files_created, parquet_files_optimized, parquet_keys, summary, log_output)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    task,
-                    started_at,
-                    duration_s,
-                    status,
-                    error_message,
-                    files_downloaded,
-                    files_deleted_fos,
-                    rows_ingested,
-                    corrupt_rows,
-                    parquet_files_created,
-                    parquet_files_optimized,
-                    keys_json,
-                    summary,
-                    log_output,
-                ),
-            )
-        con.commit()
+            if run_id is not None:
+                persisted_counters = merged_counters
+                if persisted_counters is not None:
+                    final_rows_ingested = persisted_counters["valid_records"]
+                    final_corrupt_rows = (
+                        persisted_counters["malformed_records"] + persisted_counters["corrupt_containers"]
+                    )
+                con.execute(
+                    """UPDATE cron_runs SET
+                        duration_s = ?, status = ?, error_message = COALESCE(error_message, ?),
+                        files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
+                        parquet_files_created = ?, parquet_files_optimized = ?,
+                        parquet_keys = ?, outcome_counters = ?, summary = ?, log_output = ?
+                       WHERE id = ? AND service_id = ?""",
+                    (
+                        duration_s,
+                        final_status,
+                        error_message,
+                        files_downloaded,
+                        files_deleted_fos,
+                        final_rows_ingested,
+                        final_corrupt_rows,
+                        parquet_files_created,
+                        parquet_files_optimized,
+                        keys_json,
+                        json.dumps(persisted_counters or {}),
+                        summary,
+                        log_output,
+                        run_id,
+                        service_id,
+                    ),
+                )
+            else:
+                con.execute(
+                    """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
+                        files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
+                        parquet_files_created, parquet_files_optimized, parquet_keys, outcome_counters, summary, log_output)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        service_id,
+                        task,
+                        started_at,
+                        duration_s,
+                        status,
+                        error_message,
+                        files_downloaded,
+                        files_deleted_fos,
+                        final_rows_ingested,
+                        final_corrupt_rows,
+                        parquet_files_created,
+                        parquet_files_optimized,
+                        keys_json,
+                        json.dumps(outcome_counters or {}),
+                        summary,
+                        log_output,
+                    ),
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
 
     # A leaked terminal write is worse than a leaked start (the row stays
     # 'running' and blocks the task until the orphan cutoff — the 2026-06-19
-    # incident), so retry the terminal write on a transient lock too.
-    _retry_on_locked(con, _write)
+    # incident).
+    _write()
 
     try:
         from backend.utils.cache_registry import CacheRegistry
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("log_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle subscribers that this run reached a terminal status.
     # Broad except so an SSE-channel failure never breaks cron
     # bookkeeping.
-    try:
-        from backend.cron_runs_publisher import publisher as _cron_runs_publisher
+    if run_id is not None:
+        _publish_cron_run_change(service_id, run_id, task, final_status)
 
-        _cron_runs_publisher.publish(
-            service_id,
-            {
-                "event": "cron_run_changed",
-                "run_id": run_id,
-                "task": task,
-                "status": status,
-                "ts": iso_z_now(),
-            },
+
+def record_ingest_object_outcome(service_id: str, object_key: str, outcome_counters: dict[str, int]) -> bool:
+    """Replace one ledger object's contribution in its originating cron run.
+
+    The ledger snapshot and aggregated cron counters commit together, so task
+    retries and later source-deletion outcomes cannot double-count an object.
+    """
+
+    new_counters = _normalize_outcome_counters(outcome_counters)
+    con = get_con(service_id)
+    _begin_metadata_write(con)
+    try:
+        lock_clause = " FOR UPDATE"
+        ledger_row = con.execute(
+            "SELECT originating_task, originating_run_id, outcome_counters "
+            "FROM ingest_ledger WHERE service_id = ? AND object_key = ?" + lock_clause,
+            (service_id, object_key),
+        ).fetchone()
+        if ledger_row is None:
+            con.execute("ROLLBACK")
+            return False
+
+        task = ledger_row["originating_task"]
+        run_id = ledger_row["originating_run_id"]
+        previous = _decode_outcome_counters(ledger_row["outcome_counters"])
+        new_run_status: str | None = None
+        if run_id is not None:
+            run_id = int(run_id)
+            _lock_cron_run(con, service_id, run_id)
+            run_row = con.execute(
+                "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
+                (run_id, service_id),
+            ).fetchone()
+            if run_row is None:
+                raise RuntimeError(f"originating cron run {run_id} is missing for ledger object")
+            if task != run_row["task"]:
+                raise RuntimeError(f"ledger origin task does not match cron run {run_id}")
+
+            totals = _decode_outcome_counters(run_row["outcome_counters"])
+            for key in OUTCOME_COUNTER_KEYS:
+                totals[key] += new_counters[key] - previous[key]
+                if totals[key] < 0:
+                    raise RuntimeError(f"outcome counter {key!r} would become negative")
+            has_failure = any(
+                totals[key]
+                for key in (
+                    "malformed_records",
+                    "corrupt_containers",
+                    "quarantine_capture_failures",
+                    "source_delete_failures",
+                    "objects_partial",
+                    "objects_failed",
+                )
+            )
+            new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
+            con.execute(
+                "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
+                "rows_ingested = ?, corrupt_rows = ?, "
+                "error_message = CASE WHEN ? = 'error' "
+                "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
+                "ELSE error_message END WHERE id = ? AND service_id = ?",
+                (
+                    json.dumps(totals),
+                    new_run_status,
+                    totals["valid_records"],
+                    totals["malformed_records"] + totals["corrupt_containers"],
+                    new_run_status,
+                    run_id,
+                    service_id,
+                ),
+            )
+
+        con.execute(
+            "UPDATE ingest_ledger SET outcome_counters = ? WHERE service_id = ? AND object_key = ?",
+            (json.dumps(new_counters), service_id, object_key),
         )
+        con.execute("COMMIT")
     except Exception:
-        logger.exception("[cron_log] cron-runs SSE publish (end) failed for %s/%s", service_id, task)
+        con.execute("ROLLBACK")
+        raise
+
+    if run_id is not None and task is not None and new_run_status is not None:
+        _publish_cron_run_change(service_id, run_id, task, new_run_status)
+    return True
 
 
 def finalize_cron_run_if_running(
@@ -276,19 +464,21 @@ def finalize_cron_run_if_running(
     con = get_con(service_id)
 
     def _write() -> bool:
-        row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+        row = con.execute(
+            "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
+        ).fetchone()
         if not row or row["status"] != "running":
             return False
         cur = con.execute(
             "UPDATE cron_runs SET status = 'error', duration_s = ?, "
             "error_message = COALESCE(error_message, ?), summary = COALESCE(summary, ?) "
-            "WHERE id = ? AND status = 'running'",
-            (max(duration_s, 0.0), error_message, summary, run_id),
+            "WHERE id = ? AND service_id = ? AND status = 'running'",
+            (max(duration_s, 0.0), error_message, summary, run_id, service_id),
         )
         con.commit()
         return bool(cur.rowcount)
 
-    if not _retry_on_locked(con, _write):
+    if not _write():
         return False
 
     try:
@@ -296,7 +486,7 @@ def finalize_cron_run_if_running(
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:
-        pass
+        logger.debug("finalize_cron_run_if_running: CacheRegistry.clear failed (ignored)", exc_info=True)
 
     # Tickle subscribers that this run reached a terminal status — same
     # contract (and broad except) as log_cron_run's publish hook.
@@ -327,20 +517,20 @@ def update_cron_duration(
     con = get_con(service_id)
     if log_output is None:
         con.execute(
-            "UPDATE cron_runs SET duration_s = ? WHERE id = ?",
-            (duration_s, run_id),
+            "UPDATE cron_runs SET duration_s = ? WHERE id = ? AND service_id = ?",
+            (duration_s, run_id, service_id),
         )
     else:
         con.execute(
-            "UPDATE cron_runs SET duration_s = ?, log_output = ? WHERE id = ?",
-            (duration_s, log_output, run_id),
+            "UPDATE cron_runs SET duration_s = ?, log_output = ? WHERE id = ? AND service_id = ?",
+            (duration_s, log_output, run_id, service_id),
         )
     con.commit()
 
 
 def delete_cron_run(service_id: str, run_id: int) -> None:
     con = get_con(service_id)
-    con.execute("DELETE FROM cron_runs WHERE id = ?", (run_id,))
+    con.execute("DELETE FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id))
     con.commit()
 
 
@@ -351,8 +541,8 @@ def purge_cron_runs(
     days: int | None = None,
 ) -> None:
     con = get_con(service_id)
-    where: list[str] = []
-    params: list = []
+    where: list[str] = ["service_id = ?"]
+    params: list = [service_id]
     if task and task != "all":
         where.append("task = ?")
         params.append(task)
@@ -376,8 +566,8 @@ def record_scoring_audit(
 
     Called from every scoring-config-mutating endpoint (enable, disable,
     threshold commit + enforce, retrain, rotate-key, matrix-rollback).
-    Best-effort: any SQLite failure is logged at DEBUG and swallowed so
-    a busy WAL doesn't block the actual operator action.
+    Best-effort: any DB failure is logged at DEBUG and swallowed so a
+    transient Postgres blip doesn't block the actual operator action.
     """
     try:
         con = get_con(service_id)
@@ -386,7 +576,7 @@ def record_scoring_audit(
             (service_id, action, actor, json.dumps(details) if details else None),
         )
         con.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] record_scoring_audit(%s, %s) failed: %s", service_id, action, e)
 
 
@@ -421,7 +611,7 @@ def list_scoring_audit(
                     pass
             out.append(row)
         return out
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] list_scoring_audit(%s) failed: %s", service_id, e)
         return []
 
@@ -431,23 +621,24 @@ def prune_scoring_audit(service_id: str, *, keep_last: int = 10000) -> None:
 
     Cheap unbounded growth guard — every scoring-config mutation appends
     one row, and the table is only ever read by the admin UI / state_sync
-    export which already caps its own page size. Best-effort: any SQLite
+    export which already caps its own page size. Best-effort: any DB
     failure is logged at DEBUG and swallowed so trimming never blocks the
     caller (typically a maintenance cron, not the operator hot path).
     """
     try:
         con = get_con(service_id)
         # Tiebreak on id DESC so concurrent inserts that landed in the same
-        # `datetime('now')` second are deterministically ordered (otherwise
-        # SQLite is free to pick any row from the tied group, which makes
-        # prune flaky under burst workloads and breaks reproducibility tests).
+        # `current_timestamp` instant are deterministically ordered
+        # (otherwise the DB is free to pick any row from the tied group,
+        # which makes prune flaky under burst workloads and breaks
+        # reproducibility tests).
         con.execute(
             "DELETE FROM scoring_audit WHERE service_id = ? AND id NOT IN ("
             "SELECT id FROM scoring_audit WHERE service_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?)",
             (service_id, service_id, keep_last),
         )
         con.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] prune_scoring_audit(%s) failed: %s", service_id, e)
 
 
@@ -458,9 +649,9 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
     abandoned-worker-thread zombies that completed log_cron_run but
     never fired end_progress).
 
-    Narrowed exception scope: catches sqlite3.Error (DB unreachable,
-    table missing, locked) and logs at DEBUG so the next 'why isn't
-    the cross-check firing?' triage isn't flying blind. Returns None
+    Narrowed exception scope: catches psycopg.Error (DB unreachable,
+    table missing, connection lost) and logs at DEBUG so the next 'why
+    isn't the cross-check firing?' triage isn't flying blind. Returns None
     on any DB failure so list_active_runs falls back to the in-memory
     signal (we'd rather show a false in-flight than miss a real one).
     """
@@ -468,9 +659,11 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
 
     try:
         with contextlib.closing(get_con_readonly(service_id)) as con:
-            row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            row = con.execute(
+                "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
+            ).fetchone()
             return row["status"] if row else None
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] get_cron_run_status(%s, %s) failed: %s", service_id, run_id, e)
         return None
 
@@ -486,11 +679,14 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
 
     try:
         with contextlib.closing(get_con_readonly(service_id)) as con:
-            row = con.execute("SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            row = con.execute(
+                "SELECT status, log_output FROM cron_runs WHERE id = ? AND service_id = ?",
+                (run_id, service_id),
+            ).fetchone()
             if row is None:
                 return None
             return {"status": row["status"], "log_output": row["log_output"]}
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] get_cron_run_result(%s, %s) failed: %s", service_id, run_id, e)
         return None
 
@@ -519,11 +715,19 @@ def get_cron_runs(
     status != 'running'), it falls out of the response.
     """
     con = get_con(service_id)
-    where: list[str] = []
-    params: list = []
+    where: list[str] = ["service_id = ?"]
+    params: list = [service_id]
     if task and task != "all":
-        where.append("task = ?")
-        params.append(task)
+        if "," in task:
+            task_list = [t.strip() for t in task.split(",") if t.strip()]
+            placeholders = ", ".join("?" for _ in task_list)
+            where.append(f"task IN ({placeholders})")
+            params.extend(task_list)
+        elif task in ("rum_sync", "rum_discovery"):
+            where.append("task IN ('rum_sync', 'rum_discovery')")
+        else:
+            where.append("task = ?")
+            params.append(task)
     if status and status != "all":
         where.append("status = ?")
         params.append(status)
@@ -585,7 +789,7 @@ def get_cron_runs(
     return total, entries
 
 
-def latest_cron_per_task(service_id: str) -> dict[str, dict]:
+def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...] = ()) -> dict[str, dict]:
     """Return {task: latest_completed_run_dict} for the sync-status endpoint.
 
     Single window-function pass: ROW_NUMBER() OVER (PARTITION BY task) keeps
@@ -595,22 +799,51 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
     taking ~12.9 ms — fast in absolute terms but per-task overhead added
     up on services with many task types. Mirrors the same pattern used
     by `cron_summary_for_tasks` below.
+
+    ``exclude_error_messages`` (default none) drops rows carrying one of
+    these exact error_message sentinels BEFORE the per-task ranking, so an
+    excluded row cannot become a task's "latest" and cannot mask the real
+    terminal run beneath it. The fault-surfacing caller
+    (``recent_cron_failures`` in ``routers/admin/health.py``) passes the
+    boot-reap sentinel ``"Process interrupted by server restart"`` here, so a
+    cron the deploy restarted mid-run isn't reported as an environment fault —
+    matching the identical exclusion the deep-health degraded check already
+    applies in ``backend/main.py`` (see its comment on boot-reap rows being
+    lifecycle artifacts, not failing crons). Default callers are unaffected.
     """
     con = get_con(service_id)
-    rows = con.execute(
-        """
-        SELECT task, started_at, status, duration_s, summary, error_message
-        FROM (
-            SELECT task, started_at, status, duration_s, summary, error_message,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY task ORDER BY started_at DESC, id DESC
-                   ) AS rn
-            FROM cron_runs
-            WHERE status != 'running'
+
+    exclusion_sql = ""
+    params: list[Any] = [service_id]
+    if exclude_error_messages:
+        placeholders = ",".join(["?"] * len(exclude_error_messages))
+        exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
+        params.extend(exclude_error_messages)
+
+    sql = f"""
+    WITH RECURSIVE tasks AS (
+        (
+            SELECT task FROM cron_runs WHERE service_id = ? ORDER BY service_id, task LIMIT 1
         )
-        WHERE rn = 1
-        """
-    ).fetchall()
+        UNION ALL
+        SELECT (
+            SELECT task FROM cron_runs WHERE service_id = ? AND task > t.task ORDER BY service_id, task LIMIT 1
+        )
+        FROM tasks t WHERE t.task IS NOT NULL
+    )
+    SELECT r.task, r.started_at, r.status, r.duration_s, r.summary, r.error_message
+    FROM tasks t
+    CROSS JOIN LATERAL (
+        SELECT task, started_at, status, duration_s, summary, error_message
+        FROM cron_runs
+        WHERE service_id = ? AND task = t.task AND status != 'running'{exclusion_sql}
+        ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
+    ) r WHERE t.task IS NOT NULL
+    """
+    cte_params: list[Any] = [service_id, service_id, service_id]
+    if exclude_error_messages:
+        cte_params.extend(exclude_error_messages)
+    rows = con.execute(sql, tuple(cte_params)).fetchall()
     return {
         r["task"]: {
             "started_at": r["started_at"],
@@ -624,7 +857,7 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
 
 
 def adaptive_stale_minutes(
-    con: sqlite3.Connection,
+    con: Any,
     *,
     default_minutes: int,
     min_samples: int = 10,
@@ -654,8 +887,10 @@ def adaptive_stale_minutes(
     """
     try:
         rows = con.execute(
+            # 'sync' (pre-v3 name) kept so pre-upgrade history still feeds the
+            # percentile until enough log_discovery samples accumulate.
             "SELECT started_at FROM cron_runs "
-            "WHERE task = 'sync' AND status = 'success' "
+            "WHERE task IN ('sync', 'log_discovery') AND status = 'success' "
             "AND (files_downloaded > 0 OR rows_ingested > 0) "
             "ORDER BY started_at"
         ).fetchall()
@@ -671,58 +906,61 @@ def adaptive_stale_minutes(
 
 
 def reap_running_cron_runs(service_id: str, reason: str = "Process interrupted by server restart") -> int:
-    """Mark every ``running`` cron row as ``error``, regardless of age.
-
-    Called at backend startup: in-memory progress dicts (``backend.cron_progress``)
-    are wiped on every restart, so any row still marked ``running`` in SQLite is
-    by definition an orphan — its event stream is gone and the worker thread
-    that owned it died with the previous process. Without this reap, the run
-    sits in the DB until the next sync of the *same task* triggers
-    ``start_cron_run``'s 60-minute orphan cutoff — and in the meantime the UI
-    polls ``/api/cron-runs?status=running``, sees the stale row, and mounts a
-    ``CronLiveLog`` that hangs on "Loading logs..." until the SSE endpoint
-    times out 30 s later.
-
-    Returns the number of rows reaped (0 if none).
-    """
     con = get_con(service_id)
+    # ``con`` is already scoped to this service's own per-service SQLite
+    # file (get_con(service_id)), so every row in it belongs to this
+    # service regardless of what its `service_id` column holds. Some
+    # legacy rows (pre-dating the column's consistent population — seen
+    # in production as NULL-service_id 'sync'/'metadata_sync' rows) fail
+    # an exact `service_id = ?` match, which is NULL-unsafe in SQL (NULL
+    # = anything is NULL, never true) and left them permanently stuck in
+    # status='running' across every restart — the health probe's stuck-
+    # sync detector then degrades the service forever. Match NULL too so
+    # the reaper actually clears every orphan in this file.
+    con.execute(
+        "UPDATE job_runs SET status = 'error', detail = ? "
+        "WHERE (service_id = ? OR service_id IS NULL) AND status = 'running'",
+        (reason, service_id),
+    )
     cur = con.execute(
-        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) WHERE status = 'running'",
-        (reason,),
+        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) "
+        "WHERE (service_id = ? OR service_id IS NULL) AND status = 'running'",
+        (reason, service_id),
     )
     con.commit()
     return int(cur.rowcount or 0)
 
 
 def cron_busy(service_id: str) -> bool:
-    """True if any cron run is currently 'running' within the orphan threshold."""
+    import time
+
     con = get_con(service_id)
-    time_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=_ORPHAN_THRESHOLD_MINS))
+    now = time.time()
     row = con.execute(
-        "SELECT count(*) AS n FROM cron_runs WHERE status = 'running' AND started_at > ?",
-        (time_cutoff,),
+        "SELECT count(*) AS n FROM job_runs WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) >= ?",
+        (service_id, now),
     ).fetchone()
     return bool(row and row["n"] > 0)
 
 
-def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("sync", "commit")) -> dict[str, dict]:
+def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("log_discovery", "commit")) -> dict[str, dict]:
     """For each named task, return the latest run's summary fields. Used by refresh_config_status."""
     if not tasks:
         return {}
     con = get_con(service_id)
-    placeholders = ",".join("?" * len(tasks))
+
     rows = con.execute(
-        f"""
-        SELECT task, started_at, duration_s, status, error_message, summary
-        FROM (
-            SELECT task, started_at, duration_s, status, error_message, summary,
-                   ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC) AS rn
+        """
+        SELECT r.task, r.started_at, r.duration_s, r.status, r.error_message, r.summary
+        FROM UNNEST(?::text[]) AS t(task_name)
+        CROSS JOIN LATERAL (
+            SELECT task, started_at, duration_s, status, error_message, summary
             FROM cron_runs
-            WHERE task IN ({placeholders})
-        )
-        WHERE rn = 1
+            WHERE service_id = ? AND task = t.task_name
+            ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
+        ) r
         """,
-        tasks,
+        (list(tasks), service_id),
     ).fetchall()
     return {
         row["task"]: {
@@ -734,3 +972,59 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("sync", "c
         }
         for row in rows
     }
+
+
+def reap_stale_jobs(service_id: str) -> None:
+    import time
+
+    from backend.core.metadata.base import get_con
+
+    con = get_con(service_id)
+    now = time.time()
+
+    # Find all running jobs that have expired
+    stale_jobs = con.execute(
+        "SELECT id, job_name FROM job_runs WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) < ?",
+        (service_id, now),
+    ).fetchall()
+
+    if not stale_jobs:
+        return
+
+    for row in stale_jobs:
+        job_id = row["id"]
+        job_name = row["job_name"]
+
+        con.execute(
+            "UPDATE job_runs SET status = 'reaped', detail = 'reaped due to lease expiry' WHERE id = ?", (job_id,)
+        )
+        # Scope by started_at: only rows that predate the lease expiry are the
+        # leaked ones — an unscoped UPDATE would also error a NEWER healthy run
+        # of the same task that started after the stale lease expired.
+        con.execute(
+            "UPDATE cron_runs SET status = 'error', error_message = 'Reaped due to lease expiry' "
+            "WHERE service_id = ? AND task = ? AND status = 'running' "
+            "AND started_at <= (SELECT strftime('%Y-%m-%dT%H:%M:%SZ', heartbeat_at + lease_ttl_s, 'unixepoch') "
+            "                   FROM job_runs WHERE id = ?)",
+            (service_id, job_name, job_id),
+        )
+
+    con.commit()
+
+    # Re-enqueue idempotent ingest jobs to prevent orphaned-sync-row ingestion
+    # stalls — only when a broker is actually configured (in-process mode has
+    # no worker; send_task would error against the default localhost broker).
+    # Commit the reap FIRST so a broker failure can't roll it back.
+    import os
+
+    if os.environ.get("CELERY_BROKER_URL"):
+        from backend.celery_app import app
+
+        for row in stale_jobs:
+            try:
+                if row["job_name"] == "log_discovery":
+                    app.send_task("backend.cron.jobs.sync._run_log_discovery_cron_celery", args=[service_id])
+                elif row["job_name"] == "commit":
+                    app.send_task("backend.cron.jobs.commit._run_commit_celery", args=[service_id])
+            except Exception as e:
+                logger.warning("[reap_stale_jobs] %s: re-enqueue of %s failed: %s", service_id, row["job_name"], e)

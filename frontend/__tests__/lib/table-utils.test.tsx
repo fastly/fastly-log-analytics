@@ -3,11 +3,10 @@
  */
 import { render, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import React from 'react'
+import type { ReactNode } from 'react'
+import type { CellContext, ColumnDef } from '@tanstack/react-table'
 
-vi.mock('next/navigation', () => ({
-  usePathname: () => '/origin',
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/origin'))
 
 // FilterValueCell (rendered by makeLatencyColumns) now reads useMaskIps,
 // which needs a QueryClient. Stub it off so the cells render in isolation.
@@ -15,23 +14,37 @@ vi.mock('@/hooks/useMaskIps', () => ({
   useMaskIps: () => false,
 }))
 
-import { makeLatencyColumns } from '@/lib/table-utils'
+import { makeLatencyColumns, type LatencyRow } from '@/lib/table-utils'
+
+type UrlRow = LatencyRow & { url?: string | null }
 
 afterEach(() => cleanup())
 
 // Helper: build a synthetic tanstack-table CellContext-shaped object so we
 // can invoke the column cell renderers directly without standing up a
 // table instance.
-function ctx(value: any, originalRow: Record<string, any>) {
+type CellStub = Pick<CellContext<UrlRow, unknown>, 'getValue'> & {
+  row: Pick<CellContext<UrlRow, unknown>['row'], 'original'>
+}
+
+function ctx(value: unknown, originalRow: UrlRow): CellStub {
   return {
-    getValue: () => value,
+    getValue<T>() {
+      return value as T
+    },
     row: { original: originalRow },
   }
 }
 
+function cellRenderer(col: ColumnDef<UrlRow>): (info: CellStub) => ReactNode {
+  const cell = col.cell
+  if (typeof cell !== 'function') throw new Error('expected a cell render function')
+  return (info) => cell(info as CellContext<UrlRow, unknown>)
+}
+
 describe('makeLatencyColumns — labelField cell', () => {
-  const cols = makeLatencyColumns('url', 'URL', 'url')
-  const labelCell = cols[0].cell as (info: any) => React.ReactElement
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
+  const labelCell = cellRenderer(cols[0])
 
   it('renders plain span when filter field is null', () => {
     const { container } = render(labelCell(ctx('/api/data', { url: null })))
@@ -53,12 +66,12 @@ describe('makeLatencyColumns — labelField cell', () => {
 })
 
 describe('makeLatencyColumns — numeric cells', () => {
-  const cols = makeLatencyColumns('url', 'URL', 'url')
-  const requestsCell = cols[1].cell as (info: any) => string
-  const avgCell = cols[2].cell as (info: any) => string
-  const p50Cell = cols[3].cell as (info: any) => string
-  const p95Cell = cols[4].cell as (info: any) => string
-  const p99Cell = cols[5].cell as (info: any) => string
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
+  const requestsCell = cellRenderer(cols[1])
+  const avgCell = cellRenderer(cols[2])
+  const p50Cell = cellRenderer(cols[3])
+  const p95Cell = cellRenderer(cols[4])
+  const p99Cell = cellRenderer(cols[5])
 
   it('requests cell: null → "0", number → toLocaleString', () => {
     expect(requestsCell(ctx(null, {}))).toBe('0')

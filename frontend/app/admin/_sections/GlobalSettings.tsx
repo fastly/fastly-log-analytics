@@ -1,8 +1,9 @@
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
+import { useDerivedState } from '@/hooks/useDerivedState'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 import { AnalyticsCard } from "@/components/AnalyticsCard"
@@ -23,11 +24,7 @@ import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BotSourcesPanel } from './BotSourcesPanel'
 
 function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: (days: number) => void }) {
-  const [value, setValue] = useState(String(initial))
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setValue(String(initial))
-  }, [initial])
+  const [value, setValue] = useDerivedState(String(initial))
   return (
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <span>Keep for</span>
@@ -67,11 +64,6 @@ export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [rateA, setRateA] = useState(String(_PRICING_DEFAULTS.class_a_rate_per_1k))
-  const [rateB, setRateB] = useState(String(_PRICING_DEFAULTS.class_b_rate_per_10k))
-  const [rateCdn, setRateCdn] = useState(String(_PRICING_DEFAULTS.cdn_egress_rate_per_gb))
-  const [rateStorage, setRateStorage] = useState(String(_PRICING_DEFAULTS.storage_rate_per_gb_month))
-  const [minBilledDays, setMinBilledDays] = useState(String(_PRICING_DEFAULTS.min_billed_days))
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['usage-logging-settings'],
@@ -81,30 +73,29 @@ export const PricingSettings = () => {
     },
   })
 
-  // Apply server-side values whenever the query resolves. The earlier
-  // implementation set state inside the queryFn body which raced with
-  // React's batching and sometimes left the inputs empty after Edit was
-  // pressed (audit finding N-9, 2026-06-10).
-  useEffect(() => {
-    if (!settings) return
-    const d = settings as any
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
-    setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
-    setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))
-    setRateStorage(String(d.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month))
-    setMinBilledDays(String(d.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days))
-  }, [settings])
+  // Inputs follow the server values whenever the query resolves (audit finding N-9,
+  // 2026-06-10: setting state inside the queryFn raced React's batching and left them empty).
+  const serverForm = useMemo(
+    () => ({
+      rateA: String(settings?.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k),
+      rateB: String(settings?.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k),
+      rateCdn: String(settings?.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb),
+      rateStorage: String(settings?.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month),
+      minBilledDays: String(settings?.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days),
+    }),
+    [settings],
+  )
+  const [form, setForm] = useDerivedState(serverForm)
+  const { rateA, rateB, rateCdn, rateStorage, minBilledDays } = form
+  const fieldSetter = (field: keyof typeof form) => (value: string) => setForm((f) => ({ ...f, [field]: value }))
+  const setRateA = fieldSetter('rateA')
+  const setRateB = fieldSetter('rateB')
+  const setRateCdn = fieldSetter('rateCdn')
+  const setRateStorage = fieldSetter('rateStorage')
+  const setMinBilledDays = fieldSetter('minBilledDays')
 
   function handleCancel() {
-    if (settings) {
-      const d = settings as any
-      setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
-      setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
-      setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))
-      setRateStorage(String(d.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month))
-      setMinBilledDays(String(d.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days))
-    }
+    if (settings) setForm(serverForm)
     setEditing(false)
   }
 
@@ -118,7 +109,7 @@ export const PricingSettings = () => {
           cdn_egress_rate_per_gb: parseFloat(rateCdn),
           storage_rate_per_gb_month: parseFloat(rateStorage),
           min_billed_days: parseInt(minBilledDays),
-        } as any,
+        },
       })
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
       queryClient.invalidateQueries({ queryKey: ['usage'] })
@@ -206,24 +197,24 @@ export function GlobalSettings() {
     staleTime: 60_000,
   })
 
-  const usageLoggingEnabled = (usageLoggingSettings as any)?.enabled ?? false
-  const usageLogRetention = (usageLoggingSettings as any)?.retention_days ?? 30
+  const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
+  const usageLogRetention = usageLoggingSettings?.retention_days ?? 30
 
   async function saveUsageLogRetention(days: number) {
     if (!Number.isFinite(days) || days < 1 || days === usageLogRetention) return
-    queryClient.setQueryData(['usage-logging-settings'], (old: any) => ({ ...old, retention_days: days }))
+    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days }))
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } as any })
+      await client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } })
     } finally {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     }
   }
 
   async function handleUsageLoggingToggle(enabled: boolean) {
-    queryClient.setQueryData(['usage-logging-settings'], (old: any) => ({ ...old, enabled }))
+    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, enabled }))
     setUsageLoggingLoading(true)
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { enabled } as any })
+      await client.PATCH('/api/admin/usage-logging', { body: { enabled } })
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     } catch {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })

@@ -145,7 +145,7 @@ class InstrumentedDuckDBConnection:
             try:
                 structlog.contextvars.bind_contextvars(query_id=qid)
             except Exception:
-                pass
+                logger.debug("_invoke: structlog.contextvars.bind_contextvars failed (ignored)", exc_info=True)
 
         con_ref = _safe_weakref(self._con)
         bound = getattr(self._con, method_name)
@@ -267,7 +267,7 @@ class _InstrumentedResult:
             if not self._done:
                 self._finish(None, probe_memory=False)
         except Exception:
-            pass
+            logger.debug("__del__: step failed (ignored)", exc_info=True)
 
 
 class _InstrumentedRecordReader:
@@ -297,7 +297,7 @@ class _InstrumentedRecordReader:
         try:
             self._finish(error, probe_memory=probe_memory)
         except Exception:
-            pass
+            logger.debug("_complete: self._finish failed (ignored)", exc_info=True)
 
     def __iter__(self) -> Any:
         err: BaseException | None = None
@@ -345,7 +345,7 @@ class _InstrumentedRecordReader:
         try:
             self._complete(None, probe_memory=False)
         except Exception:
-            pass
+            logger.debug("__del__: self._complete failed (ignored)", exc_info=True)
 
 
 def _safe_weakref(obj: Any) -> Callable[[], Any] | None:
@@ -451,7 +451,7 @@ def _probe_duckdb_memory(con: Any) -> float | None:
             try:
                 cursor.close()
             except Exception:
-                pass
+                logger.debug("_probe_duckdb_memory: cursor.close failed (ignored)", exc_info=True)
         if row is None or row[0] is None:
             return None
         return _parse_memory_mb(row[0])
@@ -475,4 +475,4 @@ def _deregister(qid: int, error: BaseException | None, *, peak_memory_mb: float 
         try:
             structlog.contextvars.unbind_contextvars("query_id")
         except Exception:
-            pass
+            logger.debug("_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)

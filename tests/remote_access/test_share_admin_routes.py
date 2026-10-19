@@ -635,3 +635,95 @@ def test_live_payload_shape_matches_share_channel(client):
     payload = build_share_live_payload()
     for key in ("sharing_active", "public_url", "active_session_count", "rate_limits", "telemetry"):
         assert key in payload, f"missing {key}"
+
+
+# ── typed nested models keep the producer's wire payload ───────────────────
+
+
+def _seed_status_fixtures():
+    from backend.utils.tunnel.manager import get_tunnel_manager
+    from backend.utils.tunnel.session import AnalystSession
+
+    share_db.create_remote_invite(
+        name="Carol",
+        email="carol@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svc-a"],
+    )
+    share_db.log_share_audit_event(event_type="LOGIN_FAIL", email=None, ip_address="2.2.2.2", details="d")
+    mgr = get_tunnel_manager()
+    mgr._sessions["sess-1"] = AnalystSession(
+        session_id="sess-1",
+        invite_id="inv-1",
+        name="Carol",
+        email="carol@example.com",
+        ip_address="2.2.2.2",
+        user_agent="ua",
+        fingerprint_signature="fp",
+        pii_policy={"mask_ips": True},
+        query_window_hours=None,
+        query_start_time=None,
+        query_end_time=None,
+        login_time="2026-01-01T00:00:00Z",
+        last_active_time="2026-01-01T00:01:00Z",
+        service_ids=["svc-a"],
+        auth_method="oauth",
+        oauth_provider="google",
+    )
+    mgr._tunnel_uptime_history.append(
+        {"started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:05:00Z", "duration_s": 300, "reason": "stop"}
+    )
+    mgr.record_login_failure("9.9.9.9", None)
+    mgr.record_heartbeat_unauth()
+
+
+def test_status_nested_collections_match_producer(client):
+    from fastapi.encoders import jsonable_encoder
+
+    from backend.routers.share_admin import build_share_status
+
+    _seed_status_fixtures()
+    expected = jsonable_encoder(build_share_status())
+    body = client.get("/api/admin/share/status").json()
+
+    assert body == expected
+    assert [list(s) for s in body["sessions"]] == [list(s) for s in expected["sessions"]]
+    assert body["sessions"][0]["auth_method"] == "oauth"
+    assert body["rate_limits"]["failures"][0]["ip"] == "9.9.9.9"
+    assert body["telemetry"]["heartbeat_unauth_count"] == 1
+    assert body["telemetry"]["tunnel_uptime_history"][0]["duration_s"] == 300
+    assert body["audit_logs"] and set(body["audit_logs"][0]) >= {"id", "timestamp", "event_type", "email"}
+
+
+def test_live_and_audit_logs_match_producer(client):
+    from fastapi.encoders import jsonable_encoder
+
+    from backend.utils.tunnel.manager import build_share_live_payload
+
+    _seed_status_fixtures()
+    live = client.get("/api/admin/share/live").json()
+    assert live == jsonable_encoder(build_share_live_payload())
+
+    audit = client.get("/api/admin/share/audit-logs").json()
+    assert audit["audit_logs"] == jsonable_encoder(share_db.get_share_audit_logs(limit=200))
+
+
+def test_invite_revoked_is_integer_flag_on_the_wire(client):
+    inv = share_db.create_remote_invite(
+        name="Dan",
+        email="dan@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    body = client.get("/api/admin/share/status").json()
+    row = next(i for i in body["invites"] if i["id"] == inv["id"])
+    assert row["revoked"] == 0
+    assert type(row["revoked"]) is int
+    assert share_db.revoke_remote_invite(inv["id"])
+    row = next(i for i in client.get("/api/admin/share/status").json()["invites"] if i["id"] == inv["id"])
+    assert row["revoked"] == 1
+    assert type(row["revoked"]) is int

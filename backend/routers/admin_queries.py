@@ -5,10 +5,14 @@ gates them structurally — analyst sessions can never reach this surface.
 
 Endpoints:
 
-- ``GET  /api/admin/queries``                 — incremental snapshot
-- ``GET  /api/admin/queries/summary``         — cheap counts for the tab badge
-- ``GET  /api/admin/queries/{qid}``           — full SQL for one row
-- ``POST /api/admin/queries/{qid}/cancel``    — interrupt + audit log
+- ``GET    /api/admin/queries``                  — incremental snapshot
+- ``GET    /api/admin/queries/summary``          — cheap counts for the tab badge
+- ``GET    /api/admin/queries/{qid}``            — full SQL for one row
+- ``POST   /api/admin/queries/{qid}/cancel``     — interrupt + audit log
+- ``GET    /api/admin/slow-queries``             — persisted slow-SQL history (PostgreSQL METADATA_DSN)
+- ``GET    /api/admin/slow-queries/count``       — aggregate slow-query count
+- ``DELETE /api/admin/slow-queries``             — clear persisted slow-query rows for a service
+- ``GET    /api/admin/app-config/query-monitor`` — feature-flag probe
 
 The feature-flag (``QUERY_MONITOR_ENABLED``) flips every endpoint to 404 so
 the frontend's nav-gating call sees the feature as absent. Default ON; flip
@@ -17,6 +21,7 @@ to 0 if the registry ever causes load pressure.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import deque
@@ -26,20 +31,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
-from backend.deps import get_service_id
+from backend.deps import get_service_id, require_admin
 from backend.models.admin_queries import (
     ActiveQueryRow,
     CancelResponse,
     QueryMonitorConfigResponse,
+    SlowQueriesClearResponse,
     SlowQueriesCountResponse,
     SlowQueriesResponse,
     SnapshotResponse,
     SummaryResponse,
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.utils.router_utils import make_error, not_found
+from backend.utils.router_utils import make_error, not_found, require_service_id
 
-router = APIRouter(prefix="/api/admin", tags=["admin", "query-monitor"], responses=DEFAULT_ERROR_RESPONSES)
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+    responses=DEFAULT_ERROR_RESPONSES,
+)
 
 
 def _enabled() -> bool:
@@ -66,7 +79,7 @@ def _ensure_enabled() -> None:
 
 # Per-admin token bucket — 10 cancels/sec. The cancel endpoint is idempotent
 # so a buggy frontend re-clicking is harmless; this just caps the audit-log
-# spam and prevents accidentally hammering the SQLite/DuckDB interrupt path.
+# spam and prevents accidentally hammering the DuckDB/Postgres interrupt path.
 _CANCEL_RATE_PER_SEC = 10
 _CANCEL_WINDOW_S = 1.0
 _cancel_history: dict[str, deque[float]] = {}
@@ -138,8 +151,7 @@ def count_persisted_slow_queries(
     aggregate (single indexed scan) so the card stays sub-50 ms even on
     services with thousands of persisted rows."""
     _ensure_enabled()
-    if not service_id:
-        raise HTTPException(status_code=422, detail=make_error("service_id_required"))
+    service_id = require_service_id(service_id)
     since_utc = time.time() - since_hours * 3600
     return {
         "count": _meta_mod.count_slow_queries(service_id, since_utc=since_utc, threshold_ms=threshold_ms),
@@ -158,13 +170,13 @@ def list_persisted_slow_queries(
     since_hours: int = Query(24, ge=1, le=24 * 30),
     threshold_ms: float = Query(100.0, ge=0.0),
     kind: str | None = Query(None, pattern="^(analyst|admin|cron|system)$"),
-    db_type: str | None = Query(None, pattern="^(DuckDB|SQLite)$"),
+    db_type: str | None = Query(None, pattern="^(DuckDB|Postgres|ClickHouse|SQLite)$"),
     sort: str = Query("recent", pattern="^(recent|duration)$"),
     limit: int = Query(200, ge=1, le=2000),
 ) -> dict[str, Any]:
-    """Persistent slow-SQL history from the per-service ``slow_queries``
-    SQLite table — the durable backing store for the Notable Slow
-    Queries panel beyond the in-memory ring buffer's ~10-30 min /
+    """Persistent slow-SQL history from the PostgreSQL ``slow_queries``
+    table (``METADATA_DSN``) — the durable backing store for the Notable
+    Slow Queries panel beyond the in-memory ring buffer's ~10-30 min /
     restart-bounded window.
 
     Server-side filters keep the response payload small:
@@ -177,8 +189,7 @@ def list_persisted_slow_queries(
     ``duration`` (duration_ms DESC, the "what was slowest" variant).
     """
     _ensure_enabled()
-    if not service_id:
-        raise HTTPException(status_code=422, detail=make_error("service_id_required"))
+    service_id = require_service_id(service_id)
     since_utc = time.time() - since_hours * 3600
     rows = _meta_mod.list_slow_queries(
         service_id,
@@ -227,6 +238,28 @@ def list_persisted_slow_queries(
     return {"rows": out, "since_hours": since_hours, "threshold_ms": threshold_ms}
 
 
+@router.delete("/slow-queries", response_model=SlowQueriesClearResponse)
+def clear_persisted_slow_queries(
+    request: Request,
+    service_id: str = Depends(get_service_id),
+) -> SlowQueriesClearResponse:
+    """Clear persisted slow-SQL history for *service_id* and record an audit entry."""
+    _ensure_enabled()
+    service_id = require_service_id(service_id)
+    deleted = _meta_mod.clear_slow_queries(service_id)
+    admin_id = _admin_id_from_request(request)
+    try:
+        _meta_mod.record_audit(
+            service_id,
+            "slow_queries_cleared",
+            {"deleted": deleted, "admin_id": admin_id},
+            actor=admin_id,
+        )
+    except Exception:
+        logger.warning("slow_queries_cleared audit write failed", exc_info=True)
+    return SlowQueriesClearResponse(deleted=deleted, service_id=service_id)
+
+
 @router.get(
     "/queries/{qid}",
     response_model=ActiveQueryRow,
@@ -258,7 +291,19 @@ def cancel_query(qid: int, request: Request) -> CancelResponse:
             detail=make_error("cancel_rate_limit_exceeded"),
             headers={"Retry-After": "1"},
         )
+    active = query_registry.get(qid)
+    svc_id = active.service_id if active is not None else None
     state = query_registry.cancel_query(qid, admin_id=admin_id)
+    if state == "cancelled" and svc_id:
+        try:
+            _meta_mod.record_audit(
+                svc_id,
+                "query_cancelled",
+                {"query_id": qid, "admin_id": admin_id},
+                actor=admin_id,
+            )
+        except Exception:
+            logger.warning("query_cancelled audit write failed", exc_info=True)
     return CancelResponse(state=state, query_id=qid)
 
 

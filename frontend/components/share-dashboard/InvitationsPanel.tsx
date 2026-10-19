@@ -25,7 +25,9 @@ import { client, extractApiError } from '@/lib/api'
 import { CreateInviteDialog } from './CreateInviteDialog'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
-import { formatStamp, type Invite, type ShareStatus } from './utils'
+import { type Invite, type ShareStatus } from './utils'
+import { formatDeterministicUTC } from '@/lib/date'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface InvitationsPanelProps {
   status: ShareStatus | null
@@ -35,7 +37,7 @@ interface InvitationsPanelProps {
 }
 
 function buildShareCard(
-  invite: any,
+  invite: Invite,
   publicUrl: string | null,
   allServices: Array<{ service_id: string; name?: string }> = []
 ): string {
@@ -66,13 +68,16 @@ Login Email:  ${invite.email}
 ${credLines}
 Authorized Services: ${services}
 Valid Until:  ${invite.expires_at ? new Date(invite.expires_at).toUTCString() : 'Unlimited'}
+
+Note: You will be required to review and agree to the Terms of Access upon signing in before accessing the dashboard.
 ==================================================`
 }
 
 export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }: InvitationsPanelProps) {
   const [createOpen, setCreateOpen] = React.useState(false)
   const { busy, run } = useShareMutation(onError, onRefresh)
-  const [copiedInviteId, setCopiedInviteId] = React.useState<string | null>(null)
+  const [lastCopiedInviteId, setLastCopiedInviteId] = React.useState<string | null>(null)
+  const { copied, copy } = useCopyToClipboard(1500)
   const [qrInviteId, setQrInviteId] = React.useState<string | null>(null)
   const [editingServicesFor, setEditingServicesFor] = React.useState<string | null>(null)
   const [editingServicesDraft, setEditingServicesDraft] = React.useState<string[]>([])
@@ -85,6 +90,8 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const [savingPasscode, setSavingPasscode] = React.useState(false)
   const [passcodeError, setPasscodeError] = React.useState<string | null>(null)
   const [passcodeSavedFor, setPasscodeSavedFor] = React.useState<string | null>(null)
+  const passcodeSavedTimer = React.useRef<number | undefined>(undefined)
+  React.useEffect(() => () => window.clearTimeout(passcodeSavedTimer.current), [])
 
   const services = status?.services || []
   const invites = status?.invites || []
@@ -123,13 +130,13 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     // soft-revoke endpoint still exists for callers that want to keep
     // the row for audit; the trash-icon UX expects "gone".
     run(() =>
-      client.DELETE('/api/admin/share/invites/{invite_id}' as any, {
+      client.DELETE('/api/admin/share/invites/{invite_id}', {
         params: { path: { invite_id: id } },
-      } as any),
+      }),
     )
   }
 
-  const openEditServices = (invite: any) => {
+  const openEditServices = (invite: Invite) => {
     setEditingServicesFor(invite.id)
     setEditingServicesDraft(invite.service_ids || [])
     setEditingMaskIps(!!invite.pii_policy?.mask_ips)
@@ -140,10 +147,10 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingServices(true)
     onError('')
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/services' as any, {
+      await client.PATCH('/api/admin/share/invites/{invite_id}/services', {
         params: { path: { invite_id: inviteId } },
         body: { service_ids: editingServicesDraft },
-      } as any)
+      })
       await client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
         params: { path: { invite_id: inviteId } },
         body: { mask_ips: editingMaskIps },
@@ -154,14 +161,14 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       })
       setEditingServicesFor(null)
       await onRefresh()
-    } catch (e: any) {
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setSavingServices(false)
     }
   }
 
-  const openEditPasscode = (invite: any) => {
+  const openEditPasscode = (invite: Invite) => {
     setEditingPasscodeFor(invite.id)
     setPasscodeDraft('')
     setPasscodeVisible(false)
@@ -172,16 +179,20 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingPasscode(true)
     setPasscodeError(null)
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/passcode' as any, {
+      await client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
         params: { path: { invite_id: inviteId } },
         body: { passcode: passcodeDraft },
-      } as any)
+      })
       setEditingPasscodeFor(null)
       setPasscodeDraft('')
       setPasscodeSavedFor(inviteId)
-      setTimeout(() => setPasscodeSavedFor((id) => (id === inviteId ? null : id)), 2000)
+      window.clearTimeout(passcodeSavedTimer.current)
+      passcodeSavedTimer.current = window.setTimeout(
+        () => setPasscodeSavedFor((id) => (id === inviteId ? null : id)),
+        2000,
+      )
       await onRefresh()
-    } catch (e: any) {
+    } catch (e) {
       // Show validation errors inline (weak passcode etc.); don't push to the
       // top-level toast since the popover is the natural place to fix it.
       setPasscodeError(extractApiError(e))
@@ -190,12 +201,9 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     }
   }
 
-  const handleCopyShareCard = (invite: any) => {
-    navigator.clipboard.writeText(
-      buildShareCard(invite, status?.public_url ?? null, services)
-    )
-    setCopiedInviteId(invite.id)
-    setTimeout(() => setCopiedInviteId(null), 1500)
+  const handleCopyShareCard = (invite: Invite) => {
+    setLastCopiedInviteId(invite.id)
+    void copy(buildShareCard(invite, status?.public_url ?? null, services))
   }
 
   return (
@@ -264,7 +272,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
               <TableCell className="text-xs">{invite.email}</TableCell>
               <TableCell className="text-xs whitespace-nowrap">
                 {invite.last_login_at ? (
-                  formatStamp(invite.last_login_at)
+                  formatDeterministicUTC(invite.last_login_at)
                 ) : (
                   <span className="text-muted-foreground">Never</span>
                 )}
@@ -292,7 +300,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                   })}
                 </div>
               </TableCell>
-              <TableCell className="text-xs">{formatStamp(invite.expires_at)}</TableCell>
+              <TableCell className="text-xs">{formatDeterministicUTC(invite.expires_at)}</TableCell>
               <TableCell className="text-right space-x-1">
                 <Button
                   size="sm"
@@ -300,7 +308,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                   onClick={() => handleCopyShareCard(invite)}
                   title="Copy share card"
                 >
-                  {copiedInviteId === invite.id ? (
+                  {copied && lastCopiedInviteId === invite.id ? (
                     <Check className="h-3 w-3 text-emerald-500" />
                   ) : (
                     <Copy className="h-3 w-3" />

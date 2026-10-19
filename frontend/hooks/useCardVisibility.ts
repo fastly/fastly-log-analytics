@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
+import { useMounted } from '@/hooks/useMounted'
 
 export interface CardVisibilityMigration {
   /** Bump when the set of IDs to retire or surface changes. Stored under `<storageKey>_mv`. */
@@ -66,46 +67,37 @@ export function useCardVisibility(
     return defaultVisible
   }, [storageKey, defaultVisible, migrationKey, migrationVersion, migrationRemoveStr, migrationAddStr])
 
-  // SSR-safe initial state: ALWAYS start from the deterministic default set.
-  // Reading localStorage in this initializer was correct for first-paint on a
-  // pure CSR app, but under the force-dynamic SSR layout it made the first
-  // client render diverge from the server's default-set render — the
-  // visibility-count badge and the rendered card set differed → React #418 on
-  // /charts and the dashboard for any user who had toggled card visibility.
-  // The useEffect below promotes to the persisted value (and applies the
-  // migration) right after mount, so the saved choice still lands — just one
-  // tick later, off the hydration path.
-  const [visibleCards, setVisibleCards] = useState<Set<string>>(defaultVisible)
-
-  // Keep the load() reactive so callers whose ``allIds`` / ``defaultIds``
-  // change after mount (e.g. dashboard's allCards arriving from the
-  // catalog query) still get migrations applied and defaults refreshed.
-  // The first render's initializer above handles the cold-mount case
-  // synchronously; this useEffect handles subsequent changes.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setVisibleCards(load())
-  }, [load])
+  // SSR-safe: the hydration render ALWAYS uses the deterministic default set. Reading
+  // localStorage there made the first client render diverge from the server's default-set
+  // render (React #418 on /charts and the dashboard for users who had toggled cards). Once
+  // mounted, the persisted value (with the migration applied) takes over; it re-derives
+  // whenever `load` changes (e.g. allCards arriving from the catalog query). A user edit is
+  // tied to the `load` it was made under, so a later `load` change re-reads storage (which
+  // already holds the edit).
+  const mounted = useMounted()
+  const [edit, setEdit] = useState<{ source: typeof load; set: Set<string> } | null>(null)
+  const stored = useMemo(() => (mounted ? load() : defaultVisible), [mounted, load, defaultVisible])
+  const visibleCards = edit && edit.source === load ? edit.set : stored
 
   const toggleCard = useCallback((id: string) => {
-    setVisibleCards(prev => {
-      const next = new Set(prev)
+    setEdit(prev => {
+      const next = new Set(prev && prev.source === load ? prev.set : stored)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       try { localStorage.setItem(storageKey, JSON.stringify([...next])) } catch {}
-      return next
+      return { source: load, set: next }
     })
-  }, [storageKey])
+  }, [storageKey, load, stored])
 
   const showAll = useCallback(() => {
-    setVisibleCards(allVisible)
+    setEdit({ source: load, set: allVisible })
     try { localStorage.setItem(storageKey, JSON.stringify([...allVisible])) } catch {}
-  }, [storageKey, allVisible])
+  }, [storageKey, allVisible, load])
 
   const reset = useCallback(() => {
-    setVisibleCards(defaultVisible)
+    setEdit({ source: load, set: defaultVisible })
     try { localStorage.setItem(storageKey, JSON.stringify([...defaultVisible])) } catch {}
-  }, [storageKey, defaultVisible])
+  }, [storageKey, defaultVisible, load])
 
   return { visibleCards, toggleCard, showAll, reset, defaultVisible }
 }

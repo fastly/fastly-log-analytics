@@ -142,6 +142,43 @@ describe('TopTenTable', () => {
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
   })
 
+  it('renders at most ten rows even if an API returns more', () => {
+    const top = Array.from({ length: 12 }, (_, index) => ({
+      value: `value-${index + 1}`,
+      count: 12 - index,
+    }))
+
+    render(
+      <TopTenTable
+        title="Bounded"
+        field="status"
+        data={{ total: 78, top }}
+      />,
+    )
+
+    expect(screen.getAllByRole('button', { name: /filter to value-/i })).toHaveLength(10)
+    expect(screen.getByText('value-10')).toBeInTheDocument()
+    expect(screen.queryByText('value-11')).toBeNull()
+  })
+
+  it('lets URL values share the normal card width while preserving the full value for access', () => {
+    const longUrl = 'https://example.com/very/long/path/with/query/parameters?session=synthetic&region=us'
+    render(
+      <TopTenTable
+        title="Top URLs"
+        field="url"
+        data={{ total: 1, top: [{ value: longUrl, count: 1 }] }}
+      />,
+    )
+
+    const row = screen.getByRole('button', { name: `Filter to ${longUrl}` })
+    const value = screen.getByText(longUrl)
+
+    expect(value.className).toMatch(/flex-1/)
+    expect(value.className).not.toMatch(/max-w-\[65%\]/)
+    expect(row).toHaveAttribute('title', longUrl)
+  })
+
   it('renders the `ip` card rows as non-interactive (no drill-down) when masking', () => {
     useMaskIpsMock.mockReturnValue(true)
     const onRowClick = vi.fn()
@@ -198,7 +235,7 @@ describe('TopTenTable', () => {
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
   })
 
-  it('copies the table to the clipboard as CSV and toggles the copied state', () => {
+  it('copies the table to the clipboard as CSV and toggles the copied state', async () => {
     // jsdom doesn't ship a Clipboard API and `userEvent.setup()` installs
     // its own clipboard shim that would shadow this one — so we use
     // fireEvent here to keep our mock in place and assert directly on it.
@@ -224,7 +261,7 @@ describe('TopTenTable', () => {
     expect(writeText).toHaveBeenCalledWith('status,count\n"Alpha",2\n"Beta",1')
     // After clicking the button's aria-label flips to "Copied!" until the
     // 2s timeout re-arms it.
-    expect(screen.getByRole('button', { name: /copied!/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /copied!/i })).toBeInTheDocument()
   })
 
   it('escapes CSV/formula-injection payloads in attacker-controlled fields (finding 020)', () => {

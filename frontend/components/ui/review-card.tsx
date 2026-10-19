@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from "react"
+import type { LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 export function ReviewCard({ children, className }: { children: React.ReactNode, className?: string }) {
@@ -11,7 +12,7 @@ export function ReviewCard({ children, className }: { children: React.ReactNode,
   )
 }
 
-export function ReviewHeader({ children, icon: Icon, className }: { children: React.ReactNode, icon?: any, className?: string }) {
+export function ReviewHeader({ children, icon: Icon, className }: { children: React.ReactNode, icon?: LucideIcon, className?: string }) {
   return (
     <h4 className={cn("font-semibold text-sm flex items-center gap-2 text-foreground/80 shrink-0", className)}>
       {Icon && <Icon className="h-4 w-4" />}

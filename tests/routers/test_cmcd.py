@@ -17,7 +17,7 @@ def test_cmcd_aggregates_absolute_range(client, in_memory_duckdb, test_service_s
     mock_ret = {
         "available": True,
         "has_data": True,
-        "overview": {"sessions": 10},
+        "overview": {"active_sessions": 10, "peak_viewers": 4},
     }
     with patch("backend.repositories.cmcd.get_cmcd_aggregates", return_value=mock_ret) as mock_get:
         resp = client.post(
@@ -33,7 +33,7 @@ def test_cmcd_aggregates_absolute_range(client, in_memory_duckdb, test_service_s
         assert resp.status_code == 200
         data = resp.json()
         assert data["available"] is True
-        assert data["overview"] == {"sessions": 10}
+        assert data["overview"] == {"active_sessions": 10, "peak_viewers": 4}
         mock_get.assert_called_once()
 
 

@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from backend.provision import cli
+from tests._helpers.config_fakes import mutate_via_save
 
 
 def _args(**overrides):
@@ -131,7 +132,8 @@ def test_handle_teardown_falls_back_to_bucket_flag_when_no_config(capsys):
     # No SystemExit means it ran to completion
 
 
-def test_handle_teardown_loads_state_from_service_config():
+def test_handle_teardown_loads_state_from_service_config(monkeypatch):
+    monkeypatch.delenv("FASTLY_API_KEY", raising=False)
     """When the service config exists, teardown state pulls the bucket,
     region, keys, endpoint name etc. from there. Pinned because losing
     this would force admins to re-supply every flag."""
@@ -583,7 +585,7 @@ def test_handle_update_cdn_reprobes_persists_and_applies_new_entitlement():
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, c: saved.append((sid, c)))),
         patch("backend.provision.cli.account_has_rate_limiting", return_value=False),
         patch(
             "backend.provision.cli.redeploy_cdn_vcl",
@@ -610,7 +612,7 @@ def test_handle_update_cdn_does_not_persist_when_flag_unchanged():
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, c: saved.append((sid, c))),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, c: saved.append((sid, c)))),
         patch("backend.provision.cli.account_has_rate_limiting", return_value=True),
         patch("backend.provision.cli.redeploy_cdn_vcl", return_value=9),
     ):
@@ -669,7 +671,7 @@ def test_wizard_sanitises_service_id_for_bucket_name():
         patch("backend.provision.cli.fastly", return_value={"name": "x"}),
     ):
         cfg = cli.wizard(_args(token="t", service_id="My_Service.ID_123"))
-    assert cfg["fos_bucket_name"] == "fos-My-Service-ID-123-logs"
+    assert cfg["fos_bucket_name"] == "fos-my-service-id-123-logs"
     # No invalid bucket-name chars leak through
     assert "_" not in cfg["fos_bucket_name"]
     assert "." not in cfg["fos_bucket_name"]

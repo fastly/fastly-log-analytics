@@ -12,12 +12,13 @@ import {
   makeCronRunsApplier,
   type CronRunsApplier,
 } from '@/lib/admin-stream-apply'
+import { queryKeys } from '@/lib/query-keys'
 
 /**
  * The admin channels a single multiplexed connection can carry. Mirrors
  * ``_ADMIN_EVENT_CHANNELS`` in ``backend/routers/admin/events.py``.
  */
-export type AdminEventChannel = 'sync-status' | 'cron-runs' | 'system-metrics' | 'share'
+export type AdminEventChannel = 'sync-status' | 'cron-runs' | 'system-metrics' | 'share' | 'celery-status'
 
 /**
  * Subscribe to the multiplexed admin event stream
@@ -94,6 +95,9 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
           break
         case 'share':
           applyShare(queryClient, env.data)
+          break
+        case 'celery-status':
+          queryClient.setQueryData(queryKeys.admin.celeryStatus(), env.data)
           break
         case 'cron-runs': {
           // Lazily (re)create defensively in case an event lands before

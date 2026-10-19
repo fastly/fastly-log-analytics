@@ -66,6 +66,9 @@ _HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 # a public repo (see infra-leak-sweep).
 _PATH_PARAM_SUBSTITUTIONS = {
     "service_id": "svc1",
+    "domain": "rum_vitals",
+    "export_id": "export1",
+    "job_id": "job1",
     "alert_id": "alert1",
     "invite_id": "invite1",
     "session_id": "sess1",
@@ -76,6 +79,7 @@ _PATH_PARAM_SUBSTITUTIONS = {
     "run_id": "run1",
     "field_name": "field1",
     "label_id": "label1",
+    "item_id": "1",
     "version": "v1",
     "sid": "sid1",
     "view_id": "view1",
@@ -143,8 +147,6 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Safe to load anonymously (no credentials required).
     ("GET", "/js/rum.js"),
     ("GET", "/js/faro-sdk.js"),
-    ("GET", "/rum-beacon"),
-    ("POST", "/rum-beacon"),
     # Reference / catalog data: no per-service secrets, needed to drive the
     # analyst UI's filter and field pickers.
     ("GET", "/api/log-fields/catalog"),
@@ -188,11 +190,25 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Control Room's live metrics push channel (S-1 audit decision):
     # aggregate rps/error-rate/cache-ratio, no PII, no infra details.
     ("GET", "/api/services/{service_id}/realtime-stream"),
+    # Control Room's bounded recent 4xx/5xx request-event feed (analyst-safe masked client IPs).
+    ("GET", "/api/services/{service_id}/control-room/error-stream"),
     # Security proxies export: read-only CSV export of security proxies.
     ("GET", "/api/security/proxies/export"),
     # Network pop-health & security threat-intel (read-only analytical endpoints)
+    ("GET", "/api/assets/aggregates"),
+    ("GET", "/api/network/bundle"),
     ("GET", "/api/network/pop-health"),
+    ("GET", "/api/security/bundle"),
     ("GET", "/api/security/threat-intel"),
+    ("GET", "/api/logs"),
+    ("GET", "/api/logs/{service_id}"),
+    ("GET", "/api/query/schema/{service_id}"),
+    # Live log streaming feed (analyst-safe masked client IPs).
+    ("GET", "/api/stream/{service_id}"),
+    ("GET", "/api/services/{service_id}/stream"),
+    ("GET", "/api/high-scale/request-facts"),
+    ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
+    ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
     # ── FLAGGED FOR TRIAGE ───────────────────────────────────────────────
     # The 2026-08 RBAC audit found these four analyst-reachable with NO
     # explicit classification anywhere (not in a blocked-prefix/subpath/
@@ -223,8 +239,6 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/dashboard/field-values"),
     ("POST", "/api/dashboard/raw/csv"),
     ("POST", "/api/security/aggregates"),
-    ("POST", "/api/security/top-bots"),
-    ("POST", "/api/security/proxies"),
     ("POST", "/api/origin/aggregates"),
     ("POST", "/api/origin/ip-health"),
     ("POST", "/api/origin/path-breakdown"),
@@ -239,13 +253,27 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/insights/cache-collapse-detail"),
     ("POST", "/api/network-health"),
     ("POST", "/api/network-quality"),
+    ("POST", "/api/network/bundle"),
+    ("POST", "/api/origin/drilldown"),
     ("POST", "/api/query"),
+    ("POST", "/api/security/bundle"),
     ("POST", "/api/sessions"),
     ("POST", "/api/sessions/detail"),
     ("POST", "/api/cmcd/aggregates"),
     ("POST", "/api/value/summary"),
     ("POST", "/api/web-vitals"),
     ("POST", "/api/ux-events"),
+    ("POST", "/api/high-scale/request-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/request-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
+    ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/aggregates"),
+    ("POST", "/api/high-scale/services/{service_id}/queries"),
+    ("POST", "/api/high-scale/services/{service_id}/queries/{job_id}/cancel"),
+    ("POST", "/api/high-scale/services/{service_id}/exports"),
+    ("POST", "/api/high-scale/services/{service_id}/exports/{export_id}/cancel"),
+    ("POST", "/api/logs"),
+    ("POST", "/api/logs/query"),
 }
 
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES

@@ -6,6 +6,15 @@ import { useTheme } from 'next-themes'
 
 import { ChartA11yTable } from './ChartA11yTable'
 import { tracesToTable } from './tracesToTable'
+import type {
+  PlotlyConfig,
+  PlotlyEvent,
+  PlotlyFigure,
+  PlotlyGraphDiv,
+  PlotlyLayout,
+  PlotlyRelayoutEvent,
+  PlotlyTrace,
+} from '@/types/plotly'
 
 // Use the cartesian-only Plotly distribution via react-plotly.js's factory
 // API. The default `import 'react-plotly.js'` pulls full plotly.js (~4.7 MB
@@ -20,10 +29,11 @@ const Plot = dynamic(
   async () => {
     const [{ default: createPlotlyComponent }, plotlyModule] = await Promise.all([
       import('react-plotly.js/factory'),
-      // No types ship with the cartesian-dist-min package — the runtime
-      // shape (`{Plot, plot, react, ...}` plus trace-type registrations)
-      // matches the full plotly.js for everything the factory needs.
-      import('plotly.js-cartesian-dist-min' as any) as any,
+      // No types ship with the cartesian-dist-min package (see
+      // types/plotly-cartesian.d.ts) — the runtime shape (`{Plot, plot, react, ...}`
+      // plus trace-type registrations) matches the full plotly.js for everything
+      // the factory needs.
+      import('plotly.js-cartesian-dist-min'),
     ])
     return createPlotlyComponent(plotlyModule.default || plotlyModule)
   },
@@ -40,20 +50,20 @@ export function preloadPlotlyChunk(): Promise<unknown> {
   if (plotlyPreloadPromise) return plotlyPreloadPromise
   plotlyPreloadPromise = Promise.all([
     import('react-plotly.js/factory'),
-    import('plotly.js-cartesian-dist-min' as any),
+    import('plotly.js-cartesian-dist-min'),
   ])
   return plotlyPreloadPromise
 }
 
 interface PlotlyChartProps {
-  data: any[]
-  layout?: any
-  config?: any
+  data: PlotlyTrace[]
+  layout?: PlotlyLayout
+  config?: PlotlyConfig
   className?: string
   height?: number | string
-  onRelayout?: (event: any) => void
-  onSelected?: (event: any) => void
-  onUpdate?: (event: any) => void
+  onRelayout?: (event: PlotlyRelayoutEvent) => void
+  onSelected?: (event: PlotlyEvent) => void
+  onUpdate?: (figure: PlotlyFigure, graphDiv: HTMLElement) => void
   /**
    * Optional caption for the screen-reader-only data table emitted
    * alongside the chart. Defaults to "Chart data". Pass something
@@ -61,6 +71,18 @@ interface PlotlyChartProps {
    * tech announces useful context before reading the data.
    */
   a11yTitle?: string
+}
+
+function findScrollContainer(node: HTMLElement): HTMLElement | null {
+  let parent = node.parentElement
+  while (parent) {
+    const style = window.getComputedStyle(parent)
+    if (/(auto|scroll|overlay)/.test(`${style.overflow}${style.overflowX}${style.overflowY}`)) {
+      return parent
+    }
+    parent = parent.parentElement
+  }
+  return null
 }
 
 export const PlotlyChart = React.memo(function PlotlyChart({
@@ -85,14 +107,15 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   }, [onRelayout, onSelected])
 
   // Store the graphDiv so we can re-attach listeners if needed
-  const graphDivRef = useRef<any>(null)
+  const graphDivRef = useRef<PlotlyGraphDiv | null>(null)
 
-  const handleInitialized = useRef((_figure: any, graphDiv: any) => {
+  const handleInitialized = useRef((_figure: PlotlyFigure, element: HTMLElement) => {
+    const graphDiv: PlotlyGraphDiv = element
     graphDivRef.current = graphDiv
 
     // react-plotly.js has known issues with the onRelayout prop dropping events
     // during zoom interactions, so we attach it directly to the graphDiv here.
-    graphDiv.on('plotly_relayout', (event: any) => {
+    graphDiv.on?.('plotly_relayout', (event) => {
       onRelayoutRef.current?.(event)
     })
   }).current
@@ -101,7 +124,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   // on render. `plotly_relayout` is wired imperatively in handleInitialized
   // above to work around react-plotly.js dropping zoom events; no stable
   // onRelayout prop is passed to <Plot> below.
-  const handleSelected = React.useCallback((e: any) => onSelectedRef.current?.(e), [])
+  const handleSelected = React.useCallback((e: PlotlyEvent) => onSelectedRef.current?.(e), [])
 
   // Container ref + narrow-viewport flag. Declared above defaultLayout
   // so the layout block can read `narrow` for the responsive legend
@@ -222,7 +245,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
           observer.disconnect()
         }
       },
-      { rootMargin: '600px' },
+      { root: findScrollContainer(node), rootMargin: '600px' },
     )
     observer.observe(node)
     return () => observer.disconnect()

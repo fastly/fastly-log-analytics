@@ -9,6 +9,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
 import { TeardownDialog } from '@/components/TeardownDialog/TeardownDialog'
+import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 
 const mockStart = vi.fn()
@@ -31,7 +32,7 @@ test('TeardownDialog starts the SSE stream when the user enters a token and clic
 
   render(
     <TeardownDialog
-      service={{ service_id: "test-svc", name: "Test Service", rum_enabled: true } as any}
+      service={{ service_id: "test-svc", name: "Test Service", rum_enabled: true } as ServiceConfig}
       open={true}
       onOpenChange={onOpenChange}
       onComplete={onComplete}
@@ -78,7 +79,7 @@ test('TeardownDialog allows analyst (cache-only) teardown without a token', asyn
 
   render(
     <TeardownDialog
-      service={{ service_id: "test-svc", name: "Test Service", access_level: "read_only" } as any}
+      service={{ service_id: "test-svc", name: "Test Service", access_level: "read_only" } as ServiceConfig}
       open={true}
       onOpenChange={onOpenChange}
       onComplete={onComplete}

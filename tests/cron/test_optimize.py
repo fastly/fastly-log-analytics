@@ -13,7 +13,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import optimize
+
+
+@pytest.fixture(autouse=True)
+def _clear_dev_no_crons(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
 
 
 @pytest.fixture
@@ -75,7 +81,7 @@ def test_returns_when_source_missing(monkeypatch):
 def test_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_cron_envelope):
     """``start_cron_run`` raises (another instance in-flight) → log a
     skip message and return; iceberg.optimize_table never runs."""
-    stub_cron_envelope["start"].side_effect = RuntimeError("already running")
+    stub_cron_envelope["start"].side_effect = CronLeaseHeldError("already running")
     opt = MagicMock()
     monkeypatch.setattr("backend.core.iceberg.optimize_table", opt)
 

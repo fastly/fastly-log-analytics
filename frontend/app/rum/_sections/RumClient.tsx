@@ -12,7 +12,9 @@ import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
 import { useTimezone } from '@/hooks/useTimezone';
 import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
-import { adminFetch } from '@/lib/api';
+import { adminJsonResult } from '@/lib/api';
+import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
+import type { WithRequired, components } from '@/types/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 import {
@@ -25,7 +27,10 @@ import {
 import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/DataTable/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
+import { useRumStatus } from '@/hooks/useRumStatus';
+import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCount } from '@/lib/format'
 interface RumClientProps {
   serviceId: string | null;
   startTime: string | null;
@@ -39,30 +44,48 @@ interface CwvColors {
   label: string;
 }
 
-interface RumWorstPage {
-  path: string;
-  views: number;
-  avg_load_time: number | null;
-  lcp_p75: number | null;
-  cls_p75: number | null;
+type RumWire = components['schemas']['RumAnalyticsResponse']
+type RumWorstPage = components['schemas']['RumWorstPage']
+type RumJsError = components['schemas']['RumJsError']
+type RumCwvDistribution = components['schemas']['RumCwvDistribution']
+
+// Every data-branch response carries these; the all-optional wire model only
+// omits them on the 500 path, which never reaches this consumer.
+type RumAnalytics = WithRequired<
+  RumWire,
+  'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'
+>
+
+// Edge-log blob attached to each beacon. The keys read by the table are typed;
+// whatever else the producer (or a Faro payload) carries rides the index signature.
+interface RumRawLog {
+  city?: string;
+  region?: string;
+  country?: string;
+  pop?: string;
+  tls?: string;
+  ttfb?: number | string | null;
+  faro_payload?: unknown;
+  meta?: unknown;
+  measurements?: unknown;
+  events?: unknown;
+  [key: string]: unknown;
 }
 
-interface RumJsError {
-  message: string;
-  file: string;
-  line: number;
-  col: number;
-  count: number;
-}
-
-interface RumLiveEvent {
+type RumLiveEvent = {
   time: string;
   type: string;
   path: string;
   desc: string;
-  browser: string;
-  os: string;
-  raw_log?: any;
+  // Legacy payloads carried ``{ name }`` objects here instead of plain strings.
+  browser: string | { name?: string };
+  os: string | { name?: string };
+  raw_log?: RumRawLog;
+}
+
+function envName(v: string | { name?: string } | null | undefined): string {
+  if (typeof v === 'object' && v) return v.name || 'Unknown';
+  return v || 'Unknown';
 }
 
 function getLcpColors(p75: number | null | undefined): CwvColors {
@@ -164,15 +187,13 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     {
       id: 'environment',
       accessorFn: (row) => {
-        const b = typeof row.browser === 'object' && row.browser ? ((row.browser as any).name || 'Unknown') : (row.browser || 'Unknown');
-        const o = typeof row.os === 'object' && row.os ? ((row.os as any).name || 'Unknown') : (row.os || 'Unknown');
-        return `${b} on ${o}`;
+        return `${envName(row.browser)} on ${envName(row.os)}`;
       },
       meta: { label: 'Environment' },
       header: 'Environment',
       cell: ({ row }) => {
-        const b = typeof row.original.browser === 'object' && row.original.browser ? ((row.original.browser as any).name || 'Unknown') : (row.original.browser || 'Unknown');
-        const o = typeof row.original.os === 'object' && row.original.os ? ((row.original.os as any).name || 'Unknown') : (row.original.os || 'Unknown');
+        const b = envName(row.original.browser);
+        const o = envName(row.original.os);
         return (
           <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={`${b} on ${o}`}>
             {b} on {o}
@@ -230,7 +251,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       id: 'ttfb',
       accessorFn: (row) => {
         const raw = row.raw_log || {};
-        return raw.ttfb != null ? parseFloat(raw.ttfb) : null;
+        return raw.ttfb != null ? parseFloat(String(raw.ttfb)) : null;
       },
       meta: { label: 'TTFB (Edge)' },
       header: 'TTFB (Edge)',
@@ -265,18 +286,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   ], [timezone]);
 
   // Fetch status
-  const { data: status, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null;
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
-      if (res.status === 403) {
-        return { enabled: false, unauthorized: true };
-      }
-      return res.ok ? res.json() : null;
-    },
-    enabled: !!serviceId,
-  });
+  const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId);
 
   // Fetch analytics
   const { data: analytics, isLoading } = useQuery({
@@ -291,8 +301,11 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       }
       const qs = params.toString();
       const url = `/api/services/${serviceId}/rum/analytics${qs ? `?${qs}` : ''}`;
-      const res = await adminFetch(url);
-      return res.ok ? res.json() : null;
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/analytics', RumAnalytics>(
+        '/api/services/{service_id}/rum/analytics',
+        url,
+      );
+      return res.ok ? recordOrNull(res.data) : null;
     },
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,
@@ -306,11 +319,23 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId],
+    queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return [];
-      const res = await adminFetch(`/api/services/${serviceId}/rum/live-events`);
-      return res.ok ? res.json() : [];
+      const params = new URLSearchParams();
+      if (startTime) params.append('start_time', startTime);
+      if (endTime) params.append('end_time', endTime);
+      if (filterPayload) {
+        params.append('filters', JSON.stringify(filterPayload));
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`;
+
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(
+        '/api/services/{service_id}/rum/live-events',
+        url,
+      );
+      return res.ok ? arrayOrEmpty(res.data) : [];
     },
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,
@@ -361,12 +386,34 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     );
   }
 
+  if (analytics.beacon_count === 0) {
+    return (
+      <div className="space-y-6">
+        <AnalyticsCard title="Real User Monitoring Dashboard">
+          <div className="space-y-6 text-center py-12">
+            <div>
+              <div className="mx-auto w-16 h-16 bg-muted/20 rounded-full flex items-center justify-center mb-4 border border-border">
+                <Activity className="h-8 w-8 text-muted-foreground/50" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">No data for this time period</p>
+              <p className="text-sm text-muted-foreground mt-2 max-w-sm mx-auto">
+                No real-time beacons were received during the selected time window. Try expanding your time range or check back later.
+              </p>
+            </div>
+          </div>
+        </AnalyticsCard>
+      </div>
+    );
+  }
+
   const lcpColors = getLcpColors(analytics.vitals.lcp.p75);
   const clsColors = getClsColors(analytics.vitals.cls.p75);
   const inpColors = getInpColors(analytics.vitals.inp.p75);
 
   // Distribution helper
-  const renderDistributionBar = (dist: { good: number; needs_improvement: number; poor: number }) => (
+  const renderDistributionBar = (distribution: RumCwvDistribution | null) => {
+    const dist = distribution ?? { good: 0, needs_improvement: 0, poor: 0 };
+    return (
     <div className="w-full mt-2">
       <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-secondary">
         <div style={{ width: `${dist.good}%` }} className="bg-emerald-500" title={`Good: ${dist.good}%`} />
@@ -379,7 +426,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <span>{dist.poor}% Poor</span>
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -390,7 +438,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Total Beacons</p>
-            <p className="text-2xl font-extrabold text-blue-500">{analytics.beacon_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-blue-500">{formatCount(analytics.beacon_count ?? 0)}</p>
           </div>
           <div className="p-2.5 bg-blue-500/10 rounded-lg">
             <Activity className="h-5 w-5 text-blue-500" />
@@ -400,7 +448,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Pageviews</p>
-            <p className="text-2xl font-extrabold text-emerald-500">{analytics.pageview_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-emerald-500">{formatCount(analytics.pageview_count ?? 0)}</p>
           </div>
           <div className="p-2.5 bg-emerald-500/10 rounded-lg">
             <Eye className="h-5 w-5 text-emerald-500" />
@@ -410,7 +458,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Interactions</p>
-            <p className="text-2xl font-extrabold text-amber-500">{analytics.interaction_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-amber-500">{formatCount(analytics.interaction_count ?? 0)}</p>
           </div>
           <div className="p-2.5 bg-amber-500/10 rounded-lg">
             <Cpu className="h-5 w-5 text-amber-500" />
@@ -420,7 +468,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">JavaScript Errors</p>
-            <p className="text-2xl font-extrabold text-rose-500">{analytics.error_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-rose-500">{formatCount(analytics.error_count ?? 0)}</p>
           </div>
           <div className="p-2.5 bg-rose-500/10 rounded-lg">
             <ShieldAlert className="h-5 w-5 text-rose-500" />
@@ -459,7 +507,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${clsColors.text}`}>
-              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(3) : '—'}
+              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—'}
             </p>
             <p className={`text-xs ${clsColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.cls.distribution)}
@@ -477,7 +525,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${inpColors.text}`}>
-              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75}ms` : '—'}
+              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—'}
             </p>
             <p className={`text-xs ${inpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.inp.distribution)}
@@ -496,7 +544,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 name: 'LCP (s)',
                 type: 'scatter',
                 mode: 'lines+markers',
-                line: { color: '#10b981' },
+                line: { color: CHART_COLORS.success },
               },
               {
                 x: formattedTimestamps,
@@ -504,7 +552,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 name: 'CLS',
                 type: 'scatter',
                 mode: 'lines+markers',
-                line: { color: '#3b82f6' },
+                line: { color: CHART_COLORS.info },
               },
             ]}
             layout={{
@@ -668,14 +716,14 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 y: analytics.trends.pageviews || [],
                 name: 'Pageviews',
                 type: 'bar',
-                marker: { color: '#3b82f6' },
+                marker: { color: CHART_COLORS.info },
               },
               {
                 x: formattedTimestamps,
                 y: analytics.trends.interactions || [],
                 name: 'Interactions',
                 type: 'bar',
-                marker: { color: '#10b981' },
+                marker: { color: CHART_COLORS.success },
               },
               {
                 x: formattedTimestamps,
@@ -733,8 +781,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
           </DialogHeader>
 
           {selectedEvent && (() => {
-            let faroPayload: any = null;
-            let edgeMetadata: any = null;
+            let faroPayload: unknown = null;
+            let edgeMetadata: Record<string, unknown> | null = null;
 
             const rawLog = selectedEvent.raw_log;
             if (rawLog) {
@@ -777,7 +825,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                   </div>
                   <div>
                     <span className="text-muted-foreground block mb-1">Client Platform</span>
-                    <span>{selectedEvent.browser} on {selectedEvent.os}</span>
+                    <span>{envName(selectedEvent.browser)} on {envName(selectedEvent.os)}</span>
                   </div>
                   <div className="col-span-2">
                     <span className="text-muted-foreground block mb-1">Description</span>
@@ -787,7 +835,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                   </div>
                 </div>
 
-                {faroPayload && (
+                {faroPayload != null && (
                   <div className="space-y-2">
                     <span className="text-muted-foreground font-semibold block">Client Faro JSON Payload (Full)</span>
                     <div className="bg-emerald-950/5 dark:bg-emerald-950/15 border border-emerald-500/15 rounded-lg p-4 overflow-auto max-h-[250px] font-mono text-[11px] leading-relaxed text-foreground">

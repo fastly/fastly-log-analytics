@@ -25,6 +25,7 @@ import { Loader2 } from 'lucide-react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 
 /**
  * When a route's loading.tsx passes its (static, build-time-known) title,
@@ -68,24 +69,6 @@ export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProp
   )
 }
 
-/** Grid of equally-sized chart panels — matches /charts. */
-export function ChartsGridSkeleton({ title, description }: PageSkeletonHeaderProps = {}) {
-  return (
-    <div className="space-y-4">
-      {title ? (
-        <PageHeader title={title} description={description} />
-      ) : (
-        <Skeleton className="h-7 w-32" />
-      )}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {Array.from({ length: 9 }).map((_, i) => (
-          <Skeleton key={i} className="h-64 w-full" />
-        ))}
-      </div>
-    </div>
-  )
-}
-
 /** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
 export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
   return (
@@ -101,9 +84,7 @@ export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHea
       <div className="border rounded-md overflow-hidden">
         <Skeleton className="h-10 w-full rounded-none" />
         <div className="divide-y">
-          {Array.from({ length: rows }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full rounded-none" />
-          ))}
+          <SkeletonGrid count={rows} height="3rem" className="rounded-none" />
         </div>
       </div>
     </div>
@@ -163,16 +144,24 @@ export function AuthCardSkeleton({
     .filter(Boolean)
     .join(' ')
   return (
-    <div className={container}>
-      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'}`}>
+    <div className={container} data-testid="auth-card-skeleton">
+      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'} min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]`}>
         <CardHeader className="space-y-2">
           <div className="flex items-center gap-2">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
-            <span className="text-sm text-muted-foreground" role="status">Loading…</span>
+            <span className="text-sm text-muted-foreground" role="status">
+              Verifying share session &amp; security policies...
+            </span>
           </div>
         </CardHeader>
-        <CardContent>
-          <div className="h-32" aria-hidden="true" />
+        <CardContent className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]">
+          <div className="h-32 space-y-3" aria-hidden="true">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-4 w-28" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
         </CardContent>
       </Card>
     </div>

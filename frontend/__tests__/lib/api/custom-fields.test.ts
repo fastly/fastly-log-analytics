@@ -22,11 +22,30 @@
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-import { customFieldsApi } from '@/lib/api/custom-fields'
+import { customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api/custom-fields'
 import { server } from '../../../tests/msw/server'
 
 const API_BASE = 'http://127.0.0.1:8000'
 const SVC = 'svc-test'
+
+const LINT_BODY: VclLintRequest = { vcl_log_expression: 'req.url', collection_stage: 'edge' }
+
+const FIELD_BODY: Omit<CustomField, 'created_at' | 'updated_at'> = {
+  name: 'new_field',
+  label: 'New field',
+  description: '',
+  vcl_log_expression: 'req.url',
+  collection_stage: 'edge',
+  origin_log_frequency: 'all',
+  duckdb_type: 'VARCHAR',
+  value_type: 'string',
+  bytes_estimate: 32,
+  nullable: true,
+  enabled: true,
+  show_in_dashboard: false,
+  show_in_logs: true,
+  filterable: true,
+}
 
 // The api middleware reads useServiceStore.getState() on every typed-client
 // request to inject x-service-id. Stub so the request can be built. Note:
@@ -89,19 +108,13 @@ describe('customFieldsApi.listCustomFields', () => {
 
 describe('customFieldsApi.createCustomField', () => {
   it('returns the created field body on 200', async () => {
-    // The CustomField type is wide (~14 fields). For these MSW tests the
-    // body shape doesn't have to match it exactly — what matters is that
-    // the wrapper round-trips whatever the server returns. Cast to `any`
-    // at the function boundary follows the same convention used in
-    // __tests__/lib/api-error-paths.test.ts.
-    const created = { name: 'new_field', vcl_log_expression: 'req.url' }
+    const created = FIELD_BODY
     server.use(
       http.post(`${API_BASE}/api/services/${SVC}/custom-fields`, () =>
         HttpResponse.json(created),
       ),
     )
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await customFieldsApi.createCustomField(SVC, created as any)
+    const result = await customFieldsApi.createCustomField(SVC, created)
     expect(result).toEqual(created)
   })
 
@@ -115,8 +128,7 @@ describe('customFieldsApi.createCustomField', () => {
       ),
     )
     await expect(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      customFieldsApi.createCustomField(SVC, { name: 'x' } as any),
+      customFieldsApi.createCustomField(SVC, { ...FIELD_BODY, name: 'x' }),
     ).rejects.toThrow(/LOG_FORMAT_TOO_LONG/)
   })
 
@@ -127,8 +139,7 @@ describe('customFieldsApi.createCustomField', () => {
       ),
     )
     await expect(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      customFieldsApi.createCustomField(SVC, { name: 'x' } as any),
+      customFieldsApi.createCustomField(SVC, { ...FIELD_BODY, name: 'x' }),
     ).rejects.toThrow()
   })
 })
@@ -191,10 +202,7 @@ describe('customFieldsApi.validateCustomVcl', () => {
         () => HttpResponse.json(lint),
       ),
     )
-    const result = await customFieldsApi.validateCustomVcl(SVC, {
-      vcl: 'req.url',
-      type: 'string',
-    } as unknown as Parameters<typeof customFieldsApi.validateCustomVcl>[1])
+    const result = await customFieldsApi.validateCustomVcl(SVC, LINT_BODY)
     expect(result).toEqual(lint)
   })
 
@@ -207,10 +215,7 @@ describe('customFieldsApi.validateCustomVcl', () => {
       ),
     )
     await expect(
-      customFieldsApi.validateCustomVcl(SVC, {
-        vcl: 'BAD',
-        type: 'string',
-      } as unknown as Parameters<typeof customFieldsApi.validateCustomVcl>[1]),
+      customFieldsApi.validateCustomVcl(SVC, { ...LINT_BODY, vcl_log_expression: 'BAD' }),
     ).rejects.toThrow('malformed VCL')
   })
 })

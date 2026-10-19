@@ -10,6 +10,30 @@ import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { makeTimeXAxis } from '@/lib/chart-helpers'
 import { TRENDS } from '@/lib/constants'
+import type { ReportConfiguration } from '@/hooks/useReportConfig'
+import type { PlotlyTrace } from '@/types/plotly'
+import type { OriginStatusCodes, OriginTimeseries, SectionQuery } from './types'
+
+type OriginMetric = 'ttfb' | 'ttlb'
+type OriginPercentile = 'p50' | 'p95' | 'p99'
+
+interface TimeseriesProps {
+  originTs: SectionQuery<OriginTimeseries>
+  originTsChartData: PlotlyTrace[]
+  statusCodes: SectionQuery<OriginStatusCodes>
+  statusData: PlotlyTrace[]
+  originMetric: OriginMetric
+  setOriginMetric: (metric: OriginMetric) => void
+  originPercentile: OriginPercentile
+  setOriginPercentile: (percentile: OriginPercentile) => void
+  trend: string
+  setTrend: (trend: string) => void
+  config: ReportConfiguration
+  intervalButtons: React.ReactNode
+  startTime: string | null
+  endTime: string | null
+  timezone: string
+}
 
 export function Timeseries({
   originTs,
@@ -27,15 +51,16 @@ export function Timeseries({
   startTime,
   endTime,
   timezone,
-}: any) {
+}: TimeseriesProps) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
       <AnalyticsCard
         title="Origin Latency"
         icon={<Activity className="h-4 w-4" />}
-        className="lg:col-span-2 h-[400px]"
+        className="lg:col-span-2 h-[400px] [contain-intrinsic-size:400px] [content-visibility:auto]"
         isLoading={originTs.isLoading}
         isFetching={originTs.isFetching}
+        loadingMessage="Loading origin latency timeseries..."
         error={originTs.error as AnalyticsCardError | null}
         helpContent={<p>Time to First Byte (TTFB) measures the time to receive the first byte of the response headers from the origin. Time to Last Byte (TTLB) measures the time to receive the full response body.</p>}
         headerAction={
@@ -131,9 +156,10 @@ export function Timeseries({
         icon={<Activity className="h-4 w-4" />}
         isLoading={statusCodes.isLoading}
         isFetching={statusCodes.isFetching}
+        loadingMessage="Loading origin status code breakdown..."
         error={statusCodes.error as AnalyticsCardError | null}
         isEmpty={!statusData?.length}
-        className="h-[400px]"
+        className="h-[400px] [contain-intrinsic-size:400px] [content-visibility:auto]"
         contentClassName="p-2"
         helpContent={<p>A breakdown of the HTTP status codes returned directly by your backend servers during the selected time period.</p>}
       >

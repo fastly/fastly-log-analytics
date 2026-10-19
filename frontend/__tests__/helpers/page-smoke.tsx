@@ -86,10 +86,10 @@ export function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
-    return selector ? selector(state) : state
-  })
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 }
 
@@ -116,7 +116,7 @@ export function navigationModuleMock(pathname: string) {
   return {
     usePathname: vi.fn(() => pathname),
     useSearchParams: vi.fn(() => new URLSearchParams()),
-    useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
+    useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn(), prefetch: vi.fn(), back: vi.fn() })),
   }
 }
 

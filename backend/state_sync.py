@@ -367,16 +367,14 @@ def import_admin_state(service_id: str):
         # cfg, ALWAYS re-inject the canonical list from code; the code is
         # the source of truth, not whatever happens to be in FOS.
         if "custom_fields" in state:
-            cfg = svcconfig.load_config(service_id)
-            if cfg is not None:
-                from backend.core import field_registry as _lf
-                from backend.provision.system_fields import (
-                    reconcile_system_custom_fields,
-                    system_feature_flags,
-                )
+            from backend.core import field_registry as _lf
+            from backend.provision.system_fields import (
+                reconcile_system_custom_fields,
+                system_feature_flags,
+            )
 
+            def _apply_remote_custom_fields(cfg: dict) -> None:
                 lf = _lf.get_lf_config(cfg)
-                remote_fields = list(state["custom_fields"])
 
                 # Strip any system-named entries the remote might carry
                 # (stale, partial, or just plain different) and re-add the
@@ -384,15 +382,14 @@ def import_admin_state(service_id: str):
                 # enabled locally. CMCD is included for the same reason
                 # scoring is — see backend/provision/system_fields.py.
                 scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
-                remote_fields = reconcile_system_custom_fields(
-                    remote_fields,
+                lf["custom_fields"] = reconcile_system_custom_fields(
+                    list(state["custom_fields"]),
                     scoring_enabled=scoring_enabled,
                     cmcd_enabled=cmcd_enabled,
                 )
-
-                lf["custom_fields"] = remote_fields
                 cfg["log_fields"] = lf
-                svcconfig.save_config(service_id, cfg)
+
+            svcconfig.mutate_config(service_id, _apply_remote_custom_fields)
 
         logger.debug(f"[state_sync] Imported admin state from {key}")
     except Exception as e:

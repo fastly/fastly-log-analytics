@@ -13,6 +13,7 @@
  *   - picking "System Time" resolves the live browser zone immediately
  *   - the "not in the common list" fallback item only appears in manual mode
  */
+import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -85,31 +86,14 @@ import { useTimezoneStore } from '@/stores/timezoneStore'
 import { getTimezoneAbbr } from '@/lib/date'
 
 function mockSystemTimezone(timeZone: string) {
-  // TimezoneSwitcher renders getTimezoneAbbr(), which calls date-fns-tz,
-  // which calls `new Intl.DateTimeFormat(locale, options)` internally to
-  // compute the abbreviation — a real constructor call with args. Only the
-  // browser-zone RESOLUTION path (our own code) calls the no-arg function
-  // form. Delegate anything with args to the real constructor so the
-  // abbreviation lookup still works; only fake the no-arg case.
-  // Arrow functions can't be used with `new` (no [[Construct]]) — date-fns-tz
-  // calls `new Intl.DateTimeFormat(...)`, so the mock implementation must be
-  // a real `function` to remain constructible.
-  const RealDTF = Intl.DateTimeFormat
-  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (
-    this: unknown,
-    ...args: unknown[]
-  ) {
-    if (args.length === 0) {
-      return { resolvedOptions: () => ({ timeZone }) } as unknown as Intl.DateTimeFormat
-    }
-    return new (RealDTF as unknown as new (...a: unknown[]) => Intl.DateTimeFormat)(...args)
-  } as unknown as typeof Intl.DateTimeFormat)
+  stubSystemTimeZone(timeZone)
 }
 
 beforeEach(() => {
   window.localStorage.clear()
   useTimezoneStore.setState({ mode: 'system', timezone: 'UTC' })
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('TimezoneSwitcher', () => {

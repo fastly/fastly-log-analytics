@@ -17,11 +17,20 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { MapPin, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 import {
   panelDialogContent,
   panelDialogFooter,
   panelDialogHeaderMuted,
 } from '@/lib/panel-dialog'
+
+type PopLocation = components['schemas']['PopLocation']
+
+/** Coordinate off a datacenter entry: the Fastly payload nests it under ``coordinates`` (or ``attributes``). */
+function popCoord(pop: PopLocation, axis: 'latitude' | 'longitude'): number | null {
+  const v = pop[axis] ?? pop.coordinates?.[axis] ?? pop.attributes?.[axis]
+  return typeof v === 'number' ? v : null
+}
 
 interface PopLocationsModalProps {
   open: boolean
@@ -36,7 +45,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
     queryKey: ['pop-locations'],
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/pop-locations")
-      return data as any
+      return data
     },
     enabled: open,
   })
@@ -46,7 +55,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
       const { data } = await client.POST("/api/admin/pop-locations/refresh", {
         body: { token: apiKey }
       })
-      return data as any
+      return data
     },
     onSuccess: (result) => {
       queryClient.setQueryData(['pop-locations'], { pops: result?.pops || [] })
@@ -54,10 +63,8 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
     },
   })
 
-  const pops: any[] = data?.pops || []
-  const withCoords = pops.filter(p =>
-    (p.coordinates?.latitude ?? p.attributes?.latitude) != null
-  )
+  const pops = data?.pops || []
+  const withCoords = pops.filter(p => popCoord(p, 'latitude') != null)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -68,7 +75,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
             POP Location Data
           </DialogTitle>
           <p className="text-sm text-muted-foreground mt-1">
-            POP coordinates power the Impossible Distance insight — they detect when a client's
+            POP coordinates power the Impossible Distance insight — they detect when a client&apos;s
             claimed geo location is physically impossible given their TCP RTT. Refresh when
             Fastly adds new POPs.
           </p>
@@ -106,11 +113,11 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
           ) : (
             <ScrollArea className="h-52 border rounded-lg">
               <div className="divide-y">
-                {pops.map((pop: any) => {
-                  const code = pop.code || pop.id || '?'
-                  const name = pop.name || pop.attributes?.name || ''
-                  const lat = pop.coordinates?.latitude ?? pop.attributes?.latitude
-                  const lon = pop.coordinates?.longitude ?? pop.attributes?.longitude
+                {pops.map((pop) => {
+                  const code = pop.code || '?'
+                  const name = pop.name
+                  const lat = popCoord(pop, 'latitude')
+                  const lon = popCoord(pop, 'longitude')
                   const hasGeo = lat != null && lon != null
                   return (
                     <div key={code} className="flex items-center gap-3 px-3 py-1.5 hover:bg-muted/30">
@@ -118,7 +125,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
                       <span className="text-xs text-muted-foreground flex-1 truncate">{name}</span>
                       {hasGeo ? (
                         <span className="text-[10px] font-mono text-muted-foreground/70 shrink-0 tabular-nums">
-                          {Number(lat).toFixed(2)}, {Number(lon).toFixed(2)}
+                          {lat?.toFixed(2)}, {lon?.toFixed(2)}
                         </span>
                       ) : (
                         <span className="text-[10px] text-destructive/70 shrink-0">no coords</span>
@@ -168,7 +175,7 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
             {mutation.isError && (
               <div className="flex items-center gap-2 text-sm text-destructive">
                 <AlertCircle className="h-4 w-4" />
-                {(mutation.error as any)?.message || 'Update failed. Check your API key.'}
+                {mutation.error?.message || 'Update failed. Check your API key.'}
               </div>
             )}
           </div>

@@ -1,0 +1,168 @@
+{{- include "clickhouse.validate" . -}}
+{{- if .Values.keeper.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-keeper-config
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+data:
+  keeper_config.xml: |
+    <clickhouse>
+      <logger>
+        <level>information</level>
+        <console>1</console>
+      </logger>
+      <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>{server_id}</server_id>
+        <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+          <operation_timeout_ms>10000</operation_timeout_ms>
+          <session_timeout_ms>30000</session_timeout_ms>
+          <raft_logs_level>information</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+          {{- range $k := until (int .Values.keeper.replicas) }}
+          <server>
+            <id>{{ add $k 1 }}</id>
+            <hostname>{{ include "clickhouse.fullname" $ }}-keeper-{{ $k }}.{{ include "clickhouse.fullname" $ }}-keeper-headless</hostname>
+            <port>9444</port>
+          </server>
+          {{- end }}
+        </raft_configuration>
+      </keeper_server>
+    </clickhouse>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-keeper-headless
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+spec:
+  clusterIP: None
+  ports:
+  - name: client
+    port: 9181
+    targetPort: 9181
+  - name: raft
+    port: 9444
+    targetPort: 9444
+  selector:
+    {{- include "clickhouse.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-keeper
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+spec:
+  serviceName: {{ include "clickhouse.fullname" . }}-keeper-headless
+  replicas: {{ .Values.keeper.replicas }}
+  selector:
+    matchLabels:
+      {{- include "clickhouse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keeper
+  template:
+    metadata:
+      labels:
+        {{- include "clickhouse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: keeper
+    spec:
+      serviceAccountName: {{ include "clickhouse.fullname" . }}
+      securityContext:
+        fsGroup: 3000
+        runAsGroup: 3000
+        runAsNonRoot: true
+        runAsUser: 3000
+      initContainers:
+      - name: init-keeper-config
+        image: {{ .Values.keeper.image.repository }}:{{ .Values.keeper.image.tag }}
+        command:
+        - sh
+        - -c
+        - |
+          ORDINAL=$(echo "$HOSTNAME" | awk -F'-' '{print $NF}')
+          SERVER_ID=$((ORDINAL + 1))
+          sed "s/{server_id}/$SERVER_ID/g" /etc/keeper-config-src/keeper_config.xml > /etc/keeper-config-dest/keeper_config.xml
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: config-source
+          mountPath: /etc/keeper-config-src
+        - name: config-dest
+          mountPath: /etc/keeper-config-dest
+        - name: tmp
+          mountPath: /tmp
+      containers:
+      - name: keeper
+        image: {{ .Values.keeper.image.repository }}:{{ .Values.keeper.image.tag }}
+        imagePullPolicy: {{ .Values.keeper.image.pullPolicy }}
+        command:
+        - clickhouse-keeper
+        - --config-file=/etc/clickhouse-keeper/keeper_config.xml
+        ports:
+        - name: client
+          containerPort: 9181
+        - name: raft
+          containerPort: 9444
+        resources:
+          {{- toYaml .Values.keeper.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse-keeper
+        - name: tmp
+          mountPath: /tmp
+        - name: logs
+          mountPath: /var/log/clickhouse-keeper
+        - name: config-dest
+          mountPath: /etc/clickhouse-keeper/keeper_config.xml
+          subPath: keeper_config.xml
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: logs
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: config-dest
+        emptyDir:
+          sizeLimit: 64Ki
+      - name: config-source
+        configMap:
+          name: {{ include "clickhouse.fullname" . }}-keeper-config
+      {{- if not .Values.keeper.persistence.enabled }}
+      - name: data
+        emptyDir: {}
+      {{- end }}
+  {{- if .Values.keeper.persistence.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      {{- if .Values.keeper.persistence.storageClass }}
+      storageClassName: {{ .Values.keeper.persistence.storageClass | quote }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.keeper.persistence.size }}
+  {{- end }}
+{{- end }}

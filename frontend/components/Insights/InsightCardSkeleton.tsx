@@ -13,14 +13,19 @@ import { Loader2 } from 'lucide-react'
 interface InsightCardSkeletonProps {
   title: string
   description?: string
+  loadingMessage?: string
 }
 
 // Loading shell shown while /api/insights is in flight. Same outer Card
-// shape as InsightCard so swapping in the real card on data arrival is a
-// content swap, not a layout shift.
-export function InsightCardSkeleton({ title, description }: InsightCardSkeletonProps) {
+// shape as InsightCard with zero-CLS layout reservation so swapping in the
+// real card on data arrival is a content swap, not a layout shift.
+export function InsightCardSkeleton({
+  title,
+  description,
+  loadingMessage = 'Analyzing log patterns…',
+}: InsightCardSkeletonProps) {
   return (
-    <Card className="h-full flex flex-col opacity-90">
+    <Card className="h-full flex flex-col min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto] opacity-90">
       <CardHeader className="pb-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -33,8 +38,8 @@ export function InsightCardSkeleton({ title, description }: InsightCardSkeletonP
         )}
       </CardHeader>
 
-      <CardContent className="flex-1 flex flex-col items-center justify-center pt-0 pb-6 text-xs text-muted-foreground">
-        Loading…
+      <CardContent className="flex-1 flex flex-col items-center justify-center pt-0 pb-6 text-xs text-muted-foreground gap-1.5">
+        <span>{loadingMessage}</span>
       </CardContent>
     </Card>
   )

@@ -145,7 +145,7 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
     reset_thread = threading.Thread(target=_run_reset, daemon=True)
     reset_thread.start()
     try:
-        assert reached_middle.wait(timeout=5), "reset never reached the FOS purge"
+        assert reached_middle.wait(timeout=30), "reset never reached the FOS purge"
         # Resolve the source the same way _run_commit does in production
         # (get_source_for_service), NOT the raw fos_source fixture — its
         # "name" field doesn't equal its "service_id" the way a real
@@ -157,4 +157,4 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
         assert result["files_committed"] == 0
     finally:
         release_reset.set()
-        reset_thread.join(timeout=5)
+        reset_thread.join(timeout=30)

@@ -13,7 +13,9 @@ import { Button } from "@/components/ui/button"
 import { CronLiveLog } from '@/components/CronLiveLog'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { cn } from '@/lib/utils'
+import type { BackgroundCronToast, CronRun } from '../_state'
 
+import { formatCount } from '@/lib/format'
 export function FloatingOperationsDock({
   displayedJobs,
   setDisplayedJobs,
@@ -25,15 +27,15 @@ export function FloatingOperationsDock({
   backgroundCronToast,
   setBackgroundCronToast
 }: {
-  displayedJobs: any[];
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<any[]>>;
+  displayedJobs: CronRun[];
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>;
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
   selectedJobId: number | string | null;
   setSelectedJobId: (id: number | string | null) => void;
   onDismiss: (id: number) => void;
-  backgroundCronToast: any;
-  setBackgroundCronToast: (toast: any) => void;
+  backgroundCronToast: BackgroundCronToast;
+  setBackgroundCronToast: (toast: BackgroundCronToast) => void;
 }) {
   const { full, abbr } = useDateFormat()
 
@@ -96,11 +98,11 @@ export function FloatingOperationsDock({
 
               {/* Optional completed job statistics */}
               {backgroundCronToast.status !== 'running' && (
-                <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-500 font-mono">
-                  {backgroundCronToast.rows_ingested !== undefined && (
-                    <span>Ingested: <strong className="text-zinc-300">{backgroundCronToast.rows_ingested.toLocaleString()} rows</strong></span>
+                <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400 font-mono">
+                  {backgroundCronToast.rows_ingested != null && (
+                    <span>Ingested: <strong className="text-zinc-300">{formatCount(backgroundCronToast.rows_ingested)} rows</strong></span>
                   )}
-                  {backgroundCronToast.duration_s !== undefined && (
+                  {backgroundCronToast.duration_s != null && (
                     <span>Duration: <strong className="text-zinc-300">{backgroundCronToast.duration_s.toFixed(1)}s</strong></span>
                   )}
                 </div>
@@ -181,34 +183,39 @@ export function FloatingOperationsDock({
               {displayedJobs.map((job) => {
                 const isActive = job.id === selectedJobId
                 return (
-                  <button
+                  <div
                     key={job.id}
-                    onClick={() => setSelectedJobId(job.id)}
                     className={cn(
-                      "px-3 py-1.5 rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 cursor-pointer border-t border-x transition-all shrink-0",
+                      "rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 border-t border-x transition-all shrink-0",
                       isActive
                         ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold"
                         : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30"
                     )}
                   >
-                    <span className={cn(
-                      "w-1.5 h-1.5 rounded-full transition-colors duration-300",
-                      job.status === 'running'
-                        ? "bg-blue-500 animate-pulse"
-                        : "bg-zinc-600"
-                    )} />
-                    {job.task === 'metadata_sync' ? 'sync' : job.task}
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDismiss(job.id)
-                      }}
-                      className="ml-1 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300"
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job.id)}
+                      className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider"
+                    >
+                      <span className={cn(
+                        "w-1.5 h-1.5 rounded-full transition-colors duration-300",
+                        job.status === 'running'
+                          ? "bg-blue-500 animate-pulse"
+                          : "bg-zinc-600"
+                      )} />
+                      {job.task === 'metadata_sync' ? 'sync' : job.task}
+                    </button>
+                    {/* A sibling button, not a child: interactive content may not nest inside a button. */}
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(job.id)}
+                      className="mr-3 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300 cursor-pointer"
                       title="Dismiss task"
+                      aria-label={`Dismiss ${job.task === 'metadata_sync' ? 'sync' : job.task} task`}
                     >
                       <X className="h-2.5 w-2.5" />
-                    </span>
-                  </button>
+                    </button>
+                  </div>
                 )
               })}
             </div>

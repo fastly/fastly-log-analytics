@@ -259,7 +259,9 @@ def _enumerate_table_functions() -> frozenset[str]:
     is never silently turned off.
     """
     try:
-        con = duckdb.connect(":memory:")
+        from backend.core.duckdb import get_memory_connection
+
+        con = get_memory_connection()
         try:
             rows = con.execute(
                 "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
@@ -784,56 +786,6 @@ def escape_sql_literal(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"escape_sql_literal expected str, got {type(value).__name__}")
     return value.replace("'", "''")
-
-
-def has_limit_clause(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:
-    """Return True iff ``sql`` parses as a statement with an explicit LIMIT
-    modifier on the outermost statement.
-
-    026: the previous ``\\bLIMIT\\b`` regex check matched ``LIMIT``
-    inside string literals (``WHERE name = 'WITHOUT LIMIT'``) and
-    inside SQL comments — both false positives that made the
-    auto-wrap helper SKIP wrapping. A query with attacker-supplied
-    text containing the word ``LIMIT`` then ran unbounded and could
-    materialise the entire fact table (OOM / 503).
-
-    We check the parse tree's modifiers list strictly on the top-level
-    node of each statement, preventing nested LIMIT clauses (e.g. inside subqueries)
-    from triggering false positives and bypassing the limit wrapper.
-    """
-    try:
-        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
-    except Exception:
-        return True
-    if not row or row[0] is None:
-        return True
-    try:
-        parsed = json.loads(row[0])
-    except Exception:
-        return True
-    if not isinstance(parsed, dict) or parsed.get("error"):
-        return True
-
-    statements = parsed.get("statements")
-    if not isinstance(statements, list):
-        return False
-
-    for stmt in statements:
-        if not isinstance(stmt, dict):
-            continue
-        node = stmt.get("node")
-        if not isinstance(node, dict):
-            continue
-        modifiers = node.get("modifiers")
-        if not isinstance(modifiers, list):
-            continue
-        for mod in modifiers:
-            if isinstance(mod, dict):
-                mod_type = mod.get("type")
-                if isinstance(mod_type, str) and mod_type.startswith("LIMIT"):
-                    return True
-
-    return False
 
 
 def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:

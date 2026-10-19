@@ -1,6 +1,6 @@
 'use client'
 
-import React, { Suspense, useState, useEffect, useMemo, useCallback } from 'react'
+import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
@@ -13,6 +13,8 @@ import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useDerivedState } from '@/hooks/useDerivedState'
+import { useLocalStorageString } from '@/hooks/useLocalStorageString'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Play, Search, AlertCircle, Database, Terminal, Activity, Bug } from 'lucide-react'
@@ -29,8 +31,72 @@ import { StructuredMode } from './_sections/StructuredMode'
 import { RawSqlMode } from './_sections/RawSqlMode'
 import { ResultsTable } from './_sections/ResultsTable'
 import { QueryToolbar } from './_sections/QueryToolbar'
+import { queryKeys } from '@/lib/query-keys'
+import type { components } from '@/types/api.generated'
+
+type QueryResponse = components['schemas']['QueryResponse']
+
+// The shapes the backend's error envelope takes (``detail`` is a string or an object).
+interface ErrorBody {
+  detail?: string | { message?: string; error?: string }
+  message?: string
+}
+
+function errorBodyMessage(body: ErrorBody | null): string | undefined {
+  const detail = body?.detail
+  if (typeof detail === 'string') return detail
+  return detail?.message || detail?.error || body?.message
+}
 
 const HISTORY_KEY = 'fastly_qe_history'
+
+/**
+ * Apply the deep-link params the dashboard's "See Raw Logs" CTA puts on the URL
+ * (``?start_time`` + ``?end_time`` and/or ``?filters=<json>``) into the filter store.
+ * Returns whether anything was applied — a deep-link landing is an explicit intent to run.
+ */
+function applyDeepLinkToFilterStore(): boolean {
+  if (typeof window === 'undefined') return false
+  const params = new URLSearchParams(window.location.search)
+  const qsStart = params.get('start_time')
+  const qsEnd = params.get('end_time')
+  const qsFilters = params.get('filters')
+  const { setRange, clearFilters, addFilter } = useFilterStore.getState()
+
+  let mutated = false
+  if (qsStart && qsEnd) {
+    setRange(qsStart, qsEnd)
+    mutated = true
+  }
+  if (qsFilters) {
+    try {
+      const parsed = JSON.parse(qsFilters) as FiltersPayload
+      if (parsed && typeof parsed === 'object') {
+        clearFilters()
+        for (const [rawCol, spec] of Object.entries(parsed)) {
+          if (!spec || !Array.isArray(spec.values)) continue
+          const col = rawCol.replace(/_\d+$/, '')
+          for (const v of spec.values) {
+            addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
+          }
+        }
+        mutated = true
+      }
+    } catch {
+      // Malformed ?filters= — ignore silently rather than break the page.
+    }
+  }
+  return mutated
+}
+
+function parseHistory(raw: string | null): { sql: string; ts: number }[] {
+  if (!raw) return []
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return []
+  }
+}
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
@@ -44,25 +110,25 @@ function QueryPageInner() {
   const { full, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
 
-  // Mode comes from ?mode=raw; defaults to structured. AppLayout's
+  // Mode comes from ?mode=raw (or ?q=...); defaults to structured. AppLayout's
   // RawQueryModeProbe reads the same param to toggle the global FilterBar.
-  const urlMode: QueryMode = searchParams.get('mode') === 'raw' ? 'raw' : 'structured'
-  const [mode, setMode] = useState<QueryMode>(urlMode)
+  const urlQueryParam = searchParams.get('q')
+  const urlMode: QueryMode =
+    searchParams.get('mode') === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
+  // Local mode follows the URL when it changes underneath us (e.g. back/forward).
+  const [mode, setMode] = useDerivedState<QueryMode>(urlMode)
 
-  // Keep local mode in sync if the URL changes underneath us (e.g. back/forward).
-  useEffect(() => {
-    setMode(urlMode)
-  }, [urlMode])
+  // One-shot deep-link hydration, applied BEFORE this component reads the filter store below
+  // (a lazy initializer, like QueryProvider's URL hydration). A deep-link landing marks the
+  // first run as wanted.
+  const [deepLinked] = useState(applyDeepLinkToFilterStore)
 
   // Filter store drives Structured Mode. We pull primitives so we can compose
   // the generated SQL purely from filter-bar state.
-  const { startTime, endTime, addFilter, setRange, clearFilters } = useFilterStore(
+  const { startTime, endTime } = useFilterStore(
     useShallow(state => ({
       startTime: state.startTime,
       endTime: state.endTime,
-      addFilter: state.addFilter,
-      setRange: state.setRange,
-      clearFilters: state.clearFilters,
     })),
   )
   // Pass `true` so the FilterBar's "Edge only" toggle reaches the query
@@ -75,67 +141,16 @@ function QueryPageInner() {
   // write-back loop the audit identified as missing here.
   useFilterUrlWriteback()
 
-  // ── One-shot URL hydration ────────────────────────────────────────────────
-  // The dashboard "See Raw Logs" CTA links here with ?start_time, ?end_time,
-  // and ?filters=<json>. Apply them once into the filter store so the
-  // structured mode picks them up, then strip the params so subsequent
-  // FilterBar edits aren't fighting a stale URL.
-  const [hasHydratedFromUrl, setHasHydratedFromUrl] = useState(false)
   // Gate the Structured-mode auto-run on user intent. A fresh /query
   // visit (no deep-link params, no Run click) should NOT immediately
   // fire a backend query — the previous behaviour issued a default
   // ``SELECT * FROM logs LIMIT 100`` against the cold view on every
-  // navigation. ``hasUserRun`` becomes true on a deep-link hydration
-  // (See Raw Logs CTA) and on an explicit Run button click.
-  const [hasUserRun, setHasUserRun] = useState(false)
-  useEffect(() => {
-    if (hasHydratedFromUrl) return
-    if (typeof window === 'undefined') return
-
-    const params = new URLSearchParams(window.location.search)
-    const qsStart = params.get('start_time')
-    const qsEnd = params.get('end_time')
-    const qsFilters = params.get('filters')
-
-    let mutated = false
-
-    if (qsStart && qsEnd) {
-      setRange(qsStart, qsEnd)
-      mutated = true
-    }
-
-    if (qsFilters) {
-      try {
-        const parsed = JSON.parse(qsFilters) as FiltersPayload
-        if (parsed && typeof parsed === 'object') {
-          clearFilters()
-          for (const [rawCol, spec] of Object.entries(parsed)) {
-            if (!spec || !Array.isArray(spec.values)) continue
-            const col = rawCol.replace(/_\d+$/, '')
-            for (const v of spec.values) {
-              addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
-            }
-          }
-          mutated = true
-        }
-      } catch {
-        // Malformed ?filters= — ignore silently rather than break the page.
-      }
-    }
-
-    if (mutated) {
-      // Deep-link landings are an explicit user intent — auto-run is
-      // the entire point of the See Raw Logs CTA. useFilterUrlWriteback owns
-      // the canonical URL state from the next effect tick onward, so we
-      // intentionally do NOT strip the consumed params here.
-      setHasUserRun(true)
-    }
-
-    setHasHydratedFromUrl(true)
-  }, [hasHydratedFromUrl, addFilter, clearFilters, setRange])
+  // navigation. ``hasUserRun`` starts true on a deep-link landing
+  // (See Raw Logs CTA) and becomes true on an explicit Run button click.
+  const [hasUserRun, setHasUserRun] = useState(deepLinked)
 
   // ── SQL editor + run controls ─────────────────────────────────────────────
-  type Dataset = 'logs' | 'client_vitals' | 'client_errors'
+  type Dataset = components['schemas']['QueryRequest']['dataset']
   const [dataset, setDataset] = useState<Dataset>('logs')
 
   const RUM_SCHEMAS = useMemo<Record<string, { name: string; type: string }[]>>(() => ({
@@ -166,7 +181,21 @@ function QueryPageInner() {
     ],
   }), [])
 
-  const [rawSql, setRawSql] = useState('SELECT * FROM logs LIMIT 100')
+  const DEFAULT_LOG_SCHEMA = useMemo<{ name: string; type: string }[]>(() => [
+    { name: 'timestamp', type: 'TIMESTAMPTZ' },
+    { name: 'ip', type: 'VARCHAR' },
+    { name: 'url', type: 'VARCHAR' },
+    { name: 'host', type: 'VARCHAR' },
+    { name: 'method', type: 'VARCHAR' },
+    { name: 'status', type: 'INTEGER' },
+    { name: 'cache', type: 'VARCHAR' },
+    { name: 'country', type: 'VARCHAR' },
+    { name: 'pop', type: 'VARCHAR' },
+    { name: 'asn', type: 'INTEGER' },
+    { name: 'ua', type: 'VARCHAR' },
+  ], [])
+
+  const [rawSql, setRawSql] = useState(() => urlQueryParam || 'SELECT * FROM logs LIMIT 100')
 
   const handleDatasetChange = useCallback((nextDataset: Dataset) => {
     setDataset(nextDataset)
@@ -182,7 +211,8 @@ function QueryPageInner() {
   // also page in more rows on demand.
   const [maxRows, setMaxRows] = useState<number>(100)
   const [explain, setExplain] = useState<boolean>(false)
-  const [history, setHistory] = useState<{ sql: string; ts: number }[]>([])
+  const [historyRaw, writeHistoryRaw] = useLocalStorageString(HISTORY_KEY)
+  const history = useMemo(() => parseHistory(historyRaw), [historyRaw])
 
   // Structured-mode sort lives here so the generated SQL can ORDER BY it
   // server-side. Raw-mode sort is owned uncontrolled by DataTable (client side)
@@ -191,20 +221,11 @@ function QueryPageInner() {
     { id: 'timestamp', desc: true },
   ])
 
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(HISTORY_KEY)
-      if (stored) {
-        setHistory(JSON.parse(stored))
-      }
-    } catch { /* ignore */ }
-  }, [])
-
   const { data: schemaData } = useQuery({
-    queryKey: ['admin', 'schema', activeServiceId],
+    queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/schema', { signal })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId,
     // Schema only changes when admin adds a custom field — never within
@@ -233,11 +254,28 @@ function QueryPageInner() {
     return out
   }, [dataset, catalog, RUM_SCHEMAS])
 
-  const activeSchema = useMemo(() => {
+  const activeSchema = useMemo<{ name: string; type: string }[]>(() => {
     if (dataset === 'client_vitals') return RUM_SCHEMAS.client_vitals
     if (dataset === 'client_errors') return RUM_SCHEMAS.client_errors
-    return schemaData?.schema
-  }, [dataset, schemaData, RUM_SCHEMAS])
+    const rawList = schemaData?.schema ?? []
+    if (rawList.length > 0) {
+      return rawList
+        .map(item => ({
+          name: item.name || '',
+          type: item.type || 'VARCHAR',
+        }))
+        .filter(item => Boolean(item.name))
+    }
+    if (catalog?.fields?.length) {
+      return catalog.fields
+        .filter((f) => Boolean(f.id))
+        .map((f) => ({
+          name: f.id,
+          type: f.duckdb_type || 'VARCHAR',
+        }))
+    }
+    return DEFAULT_LOG_SCHEMA
+  }, [dataset, schemaData, catalog, RUM_SCHEMAS, DEFAULT_LOG_SCHEMA])
 
   const activeTableName = useMemo(() => {
     if (dataset === 'client_vitals') return 'client_vitals'
@@ -258,7 +296,7 @@ function QueryPageInner() {
     queryKey: ['query', 'presets', activeServiceId],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/presets', { signal })
-      return data as any
+      return data ?? []
     },
     enabled: !!activeServiceId,
     // Same rationale as schema above — presets list only changes when
@@ -269,35 +307,33 @@ function QueryPageInner() {
 
   const queryMutation = useMutation({
     mutationFn: async (params: { sql: string; max_rows: number; explain: boolean; dataset?: Dataset }) => {
-      const { data, error } = await client.POST('/api/query', { body: params as any, parseAs: 'text' })
+      const { data, error } = await client.POST('/api/query', { body: { dataset: 'logs', ...params }, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
+          let parsed: ErrorBody | null = null
           try {
-            throw JSON.parse(error)
-          } catch (e) {
+            parsed = JSON.parse(error)
+          } catch {
             throw new Error(error)
           }
+          throw new Error(errorBodyMessage(parsed) || error)
         }
-        throw error
+        if (error instanceof Error) throw error
+        throw new Error(errorBodyMessage(error as ErrorBody) || 'Query execution failed')
       }
       if (!data) throw new Error('No data')
-      if (typeof data !== 'string') return data as any
-      return await parseJsonAsync<any>(data as string)
+      if (typeof data !== 'string') return data as QueryResponse
+      return await parseJsonAsync<QueryResponse>(data)
     },
   })
 
   const pushHistory = useCallback((sqlToRun: string) => {
-    setHistory(prev => {
-      const updated = [
-        { sql: sqlToRun, ts: Date.now() },
-        ...prev.filter(h => h.sql !== sqlToRun),
-      ].slice(0, 20)
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated))
-      } catch { /* ignore */ }
-      return updated
-    })
-  }, [])
+    const updated = [
+      { sql: sqlToRun, ts: Date.now() },
+      ...history.filter(h => h.sql !== sqlToRun),
+    ].slice(0, 20)
+    writeHistoryRaw(JSON.stringify(updated))
+  }, [history, writeHistoryRaw])
 
   const handleRun = useCallback(() => {
     const sqlToRun = effectiveSql.trim()
@@ -316,17 +352,16 @@ function QueryPageInner() {
   // a custom query and shouldn't see it re-execute on every keystroke.
   // We also skip the very first paint unless the user signalled intent
   // (deep-link via See Raw Logs OR explicit Run click) — see hasUserRun.
+  const runStructured = useEffectEvent(() => {
+    pushHistory(structuredSql)
+    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
+  })
   useEffect(() => {
     if (mode !== 'structured') return
     if (!activeServiceId) return
-    if (!hasHydratedFromUrl) return
     if (!hasUserRun) return
-    pushHistory(structuredSql)
-    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
-    // queryMutation/pushHistory are stable from useMutation/useCallback; we
-    // only want to re-fire when the generated SQL or run-time inputs change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, hasUserRun, maxRows, explain, dataset])
+    runStructured()
+  }, [structuredSql, mode, activeServiceId, hasUserRun, maxRows, explain, dataset])
 
   const handleExportCSV = useCallback(() => {
     if (!queryMutation.data?.data?.length) return
@@ -337,15 +372,10 @@ function QueryPageInner() {
 
   const removeHistoryItem = useCallback((e: React.MouseEvent, index: number) => {
     e.stopPropagation()
-    setHistory(prev => {
-      const updated = [...prev]
-      updated.splice(index, 1)
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated))
-      } catch { /* ignore */ }
-      return updated
-    })
-  }, [])
+    const updated = [...history]
+    updated.splice(index, 1)
+    writeHistoryRaw(JSON.stringify(updated))
+  }, [history, writeHistoryRaw])
 
   // Switching modes is reflected in the URL so AppLayout's filter-bar
   // visibility (driven by ?mode=raw) stays in sync without a hard reload.
@@ -363,13 +393,14 @@ function QueryPageInner() {
     }
     const qs = params.toString()
     router.replace(qs ? `/query?${qs}` : '/query')
-  }, [router, structuredSql])
+  }, [router, structuredSql, setMode])
 
-  const columns: ColumnDef<any>[] = useMemo(() => {
-    if (!queryMutation.data?.columns) return []
-    return queryMutation.data.columns.map((col: any) => ({
+  const resultColumns = queryMutation.data?.columns
+  const columns: ColumnDef<Record<string, unknown>>[] = useMemo(() => {
+    if (!resultColumns) return []
+    return resultColumns.map((col: string) => ({
       id: col,
-      accessorFn: (row: any) => row[col],
+      accessorFn: (row: Record<string, unknown>) => row[col],
       meta: { label: getFieldLabel(col) },
       // Plain-label header — the DataTable header supplies the sort
       // button + arrow. Returning a <Button> here nested a button inside
@@ -377,7 +408,7 @@ function QueryPageInner() {
       // breaking hydration (React #418). A <span> keeps the monospace
       // field-name styling without the interactive nesting.
       header: () => <span className="font-mono text-xs">{getFieldLabel(col)}</span>,
-      cell: ({ row }: { row: any }) => {
+      cell: ({ row }: { row: { original: Record<string, unknown> } }) => {
         const value = row.original[col]
         if ((col === 'timestamp' || col.endsWith('_at')) && value && typeof value === 'string' && value.includes('T')) {
           try {
@@ -389,22 +420,45 @@ function QueryPageInner() {
         return <span className="text-xs font-mono">{value !== null && value !== undefined ? String(value) : 'null'}</span>
       },
     }))
-  }, [queryMutation.data?.columns, full, abbr, getFieldLabel])
+  }, [resultColumns, full, abbr, getFieldLabel])
 
   if (!activeServiceId && bootstrapResolved) {
     return <NoServiceSelected icon={Search} message="Please select a service from the header to run queries." />
   }
   if (!activeServiceId) {
-    // Bootstrap in flight on cold load — render nothing rather than
-    // flash the fallback. The page will re-render with real content
-    // as soon as bootstrap commits.
-    return null
+    // Bootstrap in flight on cold load — render a pre-allocated zero-CLS
+    // skeleton matching the exact header + toggles + editor + results footprint.
+    return (
+      <div
+        className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+        data-testid="query-engine-initializing"
+      >
+        <PageHeader
+          title="Query Explorer"
+          description="Browse raw request logs using the global filter bar — column headers sort server-side."
+        >
+          <Button disabled size="lg" data-testid="query-run-btn">
+            <Database className="h-4 w-4 mr-2 animate-spin" />
+            Initializing DuckDB analytical engine...
+          </Button>
+        </PageHeader>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <ModeToggle mode={mode} onModeChange={handleModeChange} />
+          <DatasetToggle dataset={dataset} onDatasetChange={handleDatasetChange} />
+        </div>
+        <Skeleton className="h-[238px] w-full rounded-lg" />
+        <Skeleton className="h-[380px] w-full rounded-lg" />
+      </div>
+    )
   }
 
   const isStructured = mode === 'structured'
 
   return (
-    <div className="space-y-6">
+    <div
+      className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+      data-testid="query-page-root"
+    >
       <PageHeader
         title="Query Explorer"
         description={
@@ -417,6 +471,7 @@ function QueryPageInner() {
           onClick={handleRun}
           disabled={queryMutation.isPending || !effectiveSql.trim()}
           size="lg"
+          data-testid="query-run-btn"
         >
           {queryMutation.isPending ? (
             <Database className="h-4 w-4 mr-2 animate-spin" />
@@ -432,7 +487,10 @@ function QueryPageInner() {
         <DatasetToggle dataset={dataset} onDatasetChange={handleDatasetChange} />
       </div>
 
-      <div className="border rounded-lg bg-card shadow-sm">
+      <div
+        className="border rounded-lg bg-card shadow-sm [contain-intrinsic-size:auto_420px] [content-visibility:auto]"
+        data-testid="query-editor-container"
+      >
         <QueryToolbar
           presets={presets}
           history={history}
@@ -461,7 +519,7 @@ function QueryPageInner() {
       </div>
 
       {queryMutation.error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" data-testid="query-error-alert">
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Query Error</AlertTitle>
           <AlertDescription className="font-mono text-xs whitespace-pre-wrap break-words mt-2">
@@ -483,7 +541,10 @@ function QueryPageInner() {
 
       {/* Empty results initial placeholder */}
       {!queryMutation.data && !queryMutation.isPending && (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10">
+        <div
+          className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10 [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-placeholder"
+        >
           <div className="mx-auto flex max-w-[420px] flex-col items-center justify-center text-center">
             <Terminal className="h-10 w-10 text-muted-foreground/60 mb-4" />
             <h3 className="text-lg font-semibold">No query results yet</h3>
@@ -500,7 +561,10 @@ function QueryPageInner() {
           results region is empty between the click and the table paint,
           and the only loading hint is the button's spinner. */}
       {queryMutation.isPending && !queryMutation.data && (
-        <div className="space-y-3 min-h-[380px]">
+        <div
+          className="space-y-3 min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-loading"
+        >
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Database className="h-3 w-3 animate-spin" />
             <span>Running query…</span>
@@ -513,7 +577,10 @@ function QueryPageInner() {
       )}
 
       {queryMutation.data && (
-        <div className="relative min-h-[380px]">
+        <div
+          className="relative min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-container"
+        >
           {/* Re-run overlay: keeps the prior data visible (preserves scroll
               + sort context) while indicating that fresh results are on
               the way. Pointer-events-none so the user can still scroll. */}
@@ -539,14 +606,16 @@ function QueryPageInner() {
   )
 }
 
+type ToggleDataset = 'logs' | 'client_vitals' | 'client_errors'
+
 interface DatasetToggleProps {
-  dataset: 'logs' | 'client_vitals' | 'client_errors'
-  onDatasetChange: (next: 'logs' | 'client_vitals' | 'client_errors') => void
+  dataset: ToggleDataset
+  onDatasetChange: (next: ToggleDataset) => void
 }
 
 export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
   return (
-    <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as any)}>
+    <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as ToggleDataset)}>
       <TabsList className="grid w-full grid-cols-3 max-w-[480px]">
         <TabsTrigger value="logs" className="flex items-center gap-1.5">
           <Terminal className="h-3.5 w-3.5" />
@@ -570,7 +639,27 @@ export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) 
 // the route render eagerly while the search-params subtree streams in.
 export default function QueryPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <div
+          className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+          data-testid="query-engine-initializing"
+        >
+          <PageHeader
+            title="Query Explorer"
+            description="Browse raw request logs using the global filter bar — column headers sort server-side."
+          >
+            <Button disabled size="lg" data-testid="query-run-btn">
+              <Database className="h-4 w-4 mr-2 animate-spin" />
+              Initializing DuckDB analytical engine...
+            </Button>
+          </PageHeader>
+          <Skeleton className="h-9 w-full rounded-lg" />
+          <Skeleton className="h-[238px] w-full rounded-lg" />
+          <Skeleton className="h-[380px] w-full rounded-lg" />
+        </div>
+      }
+    >
       <QueryPageInner />
     </Suspense>
   )

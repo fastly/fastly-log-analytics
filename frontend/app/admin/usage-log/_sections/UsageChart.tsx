@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { formatCount } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
@@ -14,6 +15,7 @@ import {
 } from '@/components/ui/select'
 import { Database, AlertTriangle, Loader2 } from 'lucide-react'
 import { useMounted } from '@/hooks/useMounted'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },
@@ -84,24 +86,24 @@ export function LogAccountingPanel() {
 
   const chartData = useMemo(() => ([
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.fastly_requests),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.fastly_requests),
       type: 'scatter',
       mode: 'lines',
       name: 'Fastly requests',
-      line: { color: '#3b82f6', width: 2 },
+      line: { color: CHART_COLORS.info, width: 2 },
     },
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.our_rows),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.our_rows),
       type: 'scatter',
       mode: 'lines',
       name: 'We ingested (rows)',
-      line: { color: '#10b981', width: 2, dash: 'dot' },
+      line: { color: CHART_COLORS.success, width: 2, dash: 'dot' },
     },
     {
-      x: buckets.map((b: any) => b.ts),
-      y: buckets.map((b: any) => b.file_count),
+      x: buckets.map((b) => b.ts),
+      y: buckets.map((b) => b.file_count),
       type: 'scatter',
       mode: 'lines',
       name: 'Files ingested',
@@ -145,15 +147,15 @@ export function LogAccountingPanel() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly requests</div>
-              <div className="font-mono text-base">{(totals?.fastly_requests ?? 0).toLocaleString()}</div>
+              <div className="font-mono text-base">{formatCount(totals?.fastly_requests ?? 0)}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">We ingested</div>
-              <div className="font-mono text-base">{(totals?.our_rows ?? 0).toLocaleString()}</div>
+              <div className="font-mono text-base">{formatCount(totals?.our_rows ?? 0)}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (rows)</div>
-              <div className={`font-mono text-base ${gapColor}`}>{(totals?.gap ?? 0).toLocaleString()}</div>
+              <div className={`font-mono text-base ${gapColor}`}>{formatCount(totals?.gap ?? 0)}</div>
             </div>
             <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap %</div>
@@ -163,7 +165,7 @@ export function LogAccountingPanel() {
           {data?.sustained_loss && (
             <div className="mb-3 text-xs px-3 py-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
               <AlertTriangle className="h-3 w-3 inline mr-1.5" />
-              Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {data.sustained_loss.total_lost_lines.toLocaleString()} rows missing
+              Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {formatCount(data.sustained_loss.total_lost_lines)} rows missing
             </div>
           )}
           {totals?.worst_bucket_ts && (totals.worst_bucket_gap_pct ?? 0) > 0.01 && (

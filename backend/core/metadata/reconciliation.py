@@ -1,10 +1,10 @@
-"""Metadata storage stats + age-based cleanup across the per-service SQLite file.
+"""Metadata storage stats + age-based cleanup against the metadata Postgres database.
 
 Surfaces row count + bytes per table for the admin dashboard, and the
 ``cleanup_metadata`` worker that purges aged-out rows from ``usage_log``,
-``ingested_files``, and ``cron_runs`` and VACUUMs the file to reclaim space.
+``ingested_files``, and ``cron_runs`` and VACUUMs to reclaim space.
 
-Also coordinates the rollup parquet-tree cleanup that lives outside SQLite
+Also coordinates the rollup parquet-tree cleanup that lives outside Postgres
 under ``<cache>/rollups/...``.
 """
 
@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import time as _t
 from collections.abc import Callable
+from typing import Any
 
 from backend.core.metadata import usage_log_db as _usage_log_db
 from backend.core.metadata.base import db_path, get_con, get_con_readonly
 from backend.core.metadata.ingest_log import recompute_ingested_files_summary
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -81,23 +83,28 @@ _SLOW_QUERIES_TABLE = "slow_queries"
 _USAGE_LOG_TABLE = "usage_log"
 
 
-def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
-    """Open the per-service usage_log file if it exists; else None.
+def _retention_timestamp_expr(ts_col: str, postgres: bool) -> str:
+    """Return the timestamp expression used by a retention predicate."""
+    if postgres:
+        return f"CAST({ts_col} AS TIMESTAMPTZ)"
+    return ts_col
 
-    A service that hasn't logged a single call yet has no usage_log.db
-    on disk; ``usage_log_db.get_con`` would create+initialise an empty
-    file, which is wasted I/O when the caller just wants a row count.
-    Use the read-only opener instead and treat ``OperationalError`` as
-    "no rows yet".
-    """
+
+def _table_uses_postgres(table: str, postgres: bool) -> bool:
+    """Return whether retention SQL should use the Postgres dialect."""
+    return postgres and table != _USAGE_LOG_TABLE
+
+
+def _open_usage_log(service_id: str) -> Any | None:
+    """Open the per-service usage_log connection if available; else None."""
     try:
         return _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
+    except Exception:
         return None
 
 
-_storage_stats_cache: dict[str, tuple[float, dict]] = {}
-_STORAGE_STATS_CACHE_TTL = 60.0  # 60 seconds
+_storage_stats_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
+CacheRegistry.register("metadata.reconciliation._storage_stats_cache", _storage_stats_cache)
 
 
 def invalidate_storage_stats_cache(service_id: str) -> None:
@@ -106,22 +113,18 @@ def invalidate_storage_stats_cache(service_id: str) -> None:
 
 
 def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
-    """Per-table row count + estimated bytes for this service's metadata.db.
+    """Per-table row count + estimated bytes for this service's metadata store.
 
-    Per-table bytes come from SQLite's ``dbstat`` virtual table. Total
-    ``db_bytes`` is the file size from the OS (``os.path.getsize``) rather than
-    summing all ``dbstat`` pages — the full-file dbstat scan was 600ms–3s on a
-    large DB and fires on every system-metrics tick.
+    Per-table bytes come from ``pg_total_relation_size`` (includes
+    indexes/TOAST). ``db_bytes``/``db_path`` describe the legacy per-service
+    SQLite file path, which no longer exists (there is no single "this
+    service's metadata file" under a shared Postgres database, since every
+    service's rows live in the same tables), so ``db_bytes`` is ``None``.
     """
-    now = _t.monotonic()
     if not force:
-        cached = _storage_stats_cache.get(service_id)
-        if cached is not None and now - cached[0] < _STORAGE_STATS_CACHE_TTL:
-            return cached[1]
-
-    # Ensure the DB file exists and schemas are initialized
-    if not os.path.exists(db_path(service_id)):
-        get_con(service_id)
+        cached: dict | None = _storage_stats_cache.get(service_id)
+        if cached is not None:
+            return cached
 
     import contextlib
 
@@ -137,11 +140,9 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                     continue
                 try:
                     rows = usage_log_con.execute("SELECT sum(count) FROM usage_log_hourly_summary").fetchone()[0] or 0
-                    row = usage_log_con.execute(
-                        "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
-                    ).fetchone()
+                    row = usage_log_con.execute("SELECT pg_total_relation_size('usage_log')").fetchone()
                     bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
-                except sqlite3.OperationalError:
+                except Exception:
                     rows, bytes_ = 0, None
                 finally:
                     usage_log_con.close()
@@ -149,12 +150,12 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                 continue
             try:
                 rows = con.execute(f"SELECT count(*) FROM {sql_table}").fetchone()[0]
-            except sqlite3.OperationalError:
+            except Exception:
                 continue
             try:
-                row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
+                row = con.execute(f"SELECT pg_total_relation_size('{sql_table}')").fetchone()
                 bytes_ = int(row[0]) if row and row[0] is not None else 0
-            except sqlite3.OperationalError:
+            except Exception:
                 bytes_ = None
             out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
@@ -169,7 +170,7 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
         "db_bytes": db_bytes,
         "db_path": db_path(service_id),
     }
-    _storage_stats_cache[service_id] = (now, result)
+    _storage_stats_cache[service_id] = result
     return result
 
 
@@ -188,10 +189,10 @@ def is_ingested_files_dedup_active(service_id: str) -> bool:
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(service_id) or {}
-    delete_after = cfg.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
-    # Treat anything other than an explicit False as safe-to-trim. None,
-    # missing, truthy strings — all default to the safe path.
-    return delete_after is not False
+    # A high-scale shared source forces this the same as an explicit
+    # delete_after=False: raw files are not being deleted, so ingested_files
+    # remains the only thing stopping full_sync from re-ingesting everything.
+    return svcconfig.resolve_raw_delete_after(cfg)
 
 
 def cleanup_metadata(
@@ -235,7 +236,7 @@ def cleanup_metadata(
             on_event(event)
         except Exception:
             # Never let an event-sink failure abort the cleanup itself.
-            pass
+            logger.debug("_emit: on_event failed (ignored)", exc_info=True)
 
     cfg = {**DEFAULT_METADATA_RETENTION, **(retention or {})}
 
@@ -260,13 +261,10 @@ def cleanup_metadata(
         cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
+    postgres = True
     t0 = _t.time()
 
-    def _con_for(table: str) -> sqlite3.Connection:
-        # usage_log lives in its own per-service file (v2.0 cutover);
-        # every other trimmable table is in the metadata.db.
-        if table == _USAGE_LOG_TABLE:
-            return _usage_log_db.get_con(service_id)
+    def _con_for(table: str) -> Any:
         return con
 
     # Steps: 3 deletes + 1 vacuum + 1 post-count = 5. Set up the progress
@@ -278,7 +276,7 @@ def cleanup_metadata(
     for table, _, _ in _CLEANUP_TABLES:
         try:
             before[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
-        except sqlite3.OperationalError:
+        except Exception:
             before[table] = 0
 
     deleted: dict[str, int] = {}
@@ -307,6 +305,7 @@ def cleanup_metadata(
         # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
         # between commits instead of queuing for the full duration.
         _BATCH = 5_000
+        table_postgres = _table_uses_postgres(table, postgres)
         try:
             total_n = 0
             while True:
@@ -314,16 +313,57 @@ def cleanup_metadata(
                     # Unix-epoch REAL cutoff for slow_queries — see
                     # ``_SLOW_QUERIES_TABLE`` comment above.
                     cutoff_epoch = _t.time() - days_int * 86400
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
-                        (cutoff_epoch, _BATCH),
-                    )
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
+                elif table == "ingested_files":
+                    from backend import config as svcconfig
+
+                    cfg_svc = svcconfig.load_config(service_id) or {}
+                    raw_retention_days = int(cfg_svc.get("log_retention_days", 90))
+                    rum_days_int = max(days_int, raw_retention_days + 1)
+                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} WHERE "
+                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
+                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
+                            f"LIMIT ?)",
+                            (days_int, rum_days_int, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE "
+                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?)) "
+                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?)) "
+                            f"LIMIT ?)",
+                            (f"-{days_int} days", f"-{rum_days_int} days", _BATCH),
+                        )
                 else:
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN "
-                        f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
-                        (f"-{days_int} days", _BATCH),
-                    )
+                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} "
+                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                            (days_int, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
+                            (f"-{days_int} days", _BATCH),
+                        )
                 n = int(cur.rowcount or 0)
                 total_n += n
                 table_con.commit()
@@ -338,7 +378,7 @@ def cleanup_metadata(
                     "message": f"{table}: deleted {deleted[table]:,} rows (kept rows ≤{days_int}d old)",
                 }
             )
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             logger.warning("[metadata_cleanup] %s: skip %s — %s", service_id, table, e)
             deleted[table] = 0
             _emit(
@@ -370,106 +410,20 @@ def cleanup_metadata(
             )
 
     vacuumed = False
-    if any(deleted.values()):
-        # A bare VACUUM rewrites the whole file under an exclusive lock —
-        # measured at 9.5s on a populated metadata.db, during which every
-        # other writer to the SAME file (slow_queries batched insert,
-        # ingested_files upsert) queues behind it even with the 30s
-        # busy_timeout. Switch to auto_vacuum=INCREMENTAL so steady-state
-        # cleanups reclaim space via chunked ``PRAGMA incremental_vacuum(N)``
-        # calls instead — same interleaving trick as the batched DELETE loop
-        # above (commit between chunks so other writers get a turn).
-        #
-        # auto_vacuum can only move off "none" by running one full VACUUM
-        # right after setting the pragma (SQLite applies the mode change on
-        # a full-file rewrite) — see sqlite.org/pragma.html#pragma_auto_vacuum.
-        # That happens ONCE per DB file (the mode persists in the file
-        # header), so this is a one-time cost, never a recurring one: every
-        # cleanup after this run's file takes the cheap chunked path below.
-        con.commit()
-        try:
-            mode_row = con.execute("PRAGMA auto_vacuum").fetchone()
-            mode = int(mode_row[0]) if mode_row is not None else 0
-        except sqlite3.OperationalError:
-            mode = 0
-        try:
-            if mode != 2:  # 0=NONE, 1=FULL, 2=INCREMENTAL
-                _emit(
-                    {
-                        "type": "status",
-                        "message": (
-                            "Enabling incremental_vacuum mode — one-time full "
-                            "VACUUM (never again after this run), may take "
-                            "minutes on large DBs…"
-                        ),
-                    }
-                )
-                # VACUUM (and the mode-changing PRAGMA before it) cannot run
-                # inside an open transaction. Drop the Python wrapper's
-                # auto-BEGIN so the next execute() autocommits.
-                old_iso = con.isolation_level
-                con.isolation_level = None
-                try:
-                    con.execute("PRAGMA auto_vacuum=INCREMENTAL")
-                    con.execute("VACUUM")
-                finally:
-                    con.isolation_level = old_iso
-            else:
-                _emit(
-                    {
-                        "type": "status",
-                        "message": "Reclaiming space via incremental_vacuum (chunked)…",
-                    }
-                )
-                # Mirrors the DELETE loop's _BATCH=5,000-row chunking above:
-                # commit between calls so the write lock is released and
-                # other writers can interleave instead of queuing for one
-                # long exclusive rewrite.
-                _VACUUM_BATCH_PAGES = 5_000
-                while True:
-                    pending = con.execute("PRAGMA freelist_count").fetchone()[0]
-                    if not pending:
-                        break
-                    con.execute(f"PRAGMA incremental_vacuum({_VACUUM_BATCH_PAGES})")
-                    con.commit()
-                    remaining = con.execute("PRAGMA freelist_count").fetchone()[0]
-                    if remaining >= pending:
-                        break  # no progress this round — avoid spinning forever
-            vacuumed = True
-            _emit(
-                {
-                    "type": "progress",
-                    "current": len(_CLEANUP_TABLES) + 1,
-                    "total": total_steps,
-                    "message": "Vacuum complete — space reclaimed",
-                }
-            )
-        except sqlite3.OperationalError as e:
-            # Locked / busy — not fatal, the delete already shrank the row count.
-            logger.warning("[metadata_cleanup] %s: vacuum skipped — %s", service_id, e)
-            _emit(
-                {
-                    "type": "progress",
-                    "current": len(_CLEANUP_TABLES) + 1,
-                    "total": total_steps,
-                    "message": f"Vacuum skipped ({e}) — row counts already reduced",
-                }
-            )
-    else:
-        _emit(
-            {
-                "type": "progress",
-                "current": len(_CLEANUP_TABLES) + 1,
-                "total": total_steps,
-                "message": "Nothing deleted — VACUUM skipped (no-op rewrite would waste cycles)",
-            }
-        )
+    _emit(
+        {
+            "type": "progress",
+            "current": len(_CLEANUP_TABLES) + 1,
+            "total": total_steps,
+            "message": "Cleanup complete (Postgres autovacuum manages storage)",
+        }
+    )
 
     after: dict[str, int] = {}
     for table, _, _ in _CLEANUP_TABLES:
         try:
             after[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
-        except sqlite3.OperationalError:
+        except Exception:
             after[table] = 0
     _emit(
         {

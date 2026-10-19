@@ -39,10 +39,29 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #   S0xKUFV0SmtDMVpsTFZjalBHVjFqNQ== -> production logging service ID
 #   ZnBSZnlrdTQyNThxdGlmaW9UY2dVbw== -> production CDN service ID
 #   ZHJld19jb3JwLnRlc3Q=             -> production NGWAF workspace ID
+# Additional encoded entries cover deployment service IDs, project/namespace
+# names, an origin address, and a deployment-specific analyst hostname found
+# during the beta3 public-release scrub.
 _NEEDLES_B64 = (
     "S0xKUFV0SmtDMVpsTFZjalBHVjFqNQ==",
     "ZnBSZnlrdTQyNThxdGlmaW9UY2dVbw==",
     "ZHJld19jb3JwLnRlc3Q=",
+    "WlUxNUJ2WTJMWDdXY0VwNDNUOVZ3VQ==",
+    "cUk0RDh5WFhGWU9JcFpFTXJrSnk2NQ==",
+    "Y1ZudTltWUIzQ3Ztb2IzbHNxalFVMw==",
+    "cm1XekNSQTBsa0FPczlHbnh2b2hzNA==",
+    "TXZpQ0w5UGQ1dnhCS1lTeFhFaFFSMQ==",
+    "ZUhEdDM3UUdTRWZpaFpPdVhKT1JFZQ==",
+    "c2UtZGV2ZWxvcG1lbnQtOTU2Ng==",
+    "MzQuMTIzLjMwLjE5NQ==",
+    "c2UtZGVtbw==",
+    "ZmxhLWVsZXZhdGlvbi1hbmFseXN0Lmdsb2JhbC5zc2wuZmFzdGx5Lm5ldA==",
+    "WkVaNG1jQWpvU0ZEVGc3dHBrREtWMg==",
+    "emdKUWRNYXFWbGVUMlZEZTJFTENFTQ==",
+    "ZmFzdGx5LXNlLWRlbW8uZ2xvYmFsLnNzbC5mYXN0bHkubmV0",
+    "ZmxhLWs4cy1zY2FsaW5nLXRlc3QtZWxldmF0aW9uLmdsb2JhbC5zc2wuZmFzdGx5Lm5ldA==",
+    "ZmxhLWxvY2FsLWhpZ2gtc2NhbGUtdGVzdC5nbG9iYWwuc3NsLmZhc3RseS5uZXQ=",
+    "ZmxhLWxvY2FsLXN0YW5kYXJkLXRlc3QuZ2xvYmFsLnNzbC5mYXN0bHkubmV0",
 )
 
 # Suffixes that are binary / generated / lock files where a coincidental match

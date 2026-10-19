@@ -3,8 +3,10 @@ import re
 import shutil
 import urllib.parse
 
+from backend.config import is_rum_enabled
 from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
+from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
 from backend.core.fastly.service import (
     ensure_condition,
     ensure_vcl_snippet,
@@ -13,7 +15,9 @@ from backend.core.fastly.service import (
     list_s3_endpoints,
 )
 from backend.core.fastly.utils import load_vcl, region_endpoint
+from backend.provision.draft_version import draft_version
 from backend.provision.utils import BOLD, _c, fail, info, ok, warn
+from backend.provision.vcl_builder import VclBuilder
 from backend.utils import field_codes as fc
 from backend.utils import vcl_utils
 
@@ -350,34 +354,24 @@ def generate_capture_vcl(
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
 
+    if rum_enabled:
+        rum_extraction, _ = generate_rum_recv_parts()
+        scrub_lines.append("  # Section 5: RUM field extraction (vcl_recv)")
+        scrub_lines.append('  if (req.url.path == "/rum-beacon") {')
+        for line in rum_extraction.splitlines():
+            scrub_lines.append(f"    {line}")
+        scrub_lines.append("  }")
+
     for statement in get_capture_vcl_statements(log_fields_config):
         scrub_lines.append(f"  {statement}")
 
     if rum_enabled:
-        rum_lines = [
-            "  # Section 5: RUM (vcl_recv)",
-            "  # Handle RUM beacon POST to /rum-beacon",
-            '  if (req.url.path == "/rum-beacon") {',
-            "      # Extract the essential fields from querystring:",
-            "      # - cid: session ID from rum_cid cookie (set in deliver)",
-            "      # - req: per-request ID (minted in recv)",
-            "      # - raw query: complete set of event_N_* params, parsed during ingest",
-            '      set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");',
-            '      set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");',
-            '      if (req.http.x-fos-edge-data:fastly_req_id == "") {',
-            "          set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;",
-            "      }",
-            "      set req.http.x-fos-edge-data:rum_raw_query = req.url;",
-            "      set req.http.x-fos-edge-data:rum_body = req.body;",
-            "",
-            "      # Mark beacon to skip S3 logging (already logged separately to metadata DB)",
-            '      set req.http.x-skip-rum-logging = "1";',
-            "",
-            "      # Synthetic 204 response (no origin round-trip needed)",
-            '      error 611 "No Content";',
-            "  }",
-        ]
-        scrub_lines.extend(rum_lines)
+        _, rum_response = generate_rum_recv_parts()
+        scrub_lines.append("  # Section 5: RUM (vcl_recv)")
+        scrub_lines.append('  if (req.url.path == "/rum-beacon") {')
+        for line in rum_response.splitlines():
+            scrub_lines.append(f"    {line}")
+        scrub_lines.append("  }")
 
     if scoring_enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
@@ -429,7 +423,7 @@ def generate_capture_vcl(
         scrub_lines.extend(routing_lines)
 
     scrub_lines.append("}")
-    recv_vcl = "\n".join(scrub_lines)
+    recv_vcl = VclBuilder.join_lines(scrub_lines)
 
     # miss and pass: unset edge headers + optional group-L timing
     base_unset_lines = ["if (req.backend.is_origin) {", "  unset bereq.http.x-fos-edge-data;"]
@@ -437,7 +431,7 @@ def generate_capture_vcl(
         base_unset_lines.append("  unset bereq.http.x-edge-score;")
         base_unset_lines.append("  unset bereq.http.X-Edge-Scoring-Pass;")
     base_unset_lines.append("}")
-    base_unset = "\n".join(base_unset_lines) + "\n"
+    base_unset = VclBuilder.join_lines(base_unset_lines) + "\n"
 
     # Session-scoring services route the first-pass request to the scorer
     # Compute backend via `return(pass)` in vcl_recv. That triggers the
@@ -535,7 +529,7 @@ def generate_capture_vcl(
                 fetch_lines.append(f"  set beresp.http.x-fos-origin-data:{cf['name']} = {cf['vcl_log_expression']};")
             fetch_lines.append("}")
             fetch_lines.append("# --- Custom Origin Fields End ---")
-        snippets["fetch"] = "\n".join(fetch_lines)
+        snippets["fetch"] = VclBuilder.join_lines(fetch_lines)
 
     if group_l:
         error_lines = [
@@ -553,7 +547,7 @@ def generate_capture_vcl(
             "  set req.http.x-of-oretries = req.restarts;\n"
             "}"
         ]
-        snippets["error"] = "\n".join(error_lines)
+        snippets["error"] = VclBuilder.join_lines(error_lines)
 
     if group_l or group_m or custom_origin or custom_deliver:
         deliver_lines = []
@@ -685,7 +679,7 @@ def generate_capture_vcl(
                 deliver_lines.append("}")
             deliver_lines.append("# --- Custom Deliver Fields End ---")
 
-        snippets["deliver"] = "\n".join(deliver_lines)
+        snippets["deliver"] = VclBuilder.join_lines(deliver_lines)
 
     return snippets
 
@@ -917,8 +911,8 @@ def ensure_cdn_service(
 ) -> dict:
     """Create and activate the CDN VCL service fronting FOS via declarative reconciler."""
     import json
-    from pathlib import Path
 
+    from backend import config as _svcconfig
     from backend.provision.declarative.reconciler import reconcile_cdn_service_state
     from backend.provision.fastly_api import account_has_rate_limiting
 
@@ -926,29 +920,22 @@ def ensure_cdn_service(
     if not logging_service_id:
         raise ValueError("logging_service_id or service_id must be provided in config.")
 
-    if type(Path).__name__ in ("MagicMock", "Mock"):
-        config_path = Path(f"configs/{logging_service_id}.json")
-    else:
-        from backend import config as _svcconfig
+    config_path = _svcconfig.config_path(logging_service_id)
 
-        config_path = _svcconfig.config_path(logging_service_id)
+    def _merge_inputs(disk_cfg: dict) -> None:
+        # Merge top-level or nested fields from cfg and inputs
+        for k, v in cfg.items():
+            disk_cfg[k] = v
 
-    # Read current config if it exists
-    if config_path.exists():
-        disk_cfg = json.loads(config_path.read_text())
-    else:
-        disk_cfg = {}
+        disk_cfg["fos_access_key_id"] = fos_access_key
+        disk_cfg["fos_secret_access_key"] = fos_secret_key
 
-    # Merge top-level or nested fields from cfg and inputs
-    for k, v in cfg.items():
-        disk_cfg[k] = v
-
-    disk_cfg["fos_access_key_id"] = fos_access_key
-    disk_cfg["fos_secret_access_key"] = fos_secret_key
-
-    # Write updated config to disk
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(disk_cfg, indent=2))
+    # Write updated config to disk (under the config lock; a first-time provision has no file yet)
+    with _svcconfig.config_lock(logging_service_id):
+        if _svcconfig.mutate_config(logging_service_id, _merge_inputs) is None:
+            new_cfg: dict = {}
+            _merge_inputs(new_cfg)
+            _svcconfig.save_config(logging_service_id, new_cfg)
 
     # Run the declarative reconciler for CDN service
     try:
@@ -988,9 +975,8 @@ def ensure_cdn_service(
 
 def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True, status_cb=None):
     """Clone active version and redeploy the main VCL snippet via declarative reconciler."""
-    import json
-    from pathlib import Path
 
+    from backend import config as _svcconfig
     from backend.config import list_configs
     from backend.provision.declarative.reconciler import reconcile_cdn_service_state
 
@@ -1005,17 +991,11 @@ def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True
         raise ValueError(f"Could not map cdn_service_id '{cdn_service_id}' to a configured logging_service_id.")
 
     # We update the rate_limiting_enabled on disk config if different from input rate_limiting
-    if type(Path).__name__ in ("MagicMock", "Mock"):
-        config_path = Path(f"configs/{logging_service_id}.json")
-    else:
-        from backend import config as _svcconfig
+    def _set_rate_limiting(cfg: dict) -> None:
+        cfg.setdefault("fos_proxy", {})["rate_limiting_enabled"] = rate_limiting
 
-        config_path = _svcconfig.config_path(logging_service_id)
-    cfg = json.loads(config_path.read_text())
-    if "fos_proxy" not in cfg:
-        cfg["fos_proxy"] = {}
-    cfg["fos_proxy"]["rate_limiting_enabled"] = rate_limiting
-    config_path.write_text(json.dumps(cfg, indent=2))
+    if _svcconfig.mutate_config(logging_service_id, _set_rate_limiting) is None:
+        raise FileNotFoundError(_svcconfig.config_path(logging_service_id))
 
     result = reconcile_cdn_service_state(
         logging_service_id=logging_service_id,
@@ -1087,9 +1067,10 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
     region = cfg["fos_region"]
     bucket = cfg["fos_bucket_name"]
-    prefix = (cfg.get("fos_prefix") or "").strip("/")
     period = cfg["log_period"]
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
+    from backend.provision.log_paths import analytics_log_path
+
+    path = analytics_log_path()
 
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
     if status_cb:
@@ -1109,19 +1090,31 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
     info(f"Cloning version {active_ver} → new draft…")
     if status_cb:
         status_cb(f"🔄 Cloning version {active_ver} to create a new draft...")
-    clone = fastly("PUT", f"/service/{service_id}/version/{active_ver}/clone", token=token)
-    new_ver = clone["number"]
 
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{service_id}/version/{new_ver}",
-        {"comment": f"Provisioning Fastly Object Storage logging at {ts}"},
-        token=token,
-    )
-    ok(f"Draft version: {new_ver}")
 
-    try:
+    def _draft_status(msg: str) -> None:
+        info(msg)
+        if status_cb:
+            status_cb(msg)
+
+    def _log_failure(exc: Exception) -> None:
+        fail(str(exc))
+        info(f"Rolling back — re-activating version {active_ver}...")
+
+    with draft_version(
+        service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Provisioning Fastly Object Storage logging at {ts}",
+        status_cb=_draft_status,
+        validate_msg="⏳ Validating draft configuration...",
+        activate_msg="⏳ Activating version {ver}...",
+        on_failure=_log_failure,
+    ) as new_ver:
+        ok(f"Draft version: {new_ver}")
+
         info(f"Adding Fastly Object Storage logging endpoint '{_c(BOLD, endpoint_name)}'…")
         if status_cb:
             status_cb(f"➕ Adding logging endpoint '{endpoint_name}' to draft...")
@@ -1138,7 +1131,12 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         custom_condition = (custom_condition or "").strip()
 
         scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
+        cond_parts = ["!segmented_caching.is_inner_req"]
+
+        rum_enabled = is_rum_enabled(cfg)
+        if rum_enabled:
+            cond_parts.append('req.url.path != "/rum-beacon"')
+
         if edge_only:
             cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
         if sample_rate < 100:
@@ -1210,31 +1208,10 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
 
         ok("Logging endpoint and VCL snippets added to draft")
 
-        info("Validating draft version…")
-        if status_cb:
-            status_cb("⏳ Validating draft configuration...")
-        result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        ok("Draft validated")
-
-        info("Activating version {new_ver}…")
-        if status_cb:
-            status_cb(f"⏳ Activating version {new_ver}...")
-        fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
-        ok(f"Version {new_ver} is now active")
-        if status_cb:
-            status_cb(f"✅ Version {new_ver} is now active.")
-        return new_ver
-
-    except Exception as exc:
-        fail(str(exc))
-        info(f"Rolling back — re-activating version {active_ver}...")
-        try:
-            fastly("PUT", f"/service/{service_id}/version/{active_ver}/activate", token=token)
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Version {new_ver} is now active")
+    if status_cb:
+        status_cb(f"✅ Version {new_ver} is now active.")
+    return new_ver
 
 
 # Snippet-ownership attribution for teardown. Every name we install is either
@@ -1293,11 +1270,29 @@ def remove_logging_endpoint(
         ok(f"No matching logging endpoints found on version {active_ver} — checking snippets anyway")
 
     info(f"Cloning version {active_ver} → new draft…")
-    clone = fastly("PUT", f"/service/{service_id}/version/{active_ver}/clone", token=token)
-    new_ver = clone["number"]
-    ok(f"Draft version: {new_ver}")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    try:
+    def _draft_status(msg: str) -> None:
+        info(msg)
+
+    def _log_failure(exc: Exception) -> None:
+        fail(str(exc))
+        info(f"Rolling back — re-activating version {active_ver}...")
+
+    with draft_version(
+        service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Deactivating Fastly Object Storage logging at {ts}",
+        comment_before_activate=True,
+        status_cb=_draft_status,
+        validate_msg="Validating draft version…",
+        activate_msg="Activating version {ver}…",
+        on_failure=_log_failure,
+    ) as new_ver:
+        ok(f"Draft version: {new_ver}")
+
         for ep in endpoints_to_delete:
             info(f"Removing '{_c(BOLD, ep)}' from draft…")
             encoded = urllib.parse.quote(ep, safe="")
@@ -1441,31 +1436,7 @@ def remove_logging_endpoint(
         except Exception as e:
             warn(f"Failed to check/remove conditions: {e}")
 
-        info("Validating draft version…")
-        result = fastly("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        ok("Draft validated")
-
-        ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{new_ver}",
-            {"comment": f"Deactivating Fastly Object Storage logging at {ts}"},
-            token=token,
-        )
-        info(f"Activating version {new_ver}…")
-        fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
-        ok(f"Version {new_ver} is now active")
-
-    except Exception as exc:
-        fail(str(exc))
-        info(f"Rolling back — re-activating version {active_ver}...")
-        try:
-            fastly("PUT", f"/service/{service_id}/version/{active_ver}/activate", token=token)
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Version {new_ver} is now active")
 
 
 def update_logging_endpoint(cfg: dict, token: str):

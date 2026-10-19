@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Shield, ShieldAlert, Cpu, Globe, Activity, HelpCircle } from 'lucide-react'
@@ -13,6 +13,7 @@ import { DataTable } from '@/components/DataTable/DataTable'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Button } from '@/components/ui/button'
 
+import { formatCount } from '@/lib/format'
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
 
 interface ThreatIntelPanelProps {
@@ -28,8 +29,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
     ['security', 'threat-intel', serviceId, startTime, endTime],
     async ({ signal }) => {
       if (!serviceId) return []
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel' as any, {
+      const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel', {
         signal,
         params: {
           query: {
@@ -39,8 +39,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         },
       })
       if (reqErr) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((reqErr as any)?.detail || 'Failed to fetch threat intelligence data')
+        throw new Error(extractApiError(reqErr))
       }
       return res?.data || []
     },
@@ -72,7 +71,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
       header: 'Requests',
       cell: ({ row }) => (
         <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">
-          {row.original.requests.toLocaleString()}
+          {formatCount(row.original.requests)}
         </span>
       ),
     },
@@ -99,7 +98,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         const count = row.original.matched_waf_rules_count
         return count > 0 ? (
           <Badge variant="outline" className="font-mono bg-destructive/10 text-destructive border-destructive/20 hover:bg-destructive/15">
-            {count.toLocaleString()} triggers
+            {formatCount(count)} triggers
           </Badge>
         ) : (
           <span className="text-xs text-muted-foreground font-medium">None</span>
@@ -219,7 +218,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         onOpenChange={setIsHelpOpen}
         title="Client TLS Fingerprints & Threat Intelligence Guide"
         icon={<Shield className="h-5 w-5 text-primary" />}
-        size="lg"
+        size="xl"
       >
         <div className="space-y-4 text-sm text-muted-foreground">
           <div>

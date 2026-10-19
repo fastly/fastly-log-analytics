@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -17,6 +17,7 @@ import {
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
 
 type TreeNode = components['schemas']['TreeNode']
@@ -33,11 +34,12 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
   const { full, abbr, relative } = useDateFormat()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  useEffect(() => {
-    if (forceExpand !== undefined) {
-      setIsOpen(forceExpand)
-    }
-  }, [forceExpand])
+  // A defined `forceExpand` overrides the open state whenever it changes (adjusted during render).
+  const [seenForceExpand, setSeenForceExpand] = useState<boolean | undefined>(undefined)
+  if (forceExpand !== seenForceExpand) {
+    setSeenForceExpand(forceExpand)
+    if (forceExpand !== undefined) setIsOpen(forceExpand)
+  }
 
   if (node.type === 'directory') {
     return (
@@ -159,12 +161,12 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', activeServiceId, prefix],
+    queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
     queryFn: async () => {
-      const endpoint = type === 'iceberg' ? "/api/admin/iceberg-tree" : "/api/admin/raw-tree"
-      const { data } = await client.GET(endpoint as any, {
-        params: { query: { prefix: prefix || undefined } }
-      })
+      const init = { params: { query: { prefix: prefix || undefined } } }
+      const { data } = type === 'iceberg'
+        ? await client.GET("/api/admin/iceberg-tree", init)
+        : await client.GET("/api/admin/raw-tree", init)
       return data
     },
     enabled: !!activeServiceId,
@@ -186,7 +188,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
     )
   }
 
-  const nodes = (data as any)?.nodes || []
+  const nodes = data.nodes
 
   if (nodes.length === 0) {
     return (
@@ -213,7 +215,7 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await queryClient.invalidateQueries({ queryKey: ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', activeServiceId] })
+    await queryClient.invalidateQueries({ queryKey: queryKeys.admin.fileTreeFor(type, activeServiceId) })
     setTimeout(() => setIsRefreshing(false), 500)
   }
 

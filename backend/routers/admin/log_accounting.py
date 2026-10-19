@@ -7,11 +7,11 @@ and the gap-heal cron in scheduler.py — see those module's imports.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Query, Response
 
+from backend.core.fastly.mock_fixtures import api_key_or_mock
 from backend.deps import get_source
 from backend.models.admin import (
     LogAccountingBucket,
@@ -19,6 +19,9 @@ from backend.models.admin import (
     LogAccountingTotals,
     SustainedLossAlert,
 )
+from backend.models.admin_actions import BackfillWindowResponse
+from backend.repositories import log_accounting as log_accounting_repo
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import raise_internal
 
 from ._router import router
@@ -32,17 +35,17 @@ logger = logging.getLogger(__name__)
 # 30 s, so a 30 s server-side TTL is well inside any user-visible
 # staleness budget and removes the spinner feel.
 _FASTLY_COUNTS_TTL = 45.0
-_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str, bool], tuple[float, dict[str, int]]] = {}
+_FASTLY_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_FASTLY_COUNTS_TTL)
 
 # Same TTL on the per-bucket DuckDB COUNT(*) since the function arguments
 # are functions of (service name, window, by) and the answer is stable
 # for the same input within the TTL window. Keyed on the same shape so a
 # single round of clears would invalidate both halves of the response.
 _DUCKDB_COUNTS_TTL = 45.0
-_DUCKDB_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, dict[str, int]]] = {}
+_DUCKDB_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_DUCKDB_COUNTS_TTL)
 
 
-@router.post("/admin/backfill-window")
+@router.post("/admin/backfill-window", response_model=BackfillWindowResponse, response_model_exclude_unset=True)
 def backfill_window(
     start_time: str = Query(..., description="ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"),
     end_time: str = Query(..., description="ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"),
@@ -87,10 +90,9 @@ def _fetch_fastly_request_counts(
     from backend.core.fastly.client import fastly
 
     cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
-    now_mono = time.monotonic()
-    cached = _FASTLY_COUNTS_CACHE.get(cache_key)
-    if cached is not None and (now_mono - cached[0]) < _FASTLY_COUNTS_TTL:
-        return cached[1]
+    cached: dict[str, int] | None = _FASTLY_COUNTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     payload = fastly(
         "GET",
@@ -108,7 +110,7 @@ def _fetch_fastly_request_counts(
             continue
         bucket = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
         out[bucket] = out.get(bucket, 0) + int(r.get(stat_key) or r.get("requests") or 0)
-    _FASTLY_COUNTS_CACHE[cache_key] = (now_mono, out)
+    _FASTLY_COUNTS_CACHE[cache_key] = out
     return out
 
 
@@ -138,10 +140,9 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
         int(end.timestamp()),
         by,
     )
-    now_mono = time.monotonic()
-    cached = _DUCKDB_COUNTS_CACHE.get(cache_key)
-    if cached is not None and (now_mono - cached[0]) < _DUCKDB_COUNTS_TTL:
-        return cached[1]
+    cached: dict[str, int] | None = _DUCKDB_COUNTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     # Bucket key MUST match metadata_db.get_log_accounting_counts: hourly
     # uses ``YYYY-MM-DDTHH`` (T separator, from the .log.gz basename's
@@ -153,7 +154,7 @@ def _duckdb_row_counts_per_bucket(source: dict, start: datetime, end: datetime, 
         result = _try_row_counts_from_rollup(source, start, end, fmt)
         if result is None:
             result = _raw_row_counts(source, start, end, fmt)
-        _DUCKDB_COUNTS_CACHE[cache_key] = (now_mono, result)
+        _DUCKDB_COUNTS_CACHE[cache_key] = result
         return result
     except Exception as e:
         logger.warning("[log-accounting] DuckDB counts unavailable, falling back to metadata: %s", e)
@@ -204,14 +205,9 @@ def _try_row_counts_from_rollup(
         st_tz = start.astimezone(UTC).isoformat()
         et_tz = end.astimezone(UTC).isoformat()
         with _ConnectionHolder(source, read_only=True) as con:
-            rows = con.execute(
-                f"SELECT strftime(date_trunc('{unit}', hour_start), '{fmt}') AS bucket, "
-                f"  SUM(requests) AS n "
-                f"FROM read_parquet([{paths_sql}]) "
-                f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
-                f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
-                f"GROUP BY date_trunc('{unit}', hour_start)"
-            ).fetchall()
+            rows = log_accounting_repo.rollup_bucket_counts(
+                con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=st_tz, end_tz=et_tz
+            )
         for b, n in rows:
             result[b] = int(n)
 
@@ -248,13 +244,9 @@ def _try_row_counts_from_rollup(
         if active_paths:
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
             with _ConnectionHolder(source, read_only=True) as con:
-                rows = con.execute(
-                    f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-                    f"FROM read_parquet([{paths_sql}], union_by_name=true) "
-                    f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
-                    f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-                    f"GROUP BY date_trunc('{unit}', timestamp)"
-                ).fetchall()
+                rows = log_accounting_repo.active_hour_bucket_counts(
+                    con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=live_start_iso, end_iso=end_iso
+                )
             for b, n in rows:
                 result[b] = result.get(b, 0) + int(n)
 
@@ -276,13 +268,9 @@ def _raw_row_counts(
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
     unit = "day" if "%H" not in fmt else "hour"
     with _ConnectionHolder(source, read_only=True) as con:
-        rows = con.execute(
-            f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-            f"FROM {table_name} "
-            f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
-            f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-            f"GROUP BY date_trunc('{unit}', timestamp)"
-        ).fetchall()
+        rows = log_accounting_repo.raw_bucket_counts(
+            con, unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso
+        )
     return {b: int(n) for b, n in rows}
 
 
@@ -321,7 +309,7 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
             status_code=400,
             detail={"error": "no logging_service_id configured for this service"},
         )
-    api_key = svcconfig.get_fastly_api_key(service_id)
+    api_key = api_key_or_mock(svcconfig.get_fastly_api_key(service_id))
     if not api_key:
         raise HTTPException(
             status_code=400,
@@ -530,8 +518,10 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
 
 
 @router.get("/admin/log-accounting", response_model=LogAccountingResponse)
+@router.get("/admin/log-accounting/{service_id}", response_model=LogAccountingResponse)
 def api_log_accounting(
     response: Response,
+    service_id: str | None = None,
     source: dict = Depends(get_source),
     hours: int = Query(24, ge=1, le=720),
     by: str = Query("hour", pattern="^(hour|day)$"),

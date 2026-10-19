@@ -19,6 +19,7 @@ from importlib import reload
 from unittest.mock import MagicMock, patch
 
 import backend.state_sync as state_sync_module
+from tests._helpers.config_fakes import mutate_via_save
 
 
 def _make_s3_mock():
@@ -99,7 +100,7 @@ def test_import_ignores_alerts_key():
         patch("backend.state_sync.get_source_for_service", return_value=source),
         patch("backend.state_sync._get_fos_client", return_value=s3_mock),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
-        patch("backend.state_sync.svcconfig.save_config"),
+        patch("backend.state_sync.svcconfig.mutate_config"),
     ):
         reload(state_sync_module)
         state_sync_module.import_admin_state("svc1")
@@ -361,6 +362,7 @@ def test_import_cdn_path_parses_payload_and_calls_metadata_writes():
         }
     ).encode("utf-8")
 
+    mock_save = MagicMock()
     with (
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=payload),
@@ -402,7 +404,7 @@ def test_import_merges_custom_fields_into_local_config():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=starting_cfg),
-        patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
+        patch("backend.state_sync.svcconfig.mutate_config", side_effect=mutate_via_save(capture_save)),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):
@@ -428,11 +430,12 @@ def test_import_skips_custom_fields_merge_when_local_config_missing():
         }
     ).encode("utf-8")
 
+    mock_save = MagicMock()
     with (
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=None),
-        patch("backend.state_sync.svcconfig.save_config") as mock_save,
+        patch("backend.state_sync.svcconfig.mutate_config", side_effect=mutate_via_save(mock_save)),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):
@@ -499,7 +502,7 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
-        patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
+        patch("backend.state_sync.svcconfig.mutate_config", side_effect=mutate_via_save(capture_save)),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):
@@ -521,7 +524,7 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
 
 
 def test_import_reinjects_cmcd_fields_when_cmcd_enabled():
-    """REGRESSION: 2026-08-12 SE-demo incident — the sibling of the scoring
+    """REGRESSION: 2026-08-12 production incident — the sibling of the scoring
     case above, for CMCD's 14 ``cmcd_*`` fields. A remote admin_state.json
     written before CMCD was enabled (or by a host without it) carries no
     ``cmcd_*`` entries, and ``import_admin_state`` used to re-inject only the
@@ -557,7 +560,10 @@ def test_import_reinjects_cmcd_fields_when_cmcd_enabled():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
-        patch("backend.state_sync.svcconfig.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch(
+            "backend.state_sync.svcconfig.mutate_config",
+            side_effect=mutate_via_save(lambda sid, cfg: saved.update({"cfg": cfg})),
+        ),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):
@@ -596,7 +602,10 @@ def test_import_strips_cmcd_fields_when_cmcd_disabled():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
-        patch("backend.state_sync.svcconfig.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch(
+            "backend.state_sync.svcconfig.mutate_config",
+            side_effect=mutate_via_save(lambda sid, cfg: saved.update({"cfg": cfg})),
+        ),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):
@@ -699,7 +708,7 @@ def test_import_does_not_reinject_scoring_fields_when_scoring_disabled():
         patch("backend.state_sync.get_source_for_service", return_value=src),
         patch("backend.state_sync._cdn_get", return_value=remote_payload),
         patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
-        patch("backend.state_sync.svcconfig.save_config", side_effect=capture_save),
+        patch("backend.state_sync.svcconfig.mutate_config", side_effect=mutate_via_save(capture_save)),
         patch("backend.core.metadata.replace_audit_for_service"),
         patch("backend.core.metadata.replace_views_for_service"),
     ):

@@ -10,11 +10,13 @@ import {
 } from "@/components/ui/table"
 import { Skeleton } from '@/components/ui/skeleton'
 
+import { formatCountMaybe } from '@/lib/format'
+import type { components } from '@/types/api.generated'
 export function SchemaTab({
   schemaData,
   isLoadingSchema,
 }: {
-  schemaData: any
+  schemaData: components['schemas']['SchemaResponse'] | undefined
   isLoadingSchema: boolean
 }) {
   return (
@@ -50,9 +52,9 @@ export function SchemaTab({
                   <TableCell><Skeleton className="h-4 w-24" /></TableCell>
                 </TableRow>
               ))
-            ) : (schemaData as any)?.schema.map((col: any) => {
+            ) : schemaData?.schema.map((col) => {
               const hasStats = col.null_percentage !== undefined
-              const populatedPct = hasStats ? Math.max(0, 100 - col.null_percentage).toFixed(1) : '—'
+              const populatedPct = col.null_percentage != null ? Math.max(0, 100 - col.null_percentage).toFixed(1) : '—'
 
               return (
                 <TableRow key={col.name}>
@@ -66,12 +68,12 @@ export function SchemaTab({
                     ) : '—'}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-right text-muted-foreground tabular-nums">
-                    {hasStats ? col.approx_unique?.toLocaleString() ?? '—' : '—'}
+                    {hasStats ? formatCountMaybe(col.approx_unique) ?? '—' : '—'}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.min}>
+                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.min ?? undefined}>
                     {hasStats ? col.min ?? '—' : '—'}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.max}>
+                  <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.max ?? undefined}>
                     {hasStats ? col.max ?? '—' : '—'}
                   </TableCell>
                 </TableRow>

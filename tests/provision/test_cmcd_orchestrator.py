@@ -18,6 +18,7 @@ import pytest
 
 from backend.provision import cmcd_orchestrator as orch
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+from tests._helpers.config_fakes import fake_mutate_config
 
 SID = "TestLogSvcABC123"
 TOKEN = "FAKE_TOKEN"
@@ -55,9 +56,12 @@ class _FastlyRecorder:
 
 def _patches(saved, fake, *, endpoints=("Fastly Object Storage Logs",), snippets=None, cfg=None):
     """Patch every seam enable/disable_cmcd reaches out through."""
+    base_cfg = cfg if cfg is not None else _cfg()
     return (
-        patch.object(orch.svcconfig, "load_config", return_value=cfg if cfg is not None else _cfg()),
-        patch.object(orch.svcconfig, "save_config", side_effect=lambda sid, c: saved.append(c)),
+        patch.object(orch.svcconfig, "load_config", return_value=base_cfg),
+        patch.object(
+            orch.svcconfig, "mutate_config", side_effect=fake_mutate_config(base_cfg, saves=saved, stateful=True)
+        ),
         patch.object(orch, "fastly", side_effect=fake),
         patch.object(orch, "get_active_version", return_value=5),
         patch.object(orch, "ensure_vcl_snippet"),
@@ -159,7 +163,7 @@ def test_enable_raises_when_no_active_version():
     saved: list[dict] = []
     with (
         patch.object(orch.svcconfig, "load_config", return_value=_cfg()),
-        patch.object(orch.svcconfig, "save_config", side_effect=lambda s, c: saved.append(c)),
+        patch.object(orch.svcconfig, "mutate_config", side_effect=fake_mutate_config(_cfg(), saves=saved)),
         patch.object(orch, "get_active_version", return_value=None),
     ):
         with pytest.raises(RuntimeError, match="no active version"):
@@ -243,7 +247,7 @@ def test_disable_raises_when_no_active_version():
     cfg = _cfg(cmcd={"enabled": True})
     with (
         patch.object(orch.svcconfig, "load_config", return_value=cfg),
-        patch.object(orch.svcconfig, "save_config"),
+        patch.object(orch.svcconfig, "mutate_config", side_effect=fake_mutate_config(cfg)),
         patch.object(orch, "get_active_version", return_value=None),
     ):
         with pytest.raises(RuntimeError, match="no active version"):

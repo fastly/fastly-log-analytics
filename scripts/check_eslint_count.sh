@@ -59,8 +59,33 @@ cd "$REPO_ROOT/frontend"
 # actual baseline count after completely eliminating all 17 ESLint errors/warnings inside
 # the newly added RUM, Assets, and Security views (RumSettingsDialog, TeardownRemoteFrontendDialog,
 # PopHealthHeatmap, ThreatIntelPanel, and DeployRemoteFrontendDialog). 843 -> 842: ratchet down ceiling following successful routing and query telemetry fixes. 842 -> 839: adopt shared useMounted hook in all Client analytical views to remove manual effects. 839 -> 835: ratchet down ceiling following absolute type-safety refactor of DebugPanel.tsx (0 any, 0 array-index-keys).
-# Drive toward zero.
-CEILING=835
+# 835 -> 834: net drop from the log_ingest -> commit cron rename (CronColumns.tsx task-string comparisons collapsed).
+# 834 -> 831: net drop from the Cron 1 frontend changes.
+# 831 -> 824: F5/F6 DRY refactor — merge-base measured at 832 (ceiling 831 was
+# set by Cron-1 work not present at this merge-base); escaped 8 pre-existing
+# react/no-unescaped-entities violations in network/help-content.tsx (JSX
+# apostrophes/quotes, render-identical) while converting its number formatting
+# to the shared formatCount helper.
+# 824 -> 804: dropped `as any` path casts on typed client calls (share dashboard,
+# scoring labels, ngwaf, network) plus the raw-logs explorer lint fixes (baseline
+# had drifted to 830 above the 824 ceiling).
+# 804 -> 792: typed the /query page (presets, result columns), plus later DRY work.
+# 804 -> 802: adopt useCopyToClipboard/downloadBlob (hook-in-cell extraction in CronColumns).
+# 802 -> 800: shared createBaseMap for the four MapLibre maps; dropped window.map debug global.
+# 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
+# 799 -> 794: moved buildTrafficData out of app/ into lib/traffic-chart (lint-clean in its new home).
+# 792 -> 791: adminJson/adminJsonResult replaced the remaining adminFetch().json() hand casts.
+# 791 -> 788: useShareStatusBanner moved from an effect/setState poller to useQuery.
+# 788 -> 786: scoring label rows and /scoring/labels read typed from the generated schema.
+# 786 -> 785: lake-info range/calendar typed on the response model; SyncFromCloudModal lost its any cast.
+# 785 -> 328: response/request bodies, catalog, bootstrap, scoring, share, provision, logs, alerts and query pages
+# derive from the generated schema instead of any casts.
+# 328 -> 170: security, origin and network sections read typed row models from the generated
+# schema (no row `any` casts), the network page's hooks moved out of the ReportLayout render-prop
+# into NetworkBody, and the DataTable/map internals use tanstack/maplibre generics.
+# 170 -> 0: effects that only mirrored props/storage into state are derived state, keyed state or
+# external-store reads; components are hoisted; index keys and unescaped entities are gone.
+CEILING=0
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
@@ -68,32 +93,47 @@ CEILING=835
 SCOPE=(app components hooks lib stores)
 
 # ESLint exits non-zero when it reports errors; capture the JSON anyway.
-ESLINT_JSON="$(npx --no-install eslint "${SCOPE[@]}" -f json 2>/dev/null || true)"
+# Test-side ceiling: same gate over the test/e2e dirs, but warnings count too
+# (e.g. no-unused-vars), so dead imports and vars cannot pile up. Ratchet to 0.
+TEST_CEILING=0
+TEST_SCOPE=(__tests__ tests e2e vitest.setup.ts)
 
-if [[ -z "$ESLINT_JSON" ]]; then
-    echo "ERROR: eslint produced no JSON output (is the frontend dependency tree installed?)" >&2
-    exit 2
-fi
+count_errors() {
+    local json warn="$1"
+    shift
+    json="$(npx --no-install eslint "$@" -f json 2>/dev/null || true)"
+    if [[ -z "$json" ]]; then
+        echo "ERROR: eslint produced no JSON output (is the frontend dependency tree installed?)" >&2
+        exit 2
+    fi
+    local n
+    n="$(printf '%s' "$json" | COUNT_WARNINGS="$warn" node -e \
+        'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(a.reduce((n,f)=>n+(f.errorCount||0)+(process.env.COUNT_WARNINGS==="1"?(f.warningCount||0):0),0))}catch(e){process.exit(3)}})')"
+    if [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: could not parse eslint error count" >&2
+        exit 2
+    fi
+    echo "$n"
+}
 
-COUNT="$(printf '%s' "$ESLINT_JSON" | node -e \
-    'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(a.reduce((n,f)=>n+(f.errorCount||0),0))}catch(e){process.exit(3)}})')"
+check_scope() {
+    local label="$1" ceiling="$2" warn="$3"
+    shift 3
+    local count
+    count="$(count_errors "$warn" "$@")"
+    echo "eslint errors$([[ "$warn" == 1 ]] && echo "+warnings") ($label: $*): $count (ceiling: $ceiling)"
+    if (( count > ceiling )); then
+        echo "FAIL: eslint error count rose above the ceiling — new lint violation(s) introduced." >&2
+        echo "Fix the new violation(s). To see them: cd frontend && npx eslint $*" >&2
+        echo "(Do NOT raise the ceiling to pass. Lower it when you remove violations.)" >&2
+        exit 1
+    fi
+    if (( count < ceiling )); then
+        echo "NOTE: count ($count) is below the ceiling ($ceiling) — ratchet it down to $count in this PR." >&2
+    fi
+}
 
-if [[ -z "$COUNT" || ! "$COUNT" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: could not parse eslint error count" >&2
-    exit 2
-fi
-
-echo "eslint errors (${SCOPE[*]}): $COUNT (ceiling: $CEILING)"
-
-if (( COUNT > CEILING )); then
-    echo "FAIL: eslint error count rose above the ceiling — new lint violation(s) introduced." >&2
-    echo "Fix the new violation(s). To see them: cd frontend && npx eslint ${SCOPE[*]}" >&2
-    echo "(Do NOT raise CEILING to pass. Lower it when you remove violations.)" >&2
-    exit 1
-fi
-
-if (( COUNT < CEILING )); then
-    echo "NOTE: count ($COUNT) is below the ceiling ($CEILING) — ratchet CEILING down to $COUNT in this PR." >&2
-fi
+check_scope production "$CEILING" 0 "${SCOPE[@]}"
+check_scope tests "$TEST_CEILING" 1 "${TEST_SCOPE[@]}"
 
 echo "OK"

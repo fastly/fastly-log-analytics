@@ -13,7 +13,6 @@ suite. This file covers the async paths the existing tests don't reach.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiodns
@@ -23,11 +22,14 @@ from backend.utils import rdns_cache
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    db = tmp_path / "rdns_cache.db"
-    monkeypatch.setattr(rdns_cache, "_DB_PATH", Path(db))
-    rdns_cache._init()
-    yield db
+def isolated_db():
+    con = rdns_cache._write_con()
+    try:
+        con.execute("DELETE FROM rdns")
+        con.commit()
+    except Exception:
+        con.rollback()
+    yield
 
 
 # ── _do_lookup_async ──────────────────────────────────────────────────────────

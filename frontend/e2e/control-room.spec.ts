@@ -7,7 +7,14 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 
-const SERVICE_ID = 'svc-playwright-e2e'
+// Points at the real GCE-deployed Fastly service (which gets continuous real
+// traffic) when the operator has exported E2E_REAL_RT_FASTLY_API_KEY +
+// E2E_REAL_RT_FASTLY_SERVICE_ID locally (see global-setup.ts
+// _seedRealRtServiceConfig) — Control Room then renders genuine rt.fastly.com
+// data instead of the poller's credential-absent short-circuit. Falls back to
+// the shared mock-config fixture (no real Fastly credentials, no network
+// calls) so this suite still runs for anyone without those exports set.
+const SERVICE_ID = process.env.E2E_REAL_RT_FASTLY_SERVICE_ID || 'svc-playwright-e2e'
 
 // Seed localStorage so the page has an active service on first paint
 // (same pattern as hydration-smoke.spec.ts).
@@ -100,6 +107,7 @@ test.describe('Control Room', () => {
     const results = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
       .exclude('[data-empty-placeholder="true"]')
+      .exclude('[data-axe-ignore="true"]')
       .analyze()
 
     expect(
@@ -118,6 +126,7 @@ test.describe('Control Room', () => {
   test('Overview tab shows metric cards with live data', async ({ page }) => {
     await page.goto('/control-room')
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+    await page.locator('text=Loading app configuration…').waitFor({ state: 'detached', timeout: 30_000 })
 
     const reqCard = page.locator('text=Requests/s').filter({ visible: true }).first()
     await expect(reqCard).toBeVisible({ timeout: 10_000 })
@@ -167,7 +176,7 @@ test.describe('Control Room', () => {
     await page.goto('/control-room')
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
 
-    const originTab = page.locator('[role="tablist"] button:text("CDN & Caching")')
+    const originTab = page.locator('[role="tablist"] button:text("CDN & Caching")').first()
     await originTab.click()
 
     await expect(page.locator('text=Origin Requests/s').first()).toBeVisible({ timeout: 10_000 })

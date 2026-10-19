@@ -48,10 +48,10 @@ export function FieldsStep({ s }: { s: WizardState }) {
               {catalog?.presets && (
                 <div className="flex flex-wrap gap-2 pt-2 items-center">
                   {Object.entries(catalog.presets).map(
-                    ([key, preset]: [string, any]) => {
+                    ([key, preset]) => {
                       const isMinimal = key === "minimal";
                       const active =
-                        isMinimal || s.isPresetActive(preset.groups || []);
+                        isMinimal || s.isPresetActive(preset.groups);
                       return (
                         <Button
                           key={key}
@@ -97,11 +97,11 @@ export function FieldsStep({ s }: { s: WizardState }) {
               </div>
             )}
             <div className="grid grid-cols-1 gap-3 pb-8">
-              {(catalog?.groups ?? [])
+              {catalog && (catalog.groups ?? [])
                 .filter(
-                  (g: any) => config.ngwaf_workspace_id || g.id !== "J",
+                  (g) => config.ngwaf_workspace_id || g.id !== "J",
                 )
-                .map((g: any) => (
+                .map((g) => (
                   <CollapsibleGroup
                     key={g.id}
                     group={g}

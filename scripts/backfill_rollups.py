@@ -51,6 +51,20 @@ def main():
     written_os = backfill_origin_summary_bundles(service_id, source)
     if written_os:
         logger.info("Backfilled %d origin_summary bundle(s).", written_os)
+
+    # Backfill RUM aggregates
+    try:
+        from backend.core.duckdb import get_connection, rum_source_for
+        from backend.core.rollups.rum import recompute_rum_aggregates
+
+        rum_src = rum_source_for(source)
+        logger.info("Backfilling precomputed RUM aggregates...")
+        with get_connection(rum_src, read_only=False) as rum_con:
+            recompute_rum_aggregates(rum_con, service_id)
+        logger.info("RUM aggregates backfill complete.")
+    except Exception as e:
+        logger.warning("RUM aggregates backfill failed: %s", e)
+
     logger.info("Backfill complete.")
 
 

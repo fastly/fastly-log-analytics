@@ -18,23 +18,20 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, type QueryCacheNotifyEvent } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import { server } from '../../tests/msw/server'
 
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/dashboard'),
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
 const API_BASE = 'http://127.0.0.1:8000'
 
 function makeClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } },
-  })
+  return createTestQueryClient({ queries: { gcTime: Infinity, staleTime: Infinity } })
 }
 
 function renderWith(qc: QueryClient) {
@@ -248,7 +245,7 @@ describe('DebugPanel — dedup + lifecycle', () => {
     // setState fires; if it were false we'd see "2 queries".
     await act(async () => {
       const q = qc.getQueryCache().find({ queryKey: ['debug-fixture', 'one'] })!
-      qc.getQueryCache().notify({ type: 'updated', query: q } as any)
+      qc.getQueryCache().notify({ type: 'updated', query: q } as QueryCacheNotifyEvent)
     })
     await new Promise((r) => setTimeout(r, 10))
     expect(screen.getByRole('button', { name: /Show 1 queries/i })).toBeInTheDocument()

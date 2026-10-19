@@ -16,9 +16,11 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
+import { formatCount } from '@/lib/format'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
 interface RetrainButtonProps {
@@ -40,24 +42,23 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
   const [open, setOpen] = React.useState(false)
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
-  const [copied, setCopied] = React.useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RetrainResult> => {
-      const { data, response } = await client.POST(
-        '/api/services/{service_id}/scoring/retrain' as any,
+      const { data, error: errBody, response } = await client.POST(
+        '/api/services/{service_id}/scoring/retrain',
         {
           params: {
             path: { service_id: serviceId },
             query: { since_days: sinceDays },
           },
-        } as any,
+        },
       )
-      if (!response.ok) {
-        const err = (data as any)?.detail?.error ?? `status ${response.status}`
-        throw new Error(err)
+      if (!response.ok || !data) {
+        throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
       }
-      return data as RetrainResult
+      return data
     },
     onSuccess: (data) => {
       setResult(data)
@@ -79,7 +80,6 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
         setOpen(o)
         if (!o) {
           setResult(null)
-          setCopied(false)
           mutation.reset()
         }
       }}
@@ -135,16 +135,16 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
           <div className="space-y-3 py-2 text-sm">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <Metric label="Matrix version" value={result.matrix_version} mono />
-              <Metric label="Sessions trained" value={(result.sessions_trained_on ?? 0).toLocaleString()} />
-              <Metric label="Transitions" value={(result.transitions ?? 0).toLocaleString()} />
-              <Metric label="Vocab size" value={(result.vocab_size ?? 0).toLocaleString()} />
+              <Metric label="Sessions trained" value={formatCount(result.sessions_trained_on ?? 0)} />
+              <Metric label="Transitions" value={formatCount(result.transitions ?? 0)} />
+              <Metric label="Vocab size" value={formatCount(result.vocab_size ?? 0)} />
             </div>
             {result.rejected && (
               <p className="text-xs text-muted-foreground">
-                Kept {(result.rejected.kept ?? 0).toLocaleString()} sessions ·
-                {' '}dropped {(result.rejected.too_few_events ?? 0).toLocaleString()} too-short,
-                {' '}{(result.rejected.too_fast ?? 0).toLocaleString()} too-fast ·
-                {' '}{(result.rejected.routes_seen ?? 0).toLocaleString()} routes seen
+                Kept {formatCount(result.rejected.kept ?? 0)} sessions ·
+                {' '}dropped {formatCount(result.rejected.too_few_events ?? 0)} too-short,
+                {' '}{formatCount(result.rejected.too_fast ?? 0)} too-fast ·
+                {' '}{formatCount(result.rejected.routes_seen ?? 0)} routes seen
               </p>
             )}
             {result.auc_against_labels ? (
@@ -194,11 +194,7 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
                       size="icon"
                       aria-label={copied ? 'Copied deploy hint' : 'Copy deploy hint'}
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => {
-                        navigator.clipboard.writeText(result.deploy_hint!)
-                        setCopied(true)
-                        setTimeout(() => setCopied(false), 2000)
-                      }}
+                      onClick={() => copy(result.deploy_hint!)}
                     >
                       {copied ? (
                         <Check className="h-3 w-3 text-emerald-500" />

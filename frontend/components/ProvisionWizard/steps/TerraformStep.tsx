@@ -17,10 +17,12 @@ import {
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCopyToClipboard } from "@/hooks/useCopyToClipboard";
 import type { WizardState } from "../useWizardState";
 
 export function TerraformStep({ s }: { s: WizardState }) {
   const { terraformFiles, selectedTfFile, setSelectedTfFile } = s;
+  const { copy } = useCopyToClipboard();
   return (
     <div className="flex-1 overflow-hidden p-8 flex flex-col">
       <div className="w-full max-w-6xl mx-auto flex flex-col h-full space-y-6">
@@ -131,11 +133,7 @@ export function TerraformStep({ s }: { s: WizardState }) {
                       size="icon"
                       aria-label={`Copy ${selectedTfFile} to clipboard`}
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => {
-                        navigator.clipboard.writeText(
-                          terraformFiles[selectedTfFile],
-                        );
-                      }}
+                      onClick={() => void copy(terraformFiles[selectedTfFile])}
                     >
                       <Copy className="h-3 w-3" />
                     </Button>

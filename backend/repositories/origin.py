@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
 import duckdb
 
+from backend.core import metric_expressions
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -19,13 +21,14 @@ from backend.repositories._base import (
 from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
+    ResponseMemo,
     bucket_time_to_minute,
-    cache_get,
-    cache_put,
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.log_throttle import log_once_per
+
+logger = logging.getLogger(__name__)
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # Frontend Origin page fires 6 endpoints in parallel; on cold load each one
@@ -41,7 +44,8 @@ from backend.utils.bounded_cache import BoundedTTLCache
 # for an interactive analytics view.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 256
-_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE)
+_response_cache = _memo.cache
 
 
 def _response_cache_key(
@@ -86,10 +90,7 @@ def _check_response_cache(
     payload, telemetry is per-request") un-skippable.
     """
     cache_key = _response_cache_key(endpoint, src, start_time, end_time, filters, **extras)
-    cached = cache_get(_response_cache, cache_key)
-    if cached is not None:
-        return cache_key, {**cached, **runner.telemetry()}
-    return cache_key, None
+    return cache_key, _memo.check(cache_key, runner)
 
 
 def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) -> dict:
@@ -101,8 +102,7 @@ def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) ->
     onto the returned response, so the cache stays per-request-clean while
     callers see the full shape.
     """
-    cache_put(_response_cache, cache_key, payload)
-    return {**payload, **runner.telemetry()}
+    return _memo.store(cache_key, payload, runner)
 
 
 # ── POP location helpers ──────────────────────────────────────────────────────
@@ -235,6 +235,9 @@ def _shape_summary(
     )
     obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
 
+    total_misses = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'MISS'))" if "cache" in actual_cols_set else "NULL"
+    total_passes = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'PASS'))" if "cache" in actual_cols_set else "NULL"
+
     # Single () grouping over the requested window. The previous
     # GROUPING SETS shape returned a per-edge breakdown as ``by_leg``
     # in the same scan, but no UI surface consumed it (the page
@@ -243,6 +246,8 @@ def _shape_summary(
     cur = runner.execute(
         SQL.SUMMARY_ROLLUP.format(
             lat_val=lat_val,
+            total_misses=total_misses,
+            total_passes=total_passes,
             ottlb_p50=ottlb_p50,
             ottlb_p95=ottlb_p95,
             cdn_ovh=cdn_ovh,
@@ -280,7 +285,8 @@ def _shape_summary(
             "obytes_p50": None,
         }
 
-    assert rollup_row is not None  # has_data check above narrowed this
+    if rollup_row is None:  # the has_data check above guarantees a row
+        raise RuntimeError("origin summary rollup row missing after has_data")
     return {
         "has_data": True,
         "total_misses": rollup_row["total_misses"],
@@ -380,7 +386,7 @@ def get_timeseries(
 
     # Fallback logic for when metric_col exists but might be null (transition period)
     if metric == "ttfb" and "ottfb" in actual_cols and "ttfb" in actual_cols:
-        lat_expr = 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+        lat_expr = metric_expressions.origin_latency_us(actual_cols) or "NULL"
         unit_conv = "/ 1000.0"
     else:
         lat_expr = f'"{metric_col}"'
@@ -627,6 +633,95 @@ def get_ip_health(
     payload = {
         "has_data": True,
         "rows": [{"oip": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "error_pct": r[4]} for r in rows],
+    }
+    return _store_response_cache(cache_key, payload, runner)
+
+
+_DIM_CANDIDATES: dict[str, list[str]] = {
+    "host": ["host", "server", "req_header_host"],
+    "shield_pop": ["shield_pop", "fastly_info_shield_pop", "shield", "pop"],
+    "datacenter": ["server_region", "datacenter", "datacenter_code", "pop"],
+    "protocol": ["proto", "protocol"],
+    "pop": ["pop"],
+    "oip": ["oip"],
+}
+
+
+def get_drilldown(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    dimension: str = "host",
+    limit: int = 30,
+) -> dict:
+    runner = QueryRunner(con, src)
+    cache_key, hit = _check_response_cache(
+        "drilldown", src, start_time, end_time, filters, runner, dimension=dimension, limit=limit
+    )
+    if hit:
+        return hit
+
+    table_name = _safe_table(src["name"])
+    actual_cols = runner.get_schema_cols()
+    if not actual_cols:
+        return empty_schema_response(has_data=False, dimension=dimension, rows=[], **runner.telemetry())
+
+    candidates = _DIM_CANDIDATES.get(dimension, [dimension])
+    dim_col = next((c for c in candidates if c in actual_cols), None)
+    if not dim_col:
+        return empty_schema_response(has_data=False, dimension=dimension, rows=[], **runner.telemetry())
+
+    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
+    lat_val = origin_latency_us_expr(actual_cols)
+
+    if "ost" in actual_cols:
+        error_expr = '"ost" >= 500'
+    elif "status" in actual_cols:
+        error_expr = '"status" >= 500'
+    else:
+        error_expr = "false"
+
+    if "obytes" in actual_cols:
+        bytes_expr = 'ROUND(MEDIAN("obytes"), 0)'
+    elif "bytes" in actual_cols:
+        bytes_expr = 'ROUND(MEDIAN("bytes"), 0)'
+    else:
+        bytes_expr = "NULL"
+
+    rows = runner.execute(
+        SQL.DRILLDOWN.format(
+            dim_col=dim_col,
+            lat_val=lat_val,
+            error_expr=error_expr,
+            bytes_expr=bytes_expr,
+            table=table_name,
+            where=where,
+        ),
+        params + [limit],
+    ).fetchall()
+
+    if not rows:
+        payload = {"has_data": False, "dimension": dimension, "rows": []}
+        return _store_response_cache(cache_key, payload, runner)
+
+    rows_out = [
+        {
+            "key": str(r[0]),
+            "requests": int(r[1]),
+            "p50_ms": float(r[2]) if r[2] is not None else None,
+            "p95_ms": float(r[3]) if r[3] is not None else None,
+            "p99_ms": float(r[4]) if r[4] is not None else None,
+            "error_rate": float(r[5]) if r[5] is not None else 0.0,
+            "bytes": int(r[6]) if r[6] is not None else None,
+        }
+        for r in rows
+    ]
+    payload = {
+        "has_data": True,
+        "dimension": dimension,
+        "rows": rows_out,
     }
     return _store_response_cache(cache_key, payload, runner)
 
@@ -1371,7 +1466,8 @@ async def get_aggregates(
         try:
             runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         except Exception:
-            pass
+            if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
+                logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
 
 # R-1: register the response TTL cache so the autouse fixture in

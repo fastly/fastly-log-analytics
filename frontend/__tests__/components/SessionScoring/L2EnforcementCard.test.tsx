@@ -8,8 +8,10 @@
  *      ?confirm=true.
  *   3. When already enabled + mid-ramp, the card shows fade-in progress.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
 import * as React from 'react'
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -23,14 +25,8 @@ import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard
 
 // Radix AlertDialog (under ConfirmDialog) needs these jsdom shims.
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
-  window.HTMLElement.prototype.hasPointerCapture = vi.fn() as never
-  window.HTMLElement.prototype.releasePointerCapture = vi.fn() as never
-  window.HTMLElement.prototype.scrollIntoView = vi.fn() as never
+  stubResizeObserver()
+  stubPointerCaptureAndScroll()
 })
 
 const API_BASE = getApiBase()
@@ -65,7 +61,7 @@ function l2State(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   // The api client middleware aborts requests when no active service is set.
-  useServiceStore.setState({ activeServiceId: SVC, isInitialized: true } as never)
+  useServiceStore.setState({ activeServiceId: SVC, isInitialized: true })
   // Health default (carries l2_high_pct the card displays).
   server.use(
     http.get(`${API_BASE}/api/services/:service_id/scoring/health`, () =>

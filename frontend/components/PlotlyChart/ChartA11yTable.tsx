@@ -13,6 +13,7 @@
 
 import * as React from 'react'
 
+import { keyByOccurrence } from '@/lib/utils'
 import type { TableShape } from './tracesToTable'
 
 interface ChartA11yTableProps {
@@ -39,18 +40,18 @@ export const ChartA11yTable = React.memo(function ChartA11yTable({ shape }: Char
       </caption>
       <thead>
         <tr>
-          {shape.columns.map((col, i) => (
-            <th key={i} scope="col">
+          {keyByOccurrence(shape.columns, String).map(({ key, item: col }) => (
+            <th key={key} scope="col">
               {col}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {shape.rows.map((row, ri) => (
-          <tr key={ri}>
-            {row.map((cell, ci) => (
-              <td key={ci}>{String(cell)}</td>
+        {keyByOccurrence(shape.rows, (row) => String(row[0])).map(({ key, item: row }) => (
+          <tr key={key}>
+            {keyByOccurrence(row, String).map(({ key: cellKey, item: cell }) => (
+              <td key={cellKey}>{String(cell)}</td>
             ))}
           </tr>
         ))}

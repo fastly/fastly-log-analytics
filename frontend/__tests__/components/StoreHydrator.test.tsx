@@ -11,6 +11,7 @@
  *      'system' (default, a persisted system blob, or a migrated pre-v1
  *      blob), and is left untouched once mode is 'manual'
  */
+import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
 import { render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
@@ -21,9 +22,7 @@ import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
 
 function mockSystemTimezone(timeZone: string) {
-  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
-    () => ({ resolvedOptions: () => ({ timeZone }) }) as unknown as Intl.DateTimeFormat,
-  )
+  stubSystemTimeZone(timeZone)
 }
 
 beforeEach(() => {
@@ -39,6 +38,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('StoreHydrator', () => {

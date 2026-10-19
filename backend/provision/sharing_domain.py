@@ -1,37 +1,30 @@
 from typing import Any
 
-import requests
+from backend.core.fastly.client import fastly
 
 
 def _fastly_api_request(
     method: str,
-    url: str,
-    headers: dict[str, str],
+    path: str,
+    *,
+    token: str,
     json_data: Any = None,
     step: str = "",
-) -> requests.Response:
-    """Perform a request to the Fastly API with uniform error handling."""
+) -> Any:
+    """Perform a request to the Fastly API via the shared client.
+
+    Delegates transport to ``backend.core.fastly.client.fastly`` so this
+    module inherits its retry/backoff, OTel telemetry, and mock-mode support
+    instead of hand-rolling a second ``requests``-based client. ``path`` is a
+    Fastly API path (e.g. ``/service``); the client pins the ``api.fastly.com``
+    base and ``Fastly-Key`` auth. Returns the parsed JSON body (``dict`` or
+    ``list``). Errors are re-raised with the human-readable ``step`` for
+    provisioning diagnostics.
+    """
     try:
-        if method.upper() == "POST":
-            resp = requests.post(url, headers=headers, json=json_data)
-        elif method.upper() == "PUT":
-            resp = requests.put(url, headers=headers, json=json_data)
-        else:
-            resp = requests.request(method, url, headers=headers, json=json_data)
-        resp.raise_for_status()
-        return resp
-    except requests.HTTPError as exc:
-        err_msg = ""
-        try:
-            err_data = resp.json()
-            err_msg = err_data.get("msg") or err_data.get("detail") or err_data.get("message") or ""
-        except Exception:
-            pass
-        if not err_msg:
-            err_msg = resp.text
-        raise RuntimeError(f"Fastly API error during {step}: HTTP {resp.status_code} - {err_msg}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Unexpected error during {step}: {exc}") from exc
+        return fastly(method, path, body=json_data, token=token)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Fastly API error during {step}: {exc}") from exc
 
 
 def deploy_remote_frontend(
@@ -78,39 +71,34 @@ def deploy_remote_frontend(
     Raises:
         RuntimeError: If any of the Fastly API calls fail.
     """
-    headers = {
-        "Fastly-Key": token,
-        "Accept": "application/json",
-    }
-
     # Step 1: Create Service
     step = "Create Service"
-    url = "https://api.fastly.com/service"
     service_payload = {"name": service_name, "type": "vcl"}
-    resp = _fastly_api_request("POST", url, headers, json_data=service_payload, step=step)
-    service_data = resp.json()
+    service_data = _fastly_api_request("POST", "/service", token=token, json_data=service_payload, step=step)
     service_id = service_data.get("id")
     if not service_id:
         raise RuntimeError(f"Failed to retrieve service ID from response during {step}")
 
     # Step 2: Verify Draft Version
     step = "Verify Draft Version"
-    url = f"https://api.fastly.com/service/{service_id}/version"
-    resp = _fastly_api_request("POST", url, headers, step=step)
-    version_data = resp.json()
+    version_data = _fastly_api_request("POST", f"/service/{service_id}/version", token=token, step=step)
     version = version_data.get("number")
     if version is None:
         raise RuntimeError(f"Failed to retrieve version number from response during {step}")
 
     # Step 3: Attach Domain
     step = "Attach Domain"
-    url = f"https://api.fastly.com/service/{service_id}/version/{version}/domain"
     domain_payload = {"name": domain_name}
-    _fastly_api_request("POST", url, headers, json_data=domain_payload, step=step)
+    _fastly_api_request(
+        "POST",
+        f"/service/{service_id}/version/{version}/domain",
+        token=token,
+        json_data=domain_payload,
+        step=step,
+    )
 
     # Step 4: Attach Backend Origin
     step = "Attach Backend Origin"
-    url = f"https://api.fastly.com/service/{service_id}/version/{version}/backend"
     backend_payload: dict[str, Any] = {
         "name": "gce_vm_origin",
         "address": origin_host,
@@ -120,12 +108,21 @@ def deploy_remote_frontend(
     }
     if override_host:
         backend_payload["override_host"] = override_host
-    _fastly_api_request("POST", url, headers, json_data=backend_payload, step=step)
+    if use_ssl:
+        sni_host = override_host or origin_host
+        backend_payload["ssl_sni_hostname"] = sni_host
+        backend_payload["ssl_cert_hostname"] = sni_host
+    _fastly_api_request(
+        "POST",
+        f"/service/{service_id}/version/{version}/backend",
+        token=token,
+        json_data=backend_payload,
+        step=step,
+    )
 
     # Step 5: Activate Version
     step = "Activate Version"
-    url = f"https://api.fastly.com/service/{service_id}/version/{version}/activate"
-    _fastly_api_request("PUT", url, headers, step=step)
+    _fastly_api_request("PUT", f"/service/{service_id}/version/{version}/activate", token=token, step=step)
 
     return {
         "service_id": service_id,
@@ -137,29 +134,25 @@ def deploy_remote_frontend(
 
 def delete_remote_frontend(remote_service_id: str, token: str) -> None:
     """Deactivate and delete the remote frontend service on Fastly."""
-    headers = {
-        "Fastly-Key": token,
-        "Accept": "application/json",
-    }
-
     # Step 1: Get versions of the service to deactivate any active ones
-    url = f"https://api.fastly.com/service/{remote_service_id}/version"
     try:
-        resp = _fastly_api_request("GET", url, headers=headers, step="Get Versions")
-        versions = resp.json()
+        versions = _fastly_api_request("GET", f"/service/{remote_service_id}/version", token=token, step="Get Versions")
         for v in versions:
             if v.get("active"):
                 ver_num = v["number"]
-                deactivate_url = f"https://api.fastly.com/service/{remote_service_id}/version/{ver_num}/deactivate"
-                _fastly_api_request("PUT", deactivate_url, headers=headers, step=f"Deactivate Version {ver_num}")
+                _fastly_api_request(
+                    "PUT",
+                    f"/service/{remote_service_id}/version/{ver_num}/deactivate",
+                    token=token,
+                    step=f"Deactivate Version {ver_num}",
+                )
     except Exception as exc:
         if "404" not in str(exc):
             raise exc
 
     # Step 2: Delete the service
-    url = f"https://api.fastly.com/service/{remote_service_id}"
     try:
-        _fastly_api_request("DELETE", url, headers=headers, step="Delete Service")
+        _fastly_api_request("DELETE", f"/service/{remote_service_id}", token=token, step="Delete Service")
     except Exception as exc:
         if "404" not in str(exc):
             raise exc

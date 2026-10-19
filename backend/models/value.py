@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.models._base import WireSafeModel
+from backend.models.common import BaseResponse, RangeKeyedRequest
 
 ValueSectionName = Literal[
     "overview",
@@ -19,11 +20,9 @@ ValueSectionName = Literal[
 ]
 
 
-class ValueSummaryRequest(FilteredRequest):
+class ValueSummaryRequest(RangeKeyedRequest):
     sections: list[ValueSectionName] | None = None
     chart_interval: str = "1 day"
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class TimeSeriesPoint(BaseModel):
@@ -55,20 +54,44 @@ class CachingMetrics(BaseModel):
     cache_state_time_series: list[TimeSeriesPoint] = []
 
 
+class WafSignalRow(WireSafeModel):
+    signal: str | None = None
+    count: int
+
+
+class TopBotRow(WireSafeModel):
+    name: str | None = None
+    count: int
+
+
+class IOOpportunityRow(WireSafeModel):
+    url: str | None = None
+    request_count: int
+    total_bytes: int
+    avg_kb: float | None = None
+
+
+class IOFormatConversionPair(WireSafeModel):
+    input_format: str | None = None
+    output_format: str | None = None
+    count: int
+    avg_ratio: float | None = None
+
+
 class SecurityMetrics(BaseModel):
     waf_blocked: int | None = None
     waf_logged: int | None = None
     waf_passed: int | None = None
     total_requests: int | None = None
     threat_time_series: list[TimeSeriesPoint] = []
-    top_waf_signals: list[dict[str, Any]] = []
+    top_waf_signals: list[WafSignalRow] = []
 
 
 class BotMetrics(BaseModel):
     bot_requests: int | None = None
     verified_bots: int | None = None
     total_requests: int | None = None
-    top_bots: list[dict[str, Any]] = []
+    top_bots: list[TopBotRow] = []
 
 
 class PerformanceMetrics(BaseModel):
@@ -106,10 +129,10 @@ class IOMetrics(BaseModel):
     format_distribution: list[IOFormatBreakdown] = []
     modern_format_pct: float | None = None
     io_bandwidth_time_series: list[TimeSeriesPoint] = []
-    optimization_opportunities: list[dict[str, Any]] = []
+    optimization_opportunities: list[IOOpportunityRow] = []
     io_actual_bandwidth_saved_bytes: int | None = None
     io_actual_compression_ratio: float | None = None
-    io_format_conversion_pairs: list[dict[str, Any]] = []
+    io_format_conversion_pairs: list[IOFormatConversionPair] = []
     io_compression_time_series: list[TimeSeriesPoint] = []
     image_request_count: int | None = None
     image_bandwidth_bytes: int | None = None

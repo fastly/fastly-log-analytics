@@ -97,7 +97,17 @@ import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
 //
 // Data Management exposes ingestion logs / cron health — useful for an
 // analyst who runs their own ingestion, leak-y for an invited viewer.
-const SERVICE_NAVIGATION = [
+interface ServiceNavItem {
+  name: string
+  href: string
+  icon: React.ComponentType<{ className?: string }>
+  analystVisible: boolean
+  shareAnalystVisible?: boolean
+  requiresCmcd?: boolean
+  requiresRum?: boolean
+}
+
+const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, analystVisible: true },
   { name: 'Control Room', href: '/control-room', icon: Radio, analystVisible: true },
   { name: 'Service Summary', href: '/fastly-value', icon: TrendingUp, analystVisible: true },
@@ -106,13 +116,13 @@ const SERVICE_NAVIGATION = [
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
-  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
+  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true },
   { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
+  { name: 'Raw Logs', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: true },
 ]
 
 const SYSTEM_NAVIGATION = [
@@ -151,7 +161,7 @@ const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/query': 'Query',
   '/charts': 'Charts',
   '/alerts': 'Alerts',
-  '/logs': 'Data Management',
+  '/logs': 'Raw Logs',
   '/usage': 'Usage and Cost',
   '/admin': 'Admin',
   '/share-login': 'Sign in',
@@ -280,11 +290,13 @@ export function AppLayout({
   initialCollapsed = false,
   ssrActiveServiceId,
   ssrIsRumEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -319,9 +331,11 @@ export function AppLayout({
   // Route change auto-closes the panel as a belt-and-braces safeguard
   // (any Link onClick that doesn't fire — e.g. middle-click that we
   // didn't handle — still produces a pathname update).
-  React.useEffect(() => {
+  const [navPathname, setNavPathname] = React.useState(pathname)
+  if (pathname !== navPathname) {
+    setNavPathname(pathname)
     setMobileNavOpen(false)
-  }, [pathname])
+  }
   // Cmd/Ctrl+B toggles the sidebar. Skip when an editable surface is
   // focused so the Query page's SQL editor (and any future text inputs
   // that want ⌘B for bold) keep their own binding.
@@ -360,14 +374,6 @@ export function AppLayout({
   const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
   const isInitializing = bootstrapSettings?.initializing === true
 
-  React.useEffect(() => {
-    if (isInitializing) {
-      const interval = setInterval(() => {
-        void refetchBootstrap()
-      }, 2000)
-      return () => clearInterval(interval)
-    }
-  }, [isInitializing, refetchBootstrap])
   const isAnalyst = useIsAnalyst()
   // Strip any IP-family filter for masking analysts (e.g. a bookmarked
   // ?filters={ip:...} URL) so it never reaches the backend's IP-filter lock.
@@ -431,7 +437,21 @@ export function AppLayout({
   // sr-only live region below renders it so screen readers pick it up
   // alongside the RouteFocus "Loaded: …" announcement that fires after
   // the navigation completes.
-  const [redirectAnnouncement, setRedirectAnnouncement] = React.useState('')
+  const analystBlocked =
+    isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
+  const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
+  const needsWizard = !isAnalyst && !hasServices && !pathname.startsWith('/admin')
+  // Derived from the same conditions the redirect effect below acts on (precedence included),
+  // so the announcement is never out of step with the redirect it describes.
+  const redirectAnnouncement = isLoading
+    ? ''
+    : needsSignIn
+      ? 'Sign in required. Redirecting to the sign-in page.'
+      : analystBlocked
+        ? 'This page is not available for your account. Redirecting to the dashboard.'
+        : needsWizard
+          ? 'No services configured yet. Redirecting to the admin setup page.'
+          : ''
 
   React.useEffect(() => {
     if (isLoading) return
@@ -440,9 +460,12 @@ export function AppLayout({
     // first instead of stalling on the synchronous URL change.
     // Anonymous remote visitors get redirected to /share-login before any
     // other layout/redirect logic kicks in. Skip while already there.
-    if (needsLogin && !pathname.startsWith('/share-login')) {
-      setRedirectAnnouncement('Sign in required. Redirecting to the sign-in page.')
-      React.startTransition(() => router.replace('/share-login'))
+    if (needsSignIn) {
+      if (typeof window !== 'undefined') {
+        window.location.replace('/share-login')
+      } else {
+        React.startTransition(() => router.replace('/share-login'))
+      }
       return
     }
     // Analysts can't access admin pages, the Usage & Cost page, the Alerts
@@ -463,12 +486,8 @@ export function AppLayout({
     // reaches the destination's data fetches anyway), it can't be raced
     // by the destination route's own effects, and it preserves browser
     // history correctly.
-    const analystBlocked =
-      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))
-    const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
-    if (analystBlocked || logsBlocked) {
+    if (analystBlocked) {
       const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
-      setRedirectAnnouncement('This page is not available for your account. Redirecting to the dashboard.')
       if (typeof window !== 'undefined') {
         window.location.replace(target)
       } else {
@@ -477,11 +496,10 @@ export function AppLayout({
       return
     }
     // Admin-side wizard redirect — only for local admins.
-    if (!isAnalyst && !hasServices && !pathname.startsWith('/admin')) {
-      setRedirectAnnouncement('No services configured yet. Redirecting to the admin setup page.')
+    if (needsWizard) {
       React.startTransition(() => router.replace('/admin'))
     }
-  }, [isLoading, hasServices, isAnalyst, isShareAnalyst, needsLogin, pathname, router, activeServiceId])
+  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId])
 
   // SECURITY GATE: never render the app shell (sidebar, header, service
   // selector) for unauthenticated visitors. The /share-login page is a
@@ -496,7 +514,14 @@ export function AppLayout({
         <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
           {redirectAnnouncement}
         </div>
-        {isLoginPage ? children : null}
+        {isLoginPage ? (
+          <div className="min-h-screen flex flex-col bg-muted/40">
+            <main id="main" tabIndex={0} className="flex-1 outline-none">
+              {children}
+            </main>
+            {serverFooter && !isAnalyst && serverFooter}
+          </div>
+        ) : null}
       </>
     )
   }
@@ -551,7 +576,7 @@ export function AppLayout({
   // own editor + filters and the global bar would only confuse the
   // SQL the user is hand-writing.
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
+  const hideFilterBar = pathname.startsWith('/admin') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
 
   if (isInitializing) {
     return (
@@ -743,9 +768,9 @@ export function AppLayout({
             // text-muted-foreground (no /opacity-step) keeps the version
             // string above WCAG 2.1 AA 4.5:1 at 10px on bg-muted/20.
             // /50 dropped to 2.19, which axe flagged on /dashboard.
-            // data-empty-placeholder excludes from the e2e axe scope —
+            // data-axe-ignore excludes from the e2e axe scope —
             // 10px decorative version string is intentional low-emphasis.
-            <div data-empty-placeholder="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
+            <div data-axe-ignore="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
               v{packageJson.version}
             </div>
           )}
@@ -753,7 +778,7 @@ export function AppLayout({
             <div
               data-testid="analyst-watermark"
               data-analyst-email={analystEmail || ''}
-              data-empty-placeholder="true"
+              data-axe-ignore="true"
               className="text-[10px] text-muted-foreground text-center mt-1"
             >
               Viewing as <span className="font-medium">{analystName || analystEmail}</span>
@@ -866,15 +891,13 @@ export function AppLayout({
             set, so it's free on the cold path. */}
         {hideFilterBar && <ActiveFiltersBanner />}
 
-        {/* A-11 (a11y): tabIndex={-1} makes <main> a programmatic focus
-            target so the RouteFocus effect above can move SR reading
-            position here on client-side navigation. -1 keeps it out of
-            the keyboard tab order. outline-none avoids a visible focus
-            ring on the landmark itself (the new page's first focusable
-            element / heading is what users will actually see/hear). */}
+        {/* A-11 (a11y): tabIndex={0} makes <main> a programmatic focus
+            target and keyboard-accessible scrollable region (WCAG 2.1 AA
+            scrollable-region-focusable). outline-none avoids an intrusive
+            focus ring on the landmark itself. */}
         <main
           id="main"
-          tabIndex={-1}
+          tabIndex={0}
           className="flex-1 overflow-auto p-4 md:p-6 outline-none"
         >
           {/* Render children IMMEDIATELY on navigation. The previous
@@ -900,6 +923,7 @@ export function AppLayout({
             </div>
           ) : children}
           {debugEnabled && <DebugPanel />}
+          {serverFooter && !isAnalyst && serverFooter}
         </main>
       </div>
       </TooltipProvider>

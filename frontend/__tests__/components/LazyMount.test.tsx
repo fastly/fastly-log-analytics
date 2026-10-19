@@ -1,6 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
+import { stubIntersectionObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { LazyMount } from '@/components/LazyMount'
@@ -12,15 +13,7 @@ afterEach(() => {
 
 describe('LazyMount', () => {
   it('mounts children once IntersectionObserver fires isIntersecting', () => {
-    type Cb = (entries: { isIntersecting: boolean }[]) => void
-    let fire: Cb | null = null
-    class FakeIO {
-      constructor(cb: Cb) { fire = cb }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-    vi.stubGlobal('IntersectionObserver', FakeIO as unknown as typeof IntersectionObserver)
+    const io = stubIntersectionObserver()
 
     render(
       <LazyMount>
@@ -31,7 +24,7 @@ describe('LazyMount', () => {
     expect(screen.queryByTestId('child')).toBeNull()
 
     act(() => {
-      fire!([{ isIntersecting: true }])
+      io.fire(true)
     })
     expect(screen.getByTestId('child')).toBeInTheDocument()
   })

@@ -294,16 +294,24 @@ def share_claim(token: str, request: Request):
         )
         raise HTTPException(status_code=404, detail={"error": "invalid_or_used"})
     invite = share_db.get_remote_invite(row["invite_id"])
+    if invite is None or invite.get("revoked"):
+        share_db.log_share_audit_event(
+            event_type="CLAIM_FAIL",
+            email=invite.get("email") if invite else None,
+            ip_address=ip,
+            details=f"token {token[:6]}… invite revoked/deleted",
+        )
+        raise HTTPException(status_code=410, detail={"error": "invite_gone"})
     share_db.log_share_audit_event(
         event_type="INVITE_CLAIMED",
-        email=invite.get("email") if invite else None,
+        email=invite.get("email"),
         ip_address=ip,
         details=f"token {token[:6]}…",
     )
     return ShareClaimResponse(
         ok=True,
-        name=invite.get("name") if invite else None,
-        email=invite.get("email") if invite else None,
-        expires_at=invite.get("expires_at") if invite else None,
-        service_ids=(invite.get("service_ids") if invite else []) or [],
+        name=invite.get("name"),
+        email=invite.get("email"),
+        expires_at=invite.get("expires_at"),
+        service_ids=invite.get("service_ids") or [],
     )

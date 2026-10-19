@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { client } from '@/lib/api'
 
 import { useScoringQuery } from '../useScoringQuery'
+import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
 /**
  * Operator control for whether edge Layer-2 contributes to the *enforced*
@@ -30,25 +31,6 @@ import { useScoringQuery } from '../useScoringQuery'
  * the readiness gauge is not yet green.
  */
 
-interface L2EnforceState {
-  available: boolean
-  enabled: boolean
-  l2_enabled_at: number | null
-  days_since_optin: number | null
-  ramp_progress: number
-  fully_ramped: boolean
-  warmup_days_remaining: number | null
-  scoring_enabled_at: number | null
-  deployment_age_days: number | null
-  ready: boolean
-  ramp_days: number
-  readiness_days: number
-}
-
-interface HealthForL2 {
-  matrix_staleness?: { l2_high_pct: number; l2_evaluated: number }
-}
-
 interface L2EnforcementCardProps {
   serviceId: string
   sinceHours?: number
@@ -65,21 +47,23 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   // null = dialog closed; true/false = pending target enabled-state under confirm.
   const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
 
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<L2EnforceState>(
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-l2-enforce', serviceId],
-    serviceId,
-    'l2-enforce',
-    {},
+    () =>
+      client.GET('/api/services/{service_id}/scoring/l2-enforce', {
+        params: { path: { service_id: serviceId } },
+      }),
     { staleTime: 30_000 },
   )
 
   // "What L2 would flag" (l2_high_pct) rides the health query the page already
   // fetches + seeds — read the same key so we don't fire a second request.
-  const { data: health } = useScoringQuery<HealthForL2>(
+  const { data: health } = useScoringQuery(
     ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+    () =>
+      client.GET('/api/services/{service_id}/scoring/health', {
+        params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+      }),
     { staleTime: 30_000 },
   )
 
@@ -94,8 +78,8 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-l2-enforce', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-analytics-composite', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-config-composite', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
     },
   })
 

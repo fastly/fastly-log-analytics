@@ -7,23 +7,27 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
-import { formatCompactCount } from '@/lib/format'
+import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer } from '@/components/Map/baseLayers'
+import { useMapResize } from '@/components/Map/useMapResize'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, type MapFillColor } from '@/components/Map/baseLayers'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type CoordTree = number | CoordTree[]
 
+const isPosition = (coords: CoordTree[]): coords is number[] => typeof coords[0] === 'number'
+
 function geoBbox(geometry: { coordinates: CoordTree[] }): [number, number, number, number] {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  const processCoord = ([x, y]: [number, number]) => {
+  const processCoord = ([x, y]: number[]) => {
     if (x < minX) minX = x
     if (y < minY) minY = y
     if (x > maxX) maxX = x
     if (y > maxY) maxY = y
   }
   const walk = (coords: CoordTree[]) => {
-    if (typeof coords[0] === 'number') { processCoord(coords as unknown as [number, number]); return }
-    for (const c of coords) walk(c as CoordTree[])
+    if (isPosition(coords)) { processCoord(coords); return }
+    for (const c of coords) if (Array.isArray(c)) walk(c)
   }
   walk(geometry.coordinates)
   return [minX, minY, maxX, maxY]
@@ -117,7 +121,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
             errors: e.errors,
             errorRate: e.errorRate,
             radius: active ? 4 + Math.log10(e.requests) * 3 : 3,
-            color: active ? (e.errorRate > 0.05 ? '#ef4444' : '#3b82f6') : '#9ca3af',
+            color: active ? (e.errorRate > 0.05 ? CHART_COLORS.danger : CHART_COLORS.info) : '#9ca3af',
             opacity: active ? 0.3 + (e.requests / maxReq) * 0.6 : 0.3,
           },
         }
@@ -130,29 +134,14 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
     if (!map.current) {
       try {
-        map.current = new maplibregl.Map({
-          container: mapContainer.current,
+        map.current = createBaseMap(maplibregl, mapContainer.current, {
           renderWorldCopies: false,
-          preserveDrawingBuffer: true,
-          style: {
-            version: 8,
-            sources: {},
-            layers: [
-              {
-                id: 'background',
-                type: 'background',
-                paint: { 'background-color': theme === 'dark' ? '#1a1b23' : '#f0f4fa' },
-              },
-            ],
-          },
-          center: [0, 20],
           zoom: 0.5,
-          dragRotate: false,
-          touchZoomRotate: false,
+          background: theme === 'dark' ? '#1a1b23' : '#f0f4fa',
+          lockRotation: true,
+          showCompass: false,
           cooperativeGestures: true,
-        } as maplibregl.MapOptions)
-
-        map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+        })
 
         requestAnimationFrame(() => {
           map.current?.resize()
@@ -161,11 +150,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         map.current.on('load', () => {
           if (!map.current) return
 
-          if (mapContainer.current) {
-            mapContainer.current
-              .querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-              .forEach((el) => el.setAttribute('tabindex', '-1'))
-          }
+          removeMapTabStops(mapContainer.current)
 
           addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
 
@@ -269,33 +254,20 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
       for (const [cc, count] of countryEntries) {
         const intensity = 0.15 + (count / max) * 0.55
-        let countryName: string
-        try {
-          const regionNames = new Intl.DisplayNames(['en'], { type: 'region' })
-          countryName = regionNames.of(cc) ?? cc
-        } catch {
-          countryName = cc
-        }
+        const countryName = resolveCountryName(cc)
         const normalized = NORMALIZE_COUNTRY[countryName] ?? countryName
         matchExpression.push(normalized)
         matchExpression.push(`rgba(59, 130, 246, ${intensity})`)
       }
 
       matchExpression.push(countryFill(theme === 'dark'))
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression as any)
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression as MapFillColor)
     }
 
     updateLayers()
   }, [popGeoJson, countryAgg, theme])
 
-  useEffect(() => {
-    if (!mapContainer.current) return
-    const el = mapContainer.current
-    const ro = new ResizeObserver(() => map.current?.resize())
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
+  useMapResize(map, mapContainer)
 
   const handleResetView = () => {
     if (!map.current) return
@@ -322,7 +294,12 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   return (
     <div
       className={`relative min-h-[300px] w-full rounded-lg overflow-hidden bg-background ${className}`}
-      role="img"
+      // role="group" (not "img"): the wrapper holds the interactive MapLibre
+      // controls + the sr-only data table below, so it can't be an "img"
+      // (axe: nested-interactive — an img must not contain focusable
+      // descendants). group is a structural role that legitimately groups
+      // interactive content under the aria-label.
+      role="group"
       aria-label={ariaLabel}
     >
       {mapError ? (
@@ -357,7 +334,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
               <td>{i + 1}</td>
               <td>{e.code}</td>
               <td>{formatPopGeo(geoMap[e.code])}</td>
-              <td>{e.requests.toLocaleString()}</td>
+              <td>{formatCount(e.requests)}</td>
               <td>{(e.errorRate * 100).toFixed(2)}%</td>
             </tr>
           ))}
@@ -389,7 +366,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           <div className="mt-1 text-xs space-y-0.5">
             <div>
               <span className="text-muted-foreground">Requests:</span>{' '}
-              <span className="tabular-nums">{tooltip.requests.toLocaleString()}</span>
+              <span className="tabular-nums">{formatCount(tooltip.requests)}</span>
             </div>
             <div>
               <span className="text-muted-foreground">Error rate:</span>{' '}

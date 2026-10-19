@@ -3,6 +3,8 @@ import { expect, test, vi, beforeEach } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../../helpers/query'
 import React from 'react'
+import { partial } from '../../helpers/partial'
+import type { components } from '@/types/api.generated'
 
 // UX-5: SessionDetail destructured only { data, isLoading } from useQuery, so a
 // 5xx on /api/sessions/detail rendered the DataTable's default "No results." —
@@ -22,11 +24,11 @@ vi.mock('@/hooks/useFieldLabel', () => ({ useFieldLabel: () => (s: string) => s 
 
 import { SessionDetail } from '@/app/sessions/_sections/SessionDetail'
 
-const selectedSession = {
+const selectedSession = partial<components["schemas"]["Session"]>({
   ip: '1.2.3.4',
   session_start: '2026-01-01T00:00:00Z',
   session_end: '2026-01-01T01:00:00Z',
-} as never
+})
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 beforeEach(() => queryClient.clear())

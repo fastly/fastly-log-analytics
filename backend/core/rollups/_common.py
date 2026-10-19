@@ -16,6 +16,9 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from backend.utils.date_utils import parse_hour_key, parse_hour_key_strict
+from backend.utils.sql_validator import escape_sql_literal
+
 if TYPE_CHECKING:
     import duckdb
 
@@ -72,7 +75,7 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _is_safe_ident(name: str) -> bool:
-    return bool(name) and bool(_SAFE_IDENT_RE.match(name))
+    return bool(name) and bool(_SAFE_IDENT_RE.fullmatch(name))
 
 
 def _safe_table_for(source: dict) -> str | None:
@@ -81,18 +84,18 @@ def _safe_table_for(source: dict) -> str | None:
     Slugifies the same way the dashboard's view-builder does
     (``backend.core.duckdb._safe_table_name``: non-alphanumerics to ``_``,
     lowercased, ``logs_`` prefix) so the rollup COPY/SELECT targets the
-    same view name the dashboard creates. Reads ``service_id`` first (the
-    canonical slug in normalized source dicts) and falls back to ``name``
-    for callers that pass a raw on-disk config — both cases pass through
-    the slugifier identically.
+    same view name the dashboard creates. Reads ``name`` first (matching
+    ``update_iceberg_view``) and falls back to ``service_id`` for callers that
+    pass a raw on-disk config — both cases pass through the slugifier
+    identically.
     """
-    raw = source.get("service_id") or source.get("name") or ""
-    if not raw:
+    slug = source.get("name") or source.get("service_id")
+    if not slug:
         logger.warning("[rollups] no service_id/name in source dict; skipping rollup")
         return None
     from backend.core.duckdb import _safe_table_name
 
-    return _safe_table_name(raw)
+    return _safe_table_name(slug)
 
 
 def _get_fields(src: dict) -> list[str]:
@@ -106,8 +109,24 @@ def _get_fields(src: dict) -> list[str]:
     we now have a dedicated SQL builder (``_build_virtual_field_copy_query``)
     that does the unnest at write time so the dashboard reader doesn't
     have to rescan + unnest the raw window at query time.
+
+    Excludes every OTHER derived field (``vcl=None``: METRICS group like
+    requests/hit_rate/p95_latency, plus any VIRTUAL-group field with no
+    dedicated backing, plus INTERNAL) — those have no real per-row column
+    to SELECT. Checked via the registry's own ``is_derived``, not a hand-
+    maintained list: a hand list is exactly how this broke live (a VIRTUAL-
+    group field, ``_bot_name``, was never in the narrow ``_VIRTUAL_FIELDS``
+    tuple this used to filter against, so it slipped through as an "actual"
+    field). See AGENTS.md Trap #40.
     """
+    from backend.core.field_registry import try_get
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
+
+    def _is_unbacked_derived(code: str) -> bool:
+        if code in _VIRTUAL_FIELDS:
+            return False
+        spec = try_get(code)
+        return spec is not None and spec.is_derived
 
     lf_config = src.get("log_fields") or {}
     custom_field_names: list[str] = []
@@ -119,7 +138,9 @@ def _get_fields(src: dict) -> list[str]:
             logger.warning("[rollups] skipping custom field with unsafe name: %r", name)
             continue
         custom_field_names.append(name)
-    actual_fields = [f for f in FIELDS if f not in _VIRTUAL_FIELDS and _is_safe_ident(f)]
+    actual_fields = [
+        f for f in FIELDS if f not in _VIRTUAL_FIELDS and not _is_unbacked_derived(f) and _is_safe_ident(f)
+    ]
     virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
     return actual_fields + virtual_fields + custom_field_names
 
@@ -259,18 +280,6 @@ def _ip_spread_root(source: dict) -> str:
     return os.path.join(_cache_dir(source), "rollups", IP_SPREAD_DIR_NAME)
 
 
-def _ip_spread_day_root(source: dict) -> str:
-    """Per-(field, day) IP-spread rollup root.
-
-    Day-compacted counterpart to :func:`_ip_spread_root`. Produced by
-    the daily compaction cron the same way the count-side
-    ``rollups/day`` tree is — one parquet per (field, closed-day),
-    consumed by the reader's closed-day fast path."""
-    from backend.core.duckdb import _cache_dir
-
-    return os.path.join(_cache_dir(source), "rollups", IP_SPREAD_DAY_DIR_NAME)
-
-
 def _build_ip_spread_select_query(table_ident: str, field: str, where_sql: str) -> str:
     """Return SQL producing ``(field, hour, value, ip_sample,
     ip_count_observed, request_count)`` rows for one field.
@@ -324,12 +333,17 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
     Callers (recompute_touched_hours / backfill_rollups) gate via
     ``_is_safe_ident`` and ``_safe_table_for``.
     """
+    if field in ("age", "ttl"):
+        val_expr = f'CAST(CAST(ROUND("{field}") AS INTEGER) AS VARCHAR)'
+    else:
+        val_expr = f'CAST("{field}" AS VARCHAR)'
+
     return f"""
         SELECT field, hour, value, count FROM (
             SELECT
                 '{field}' AS field,
                 strftime(timestamp, '%Y-%m-%d-%H') AS hour,
-                CAST("{field}" AS VARCHAR) AS value,
+                {val_expr} AS value,
                 COUNT(*) AS count,
                 ROW_NUMBER() OVER (
                     PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')
@@ -338,7 +352,7 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
             FROM {table_ident}
             WHERE {where_sql}
               AND "{field}" IS NOT NULL
-              AND NULLIF(CAST("{field}" AS VARCHAR), '') IS NOT NULL
+              AND NULLIF({val_expr}, '') IS NOT NULL
             GROUP BY 1, 2, 3
         ) WHERE rn <= {TOP_K}
     """
@@ -433,6 +447,61 @@ def _day_bundled_root(source: dict) -> str:
     return os.path.join(_cache_dir(source), "rollups", "day_bundled")
 
 
+def _tier_has_parquet(root: str) -> bool:
+    """True if ``root`` holds at least one ``.parquet`` in any partition dir.
+
+    Cheap, early-exit scan: walks partition dirs only until the first parquet
+    is found. An empty root (or partition dirs with no parquet left behind by
+    cleanup) counts as absent.
+    """
+    try:
+        with os.scandir(root) as partitions:
+            for part in partitions:
+                if not part.is_dir():
+                    if part.name.endswith(".parquet"):
+                        return True
+                    continue
+                try:
+                    with os.scandir(part.path) as entries:
+                        for e in entries:
+                            if e.is_file() and e.name.endswith(".parquet"):
+                                return True
+                            # Per-field hour tier nests one more level:
+                            # rollups/hour/field=X/hour=H/*.parquet
+                            if e.is_dir():
+                                try:
+                                    with os.scandir(e.path) as sub:
+                                        for s in sub:
+                                            if s.is_file() and s.name.endswith(".parquet"):
+                                                return True
+                                except OSError:
+                                    continue
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def rollups_present(source: dict) -> bool:
+    """True if ANY reader-usable rollup tier holds data for this service.
+
+    The dashboard rollup fast-path reader (``execute_top_n_rollups``) serves
+    from, in preference order, ``day_bundled`` → ``hour_bundled`` → per-field
+    ``day`` → per-field ``hour``. Day compaction deletes the per-field ``hour``
+    tree once a day closes, so probing only that tier (the historical bug)
+    reported "no rollups" for a fully-usable service and forced every
+    unfiltered dashboard request onto the slow wide-temp base scan. This checks
+    every tier the reader can actually consume.
+    """
+    return (
+        _tier_has_parquet(_day_bundled_root(source))
+        or _tier_has_parquet(_hour_bundled_root(source))
+        or _tier_has_parquet(_day_rollups_root(source))
+        or _tier_has_parquet(_rollups_root(source))
+    )
+
+
 # Filename for the per-day bundled rollup (same as the per-hour
 # bundled). Kept identical so future tooling can treat the two trees
 # uniformly when needed.
@@ -485,6 +554,11 @@ NETWORK_RTT_BUNDLE_FILENAME = "network_rtt.parquet"
 NETWORK_RTT_BUNDLE_TOP_K = 100
 NETWORK_RTT_BUNDLE_MIN_REQUESTS_PER_HOUR = 5
 
+NETWORK_QUALITY_COUNTRY_FILENAME = "network_quality_country.parquet"
+NETWORK_QUALITY_ASN_FILENAME = "network_quality_asn.parquet"
+NETWORK_QUALITY_REGION_FILENAME = "network_quality_region.parquet"
+NETWORK_QUALITY_POP_FILENAME = "network_quality_pop.parquet"
+
 # Filename for the per-hour per-ASN client-speed (c_speed) distribution
 # rollup feeding /api/network-health's speed_distribution_query (2.9 s
 # on prod 30 d). Schema: (asn, c_speed, count). Same top-K=100 ASNs
@@ -536,6 +610,7 @@ PERF_ASNS_MIN_REQUESTS_PER_HOUR = 10
 ORIGIN_POP_BUNDLE_FILENAME = "origin_pop.parquet"
 ORIGIN_IP_BUNDLE_FILENAME = "origin_ip.parquet"
 ORIGIN_PATH_BUNDLE_FILENAME = "origin_path.parquet"
+POP_HEALTH_BUNDLE_FILENAME = "pop_health.parquet"
 ORIGIN_DIMS_BUNDLE_TOP_K = 100
 # Per-hour minimum-request floor for the oip bundle (mirrors the slow_urls
 # noise cut; the live IP_HEALTH panel applies a window-level HAVING >= 10
@@ -725,53 +800,16 @@ def quote_path_list(paths: Iterable[str]) -> str:
     SQL-escaped string literals for a DuckDB ``read_parquet([...])`` /
     ``COPY`` source list. Embedded single quotes are doubled per SQL.
 
-    Equivalent to the ``", ".join("'" + p.replace("'", "''") + "'" ...)``
+    Equivalent to the ``", ".join("'" + escape_sql_literal(p) + "'" ...)``
     idiom previously inlined across the hour/day bundle writers.
     """
-    return ", ".join("'" + p.replace("'", "''") + "'" for p in paths)
+    return ", ".join("'" + escape_sql_literal(p) + "'" for p in paths)
 
 
 def parse_hour_token(h: str) -> datetime | None:
     """Parse a rollup hour partition token (``"YYYY-MM-DD-HH"``) to a
     tz-aware UTC datetime, or ``None`` if the string doesn't match."""
-    try:
-        return datetime.strptime(h, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-    except ValueError:
-        return None
-
-
-def discover_closed_hours(source: dict) -> set[str]:
-    """Return every ``"YYYY-MM-DD-HH"`` partition that exists under
-    ``_rollups_root(source)`` and is strictly before the active hour.
-
-    Skips field directories that don't begin with ``"field="``; tolerates
-    missing roots and unreadable sub-directories by treating them as
-    empty (the rollups jobs already handle the "no data yet" case).
-    """
-    hour_root = _rollups_root(source)
-    if not os.path.isdir(hour_root):
-        return set()
-
-    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    all_hours: set[str] = set()
-    try:
-        for field_entry in os.listdir(hour_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(hour_root, field_entry)
-            try:
-                for hour_entry in os.listdir(field_dir):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if hour >= active_hour:
-                        continue
-                    all_hours.add(hour)
-            except OSError:
-                continue
-    except OSError:
-        return set()
-    return all_hours
+    return parse_hour_key(h)
 
 
 def backfill_missing_bundles(
@@ -833,6 +871,7 @@ def compact_closed_days(
     source: dict,
     *,
     jobs: list[tuple[str, str, Callable[[str, str], str]]],
+    lookback_days: int | None = None,
     logger: logging.Logger = logger,
 ) -> int:
     """Consolidate closed-day per-hour bundle parquets into per-day files.
@@ -844,6 +883,8 @@ def compact_closed_days(
       - walks ``hour_bundled/hour=YYYY-MM-DD-HH/<bundle_filename>``, grouping
         files by their ``YYYY-MM-DD`` prefix and skipping the active day (still
         being written);
+      - bounds historical days to ``lookback_days`` when specified (e.g. 30 days
+        for nightly compaction);
       - for each closed day, skips when the per-day file is already newer than
         every constituent hour file (mtime gate);
       - otherwise writes ``build_copy_sql(paths_sql, tmp_file)`` to a temp file
@@ -868,10 +909,18 @@ def compact_closed_days(
         return 0
 
     active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
     lock_key = source.get("name", "default")
 
     rebuilt = 0
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for bundle_filename, tmp_prefix, build_copy_sql in jobs:
             hours_by_day: dict[str, list[str]] = {}
@@ -885,6 +934,8 @@ def compact_closed_days(
                     day = hour_tok[:10]
                     if day == active_day:
                         continue
+                    if cutoff_day is not None and day < cutoff_day:
+                        continue
                     p = os.path.join(hour_root, hour_entry, bundle_filename)
                     if os.path.isfile(p):
                         hours_by_day.setdefault(day, []).append(p)
@@ -892,6 +943,8 @@ def compact_closed_days(
                 continue
 
             for day in sorted(hours_by_day):
+                if cutoff_day is not None and day < cutoff_day:
+                    continue
                 input_paths = sorted(hours_by_day[day])
                 if not input_paths:
                     continue
@@ -1033,7 +1086,7 @@ def build_per_hour_bundles(
 
         rebuilt = 0
         for hour in target_hours:
-            hour_dt = datetime.strptime(hour, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+            hour_dt = parse_hour_key_strict(hour)
             start_iso = hour_dt.isoformat()
             end_iso = (hour_dt + timedelta(hours=1)).isoformat()
 

@@ -1,30 +1,22 @@
 """Reverse DNS cache with FCrDNS validation.
 
-Stores IP→hostname mappings in a SQLite DB (WAL mode). A background enrichment
-job populates the cache; query-time reads are non-blocking — unknown IPs return
-'pending' immediately and are enqueued for the next enrichment run.
+Stores IP→hostname mappings in PostgreSQL 16 (METADATA_DSN, rdns table per ADR-22).
+A background enrichment job populates the cache; query-time reads are non-blocking —
+unknown IPs return 'pending' immediately and are enqueued for the next enrichment run.
 
-Concurrency (v2.0)
-------------------
-WAL mode allows concurrent readers, but SQLite serialises writers.
-``_write_lock`` (threading.Lock) gates every writer thread / async block.
-Read-only calls open an independent connection with check_same_thread=False
-and uri=True mode (file:...?mode=ro) so they never block writers.
+Concurrency (ADR-22)
+--------------------
+Read and write queries use PostgreSQL connection pooling via
+``backend.core.metadata.pg_connection`` (``get_pg_thread_connection`` /
+``get_pg_readonly_connection``). In-process write synchronization is guarded via
+``_write_lock`` (threading.Lock).
 
-Phase 1.4a refactored the enrichment loop to use :mod:`aiodns` for
-concurrent non-blocking PTR + A/AAAA lookups (semaphore-bounded at
-``_CONCURRENCY_LIMIT``) and :mod:`aiosqlite` for the bulk write inside a
-single transaction. The previous shape — sequential ``socket.gethostbyaddr``
-plus one ``UPDATE ... ; COMMIT`` per IP — was the dominant cost in the
-sync-worker hot path. The sync helper :func:`_do_lookup` is kept (still
-using ``socket.gethostbyaddr``) so existing tests that patch it keep
-working; the batch entrypoint :func:`_run_async_resolve` short-circuits to
-the sync helper when it detects a ``unittest.mock`` patch.
-
-Tenacity wraps the bulk write with a bounded exponential-backoff retry on
-:class:`sqlite3.OperationalError` / :class:`aiosqlite.OperationalError` so
-transient WAL "database is locked" busy errors during heavy concurrent
-ingest don't bubble out to the scheduler.
+Enrichment uses :mod:`aiodns` for concurrent non-blocking PTR + A/AAAA lookups
+(semaphore-bounded at ``_CONCURRENCY_LIMIT``) and threaded batch execution
+(:func:`_bulk_update_sync` via :func:`asyncio.to_thread`) for PostgreSQL row updates.
+The sync helper :func:`_do_lookup` is kept (using ``socket.gethostbyaddr``) so
+existing tests that patch it keep working; the batch entrypoint :func:`_run_async_resolve`
+short-circuits to the sync helper when it detects a ``unittest.mock`` patch.
 """
 
 from __future__ import annotations
@@ -33,7 +25,6 @@ import asyncio
 import ipaddress
 import logging
 import socket
-import sqlite3
 import sys
 import threading
 import time
@@ -41,8 +32,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiodns
-import aiosqlite
-import tenacity
 
 from backend.utils.date_utils import iso_z_now
 
@@ -51,6 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Backward compatibility shim for test suites and scripts inspecting historical paths
 _DB_PATH = Path("data/cache/rdns_cache.db")
 _write_lock = threading.Lock()
 _last_enrichment_at: str | None = None
@@ -90,7 +80,7 @@ def _is_ip_in_cidrs(ip: str, cidrs: list[str]) -> bool:
             except ValueError:
                 continue
     except Exception:
-        pass
+        logger.debug("_is_ip_in_cidrs: step failed (ignored)", exc_info=True)
     return False
 
 
@@ -109,39 +99,20 @@ CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_
 """
 
 
-def _write_con() -> sqlite3.Connection:
-    """Open a write connection (creates DB + schema on first call)."""
-    from backend.core.sqlite_pool import open_small_cache_db
+def _write_con():
+    from backend.core.metadata.pg_connection import get_pg_thread_connection
 
-    return open_small_cache_db(_DB_PATH, ddl=_RDNS_DDL, check_same_thread=False)
-
-
-def _read_con() -> sqlite3.Connection:
-    """Open a read-only connection; does not create the DB."""
-    if not _DB_PATH.exists():
-        return None  # type: ignore[return-value]
-    con = sqlite3.connect(
-        f"file:{_DB_PATH}?mode=ro",
-        uri=True,
-        check_same_thread=False,
-    )
-    con.row_factory = sqlite3.Row
-    return con
+    return get_pg_thread_connection()
 
 
-# Ensure schema exists. Kept as the explicit entrypoint tests call
-# (tests/utils/test_rdns_async.py monkeypatches _DB_PATH then invokes
-# _init()). NOT called at import time: doing so wrote to the shared
-# real-disk data/cache/rdns_cache.db during pytest collection, and under
-# `pytest -n auto` the concurrent cross-process WAL-mode switch raced →
-# sqlite3.OperationalError "database is locked" mid-collection → xdist
-# "Different tests were collected" abort → partial coverage → cov-fail.
-# Schema is created lazily on first _write_con() (CREATE TABLE IF NOT
-# EXISTS), exactly like backend/utils/ngwaf_bot_cache.py.
+def _read_con():
+    from backend.core.metadata.pg_connection import get_pg_readonly_connection
+
+    return get_pg_readonly_connection()
+
+
 def _init() -> None:
-    with _write_lock:
-        con = _write_con()
-        con.close()
+    pass
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -228,13 +199,12 @@ def enqueue(ips: list[str]) -> int:
                     len(ips),
                 )
                 return 0
-            before = con.total_changes
-            con.executemany(
+            cur = con.executemany(
                 "INSERT OR IGNORE INTO rdns (ip, status, fcrdns_verified) VALUES (?, 'pending', 0)",
                 [(ip,) for ip in ips],
             )
             con.commit()
-            return con.total_changes - before
+            return cur.rowcount or 0
         finally:
             con.close()
 
@@ -335,7 +305,7 @@ async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, st
         try:
             resolver.cancel()
         except Exception:
-            pass
+            logger.debug("_resolve_batch_async: resolver.cancel failed (ignored)", exc_info=True)
 
     out: dict[str, tuple[str | None, str, bool]] = {}
     for ip, result in zip(ips, results, strict=True):
@@ -346,34 +316,25 @@ async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, st
     return out
 
 
-@tenacity.retry(
-    retry=tenacity.retry_if_exception_type((sqlite3.OperationalError, aiosqlite.OperationalError)),
-    stop=tenacity.stop_after_attempt(5),
-    wait=tenacity.wait_exponential(multiplier=0.1, min=0.1, max=1.0),
-    reraise=True,
-)
-async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]]) -> None:
-    """Bulk UPDATE rdns rows with new lookup results.
-
-    ``records``: list of ``(hostname, status, fcrdns_int, looked_up_at, ip)``
-    suitable for the parameterised UPDATE. Single transaction +
-    ``executemany`` keeps WAL contention low. Tenacity retries on
-    ``OperationalError`` so a transient busy collision with a concurrent
-    ``enqueue`` writer doesn't fail the whole enrich tick.
-    """
+def _bulk_update_sync(records: list[tuple[str | None, str, int, str, str]]) -> None:
     if not records:
         return
-    async with aiosqlite.connect(str(_DB_PATH), timeout=10) as con:
-        async with con.execute("PRAGMA journal_mode") as cur:
-            row = await cur.fetchone()
-            if not row or row[0].lower() != "wal":
-                await con.execute("PRAGMA journal_mode=WAL")
-        await con.execute("PRAGMA busy_timeout=10000")
-        await con.executemany(
+    con = _write_con()
+    try:
+        con.executemany(
             "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?",
             records,
         )
-        await con.commit()
+        con.commit()
+    finally:
+        con.close()
+
+
+async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]]) -> None:
+    """Bulk UPDATE rdns rows with new lookup results."""
+    if not records:
+        return
+    await asyncio.to_thread(_bulk_update_sync, records)
 
 
 def _run_async_resolve(ips: list[str]) -> dict[str, int]:
@@ -506,9 +467,26 @@ def _maybe_reap_stale_rows() -> None:
         logger.error("[rdns_cache] Reap pass failed: %s", e)
 
 
-def enrich_batch(limit: int = 200) -> dict:
+def _get_pending_count() -> int:
+    con = _read_con()
+    if con is None:
+        return 0
+    try:
+        row = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()
+        return row[0] if row else 0
+    finally:
+        con.close()
+
+
+def enrich_batch(limit: int | None = None) -> dict:
     """Resolve pending IPs with FCrDNS validation, then discover new IPs from
     DuckDB sources.
+
+    If limit is None, dynamically scales the batch size based on the pending
+    queue depth:
+    - pending <= 200: batch_limit = max(100, pending) if pending > 0 else 200
+    - 200 < pending <= 2000: batch_limit = 500
+    - pending > 2000: batch_limit = 1000
 
     Returns a summary dict with counts for monitoring/logging.
     """
@@ -518,14 +496,25 @@ def enrich_batch(limit: int = 200) -> dict:
     errors = 0
     discovered = 0
 
-    pending_rows = _select_ips_with_status("pending", limit=limit)
+    if limit is not None:
+        batch_limit = limit
+    else:
+        pending_count = _get_pending_count()
+        if pending_count <= 200:
+            batch_limit = max(100, pending_count) if pending_count > 0 else 200
+        elif pending_count <= 2000:
+            batch_limit = 500
+        else:
+            batch_limit = 1000
+
+    pending_rows = _select_ips_with_status("pending", limit=batch_limit)
     if pending_rows:
         pending_ips = [row[0] for row in pending_rows]
         summary = _run_async_resolve(pending_ips)
         resolved = summary["resolved"]
         errors = summary["errors"]
 
-    stale_rows = _select_stale_ips(limit=max(1, limit // 4))
+    stale_rows = _select_stale_ips(limit=max(1, batch_limit // 4))
     if stale_rows:
         stale_ips = [row[0] for row in stale_rows]
         _run_async_resolve(stale_ips)
@@ -538,7 +527,12 @@ def enrich_batch(limit: int = 200) -> dict:
     _maybe_reap_stale_rows()
 
     _last_enrichment_at = iso_z_now()
-    summary_out = {"resolved": resolved, "errors": errors, "discovered": discovered}
+    summary_out = {
+        "resolved": resolved,
+        "errors": errors,
+        "discovered": discovered,
+        "batch_limit": batch_limit,
+    }
     if resolved > 0 or errors > 0 or discovered > 0:
         logger.info("🌐 \x1b[34m[rdns]\x1b[0m enrich_batch complete: %s", summary_out)
     else:

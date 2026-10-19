@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
-import { client } from "@/lib/api";
+import { useEffect, useEffectEvent } from "react";
+import type { QueryClient } from "@tanstack/react-query";
+import { client, extractApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { SHIELD_MAP, type FosStatus, type JoinPhase, type ProvisionConfig, type ProvisionService, type Step, type WizardDraft } from "./types";
+import { SHIELD_MAP, type FosStatus, type JoinPhase, type ProvisionConfig, type ProvisionService, type Step, type WizardDraft, type WizardMode } from "./types";
 
 export interface WizardEffectsArgs {
   open: boolean;
@@ -14,7 +15,7 @@ export interface WizardEffectsArgs {
   setFosStatus: (s: FosStatus) => void;
   setFosError: (s: string) => void;
   setStep: (s: Step) => void;
-  setMode: (m: any) => void;
+  setMode: (m: WizardMode) => void;
   setSearch: (s: string) => void;
   setSelectedService: (s: ProvisionService | null) => void;
   setIsDeploying: (b: boolean) => void;
@@ -113,7 +114,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   ]);
 
   // After FOS check succeeds in the join flow, auto-proceed to lake analysis
-  useEffect(() => {
+  const autoAnalyzeLake = useEffectEvent(() => {
     if (
       fosStatus === "success" &&
       step === "join" &&
@@ -124,7 +125,9 @@ export function useWizardEffects(args: WizardEffectsArgs) {
     ) {
       handleAnalyzeLake();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    autoAnalyzeLake();
   }, [fosStatus]);
 
   // Auto-fetch NGWAF workspaces when entering the ngwaf step
@@ -135,35 +138,33 @@ export function useWizardEffects(args: WizardEffectsArgs) {
     setNgwafDebugRaw("");
     setNgwafFetching(true);
     client
-      .GET("/api/provision/ngwaf-workspaces" as any, {
+      .GET("/api/provision/ngwaf-workspaces", {
         params: {
           query: { service_id: selectedService.id, token: token || undefined },
         },
       })
       .then((r) => {
-        if ((r as any).error) {
-          const errBody = (r as any).error;
-          const msg =
-            errBody?.detail?.error ||
-            errBody?.error ||
-            errBody?.message ||
-            "Could not load workspaces";
-          setNgwafFetchError(msg);
+        if (r.error) {
+          setNgwafFetchError(extractApiError(r.error) || "Could not load workspaces");
         } else {
-          const data = r.data as any;
-          setNgwafWorkspaces(data?.workspaces || []);
+          const data = r.data;
+          setNgwafWorkspaces(
+            (data?.workspaces || []).flatMap((w) =>
+              w.id && w.name ? [{ id: w.id, name: w.name }] : [],
+            ),
+          );
           if (data?._debug_raw) setNgwafDebugRaw(data._debug_raw);
           if (data?.error_hint) setNgwafFetchError(data.error_hint);
         }
       })
-      .catch((e: any) =>
-        setNgwafFetchError(e?.message || "Could not load workspaces"),
+      .catch((e: unknown) =>
+        setNgwafFetchError(extractApiError(e) || "Could not load workspaces"),
       )
       .finally(() => setNgwafFetching(false));
   }, [step, selectedService?.id, token]);
 
   // Save ngwaf_workspace_id to local config after provisioning completes
-  useEffect(() => {
+  const persistNgwafWorkspace = useEffectEvent(() => {
     if (
       isDone &&
       step === "execute" &&
@@ -172,7 +173,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
     ) {
       client
         .PATCH(
-          "/api/provision/services/{service_id}/ngwaf-workspace" as any,
+          "/api/provision/services/{service_id}/ngwaf-workspace",
           {
             params: { path: { service_id: selectedService.id } },
             // The endpoint runs validate_destructive_token — it requires a
@@ -183,10 +184,10 @@ export function useWizardEffects(args: WizardEffectsArgs) {
             // /share-login right after a successful provision. Pass the same
             // superuser token the wizard already used to deploy.
             headers: { Authorization: `Bearer ${token}` },
-            body: { ngwaf_workspace_id: config.ngwaf_workspace_id } as any,
+            body: { ngwaf_workspace_id: config.ngwaf_workspace_id },
           },
         )
-        .then((r: { error?: unknown }) => {
+        .then((r) => {
           if (r?.error) {
             // Don't fail silently — a dropped save means the workspace id
             // never lands in the service config and NGWAF stats stay empty.
@@ -197,7 +198,9 @@ export function useWizardEffects(args: WizardEffectsArgs) {
           console.error("[wizard] failed to persist ngwaf_workspace_id:", e);
         });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    persistNgwafWorkspace();
   }, [isDone]);
 }
 
@@ -211,7 +214,7 @@ export interface JoinCompletionEffectArgs {
   setActiveServiceId: (id: string) => void;
   services: { id: string; name: string; accessLevel?: string }[];
   setServices: (s: { id: string; name: string; accessLevel?: string }[]) => void;
-  queryClient: { invalidateQueries: (opts: any) => void };
+  queryClient: Pick<QueryClient, "invalidateQueries">;
   setJoinPhase: (p: JoinPhase) => void;
   reset: () => void;
 }

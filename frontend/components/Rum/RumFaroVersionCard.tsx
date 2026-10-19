@@ -7,10 +7,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
-import { adminFetch, client } from '@/lib/api';
+import { client } from '@/lib/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
 import { RumSettingsDialog } from './RumSettingsDialog';
+import { useRumStatus } from '@/hooks/useRumStatus';
+import { queryKeys } from '@/lib/query-keys';
 
 type RumVersionsResponse = components['schemas']['RumVersionsResponse'];
 
@@ -24,15 +26,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
   const isAnalyst = useIsAnalyst();
 
   // Fetch status first
-  const { data: status, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null;
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
-      return res.ok ? res.json() : null;
-    },
-    enabled: !!serviceId,
-  });
+  const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId);
 
   const rumEnabled = !!status?.enabled;
 
@@ -56,18 +50,18 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
     return null;
   }
 
-  // Not enabled: nothing to pin/upgrade
-  if (!rumEnabled) {
-    return null;
-  }
-
-  if (isStatusLoading || isVersionsLoading) {
+  if (!serviceId || isStatusLoading || (rumEnabled && isVersionsLoading)) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 shrink-0">
         <Skeleton className="h-8 w-32" />
         <Skeleton className="h-8 w-24" />
       </div>
     );
+  }
+
+  // Not enabled: nothing to pin/upgrade
+  if (!rumEnabled) {
+    return null;
   }
 
   if (isError) {
@@ -96,15 +90,20 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
 
   const handleComplete = () => {
     queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] });
-    queryClient.invalidateQueries({ queryKey: ['rum-status', serviceId] });
+    queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) });
   };
 
   return (
     <>
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center gap-2 shrink-0" data-testid="admin-rum-faro-version-card">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground mr-1">
           <span className="font-semibold uppercase tracking-wider text-[10px]">Faro SDK:</span>
-          <span className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10">{current ?? 'Not pinned'}</span>
+          <span
+            className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10"
+            data-testid="admin-rum-faro-version"
+          >
+            {current ?? 'Not pinned'}
+          </span>
           {updateAvailable && (
             <Badge variant="warning" className="text-[9px] py-0 px-1.5 h-4.5 font-medium ml-1 shrink-0">
               Update available
@@ -117,6 +116,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
           variant={updateAvailable ? 'default' : 'outline'}
           size="sm"
           className="h-8 text-xs font-semibold px-3"
+          data-testid="admin-rum-settings-btn"
         >
           RUM Settings
         </Button>

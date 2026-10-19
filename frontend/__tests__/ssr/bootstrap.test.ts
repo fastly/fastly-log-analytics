@@ -1,5 +1,3 @@
-import { EventEmitter } from 'node:events'
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockCookies = vi.fn()
@@ -11,7 +9,7 @@ vi.mock('next/headers', () => ({
 
 beforeEach(() => {
   mockCookies.mockReturnValue({ toString: () => 'session=abc123', get: () => undefined })
-  mockHeaders.mockReturnValue({ get: (_k: string) => null })
+  mockHeaders.mockReturnValue({ get: () => null })
 })
 
 afterEach(() => {
@@ -169,7 +167,7 @@ describe('fetchBootstrapServerSide', () => {
   it('fail-closed: no Caddy marker + absent Host → null (drift / SSRF without a loopback Host)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1' // must not be reached
     mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-    mockHeaders.mockReturnValue({ get: (_k: string) => null })
+    mockHeaders.mockReturnValue({ get: () => null })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
     const out = await fetchBootstrapServerSide()

@@ -1,12 +1,14 @@
 """Schema-shape and migration-safety tests for backend.core.metadata_db.
 
 Covers:
-- All declared tables and indexes are present after ``_init_schema``.
-- ``_init_schema`` is idempotent — running it on an already-initialised
-  file is a no-op (no errors, no data loss).
+- All declared tables and indexes are present after Postgres schema
+  bootstrap (``pg_schema.ensure_pg_schema``).
+- Bootstrap is idempotent — re-running it against an already-initialised
+  database is a no-op (no errors, no data loss).
 - The ``IF NOT EXISTS`` guards mean future schema additions just append
-  to ``_SCHEMA`` and run on next ``get_con``. This test verifies that
-  pattern: re-init after a row is seeded must preserve the row.
+  to ``_SCHEMA`` and land on the next ``ensure_pg_schema(force=True)``.
+  This test verifies that pattern: re-applying schema after a row is
+  seeded must preserve the row.
 
 These tests don't enforce a specific schema-version bump strategy because
 the codebase doesn't have one yet — when one is added, this file is the
@@ -20,6 +22,18 @@ import sqlite3
 import pytest
 
 from backend.core import metadata as metadata_db
+from backend.core.metadata import pg_schema
+
+
+def _reapply_schema() -> None:
+    """Re-run Postgres schema bootstrap, simulating a fresh-boot re-apply
+    of ``_SCHEMA`` against an already-initialised database. Replaces the
+    old SQLite-only ``metadata_db._init_schema(con)`` call these tests used
+    before Postgres became the only backend — schema bootstrap now goes
+    through :func:`pg_schema.ensure_pg_schema` exclusively (see
+    ``backend/core/metadata/base.py``'s module docstring)."""
+    pg_schema.ensure_pg_schema(force=True)
+
 
 _EXPECTED_TABLES = {
     "sources",
@@ -47,20 +61,24 @@ _EXPECTED_INDEXES = {
 
 
 def _list_tables(con: sqlite3.Connection) -> set[str]:
-    return {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    return {r[0] for r in con.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()").fetchall()}
 
 
 def _list_indexes(con: sqlite3.Connection) -> set[str]:
     return {
-        r[0]
-        for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
+        r[0] for r in con.execute("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()").fetchall()
     }
 
 
 def _columns(con: sqlite3.Connection, table: str) -> set[str]:
-    return {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    return {
+        r[0]
+        for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?",
+            (table,),
+        ).fetchall()
+    }
 
 
 # ── Initial schema shape ──────────────────────────────────────────────────────
@@ -98,11 +116,65 @@ def test_alerts_table_has_evaluation_scope_column():
 # pinned by tests/routers/test_usage_log.py.
 
 
+# ── usage_log byte columns must be 64-bit (Postgres int4 overflow) ────────────
+
+
+def _column_type(con: sqlite3.Connection, table: str, column: str) -> str:
+    row = con.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+        (table, column),
+    ).fetchone()
+    return row[0] if row else ""
+
+
+def test_usage_log_byte_columns_are_bigint():
+    """``usage_log.bytes`` and ``usage_log_hourly_summary.bytes`` accumulate
+    byte counts (the hourly summary is a running SUM per service/hour). A
+    Postgres ``integer`` (int4) column caps at 2,147,483,647 (~2.1 GB); a
+    busy service's hourly CDN egress blows past that in a single hour,
+    raising ``integer out of range`` and silently dropping every usage row
+    for the rest of that hour. The columns must be 64-bit."""
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc-usage-bigint")
+    for table, column in (
+        ("usage_log", "bytes"),
+        ("usage_log", "count"),
+        ("usage_log_hourly_summary", "bytes"),
+        ("usage_log_hourly_summary", "count"),
+    ):
+        assert _column_type(con, table, column) == "bigint", f"{table}.{column} must be bigint, not int4"
+
+
+def test_log_usage_calls_accepts_bytes_over_int4_max():
+    """Regression for the production ``[metadata_db] Failed to log usage
+    calls: integer out of range`` flood. A single CDN op whose (egress-
+    doubled) byte count exceeds int4 max must round-trip, not get swallowed
+    by ``log_usage_calls``'s broad ``except`` and vanish from the table."""
+    from backend.core.metadata import usage_log, usage_log_db
+
+    sid = "svc-usage-overflow"
+    big = 3_000_000_000  # > int4 max 2_147_483_647, within int8
+    usage_log.log_usage_calls(
+        sid,
+        [{"method": "GET", "service": "FOS", "path": "/big.gz", "bytes": big, "caller": "test"}],
+    )
+
+    con = usage_log_db.get_con(sid)
+    row = con.execute("SELECT bytes FROM usage_log WHERE service_id = ? AND url = ?", (sid, "/big.gz")).fetchone()
+    assert row is not None, "usage row was dropped (int4 overflow swallowed the INSERT)"
+    assert row[0] == big
+
+    hourly = con.execute("SELECT max(bytes) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
+    assert hourly is not None and hourly[0] == big
+
+
 # ── Idempotency: re-running init must not lose data ──────────────────────────
 
 
 def test_init_schema_is_idempotent_no_data_loss():
-    """Re-applying ``_init_schema`` to an already-populated file must
+    """Re-applying schema bootstrap to an already-populated database must
     preserve every row. This is the load-bearing property that lets future
     schema additions just append to ``_SCHEMA``.
     """
@@ -114,20 +186,21 @@ def test_init_schema_is_idempotent_no_data_loss():
     assert before == 2
 
     # Re-apply schema. With ``IF NOT EXISTS`` everywhere, this should be a no-op.
-    metadata_db._init_schema(con)
+    _reapply_schema()
 
     after = con.execute("SELECT count(*) FROM ingested_files WHERE source_name = ?", (sid,)).fetchone()[0]
     assert after == 2, f"data lost after re-init: was 2 rows, now {after}"
 
 
 def test_init_schema_run_twice_is_safe_in_sequence():
-    """The autouse ``isolate_metadata_db`` fixture clears the
-    ``_initialized`` set between tests, so cold opens may legitimately
-    re-init. Verify back-to-back calls don't raise.
+    """Schema bootstrap can legitimately run more than once per process
+    (a concurrently-booting pod, or a forced re-apply). Verify back-to-back
+    calls don't raise.
     """
     sid = "svc-schema-double"
-    metadata_db._init_schema(metadata_db.get_con(sid))
-    metadata_db._init_schema(metadata_db.get_con(sid))  # must not raise
+    metadata_db.get_con(sid)
+    _reapply_schema()
+    _reapply_schema()  # must not raise
 
 
 # ── Forward-compat: a future schema addition pattern ──────────────────────────
@@ -136,18 +209,18 @@ def test_init_schema_run_twice_is_safe_in_sequence():
 def test_pre_existing_data_survives_added_table():
     """Simulate a future migration: a new ``CREATE TABLE IF NOT EXISTS``
     statement is added to ``_SCHEMA``. Existing data in other tables
-    must survive when ``_init_schema`` re-runs on the next process boot.
+    must survive when schema bootstrap re-runs on the next process boot.
     """
     sid = "svc-schema-future"
     metadata_db.insert_ingested_files(sid, [("survivor.gz", 1, 100)])
 
     # Apply a hypothetical future migration (extra table)
     con = metadata_db.get_con(sid)
-    con.execute("CREATE TABLE IF NOT EXISTS new_feature_table (id INTEGER PRIMARY KEY, payload TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS new_feature_table (id SERIAL PRIMARY KEY, payload TEXT)")
     con.commit()
 
     # Re-apply the standard schema — survivor row must remain
-    metadata_db._init_schema(con)
+    _reapply_schema()
 
     rows = con.execute("SELECT file_name FROM ingested_files WHERE source_name = ?", (sid,)).fetchall()
     assert len(rows) == 1

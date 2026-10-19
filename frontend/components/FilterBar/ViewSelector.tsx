@@ -27,7 +27,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { showToast, showToastWithAction } from '@/lib/toast'
 import type { components } from '@/types/api.generated'
 
-type SavedView = components["schemas"]["SavedView"]
+type SavedView = components["schemas"]["SavedViewRecord"]
 
 export function ViewSelector() {
   const [open, setOpen] = React.useState(false)
@@ -47,7 +47,7 @@ export function ViewSelector() {
       const { data } = await client.GET("/api/views/{service_id}", {
         params: { path: { service_id: activeServiceId } }
       })
-      return data as any
+      return data
     },
     enabled: !!activeServiceId && !bootstrapPending,
   })
@@ -70,7 +70,7 @@ export function ViewSelector() {
   const [viewPendingConfirm, setViewPendingConfirm] = React.useState<SavedView | null>(null)
 
   const visibleViews: SavedView[] = React.useMemo(
-    () => (views ?? []).filter((v: SavedView) => !pendingDeleteIds.has(v.id!)),
+    () => (views ?? []).filter((v) => !pendingDeleteIds.has(v.id)),
     [views, pendingDeleteIds],
   )
 

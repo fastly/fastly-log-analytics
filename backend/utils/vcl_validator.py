@@ -32,19 +32,25 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
 
-from backend.utils.vcl_utils import _run_falco_lint
+from backend.utils.vcl_safety import LintResult, VclSafetyError, lint_document, validate_quoted_literal
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "LintResult",
+    "MAX_REGEX_BYTES",
+    "RegexValidationError",
+    "lint_vcl",
+    "validate_recv_exclusion_regex_with_lint",
+    "validate_url_exclusion_regex",
+]
 
 
 # ── Input validation ────────────────────────────────────────────────────────
 
 MAX_REGEX_BYTES = 2048
-_DISALLOWED_CHARS_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f\"]")
 
 
 class RegexValidationError(ValueError):
@@ -80,10 +86,18 @@ def validate_url_exclusion_regex(value: str) -> str:
             "too_long",
             f"regex exceeds {MAX_REGEX_BYTES}-byte limit (got {len(cleaned.encode('utf-8'))})",
         )
-    bad = _DISALLOWED_CHARS_RE.search(cleaned)
+    bad = None
+    try:
+        validate_quoted_literal(cleaned, allow_backslash=True, field="regex")
+    except VclSafetyError:
+        bad = True
     if bad:
-        ch = bad.group(0)
-        # Don't echo the byte verbatim — could be a control char.
+        # Report the first offending codepoint without echoing a raw
+        # control char. Re-scan via the unified policy's own match.
+        from backend.utils.vcl_safety import _FORBIDDEN_ALLOW_BACKSLASH
+
+        m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
+        ch = m.group(0) if m else "?"
         raise RegexValidationError(
             "disallowed_char",
             f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
@@ -100,19 +114,6 @@ def validate_url_exclusion_regex(value: str) -> str:
 
 
 # ── Falco static analysis ───────────────────────────────────────────────────
-
-
-@dataclass
-class LintResult:
-    """Outcome of running falco on a VCL snippet."""
-
-    ok: bool
-    errors: list[str]
-    warnings: list[str]
-    # True if falco couldn't run (binary missing). Caller decides whether
-    # that's a hard fail; production should treat skipped == fail.
-    skipped: bool = False
-    skipped_reason: str = ""
 
 
 def _falco_binary() -> str | None:
@@ -205,57 +206,13 @@ def lint_vcl(
     # see (catalog/regex/etc.). The wrapper above is engineered to
     # lint cleanly on its own, so any warning that surfaces here is
     # from the operator's snippet body.
-    try:
-        returncode, out, err = _run_falco_lint(falco_bin, full_vcl, timeout=10, verbose=True)
-    except subprocess.TimeoutExpired:
-        return LintResult(
-            ok=False,
-            errors=[f"falco lint timed out after 10s for snippet {snippet_name!r}"],
-            warnings=[],
-        )
-
-    # Falco exits non-zero when there are ANY diagnostics (errors or
-    # warnings), so the exit code alone isn't a reliable
-    # "did the snippet pass?" signal. The authoritative source is the
-    # summary line falco emits at the end:
-    #     "🔥 N errors, ❗ M warnings, 🔈 K recommendations."
-    # We parse the N to decide pass/fail; lines tagged [ERROR] are
-    # surfaced as errors, [WARNING] / [INFO] go in warnings.
-    out = out.strip()
-    err = err.strip()
-    combined = "\n".join(filter(None, [out, err]))
-
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    # Pre-parse: find the summary line if present.
-    summary_re = re.compile(r"(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?")
-    summary_match = None
-    for line in combined.splitlines():
-        if "errors" in line and "warnings" in line and summary_re.search(line):
-            summary_match = summary_re.search(line)
-            # Don't classify the summary line itself as an error/warning.
-            continue
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if "[ERROR]" in stripped or "🔥 [ERROR]" in stripped:
-            errors.append(stripped)
-        elif "[WARNING]" in stripped or "❗ [WARNING]" in stripped:
-            warnings.append(stripped)
-        elif "[INFO]" in stripped or "🔈 [INFO]" in stripped:
-            warnings.append(stripped)
-
-    summary_errors = int(summary_match.group(1)) if summary_match else None
-    ok = summary_errors == 0 if summary_errors is not None else (returncode == 0 and not errors)
-
-    # If falco reported a non-zero error count but no parseable
-    # [ERROR] line, surface a generic error so the operator isn't
-    # left guessing.
-    if summary_errors and summary_errors > 0 and not errors:
-        errors.append(f"falco reported {summary_errors} error(s) but no parseable diagnostics; stdout={out[:200]!r}")
-
-    return LintResult(ok=ok, errors=errors, warnings=warnings)
+    #
+    # Run + parse are delegated to the unified ``vcl_safety.lint_document``
+    # (the canonical full-document API). We pass the already-resolved
+    # ``falco_bin`` so this function's own ``shutil.which`` (patched by
+    # tests on this module's namespace) stays the authority for the skip
+    # branch above.
+    return lint_document(full_vcl, falco_bin=falco_bin, snippet_name=snippet_name, timeout=10, verbose=True)
 
 
 # ── Convenience: validate a recv-snippet exclusion regex end-to-end ─────────

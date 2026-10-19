@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
   Dialog,
   DialogContent,
@@ -13,7 +14,8 @@ import { Badge } from '@/components/ui/badge'
 import { Loader2, CloudDownload, Calendar } from 'lucide-react'
 import { formatDateTime, cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
-import { adminFetch } from '@/lib/api'
+import { adminJsonResult } from '@/lib/api'
+import type { components } from '@/types/api'
 import { formatForInput, parseFromInput } from '@/lib/date'
 import {
   panelDialogContent,
@@ -28,26 +30,71 @@ interface SyncFromCloudModalProps {
   onStartSync: (range?: { start: string; end: string }) => void
 }
 
+type LakeInfo = components['schemas']['ProvisionLakeInfoResponse']
+
 export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
   const { timezone } = useTimezoneStore()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  const [lakeInfo, setLakeInfo] = useState<any>(null)
-  const [lakeError, setLakeError] = useState<string | null>(null)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  // Lake analysis is server state: fetched whenever the modal opens for a service, and re-run on
+  // demand from the retry button. The window the lake covers seeds the import range until the
+  // operator edits it.
+  const lakeQuery = useQuery({
+    queryKey: ['lake-info', activeServiceId],
+    queryFn: async (): Promise<LakeInfo> => {
+      // Raw fetch: the lake-info route resolves service_id via a FastAPI
+      // dependency, so OpenAPI declares `path?: never` and the typed
+      // client can't substitute the param. The URL path is still tightly
+      // coupled to the backend route. Add a response_model on the
+      // handler (and lift service_id into an explicit path arg) to make
+      // this typed.
+      const resp = await adminJsonResult(
+        '/api/services/{service_id}/lake-info',
+        `/api/services/${activeServiceId}/lake-info`,
+      )
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`)
+      }
+      const data: LakeInfo = resp.data
+      if (!data.ok) {
+        throw new Error(data.error || data.message || 'Failed to analyze data lake.')
+      }
+      return data
+    },
+    enabled: open && !!activeServiceId,
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  })
+  const lakeInfo = lakeQuery.data ?? null
+  const isAnalyzing = lakeQuery.isFetching
+  const lakeError = lakeQuery.error
+    ? lakeQuery.error.message || 'Connection error while analyzing data lake.'
+    : null
+  const handleAnalyzeLake = () => {
+    void lakeQuery.refetch()
+  }
 
   const [importMode, setImportMode] = useState<"all" | "range">("all")
-  const [importRange, setImportRange] = useState({ start: "", end: "" })
+  const [rangeDraft, setRangeDraft] = useState<{ start: string; end: string } | null>(null)
+  const importRange = rangeDraft ?? (
+    lakeInfo?.range?.start && lakeInfo.range.end
+      ? { start: lakeInfo.range.start, end: lakeInfo.range.end }
+      : { start: "", end: "" }
+  )
+  const setImportRange = (update: (prev: { start: string; end: string }) => { start: string; end: string }) =>
+    setRangeDraft(update(importRange))
 
-  useEffect(() => {
-    if (open && activeServiceId) {
-      handleAnalyzeLake()
-    }
+  // Closing the modal drops the import choices (adjusted during render, keyed on `open`).
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
     if (!open) {
       setImportMode("all")
-      setImportRange({ start: "", end: "" })
+      setRangeDraft(null)
     }
-  }, [open, activeServiceId])
+  }
 
   const estimatedImportSize = React.useMemo(() => {
     if (!lakeInfo?.calendar) return 0;
@@ -63,42 +110,10 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
         if (end && dateStr > end.split('T')[0]) continue;
       }
 
-      total += (stats as any).size_bytes || 0;
+      total += stats.size_bytes;
     }
     return total;
   }, [lakeInfo, importMode, importRange]);
-
-  const handleAnalyzeLake = async () => {
-    if (!activeServiceId) return;
-    setIsAnalyzing(true);
-    setLakeError(null);
-    try {
-      // Raw fetch: the lake-info route resolves service_id via a FastAPI
-      // dependency, so OpenAPI declares `path?: never` and the typed
-      // client can't substitute the param. The URL path is still tightly
-      // coupled to the backend route. Add a response_model on the
-      // handler (and lift service_id into an explicit path arg) to make
-      // this typed.
-      const resp = await adminFetch(`/api/services/${activeServiceId}/lake-info`);
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-      }
-      const data = await resp.json();
-      if (data.ok) {
-        setLakeInfo(data);
-        if (data.range?.start && data.range?.end) {
-          setImportRange({ start: data.range.start, end: data.range.end });
-        }
-      } else {
-        setLakeError(data.error || data.message || "Failed to analyze data lake.");
-      }
-    } catch (e: any) {
-      console.error("Failed to analyze data lake:", e);
-      setLakeError(e.message || "Connection error while analyzing data lake.");
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
 
   const handleStartSync = () => {
     if (importMode === "range") {
@@ -197,8 +212,8 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                       type="datetime-local"
                       step="1"
                       value={formatForInput(importRange.start, timezone)}
-                      min={formatForInput(lakeInfo.range?.start, timezone)}
-                      max={formatForInput(importRange.end || lakeInfo.range?.end, timezone)}
+                      min={formatForInput(lakeInfo.range?.start ?? '', timezone)}
+                      max={formatForInput(importRange.end || lakeInfo.range?.end || '', timezone)}
                       onChange={(e) => setImportRange(prev => ({ ...prev, start: parseFromInput(e.target.value, timezone) ?? '' }))}
                       className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono"
                     />
@@ -209,8 +224,8 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                       type="datetime-local"
                       step="1"
                       value={formatForInput(importRange.end, timezone)}
-                      min={formatForInput(importRange.start || lakeInfo.range?.start, timezone)}
-                      max={formatForInput(lakeInfo.range?.end, timezone)}
+                      min={formatForInput(importRange.start || lakeInfo.range?.start || '', timezone)}
+                      max={formatForInput(lakeInfo.range?.end ?? '', timezone)}
                       onChange={(e) => setImportRange(prev => ({ ...prev, end: parseFromInput(e.target.value, timezone) ?? '' }))}
                       className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono"
                     />

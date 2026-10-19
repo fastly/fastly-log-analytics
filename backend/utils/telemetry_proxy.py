@@ -3,7 +3,7 @@ and PyIceberg so we can centrally capture FOS/CDN telemetry, re-sign SigV4
 on behalf of unsigned clients, and apply policy guardrails (e.g. dashboard
 reads MUST NOT hit cloud).
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md
+The implementation and tests below are the source of truth for proxy behavior.
 """
 
 from __future__ import annotations
@@ -383,8 +383,17 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
     cdn_host = _cdn_host_for(cfg)
     # CDN routing uses ?key= auth — do NOT inject SigV4 there.
     if cdn_host and target_host == cdn_host:
+        if cfg.get("cdn_secret"):
+            headers["x-fastly-key"] = cfg["cdn_secret"]
         return headers
 
+    # Deliberately NO cdn_secret below this line. The native FOS endpoint
+    # authenticates with SigV4 over the FOS access keys; it neither reads
+    # nor needs the CDN service's secret, so forwarding it would hand a
+    # credential to a host that has no use for it. It also does not lift
+    # FOS's own rate limits — those are a property of the storage account,
+    # not of the CDN in front of it. Pinned by the *_native tests in
+    # tests/utils/test_telemetry_proxy_phase2.py.
     access_key = cfg.get("fos_access_key_id")
     secret_key = cfg.get("fos_secret_access_key")
     region = cfg.get("fos_region", "us-east-1")
@@ -397,6 +406,22 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
             service_id,
         )
         return headers
+
+    # S3 bulk delete (POST /<bucket>?delete) requires Content-MD5. When unsigned
+    # boto3 sends this request, Content-MD5 may be missing from client headers.
+    # Compute and add it before signing so SigV4 covers it and FOS accepts bulk delete.
+    if (
+        ("?delete" in url or b"<Delete" in body)
+        and body
+        and "Content-MD5" not in headers
+        and "content-md5" not in headers
+    ):
+        import base64
+        import hashlib
+
+        headers["Content-MD5"] = base64.b64encode(
+            hashlib.md5(body, usedforsecurity=False).digest()  # nosec B324
+        ).decode("ascii")
 
     credentials = Credentials(access_key, secret_key)
     aws_req = AWSRequest(method=method, url=url, headers=headers, data=body)
@@ -456,6 +481,15 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
     target_host = request.headers.get("X-Fos-Target")
     if not target_host:
         return web.Response(status=400, text="Missing X-Fos-Target header")
+
+    service_id = request.headers.get("X-Telemetry-Service-Id")
+    is_mutation = request.method in ("PUT", "POST", "DELETE")
+    if service_id and is_mutation:
+        _cfg = _load_config_cached(service_id)
+        if _cfg:
+            _fos_native = (_cfg.get("fos_native_endpoint") or _cfg.get("fos_endpoint") or "").strip()
+            if _fos_native:
+                target_host = _fos_native.replace("https://", "").replace("http://", "").rstrip("/")
 
     # X-Fos-Target is normally a bare host (production: HTTPS implied).
     # Tests using moto run an http-only upstream on 127.0.0.1, so we
@@ -570,7 +604,8 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
                 # diverged from what R2 verifies — producing
                 # HTTP 403 'The calculated signature does not match'.
                 wire_url = yarl.URL(upstream_url, encoded=True)
-                assert _SESSION is not None, "telemetry-proxy session not initialised"
+                if _SESSION is None:
+                    raise RuntimeError("telemetry-proxy session not initialised")
                 async with _SESSION.request(
                     method=request.method,
                     url=wire_url,
@@ -680,7 +715,14 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
             # Warn loudly so the regression class (the iceberg_scan vs
             # read_parquet incident) is visible. Do not block — visibility
             # over enforcement until Phase 3 wires clients to the proxy.
-            if service == "FOS" and request.method in ("GET", "HEAD") and (process_context or "").startswith("api:"):
+            # Health check probes (e.g. /api/admin/health-snapshot) intentionally test
+            # bucket reachability and are exempt from dashboard cost guardrails.
+            if (
+                service == "FOS"
+                and request.method in ("GET", "HEAD")
+                and (process_context or "").startswith("api:")
+                and not any(h in (process_context or "") for h in ("/api/admin/health", "/api/health"))
+            ):
                 logger.warning(
                     "[telemetry-proxy] dashboard context hitting FOS: %s %s ctx=%s",
                     request.method,
@@ -723,6 +765,7 @@ async def _create_session() -> aiohttp.ClientSession:
     # third line of defense for the residual race.
     return aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(
+            limit=256,
             limit_per_host=_POOL_PER_HOST,
             enable_cleanup_closed=True,
             keepalive_timeout=_UPSTREAM_KEEPALIVE_S,
@@ -769,7 +812,8 @@ def _run_server() -> None:
     # every concrete implementation (Server/UnixServer) provides it; the
     # site is started so `_server` is the concrete subclass at runtime.
     _server = site._server
-    assert _server is not None
+    if _server is None:
+        raise RuntimeError("_server is unexpectedly None")
     _PORT = _server.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
     _READY.set()
 
@@ -807,12 +851,12 @@ def stop_proxy_server() -> None:
             try:
                 asyncio.run_coroutine_threadsafe(_SESSION.close(), _LOOP).result(timeout=2.0)
             except Exception:
-                pass
+                logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
         if _RUNNER is not None:
             try:
                 asyncio.run_coroutine_threadsafe(_RUNNER.cleanup(), _LOOP).result(timeout=2.0)
             except Exception:
-                pass
+                logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
         _LOOP.call_soon_threadsafe(_LOOP.stop)
     if _SERVER_THREAD is not None:
         _SERVER_THREAD.join(timeout=2.0)
@@ -842,7 +886,10 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
     """
     native_target = source.get("fos_native_endpoint") or source["endpoint"]
     cdn_url = (source.get("cdn_url") or "").strip()
-    cdn_target = _scheme_host(cdn_url) if cdn_url else None
+    edge_only = source.get("provisioning", {}).get("edge_only")
+    if edge_only is None:
+        edge_only = source.get("edge_only")
+    cdn_target = _scheme_host(cdn_url) if (cdn_url and edge_only is not False) else None
     cdn_secret = source.get("cdn_secret") or ""
     service_id = source.get("service_id") or source.get("name", "default")
     # Only flip object downloads. LIST is HTTP GET too but the CDN
@@ -864,6 +911,8 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             if cdn_secret:
                 request.headers["x-fastly-key"] = cdn_secret
         else:
+            # Native FOS only: SigV4 authenticates these, so the CDN secret
+            # is not attached — see the note in _sign_request.
             request.headers["X-Fos-Target"] = native_target
 
         request.headers["X-Telemetry-Service-Id"] = service_id
@@ -882,19 +931,31 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
 
 
 def _reset_for_tests() -> None:
-    global _PORT, _SERVER_THREAD, _RUNNER, _LOOP, _SESSION
+    global _PORT, _SERVER_THREAD, _RUNNER, _LOOP, _SESSION, _LOG_FLUSHER_THREAD
     # Drain any rows the prior test left in the coalescer queue so the next
     # test's log_usage_calls mock doesn't capture stale rows from an
     # already-torn-down patch context.
     try:
         _flush_log_writes_for_tests(timeout=1.0)
     except Exception:
-        pass
+        logger.debug("_reset_for_tests: _flush_log_writes_for_tests failed (ignored)", exc_info=True)
     while True:
         try:
             _LOG_QUEUE.get_nowait()
         except queue.Empty:
             break
+    flusher = _LOG_FLUSHER_THREAD
+    if flusher is not None and flusher.is_alive():
+        _LOG_FLUSHER_STOP.set()
+        barrier = _FlushBarrier()
+        _LOG_QUEUE.put(barrier)
+        if not barrier.event.wait(timeout=1.0):
+            raise RuntimeError("telemetry log flusher did not drain during test reset")
+        flusher.join(timeout=1.0)
+        if flusher.is_alive():
+            raise RuntimeError("telemetry log flusher did not stop during test reset")
+    _LOG_FLUSHER_THREAD = None
+    _LOG_FLUSHER_STOP.clear()
     _PORT = None
     _SERVER_THREAD = None
     _RUNNER = None

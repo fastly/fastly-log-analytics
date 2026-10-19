@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatValue } from '@/lib/format'
+import { formatValue, formatCount, formatCountMaybe } from '@/lib/format'
 import { PopLabel } from '@/components/PopLabel'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useFieldValues } from '@/hooks/useFieldValues'
@@ -109,7 +109,7 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
                         {renderValue(pill.value)}
                       </span>
                       <span className="text-muted-foreground text-xs">
-                        {countByValue.get(pill.value)?.toLocaleString() ?? ''}
+                        {formatCountMaybe(countByValue.get(pill.value)) ?? ''}
                       </span>
                     </button>
                   ))}
@@ -136,7 +136,7 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
                     <span className="truncate max-w-[300px]">
                       {renderValue(v.value as string | number, v.label)}
                     </span>
-                    <span className="text-muted-foreground text-xs">{v.count.toLocaleString()}</span>
+                    <span className="text-muted-foreground text-xs">{formatCount(v.count)}</span>
                   </button>
                 ))
               )}

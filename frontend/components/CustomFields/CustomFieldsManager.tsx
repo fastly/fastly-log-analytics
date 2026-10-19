@@ -7,6 +7,7 @@ import { Plus, Edit, Trash2, Download, Upload } from 'lucide-react'
 import { CustomFieldDrawer } from './CustomFieldDrawer'
 import { queryKeys } from '@/lib/query-keys'
 import { downloadBlob } from '@/lib/utils'
+import { extractApiError } from '@/lib/api'
 
 export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
   const queryClient = useQueryClient()
@@ -65,8 +66,8 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
       } else {
         alert("Invalid export file format.");
       }
-    } catch (err: any) {
-      alert(`Failed to import: ${err.message}`);
+    } catch (err) {
+      alert(`Failed to import: ${extractApiError(err)}`);
     }
     e.target.value = '';
   }

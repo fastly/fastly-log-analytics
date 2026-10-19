@@ -99,6 +99,194 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/high-scale/services/{service_id}/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request Export */
+        post: operations["request_export_api_high_scale_services__service_id__exports_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/exports/{export_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Status */
+        get: operations["export_status_api_high_scale_services__service_id__exports__export_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/exports/{export_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Export */
+        post: operations["cancel_export_api_high_scale_services__service_id__exports__export_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/request-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Request Facts Root */
+        get: operations["get_request_facts_root_api_high_scale_request_facts_get"];
+        put?: never;
+        /** Post Request Facts Root */
+        post: operations["post_request_facts_root_api_high_scale_request_facts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/request-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request Facts */
+        post: operations["request_facts_api_high_scale_services__service_id__request_facts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/rum-facts/{domain}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rum Facts */
+        post: operations["rum_facts_api_high_scale_services__service_id__rum_facts__domain__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/cmcd-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cmcd Facts */
+        post: operations["cmcd_facts_api_high_scale_services__service_id__cmcd_facts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/aggregates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Aggregates */
+        post: operations["aggregates_api_high_scale_services__service_id__aggregates_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit Query */
+        post: operations["submit_query_api_high_scale_services__service_id__queries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/queries/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Query Job Status */
+        get: operations["query_job_status_api_high_scale_services__service_id__queries__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/high-scale/services/{service_id}/queries/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Query Job */
+        post: operations["cancel_query_job_api_high_scale_services__service_id__queries__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/insights": {
         parameters: {
             query?: never;
@@ -184,6 +372,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/query/schema/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Schema Endpoint
+         * @description Reflect schema columns and types for the active service.
+         */
+        get: operations["query_schema_endpoint_api_query_schema__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/presets": {
         parameters: {
             query?: never;
@@ -255,6 +463,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/network/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Network Bundle Get */
+        get: operations["network_bundle_get_api_network_bundle_get"];
+        put?: never;
+        /** Network Bundle */
+        post: operations["network_bundle_api_network_bundle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/performance/aggregates": {
         parameters: {
             query?: never;
@@ -272,6 +498,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/security/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Security Bundle Get */
+        get: operations["security_bundle_get_api_security_bundle_get"];
+        put?: never;
+        /** Security Aggregates */
+        post: operations["security_aggregates_api_security_bundle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/security/aggregates": {
         parameters: {
             query?: never;
@@ -283,40 +527,6 @@ export interface paths {
         put?: never;
         /** Security Aggregates */
         post: operations["security_aggregates_api_security_aggregates_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/security/top-bots": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Top Bots */
-        post: operations["top_bots_api_security_top_bots_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/security/proxies": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Get Proxies Data */
-        post: operations["get_proxies_data_api_security_proxies_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -488,6 +698,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate Alerts Endpoint
+         * @description Evaluate enabled alert rules on demand for the active service (Admin only).
+         */
+        post: operations["evaluate_alerts_endpoint_api_alerts_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/preview": {
         parameters: {
             query?: never;
@@ -500,6 +730,24 @@ export interface paths {
         /** Preview Alert */
         post: operations["preview_alert_api_alerts_preview_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Alert */
+        put: operations["update_alert_api_alerts__alert_id__put"];
+        post?: never;
+        /** Delete Alert */
+        delete: operations["delete_alert_api_alerts__alert_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -522,7 +770,7 @@ export interface paths {
         patch: operations["toggle_alert_enabled_api_alerts__alert_id__enabled_patch"];
         trace?: never;
     };
-    "/api/alerts/{alert_id}": {
+    "/api/alerts/{alert_id}/test": {
         parameters: {
             query?: never;
             header?: never;
@@ -531,9 +779,26 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post?: never;
-        /** Delete Alert */
-        delete: operations["delete_alert_api_alerts__alert_id__delete"];
+        /** Test Alert Webhook */
+        post: operations["test_alert_webhook_api_alerts__alert_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{service_id}/{alert_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Alert Webhook By Service */
+        post: operations["test_alert_webhook_by_service_api_alerts__service_id___alert_id__test_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -704,6 +969,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/origin/drilldown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Origin Drilldown */
+        post: operations["origin_drilldown_api_origin_drilldown_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/control-room/{tab}": {
         parameters: {
             query?: never;
@@ -859,6 +1141,29 @@ export interface paths {
          *     on first subscriber connect and suspends when all subscribers disconnect.
          */
         get: operations["realtime_stream_api_services__service_id__realtime_stream_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/control-room/error-stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Control Room Error Stream
+         * @description Stream bounded recent 4xx/5xx request events.
+         *
+         *     This analyst-reachable SSE path is explicitly listed in
+         *     ``remote_access._ANALYST_SSE_ALLOWLIST``.
+         */
+        get: operations["control_room_error_stream_api_services__service_id__control_room_error_stream_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1051,6 +1356,11 @@ export interface paths {
         /**
          * Rum Versions
          * @description List available Faro Web SDK versions + the pinned/latest state (admin-only).
+         *
+         *     The available-versions list is served from a cached, stale-on-error path
+         *     (``get_faro_versions_cached``) so a slow or unavailable npm registry
+         *     degrades the "update available" badge instead of 503-ing the whole RUM
+         *     page — this is a non-critical affordance, not page-critical data.
          */
         get: operations["rum_versions_api_services__service_id__rum_versions_get"];
         put?: never;
@@ -1198,25 +1508,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/rum-beacon": {
+    "/api/assets/aggregates": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Receive Rum Beacon */
-        get: operations["receive_rum_beacon_rum_beacon_get"];
+        /** Assets Aggregates Get */
+        get: operations["assets_aggregates_get_api_assets_aggregates_get"];
         put?: never;
-        /** Receive Rum Beacon */
-        post: operations["receive_rum_beacon_rum_beacon_post"];
+        /** Assets Aggregates */
+        post: operations["assets_aggregates_api_assets_aggregates_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/assets/aggregates": {
+    "/api/logs/query": {
         parameters: {
             query?: never;
             header?: never;
@@ -1225,8 +1535,101 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Assets Aggregates */
-        post: operations["assets_aggregates_api_assets_aggregates_post"];
+        /**
+         * Query Logs Post
+         * @description Execute a paginated query for raw log records.
+         */
+        post: operations["query_logs_post_api_logs_query_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Logs Get
+         * @description Execute a paginated query for raw log records via GET.
+         */
+        get: operations["query_logs_get_api_logs_get"];
+        put?: never;
+        /**
+         * Query Logs Post
+         * @description Execute a paginated query for raw log records.
+         */
+        post: operations["query_logs_post_api_logs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logs/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Logs Get
+         * @description Execute a paginated query for raw log records via GET.
+         */
+        get: operations["query_logs_get_api_logs__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/services/{service_id}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live Log Stream
+         * @description Stream live Fastly access log lines via Server-Sent Events (SSE).
+         *
+         *     Supports pause/resume on the client, client-side regex search, and deep JSON
+         *     inspection. Analyst sessions with IP masking receive masked client IPs.
+         */
+        get: operations["live_log_stream_api_services__service_id__stream_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stream/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live Log Stream
+         * @description Stream live Fastly access log lines via Server-Sent Events (SSE).
+         *
+         *     Supports pause/resume on the client, client-side regex search, and deep JSON
+         *     inspection. Analyst sessions with IP masking receive masked client IPs.
+         */
+        get: operations["live_log_stream_api_stream__service_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1844,6 +2247,141 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/bots/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh All Bot Sources Endpoint
+         * @description Fetch and re-cache all enabled bot sources.
+         */
+        post: operations["refresh_all_bot_sources_endpoint_api_admin_bots_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/bot-sources/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh All Bot Sources Endpoint
+         * @description Fetch and re-cache all enabled bot sources.
+         */
+        post: operations["refresh_all_bot_sources_endpoint_api_admin_bot_sources_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rdns/enrich": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Rdns Enrich Endpoint
+         * @description Trigger manual rDNS enrichment batch.
+         */
+        post: operations["trigger_rdns_enrich_endpoint_api_admin_rdns_enrich_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rdns/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Rdns Stats Endpoint
+         * @description Return rDNS cache stats.
+         */
+        get: operations["get_rdns_stats_endpoint_api_admin_rdns_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/celery/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Celery Status
+         * @description Expose Celery queue depths, worker status, RedBeat schedule, and
+         *     ingest-ledger summary.
+         */
+        get: operations["api_celery_status_api_admin_celery_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/clickhouse/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Clickhouse Status */
+        get: operations["api_clickhouse_status_api_admin_clickhouse_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/clickhouse/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Api Clickhouse Replay */
+        post: operations["api_clickhouse_replay_api_admin_clickhouse_replay_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/optimize-now": {
         parameters: {
             query?: never;
@@ -1862,6 +2400,48 @@ export interface paths {
          *     free local-only equivalent.
          */
         post: operations["optimize_now_api_admin_optimize_now_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/optimize/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Optimize Service
+         * @description Trigger an immediate cloud lakehouse optimization pass for service_id.
+         *     Executes DuckLake durability flush, small-file merge, and data file compaction.
+         *     Logs execution in cron_runs and returns execution outcome.
+         */
+        post: operations["optimize_service_api_admin_optimize__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/expire-snapshots/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Expire Snapshots Service
+         * @description Trigger an immediate DuckLake retention and snapshot-expiry pass.
+         */
+        post: operations["expire_snapshots_service_api_admin_expire_snapshots__service_id__post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1907,6 +2487,214 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/consolidate-rollups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Consolidate Rollups
+         * @description Consolidate historical fragmented rollup files into daily bundles and prune obsolete files.
+         *
+         *     Sweeps hour_ip_spread, compacts closed days into day_bundled files, and prunes
+         *     per-field and obsolete hourly files older than 14 days.
+         */
+        post: operations["consolidate_rollups_api_admin_consolidate_rollups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/compact/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Compact Now
+         * @description Manually trigger daily rollup compaction for closed days over a 30-day window.
+         */
+        post: operations["rollup_compact_now_api_admin_rollups_compact__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/compact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Compact Now
+         * @description Manually trigger daily rollup compaction for closed days over a 30-day window.
+         */
+        post: operations["rollup_compact_now_api_admin_rollups_compact_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/heal/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Heal Now
+         * @description Manually trigger hourly rollup healing for missing closed-hour bundles over 48h.
+         */
+        post: operations["rollup_heal_now_api_admin_rollups_heal__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/heal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Heal Now
+         * @description Manually trigger hourly rollup healing for missing closed-hour bundles over 48h.
+         */
+        post: operations["rollup_heal_now_api_admin_rollups_heal_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollup-heal/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Heal Now
+         * @description Manually trigger hourly rollup healing for missing closed-hour bundles over 48h.
+         */
+        post: operations["rollup_heal_now_api_admin_rollup_heal__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollup-heal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollup Heal Now
+         * @description Manually trigger hourly rollup healing for missing closed-hour bundles over 48h.
+         */
+        post: operations["rollup_heal_now_api_admin_rollup_heal_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/status/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rollup Status
+         * @description Inspect the status of day and hour rollup bundles.
+         */
+        get: operations["rollup_status_api_admin_rollups_status__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rollups/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rollup Status
+         * @description Inspect the status of day and hour rollup bundles.
+         */
+        get: operations["rollup_status_api_admin_rollups_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/compact/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Local Compact Now
+         * @description Trigger an immediate local-only parquet compaction pass.
+         *
+         *     Does NOT touch FOS — only rewrites files inside the local cache, so
+         *     no 30-day-minimum billing penalty. Safe to call as often as needed.
+         *     The 2-minute cron does this automatically; this endpoint is for
+         *     ad-hoc cleanup.
+         */
+        post: operations["local_compact_now_api_admin_compact__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/local-compact-now": {
         parameters: {
             query?: never;
@@ -1932,6 +2720,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/compaction-status/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compaction Stats
+         * @description Snapshot of file-count distribution across local cache partitions.
+         *
+         *     Useful for monitoring: rising partitions_above_3 means the local
+         *     compaction cron has stopped keeping up; rising avg_files_per_partition
+         *     correlates with slow dashboard scans.
+         */
+        get: operations["compaction_stats_api_admin_compaction_status__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/compaction-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compaction Stats
+         * @description Snapshot of file-count distribution across local cache partitions.
+         *
+         *     Useful for monitoring: rising partitions_above_3 means the local
+         *     compaction cron has stopped keeping up; rising avg_files_per_partition
+         *     correlates with slow dashboard scans.
+         */
+        get: operations["compaction_stats_api_admin_compaction_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/compaction-stats": {
         parameters: {
             query?: never;
@@ -1948,6 +2784,92 @@ export interface paths {
          *     correlates with slow dashboard scans.
          */
         get: operations["compaction_stats_api_admin_compaction_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/partial-hour-merge/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Partial Hour Merge Now
+         * @description Trigger an immediate partial-hour merge tick for the active UTC hour.
+         *
+         *     Folds newly-arrived buffer parquets into the active hour's partial-hour rollup.
+         *     Local-only operation; zero FOS egress.
+         */
+        post: operations["partial_hour_merge_now_api_admin_partial_hour_merge__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/partial-hour-merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Partial Hour Merge Now
+         * @description Trigger an immediate partial-hour merge tick for the active UTC hour.
+         *
+         *     Folds newly-arrived buffer parquets into the active hour's partial-hour rollup.
+         *     Local-only operation; zero FOS egress.
+         */
+        post: operations["partial_hour_merge_now_api_admin_partial_hour_merge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/partial-hour-status/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Partial Hour Status
+         * @description Inspect the status of the current active hour's partial rollup.
+         */
+        get: operations["partial_hour_status_api_admin_partial_hour_status__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/partial-hour-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Partial Hour Status
+         * @description Inspect the status of the current active hour's partial rollup.
+         */
+        get: operations["partial_hour_status_api_admin_partial_hour_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2001,6 +2923,43 @@ export interface paths {
         get: operations["metadata_storage_api_admin_metadata_storage_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/metadata-cleanup/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Metadata Cleanup Now
+         * @description Trigger an immediate metadata cleanup, streaming progress as SSE.
+         *
+         *     Equivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but
+         *     on-demand. The DELETE phase is fast; VACUUM rewrites the whole file
+         *     and on a multi-GB metadata.db can take minutes. Streaming gives the
+         *     operator real-time feedback instead of a 5-minute hang behind a
+         *     spinning button.
+         *
+         *     Event shapes (between SSE ``data:`` lines):
+         *
+         *         {"type": "status",   "message": str}
+         *         {"type": "progress", "current": int, "total": int, "message": str}
+         *         {"type": "done",     "message": str, "result": {...}}
+         *         {"type": "error",    "message": str}
+         *
+         *     Writes a row to ``cron_runs`` with task=``metadata_cleanup`` so the
+         *     manual run shows up on the Data Management schedule + history grid
+         *     alongside the scheduled cron's runs.
+         */
+        post: operations["metadata_cleanup_now_api_admin_metadata_cleanup__service_id__post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2119,6 +3078,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/duckdb/recycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Duckdb Recycle Endpoint
+         * @description Trigger on-demand recycle of DuckDB instances to free parquet metadata cache.
+         */
+        post: operations["trigger_duckdb_recycle_endpoint_api_admin_duckdb_recycle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/duckdb/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Duckdb Status Endpoint
+         * @description Return memory metrics, recycle configuration, and active connection pool states.
+         */
+        get: operations["get_duckdb_status_endpoint_api_admin_duckdb_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sync-status": {
         parameters: {
             query?: never;
@@ -2128,6 +3127,23 @@ export interface paths {
         };
         /** Sync Status */
         get: operations["sync_status_api_sync_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/sync-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sync Status */
+        get: operations["sync_status_api_admin_sync_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2214,6 +3230,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Health Snapshot
+         * @description One-shot health snapshot for the admin page system health card.
+         *
+         *     Returns CPU load averages, memory, disk usage of the data mount,
+         *     docker container CPU/memory (if reachable), the count of in-flight
+         *     cron runs, the age of the last scheduler tick (SRE-06), the set of
+         *     services+tasks whose latest terminal cron run errored (SRE-03), the
+         *     effective log/exporter mode (SRE-20), and config-backup freshness
+         *     (SRE-11). Uses only stdlib + per-service SQLite (no psutil dep).
+         *
+         *     ``probe_fos=1`` additionally issues a per-service FOS reachability
+         *     probe (SRE-13) — a real network round-trip that bills a Class-B op,
+         *     so it is opt-in and off by default (the card never sets it).
+         */
+        get: operations["health_snapshot_api_admin_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/system-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Health Snapshot
+         * @description One-shot health snapshot for the admin page system health card.
+         *
+         *     Returns CPU load averages, memory, disk usage of the data mount,
+         *     docker container CPU/memory (if reachable), the count of in-flight
+         *     cron runs, the age of the last scheduler tick (SRE-06), the set of
+         *     services+tasks whose latest terminal cron run errored (SRE-03), the
+         *     effective log/exporter mode (SRE-20), and config-backup freshness
+         *     (SRE-11). Uses only stdlib + per-service SQLite (no psutil dep).
+         *
+         *     ``probe_fos=1`` additionally issues a per-service FOS reachability
+         *     probe (SRE-13) — a real network round-trip that bills a Class-B op,
+         *     so it is opt-in and off by default (the card never sets it).
+         */
+        get: operations["health_snapshot_api_admin_system_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/vcl-health": {
         parameters: {
             query?: never;
@@ -2234,6 +3312,26 @@ export interface paths {
          *     Used by the admin UI post-deploy to show migration status.
          */
         get: operations["api_vcl_health_api_admin_vcl_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/high-scale/retention-recommendation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api High Scale Retention Recommendation
+         * @description Recommend hot/warm retention for sizing; an explicit per-service setting always wins.
+         */
+        get: operations["api_high_scale_retention_recommendation_api_admin_high_scale_retention_recommendation_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2282,6 +3380,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/commit/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Iceberg Commit Endpoint
+         * @description Manually flush the local buffer to the DuckLake table.
+         *
+         *     Returns 202 Accepted — the commit runs asynchronously in a worker
+         *     thread and the response body carries a ``run_id`` the caller can
+         *     poll for completion. 200 (the prior status) misled clients that
+         *     treated it as "done".
+         */
+        post: operations["iceberg_commit_endpoint_api_admin_commit__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/commit-iceberg": {
         parameters: {
             query?: never;
@@ -2293,7 +3416,7 @@ export interface paths {
         put?: never;
         /**
          * Iceberg Commit Endpoint
-         * @description Manually flush the local buffer to the Iceberg table.
+         * @description Manually flush the local buffer to the DuckLake table.
          *
          *     Returns 202 Accepted — the commit runs asynchronously in a worker
          *     thread and the response body carries a ``run_id`` the caller can
@@ -2334,6 +3457,35 @@ export interface paths {
          *     still looks wrong. This is the nuclear-option version of refresh.
          */
         post: operations["rebuild_local_view_endpoint_api_admin_rebuild_local_view_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ducklake/migrate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ducklake Migrate Endpoint
+         * @description Adopt this service's legacy pyiceberg-era parquet into DuckLake.
+         *
+         *     The backend already runs this automatically on first boot under v3;
+         *     this endpoint is the explicit "run it now" button (and the retry path
+         *     after a failed sweep), so it bypasses the once-ever guard. Returns
+         *     202 Accepted — the adoption runs in a background thread (registering
+         *     thousands of files can take a while). Idempotent: files already
+         *     tracked by the DuckLake catalog are skipped, so re-running after a
+         *     partial failure is safe. The outcome lands as a ``ducklake_adopt``
+         *     row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
+         */
+        post: operations["ducklake_migrate_endpoint_api_admin_ducklake_migrate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2394,6 +3546,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/sync/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync Service */
+        post: operations["sync_service_api_admin_sync__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/full-sweep/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Full Sweep Service */
+        post: operations["full_sweep_service_api_admin_full_sweep__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/gap-heal/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Gap Heal Service */
+        post: operations["gap_heal_service_api_admin_gap_heal__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ledger/sweep/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ledger Sweep Service */
+        post: operations["ledger_sweep_service_api_admin_ledger_sweep__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rum/sync/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rum Sync Service */
+        post: operations["rum_sync_service_api_admin_rum_sync__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rum/discovery/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rum Discovery Service */
+        post: operations["rum_discovery_service_api_admin_rum_discovery__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/rum/ledger/sweep/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rum Ledger Sweep Service */
+        post: operations["rum_ledger_sweep_service_api_admin_rum_ledger_sweep__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/ingest-logs": {
         parameters: {
             query?: never;
@@ -2429,6 +3700,30 @@ export interface paths {
          *     Idempotent — files already present in the local cache are skipped.
          */
         post: operations["backfill_window_api_admin_backfill_window_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/log-accounting/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Log Accounting
+         * @description Reconcile Fastly's authoritative ``requests`` count against our
+         *     locally-ingested row counts to surface any gap between what Fastly served
+         *     and what we ingested.
+         *
+         *     Per-bucket gap is the actionable signal — totals smooth over burst losses.
+         */
+        get: operations["api_log_accounting_api_admin_log_accounting__service_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2475,6 +3770,46 @@ export interface paths {
          *     per-service, ``"metric|service_id|task"`` for per-task.
          */
         get: operations["metric_history_batch_api_admin_metric_history_batch_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ngwaf/sync/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Ngwaf Sync Endpoint
+         * @description Trigger manual NGWAF bot sync for a service.
+         */
+        post: operations["trigger_ngwaf_sync_endpoint_api_admin_ngwaf_sync__service_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ngwaf/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Ngwaf Status Endpoint
+         * @description Return NGWAF cache statistics and workspace sync watermarks.
+         */
+        get: operations["get_ngwaf_status_endpoint_api_admin_ngwaf_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2540,6 +3875,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/ledger/quarantine": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Ledger Quarantine */
+        get: operations["list_ledger_quarantine_api_admin_ledger_quarantine_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/quarantine/summary": {
         parameters: {
             query?: never;
@@ -2557,38 +3909,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/quarantine/export": {
+    "/api/admin/quarantine/download/{item_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Export Quarantine
-         * @description Export all quarantine metadata as JSONL (no FOS fetch — SQLite only).
-         */
-        get: operations["export_quarantine_api_admin_quarantine_export_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/quarantine/{quarantine_id}/download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Download Quarantined File
-         * @description Stream the ``.bad.jsonl`` for a single quarantined file from FOS.
-         */
-        get: operations["download_quarantined_file_api_admin_quarantine__quarantine_id__download_get"];
+        /** Download Quarantine Evidence */
+        get: operations["download_quarantine_evidence_api_admin_quarantine_download__item_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2606,8 +3935,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Purge Quarantine */
-        post: operations["purge_quarantine_api_admin_quarantine_purge_post"];
+        /** Purge Quarantine Evidence */
+        post: operations["purge_quarantine_evidence_api_admin_quarantine_purge_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2877,9 +4206,9 @@ export interface paths {
         };
         /**
          * List Persisted Slow Queries
-         * @description Persistent slow-SQL history from the per-service ``slow_queries``
-         *     SQLite table — the durable backing store for the Notable Slow
-         *     Queries panel beyond the in-memory ring buffer's ~10-30 min /
+         * @description Persistent slow-SQL history from the PostgreSQL ``slow_queries``
+         *     table (``METADATA_DSN``) — the durable backing store for the Notable
+         *     Slow Queries panel beyond the in-memory ring buffer's ~10-30 min /
          *     restart-bounded window.
          *
          *     Server-side filters keep the response payload small:
@@ -2894,7 +4223,11 @@ export interface paths {
         get: operations["list_persisted_slow_queries_api_admin_slow_queries_get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Clear Persisted Slow Queries
+         * @description Clear persisted slow-SQL history for *service_id* and record an audit entry.
+         */
+        delete: operations["clear_persisted_slow_queries_api_admin_slow_queries_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3024,7 +4357,7 @@ export interface paths {
         put?: never;
         /**
          * Provision Check Fos
-         * @description Validate FOS credentials by attempting to list objects.
+         * @description Validate FOS credentials against the same raw prefixes ingest reads.
          */
         post: operations["provision_check_fos_api_provision_check_fos_post"];
         delete?: never;
@@ -4321,10 +5654,31 @@ export interface paths {
         };
         /**
          * Recent Sqlite
-         * @description Return up to ``limit`` most-recent SQLite statements captured since
-         *     ``since_seq``. The Debug Panel polls this every 2s when SQL debug is on.
+         * @description Return up to ``limit`` most-recent Postgres statements captured since
+         *     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
          */
         get: operations["recent_sqlite_api_debug_recent_sqlite_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/debug/recent-postgres": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recent Sqlite
+         * @description Return up to ``limit`` most-recent Postgres statements captured since
+         *     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
+         */
+        get: operations["recent_sqlite_api_debug_recent_postgres_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4344,9 +5698,29 @@ export interface paths {
         put?: never;
         /**
          * Clear Sqlite
-         * @description Drain the SQLite ring buffer. Manual reset for the Debug Panel.
+         * @description Drain the Postgres ring buffer. Manual reset for the Debug Panel.
          */
         post: operations["clear_sqlite_api_debug_clear_sqlite_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/debug/clear-postgres": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Sqlite
+         * @description Drain the Postgres ring buffer. Manual reset for the Debug Panel.
+         */
+        post: operations["clear_sqlite_api_debug_clear_postgres_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5031,6 +6405,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/share/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Share Purge
+         * @description Trigger manual retention cleanup of audit logs, expired invites, tokens, and stale sessions.
+         */
+        post: operations["trigger_share_purge_api_admin_share_purge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-vitals": {
         parameters: {
             query?: never;
@@ -5129,36 +6523,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** ActiveClientItem */
+        /**
+         * ActiveClientItem
+         * @description Field order mirrors ``GET_ACTIVE_PROXY_CLIENTS`` (``asn`` is swapped for a
+         *     trailing ``asn_name`` by the repository).
+         */
         ActiveClientItem: {
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Is Cached
-             * @default false
-             */
-            _is_cached: boolean;
-            /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
             /** Ip */
             ip: string;
-            /** Risk Level */
-            risk_level: string;
-            /** Asn Name */
-            asn_name?: string | null;
-            /**
-             * Impossible Distance
-             * @default false
-             */
-            impossible_distance: boolean;
             /** Rtt Min Ms */
             rtt_min_ms?: number | null;
             /** Tcp Rtt Ms */
@@ -5175,10 +6547,21 @@ export interface components {
             pop_lat?: number | null;
             /** Pop Lon */
             pop_lon?: number | null;
+            /**
+             * Impossible Distance
+             * @default false
+             */
+            impossible_distance: boolean;
+            /** Risk Level */
+            risk_level: string;
             /** Country */
             country?: string | null;
             /** City */
             city?: string | null;
+            /** Asn Name */
+            asn_name?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ActiveQueryRow
@@ -5224,6 +6607,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Chart Interval
              * @default 1 minute
@@ -5245,10 +6632,6 @@ export interface components {
             include_map_data?: boolean | null;
             /** Sections */
             sections?: ("core" | "topten" | "bots")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** AggregatesResponse */
         AggregatesResponse: {
@@ -5262,6 +6645,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5368,6 +6755,64 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** AlertEvaluateData */
+        AlertEvaluateData: {
+            /** Service Id */
+            service_id: string;
+            /** Evaluated */
+            evaluated: number;
+            /** Triggered */
+            triggered: number;
+            /** Results */
+            results: components["schemas"]["AlertEvaluateResultItem"][];
+            /** Evaluated At */
+            evaluated_at: string;
+        };
+        /** AlertEvaluateRequest */
+        AlertEvaluateRequest: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Alert Id */
+            alert_id?: string | null;
+        };
+        /** AlertEvaluateResponse */
+        AlertEvaluateResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            data: components["schemas"]["AlertEvaluateData"];
+        };
+        /** AlertEvaluateResultItem */
+        AlertEvaluateResultItem: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Metric */
+            metric: string;
+            /** Triggered */
+            triggered: boolean;
+            /** Last Triggered At */
+            last_triggered_at?: string | null;
+        };
         /** AlertListResponse */
         AlertListResponse: {
             /** Debug Queries */
@@ -5376,6 +6821,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5392,6 +6841,35 @@ export interface components {
             /** Evaluated At */
             evaluated_at: string;
         };
+        /** AlertMutationData */
+        AlertMutationData: {
+            /** Id */
+            id: string;
+            /**
+             * Status
+             * @default success
+             */
+            status: string;
+            /** Service Id */
+            service_id?: string | null;
+        };
+        /** AlertPreviewData */
+        AlertPreviewData: {
+            /** Times */
+            times: string[];
+            /** Values */
+            values: number[];
+            /**
+             * Type
+             * @default absolute
+             * @enum {string}
+             */
+            type: "absolute" | "relative" | "anomaly_zscore";
+            /** Hist Values */
+            hist_values?: number[] | null;
+            /** Threshold Values */
+            threshold_values?: number[] | null;
+        };
         /** AlertPreviewResponse */
         AlertPreviewResponse: {
             /** Debug Queries */
@@ -5400,6 +6878,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5411,10 +6893,7 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Data */
-            data?: {
-                [key: string]: unknown;
-            } | null;
+            data?: components["schemas"]["AlertPreviewData"] | null;
             /** Error */
             error?: string | null;
         };
@@ -5428,6 +6907,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5438,9 +6921,73 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Data */
-            data: {
+            data: components["schemas"]["AlertMutationData"] | {
                 [key: string]: unknown;
             };
+        };
+        /** AlertTestWebhookData */
+        AlertTestWebhookData: {
+            /** Alert Id */
+            alert_id: string;
+            /** Service Id */
+            service_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "sent" | "validated" | "failed";
+            /** Targets Tested */
+            targets_tested: number;
+            /**
+             * Channel Type
+             * @default webhook
+             */
+            channel_type: string;
+            /** Detail */
+            detail?: string | null;
+        };
+        /** AlertTestWebhookRequest */
+        AlertTestWebhookRequest: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Webhook Url */
+            webhook_url?: string | null;
+            /**
+             * Channel Type
+             * @default webhook
+             * @enum {string}
+             */
+            channel_type: "webhook" | "slack" | "pagerduty";
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /** AlertTestWebhookResponse */
+        AlertTestWebhookResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            data: components["schemas"]["AlertTestWebhookData"];
         };
         /** AnalystInvite */
         AnalystInvite: {
@@ -5450,6 +6997,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5486,6 +7037,107 @@ export interface components {
             /** Cdn Secret */
             cdn_secret?: string | null;
         };
+        /** AsnConcentrationInsightCard */
+        AsnConcentrationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_concentration";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnConcentrationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnConcentrationMeta */
+        AsnConcentrationMeta: {
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** AsnHostingShiftInsightCard */
+        AsnHostingShiftInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_hosting_shift";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnHostingShiftMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnHostingShiftMeta */
+        AsnHostingShiftMeta: {
+            /** Window Hosting */
+            window_hosting: number;
+            /** Window Total */
+            window_total: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** AsnMetroPerformanceInsightCard */
+        AsnMetroPerformanceInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "asn_metro_performance";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_AsnMetroPerformanceMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** AsnMetroPerformanceMeta */
+        AsnMetroPerformanceMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** AssetTypeBreakdownRow */
         AssetTypeBreakdownRow: {
             /** Asset Type */
@@ -5510,6 +7162,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5546,6 +7202,8 @@ export interface components {
              * @default []
              */
             low_ttl_assets: components["schemas"]["LowTtlAssetRow"][];
+            /** Missing Fields */
+            missing_fields?: string[];
         };
         /**
          * AssetsRequest
@@ -5567,6 +7225,44 @@ export interface components {
             range_token?: string | null;
             /** Anchor */
             anchor?: string | null;
+        };
+        /**
+         * AuditLogEntry
+         * @description One ``metadata.get_audit_logs`` row (``details`` is the json-decoded payload).
+         */
+        AuditLogEntry: {
+            /** Id */
+            id: number;
+            /** Timestamp */
+            timestamp: string;
+            /** Event Type */
+            event_type: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Actor */
+            actor: string | null;
+            /** Source */
+            source: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * AuditLogsResponse
+         * @description ``GET /api/audit-logs``. ``_debug_calls`` rides along as an extra.
+         */
+        AuditLogsResponse: {
+            /** Total */
+            total: number;
+            /** Page */
+            page: number;
+            /** Per Page */
+            per_page: number;
+            /** Entries */
+            entries: components["schemas"]["AuditLogEntry"][];
+        } & {
+            [key: string]: unknown;
         };
         /**
          * AuthConfigProvider
@@ -5648,6 +7344,28 @@ export interface components {
             overview?: number | null;
             /** Overview Days */
             overview_days?: number | null;
+            /** Rum */
+            rum?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BackfillWindowResponse
+         * @description ``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``.
+         */
+        BackfillWindowResponse: {
+            /** Error */
+            error?: string | null;
+            /** Files Downloaded */
+            files_downloaded?: number | null;
+            /** Rows Downloaded */
+            rows_downloaded?: number | null;
+            /** Bytes Downloaded */
+            bytes_downloaded?: number | null;
+            /** Files Removed */
+            files_removed?: number | null;
+            /** Files Skipped */
+            files_skipped?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -5683,6 +7401,35 @@ export interface components {
              */
             mode: string;
         };
+        /**
+         * BootstrapDebugState
+         * @description Debug-visibility settings folded into bootstrap (admin only).
+         */
+        BootstrapDebugState: {
+            /** Debug Responses Enabled */
+            debug_responses_enabled: boolean;
+            /** Query Debug Visibility */
+            query_debug_visibility: string;
+            /** Api Call Debug Visibility */
+            api_call_debug_visibility: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BootstrapPopGeo
+         * @description One PoP's label parts, parsed from the cached ``/datacenters`` list
+         *     (``get_pop_location_map``); any part may be an empty string.
+         */
+        BootstrapPopGeo: {
+            /** City */
+            city: string;
+            /** Region */
+            region: string;
+            /** Country */
+            country: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** BootstrapResponse */
         BootstrapResponse: {
             /** Debug Queries */
@@ -5691,6 +7438,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5725,9 +7476,7 @@ export interface components {
             } | null;
             /** Pop Geo */
             pop_geo?: {
-                [key: string]: {
-                    [key: string]: string;
-                };
+                [key: string]: components["schemas"]["BootstrapPopGeo"];
             } | null;
             /** Settings */
             settings?: {
@@ -5739,14 +7488,16 @@ export interface components {
             }[];
             /** Active Log Field Ids */
             active_log_field_ids?: string[];
+            /**
+             * Ngwaf Configured
+             * @default false
+             */
+            ngwaf_configured: boolean;
             /** Views */
             views?: {
                 [key: string]: unknown;
             }[];
-            /** Log Fields Catalog */
-            log_fields_catalog?: {
-                [key: string]: unknown;
-            } | null;
+            log_fields_catalog?: components["schemas"]["LogFieldsCatalogResponse"] | null;
             /** Sync Status */
             sync_status?: {
                 [key: string]: unknown;
@@ -5763,10 +7514,7 @@ export interface components {
             log_extents?: {
                 [key: string]: unknown;
             } | null;
-            /** Debug State */
-            debug_state?: {
-                [key: string]: unknown;
-            } | null;
+            debug_state?: components["schemas"]["BootstrapDebugState"] | null;
             /** Ops Overview */
             ops_overview?: {
                 [key: string]: unknown;
@@ -5794,6 +7542,17 @@ export interface components {
             access_level?: string | null;
             /** Cmcd Enabled */
             cmcd_enabled?: boolean | null;
+            /** Rum Enabled */
+            rum_enabled?: boolean | null;
+            /** Rum Log Period */
+            rum_log_period?: number | null;
+            /**
+             * Analyst Path A Supported
+             * @default true
+             */
+            analyst_path_a_supported: boolean;
+            /** Analyst Path A Reason */
+            analyst_path_a_reason?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -5809,9 +7568,7 @@ export interface components {
              * Top Bots
              * @default []
              */
-            top_bots: {
-                [key: string]: unknown;
-            }[];
+            top_bots: components["schemas"]["TopBotRow"][];
         };
         /** BotSourceMeta */
         BotSourceMeta: {
@@ -5826,6 +7583,38 @@ export interface components {
             /** Entry Count */
             entry_count?: number | null;
         };
+        /**
+         * BotSourceRefreshResponse
+         * @description ``POST /admin/bot-sources/{source_id}/refresh``.
+         */
+        BotSourceRefreshResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Source */
+            source: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BotSourcesRefreshResponse
+         * @description ``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``.
+         */
+        BotSourcesRefreshResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Sources */
+            sources: {
+                [key: string]: unknown;
+            }[];
+            /** Updated Count */
+            updated_count: number;
+            /** Failed Count */
+            failed_count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** BotSourcesResponse */
         BotSourcesResponse: {
             /** Debug Queries */
@@ -5834,6 +7623,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5848,6 +7641,54 @@ export interface components {
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
+        };
+        /** BotnetGroupingInsightCard */
+        BotnetGroupingInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "botnet_grouping";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_BotnetGroupingMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** BotnetGroupingMeta */
+        BotnetGroupingMeta: {
+            /** Requests */
+            requests: number;
+            /** Ip Ratio */
+            ip_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BucketCountRow
+         * @description Histogram bucket. Repository paths key the bucket as ``bucket``; the
+         *     high-scale path keys it as ``label``.
+         */
+        BucketCountRow: {
+            /** Bucket */
+            bucket?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * BundleResponse
@@ -5874,6 +7715,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5888,13 +7733,25 @@ export interface components {
         };
         /** CacheBreakdown */
         CacheBreakdown: {
-            /** Hits */
+            /**
+             * Hits
+             * @default 0
+             */
             hits: number;
-            /** Misses */
+            /**
+             * Misses
+             * @default 0
+             */
             misses: number;
-            /** Passes */
+            /**
+             * Passes
+             * @default 0
+             */
             passes: number;
-            /** Other */
+            /**
+             * Other
+             * @default 0
+             */
             other: number;
         };
         /** CacheCollapseDetailRequest */
@@ -5903,7 +7760,7 @@ export interface components {
             url: string;
             /**
              * Window Size Hrs
-             * @default 1
+             * @default 24
              */
             window_size_hrs: number;
             /**
@@ -5922,6 +7779,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5931,21 +7792,76 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Url */
+            /**
+             * Url
+             * @default
+             */
             url: string;
             /** Timeline */
-            timeline: components["schemas"]["CacheCollapseTimelinePoint"][];
+            timeline?: components["schemas"]["CacheCollapseTimelinePoint"][];
             /** Recent Misses */
-            recent_misses: components["schemas"]["CacheMissPoint"][];
-            breakdown: components["schemas"]["CacheBreakdown"];
-            /** Baseline Hit Rate */
+            recent_misses?: components["schemas"]["CacheMissPoint"][];
+            breakdown?: components["schemas"]["CacheBreakdown"];
+            /**
+             * Baseline Hit Rate
+             * @default 0
+             */
             baseline_hit_rate: number;
-            /** Window Hit Rate */
+            /**
+             * Window Hit Rate
+             * @default 0
+             */
             window_hit_rate: number;
-            /** Baseline Pass Rate */
+            /**
+             * Baseline Pass Rate
+             * @default 0
+             */
             baseline_pass_rate: number;
-            /** Window Pass Rate */
+            /**
+             * Window Pass Rate
+             * @default 0
+             */
             window_pass_rate: number;
+            /**
+             * Has Data
+             * @default true
+             */
+            has_data: boolean;
+            /** Clusters */
+            clusters?: unknown[];
+        };
+        /** CacheCollapseInsightCard */
+        CacheCollapseInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_collapse";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheCollapseMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheCollapseMeta */
+        CacheCollapseMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** CacheCollapseTimelinePoint */
         CacheCollapseTimelinePoint: {
@@ -5961,6 +7877,37 @@ export interface components {
             total_requests: number;
             /** Hit Rate */
             hit_rate: number;
+        };
+        /** CacheHitCliffInsightCard */
+        CacheHitCliffInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_hit_cliff";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheHitCliffMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheHitCliffMeta */
+        CacheHitCliffMeta: {
+            /** Window Cacheable */
+            window_cacheable: number;
+            /** Baseline Cacheable */
+            baseline_cacheable: number;
+            /** Drop Pts */
+            drop_pts: number;
+        } & {
+            [key: string]: unknown;
         };
         /** CacheMissPoint */
         CacheMissPoint: {
@@ -5985,6 +7932,76 @@ export interface components {
             requests: number;
             /** Bytes */
             bytes: number;
+        };
+        /** CacheTtlMismatchInsightCard */
+        CacheTtlMismatchInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cache_ttl_mismatch";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheTtlMismatchMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheTtlMismatchMeta */
+        CacheTtlMismatchMeta: {
+            /** Avg Ttl S */
+            avg_ttl_s: number;
+            /** Avg Hits */
+            avg_hits: number;
+            /** Avg Age S */
+            avg_age_s: number;
+            /** Samples */
+            samples: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CacheabilityRegressionInsightCard */
+        CacheabilityRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cacheability_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CacheabilityRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CacheabilityRegressionMeta */
+        CacheabilityRegressionMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** CachingMetrics */
         CachingMetrics: {
@@ -6029,9 +8046,85 @@ export interface components {
             query_id: number;
         };
         /**
+         * CeleryActiveTask
+         * @description One entry of Celery ``inspect().active()``; other inspect keys ride as extras.
+         */
+        CeleryActiveTask: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Args */
+            args: unknown[];
+            /** Time Start */
+            time_start: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CeleryScheduleEntry */
+        CeleryScheduleEntry: {
+            /** Name */
+            name: string;
+            /** Task */
+            task: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CeleryStatusResponse
+         * @description ``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
+         *     summed across services, so both keep open string keys.
+         */
+        CeleryStatusResponse: {
+            /** Broker Reachable */
+            broker_reachable?: boolean | null;
+            workers?: components["schemas"]["CeleryWorkers"] | null;
+            /** Queues */
+            queues?: {
+                [key: string]: number;
+            } | null;
+            /** Schedules */
+            schedules?: components["schemas"]["CeleryScheduleEntry"][] | null;
+            /** Ledger */
+            ledger?: {
+                [key: string]: number;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CeleryWorkers
+         * @description ``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
+         *     ``error`` is present only when the inspect call failed.
+         */
+        CeleryWorkers: {
+            /** Active Tasks */
+            active_tasks: {
+                [key: string]: components["schemas"]["CeleryActiveTask"][];
+            };
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+            /** Registered */
+            registered: {
+                [key: string]: string[];
+            };
+            /** Scheduled */
+            scheduled: {
+                [key: string]: unknown;
+            };
+            /** Count */
+            count: number;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * CheckFosRequest
          * @description Body for ``POST /api/provision/check-fos`` — FOS credentials to
-         *     validate by attempting a single list-objects call.
+         *     validate against the raw request/RUM prefixes and a representative object.
          */
         CheckFosRequest: {
             /** Bucket */
@@ -6042,6 +8135,138 @@ export interface components {
             access_key: string;
             /** Secret Key */
             secret_key: string;
+        };
+        /** CipherSpreadInsightCard */
+        CipherSpreadInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "cipher_spread";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CipherSpreadMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CipherSpreadMeta */
+        CipherSpreadMeta: {
+            /** Requests */
+            requests: number;
+            /** Baseline Total Ips */
+            baseline_total_ips: number;
+            /** Sha */
+            sha: string;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CityErrorSpikesInsightCard */
+        CityErrorSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_error_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CityErrorSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CityErrorSpikesMeta */
+        CityErrorSpikesMeta: {
+            /** Requests */
+            requests: number;
+            /** Errors */
+            errors: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CityLatencyRegressionsInsightCard */
+        CityLatencyRegressionsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_latency_regressions";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CityLatencyRegressionsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CityLatencyRegressionsMeta */
+        CityLatencyRegressionsMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CitySurgesInsightCard */
+        CitySurgesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "city_surges";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CitySurgesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CitySurgesMeta */
+        CitySurgesMeta: {
+            /** Spike Ratio */
+            spike_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** ClaimTokenResponse */
         ClaimTokenResponse: {
@@ -6064,6 +8289,173 @@ export interface components {
             /** Dropped */
             dropped: number;
         };
+        /** ClickHouseActiveGeneration */
+        ClickHouseActiveGeneration: {
+            /** Generation */
+            generation: string;
+            /** Dataset Id */
+            dataset_id: string;
+            /** Coverage Start */
+            coverage_start: string;
+            /** Coverage End */
+            coverage_end: string;
+            /** Expires At */
+            expires_at: string;
+            /** Expired */
+            expired: boolean;
+            /** Target Matches */
+            target_matches: boolean;
+            /** Coverage Age Seconds */
+            coverage_age_seconds: number;
+        };
+        /** ClickHouseReplayErrorResponse */
+        ClickHouseReplayErrorResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            detail: components["schemas"]["ErrorDetail"];
+        };
+        /** ClickHouseReplayRequest */
+        ClickHouseReplayRequest: {
+            /** Service Id */
+            service_id: string;
+            /** Dataset Id */
+            dataset_id?: string | null;
+            /** Generation */
+            generation?: string | null;
+            /**
+             * Dry Run
+             * @default true
+             */
+            dry_run: boolean;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+        };
+        /** ClickHouseReplayResponse */
+        ClickHouseReplayResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            operation: "rebuild" | "resume";
+            /** Dataset Id */
+            dataset_id: string;
+            /** Generation */
+            generation: string | null;
+            /** Limit */
+            limit: number;
+            /** Artifact Count */
+            artifact_count: number;
+            /** Planned Artifacts */
+            planned_artifacts: number;
+            /**
+             * Attempted
+             * @default 0
+             */
+            attempted: number;
+            /**
+             * Published
+             * @default 0
+             */
+            published: number;
+            /**
+             * Activated
+             * @default false
+             */
+            activated: boolean;
+        };
+        /** ClickHouseStatusResponse */
+        ClickHouseStatusResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Health
+             * @enum {string}
+             */
+            health: "ok" | "disabled" | "unavailable";
+            /** Schema Version */
+            schema_version?: number | null;
+            /** Publication Counts */
+            publication_counts?: {
+                [key: string]: number;
+            } | null;
+            /** Oldest Pending Age Seconds */
+            oldest_pending_age_seconds?: number | null;
+            /** Last Published At */
+            last_published_at?: string | null;
+            active_generation?: components["schemas"]["ClickHouseActiveGeneration"] | null;
+            /** Expired Dataset Count */
+            expired_dataset_count?: number | null;
+        };
         /** CmcdAggregatesResponse */
         CmcdAggregatesResponse: {
             /** Debug Queries */
@@ -6072,6 +8464,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6090,87 +8486,86 @@ export interface components {
              * @default true
              */
             has_data: boolean;
-            /** Overview */
-            overview?: {
-                [key: string]: unknown;
-            } | null;
+            overview?: components["schemas"]["CmcdOverview"] | null;
             /**
              * Buffer Health Ts
              * @default []
              */
-            buffer_health_ts: {
-                [key: string]: unknown;
-            }[];
+            buffer_health_ts: components["schemas"]["CmcdBufferHealthPoint"][];
             /**
              * Bitrate Ts
              * @default []
              */
-            bitrate_ts: {
-                [key: string]: unknown;
-            }[];
+            bitrate_ts: components["schemas"]["CmcdBitratePoint"][];
             /**
              * Throughput Ts
              * @default []
              */
-            throughput_ts: {
-                [key: string]: unknown;
-            }[];
+            throughput_ts: components["schemas"]["CmcdThroughputPoint"][];
             /**
              * Top Content
              * @default []
              */
-            top_content: {
-                [key: string]: unknown;
-            }[];
+            top_content: components["schemas"]["CmcdTopContentRow"][];
             /**
              * Rebuffer By Country
              * @default []
              */
-            rebuffer_by_country: {
-                [key: string]: unknown;
-            }[];
+            rebuffer_by_country: components["schemas"]["CmcdRebufferByCountryRow"][];
             /**
              * Rebuffer By Asn
              * @default []
              */
-            rebuffer_by_asn: {
-                [key: string]: unknown;
-            }[];
+            rebuffer_by_asn: components["schemas"]["CmcdRebufferByAsnRow"][];
             /**
              * Object Type Dist
              * @default []
              */
-            object_type_dist: {
-                [key: string]: unknown;
-            }[];
+            object_type_dist: components["schemas"]["CmcdObjectTypeRow"][];
             /**
              * Streaming Format Dist
              * @default []
              */
-            streaming_format_dist: {
-                [key: string]: unknown;
-            }[];
+            streaming_format_dist: components["schemas"]["CmcdStreamingFormatRow"][];
             /**
              * Sessions Ts
              * @default []
              */
-            sessions_ts: {
-                [key: string]: unknown;
-            }[];
+            sessions_ts: components["schemas"]["CmcdSessionsPoint"][];
             /**
              * Startup Ts
              * @default []
              */
-            startup_ts: {
-                [key: string]: unknown;
-            }[];
+            startup_ts: components["schemas"]["CmcdStartupPoint"][];
             /**
              * Session Duration Dist
              * @default []
              */
-            session_duration_dist: {
-                [key: string]: unknown;
-            }[];
+            session_duration_dist: components["schemas"]["CmcdSessionDurationRow"][];
+        };
+        /** CmcdBitratePoint */
+        CmcdBitratePoint: {
+            /** Bucket */
+            bucket: string;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Utilization Ratio */
+            utilization_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdBufferHealthPoint */
+        CmcdBufferHealthPoint: {
+            /** Bucket */
+            bucket: string;
+            /** P50 Buffer */
+            p50_buffer?: number | null;
+            /** P95 Buffer */
+            p95_buffer?: number | null;
+            /** Starvation Rate */
+            starvation_rate?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** CmcdDisableBody */
         CmcdDisableBody: {
@@ -6199,6 +8594,64 @@ export interface components {
              */
             version: number;
         };
+        /** CmcdObjectTypeRow */
+        CmcdObjectTypeRow: {
+            /** Object Type */
+            object_type?: string | null;
+            /** Request Count */
+            request_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdOverview */
+        CmcdOverview: {
+            /** Active Sessions */
+            active_sessions: number;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
+            /** Median Throughput */
+            median_throughput?: number | null;
+            /** Peak Viewers */
+            peak_viewers: number;
+            /** Avg Session Duration */
+            avg_session_duration?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdRebufferByAsnRow */
+        CmcdRebufferByAsnRow: {
+            /** Asn */
+            asn: number | string;
+            /** Label */
+            label: string;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Session Count */
+            session_count: number;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdRebufferByCountryRow */
+        CmcdRebufferByCountryRow: {
+            /** Country */
+            country?: string | null;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Session Count */
+            session_count: number;
+            /** Median Throughput */
+            median_throughput?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** CmcdRequest */
         CmcdRequest: {
             /** Start Time */
@@ -6212,6 +8665,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Seconds
              * @default 300
@@ -6224,10 +8681,28 @@ export interface components {
             top_n: number;
             /** Sections */
             sections?: ("overview" | "sessions_ts" | "buffer_health_ts" | "bitrate_ts" | "throughput_ts" | "top_content" | "rebuffer_by_country" | "rebuffer_by_asn" | "object_type_dist" | "streaming_format_dist" | "startup_ts" | "session_duration_dist")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
+        };
+        /** CmcdSessionDurationRow */
+        CmcdSessionDurationRow: {
+            /** Duration Bucket */
+            duration_bucket: string;
+            /** Session Count */
+            session_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdSessionsPoint */
+        CmcdSessionsPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Concurrent Sessions */
+            concurrent_sessions: number;
+            /** Rebuffer Session Pct */
+            rebuffer_session_pct?: number | null;
+            /** New Sessions */
+            new_sessions: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * CmcdSettingsResponse
@@ -6243,6 +8718,75 @@ export interface components {
             mode?: string | null;
             /** Version */
             version?: number | null;
+        };
+        /** CmcdStartupPoint */
+        CmcdStartupPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Startup Ratio */
+            startup_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * CmcdStatusResponse
+         * @description ``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off.
+         */
+        CmcdStatusResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /** Mode */
+            mode?: string | null;
+            /** Version */
+            version?: number | null;
+            /** Enabled At */
+            enabled_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdStreamingFormatRow */
+        CmcdStreamingFormatRow: {
+            /** Streaming Format */
+            streaming_format?: string | null;
+            /** Session Count */
+            session_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdThroughputPoint */
+        CmcdThroughputPoint: {
+            /** Bucket */
+            bucket: string;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdTopContentRow */
+        CmcdTopContentRow: {
+            /** Content Id */
+            content_id?: string | null;
+            /** Session Count */
+            session_count: number;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Avg Buffer Length */
+            avg_buffer_length?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ColumnMeta */
+        ColumnMeta: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
         };
         /**
          * CompactionStatsResponse
@@ -6335,6 +8879,153 @@ export interface components {
             /** Bytes */
             bytes: number;
         };
+        /** ConnectionAbuseInsightCard */
+        ConnectionAbuseInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "connection_abuse";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ConnectionAbuseMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ConnectionAbuseMeta */
+        ConnectionAbuseMeta: {
+            /** Max Conn Reqs */
+            max_conn_reqs: number;
+            /** Avg Conn Reqs */
+            avg_conn_reqs: number;
+            /** Requests */
+            requests: number;
+            /** P95 Baseline */
+            p95_baseline: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** ConnectionTypeMixInsightCard */
+        ConnectionTypeMixInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "connection_type_mix";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ConnectionTypeMixMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ConnectionTypeMixMeta */
+        ConnectionTypeMixMeta: {
+            /** Requests */
+            requests: number;
+            /** C Type */
+            c_type: string | null;
+            /** C Speed */
+            c_speed: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ConsolidateRollupsResponse
+         * @description Result from POST /admin/consolidate-rollups.
+         */
+        ConsolidateRollupsResponse: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Files Before */
+            files_before?: number | null;
+            /** Files After */
+            files_after?: number | null;
+            /** Files Deleted */
+            files_deleted?: number | null;
+            /** Hours Ip Bundled */
+            hours_ip_bundled?: number | null;
+            /** Days Compacted */
+            days_compacted?: number | null;
+            /** Days Bundled */
+            days_bundled?: number | null;
+            /** Cleaned Entries */
+            cleaned_entries?: number | null;
+            /** Duration S */
+            duration_s?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ContentDiscoveryInsightCard */
+        ContentDiscoveryInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "content_discovery";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ContentDiscoveryMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ContentDiscoveryMeta */
+        ContentDiscoveryMeta: {
+            /** Requests */
+            requests: number;
+            /** Not Found */
+            not_found: number;
+            /** Not Found Rate Pct */
+            not_found_rate_pct: number;
+            /** Distinct 404 Urls */
+            distinct_404_urls: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ControlRoomTabResponse
+         * @description Canned per-tab payload (``TAB_STUBS``); the metric keys differ per tab.
+         */
+        ControlRoomTabResponse: {
+            /** Tab */
+            tab: string;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** CorrelateRequest */
         CorrelateRequest: {
             /** Dimension */
@@ -6349,6 +9040,104 @@ export interface components {
              * @default 10
              */
             limit: number;
+        };
+        /** CorrelateResponse */
+        CorrelateResponse: {
+            /** Dimension */
+            dimension: string;
+            /** Top */
+            top: components["schemas"]["CorrelatorTopRow"][];
+            freshness: components["schemas"]["CorrelatorFreshness"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** CorrelatorFreshness */
+        CorrelatorFreshness: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Lag Seconds */
+            lag_seconds: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CorrelatorTopRow */
+        CorrelatorTopRow: {
+            /** Value */
+            value: string | number | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CrawlerDisparityInsightCard */
+        CrawlerDisparityInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "crawler_disparity";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CrawlerDisparityMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CrawlerDisparityMeta */
+        CrawlerDisparityMeta: {
+            /** Crawls */
+            crawls: number;
+            /** Referrals */
+            referrals: number;
+            /** Crawls Per Referral */
+            crawls_per_referral: number;
+            /** Baseline Crawls Per Referral */
+            baseline_crawls_per_referral: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CredentialEnumerationInsightCard */
+        CredentialEnumerationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "credential_enumeration";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_CredentialEnumerationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** CredentialEnumerationMeta */
+        CredentialEnumerationMeta: {
+            /** Attempts */
+            attempts: number;
+            /** Denied */
+            denied: number;
+            /** Fail Rate Pct */
+            fail_rate_pct: number;
+            /** Distinct Paths */
+            distinct_paths: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * CredentialsUpdateResponse
@@ -6378,15 +9167,15 @@ export interface components {
          */
         CronRunEntry: {
             /** Id */
-            id?: number | null;
+            id: number;
             /** Task */
-            task?: string | null;
+            task: string;
             /** Started At */
-            started_at?: string | null;
+            started_at: string;
             /** Duration S */
             duration_s?: number | null;
             /** Status */
-            status?: string | null;
+            status: string | null;
             /** Error Message */
             error_message?: string | null;
             /** Files Downloaded */
@@ -6435,9 +9224,9 @@ export interface components {
          */
         CronScheduleEntry: {
             /** Task */
-            task?: string | null;
+            task: string;
             /** Next Run Time */
-            next_run_time?: string | null;
+            next_run_time: string | null;
             /** Last Run Time */
             last_run_time?: string | null;
             /** Last Run Status */
@@ -6474,6 +9263,8 @@ export interface components {
         CronSettingsPartial: {
             /** Enabled */
             enabled?: boolean | null;
+            /** Polling Mode */
+            polling_mode?: ("regular" | "adaptive") | null;
             /** Interval Mins */
             interval_mins?: number | null;
             /** Interval Seconds */
@@ -6490,12 +9281,16 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
             expire_interval_mins?: number | null;
             /** Delete After */
             delete_after?: boolean | null;
+            /** High Scale Shared Source */
+            high_scale_shared_source?: boolean | null;
         };
         /** CurrentStorageResponse */
         CurrentStorageResponse: {
@@ -6505,6 +9300,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6696,6 +9495,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6745,6 +9548,20 @@ export interface components {
             filterable?: boolean | null;
         };
         /**
+         * CustomFieldsExportFile
+         * @description Body of the ``GET /api/services/{id}/custom-fields/export`` file download:
+         *     the exact shape ``/custom-fields/import`` accepts, so an export round-trips.
+         */
+        CustomFieldsExportFile: {
+            /**
+             * Custom Fields
+             * @default []
+             */
+            custom_fields: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
          * CustomFieldsImportBody
          * @description Body for ``POST /api/services/{id}/custom-fields/import``.
          *
@@ -6780,6 +9597,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6822,6 +9643,10 @@ export interface components {
              * @default false
              */
             is_cached: boolean;
+            /** Engine */
+            engine?: string | null;
+            /** Params */
+            params?: unknown[] | null;
         };
         /** DebugSettingsResponse */
         DebugSettingsResponse: {
@@ -6838,6 +9663,75 @@ export interface components {
             query_debug_visibility?: string | null;
             /** Api Call Debug Visibility */
             api_call_debug_visibility?: string | null;
+        };
+        /**
+         * DebugStateResponse
+         * @description ``GET /api/debug/state``.
+         */
+        DebugStateResponse: {
+            /** Debug Responses Enabled */
+            debug_responses_enabled: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DuckdbRecycleResponse
+         * @description ``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest.
+         */
+        DuckdbRecycleResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Status */
+            status: string;
+            /** Reason */
+            reason?: string | null;
+            /** Rss Mb */
+            rss_mb?: number | null;
+            /** Threshold Mb */
+            threshold_mb?: number | null;
+            /** Detail */
+            detail?: string | null;
+            /** Rss Before Mb */
+            rss_before_mb?: number | null;
+            /** Rss After Mb */
+            rss_after_mb?: number | null;
+            /** Freed Mb */
+            freed_mb?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** DuckdbStatusResponse */
+        DuckdbStatusResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Memory */
+            memory?: {
+                [key: string]: unknown;
+            } | null;
+            /** Barrier */
+            barrier?: {
+                [key: string]: unknown;
+            } | null;
+            /** Pools */
+            pools?: unknown;
+            /** Retired Pools */
+            retired_pools?: unknown;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DucklakeMigrateResponse
+         * @description ``POST /admin/ducklake/migrate`` (202).
+         */
+        DucklakeMigrateResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Message */
+            message: string;
+            /** Service Id */
+            service_id: string;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ErrorDetail
@@ -6866,6 +9760,61 @@ export interface components {
          */
         ErrorEnvelope: {
             detail: components["schemas"]["ErrorDetail"];
+        };
+        /** ErrorSpikesInsightCard */
+        ErrorSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "error_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ErrorSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ErrorSpikesMeta */
+        ErrorSpikesMeta: {
+            /** Requests */
+            requests: number;
+            /** Errors */
+            errors: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ExpireSnapshotsResponse
+         * @description Outcome and counters from ``POST /admin/expire-snapshots/{service_id}``.
+         */
+        ExpireSnapshotsResponse: {
+            /** Status */
+            status?: string | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Retention Deleted Rows */
+            retention_deleted_rows?: number | null;
+            /** Snapshots Expired */
+            snapshots_expired?: number | null;
+            /** Files Unlinked */
+            files_unlinked?: number | null;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** FieldAggregate */
         FieldAggregate: {
@@ -6919,6 +9868,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6954,23 +9907,6 @@ export interface components {
             values: unknown[];
         };
         /**
-         * FilteredRequest
-         * @description Base for POST bodies that carry both a date range and column filters.
-         */
-        FilteredRequest: {
-            /** Start Time */
-            start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /**
-             * Filters
-             * @default {}
-             */
-            filters: {
-                [key: string]: components["schemas"]["FilterSpec"];
-            };
-        };
-        /**
          * GdprErasePayload
          * @description Body for ``POST /api/share-admin/gdpr/erase`` — GDPR right-to-be-
          *     forgotten request for an analyst email.
@@ -6996,6 +9932,15 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HealthCeleryStats */
+        HealthCeleryStats: {
+            /** Queue Depth */
+            queue_depth: number;
+            /** Active Workers */
+            active_workers: number;
+            /** Broker Reachable */
+            broker_reachable: boolean;
         };
         /**
          * HealthConfigBackup
@@ -7056,6 +10001,55 @@ export interface components {
             /** Error */
             error?: string | null;
         };
+        /**
+         * HealthHighScale
+         * @description High-scale-only health block; absent from the payload in standard mode.
+         */
+        HealthHighScale: {
+            disk?: components["schemas"]["HealthHighScaleDisk"] | null;
+            topology?: components["schemas"]["HealthHighScaleTopology"] | null;
+        };
+        /**
+         * HealthHighScaleDisk
+         * @description Latest serving-volume disk-guard evaluation (high-scale topology only).
+         */
+        HealthHighScaleDisk: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "normal" | "warning" | "protective" | "emergency";
+            /** Free Fraction */
+            free_fraction: number;
+            /** Reserve Bytes */
+            reserve_bytes: number;
+            /** Total Bytes */
+            total_bytes: number;
+            /** Free Bytes */
+            free_bytes: number;
+            /** Reasoning */
+            reasoning: string;
+            /** Sample Age S */
+            sample_age_s: number;
+        };
+        /**
+         * HealthHighScaleTopology
+         * @description Configured portable topology profile (what production HA claims rest on).
+         */
+        HealthHighScaleTopology: {
+            /** Name */
+            name: string;
+            /** Clickhouse Replicas Per Shard */
+            clickhouse_replicas_per_shard: number;
+            /** Keeper Members */
+            keeper_members: number;
+            /** Persistent Serving Storage */
+            persistent_serving_storage: boolean;
+            /** Production Ha */
+            production_ha: boolean;
+            /** Shard Count */
+            shard_count: number;
+        };
         /** HealthInFlightRun */
         HealthInFlightRun: {
             /** Run Id */
@@ -7101,6 +10095,39 @@ export interface components {
             otel_exporter: string;
         };
         /**
+         * HealthResponse
+         * @description ``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers.
+         */
+        HealthResponse: {
+            /** Status */
+            status: string;
+            /** Version */
+            version: string;
+            /** Services */
+            services?: components["schemas"]["HealthServiceState"][] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** HealthServiceState */
+        HealthServiceState: {
+            /** Service Id */
+            service_id: string;
+            /** Status */
+            status: string;
+            /** Last Ingest */
+            last_ingest?: unknown;
+            /** Last Sync Status */
+            last_sync_status?: string | null;
+            /** Last Sync At */
+            last_sync_at?: unknown;
+            /** Reason */
+            reason?: string | null;
+            /** Stale Minutes Used */
+            stale_minutes_used?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * HealthSnapshotResponse
          * @description One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
          *
@@ -7132,12 +10159,558 @@ export interface components {
             scheduler_last_tick_age_s?: number | null;
             /** Recent Cron Failures */
             recent_cron_failures?: components["schemas"]["HealthCronFailure"][];
+            /**
+             * Config Lock Degraded
+             * @default false
+             */
+            config_lock_degraded: boolean;
             observability?: components["schemas"]["HealthObservability"] | null;
             config_backup?: components["schemas"]["HealthConfigBackup"] | null;
             /** Fos */
             fos?: {
                 [key: string]: components["schemas"]["HealthFosProbe"];
             } | null;
+            celery?: components["schemas"]["HealthCeleryStats"] | null;
+            high_scale?: components["schemas"]["HealthHighScale"] | null;
+        };
+        /** HighScale5xxInsightCard */
+        HighScale5xxInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "high_scale_5xx";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_HighScale5xxMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** HighScale5xxMeta */
+        HighScale5xxMeta: {
+            [key: string]: unknown;
+        };
+        /** HighScaleAggregateRequest */
+        HighScaleAggregateRequest: {
+            /**
+             * Domain
+             * @default request
+             * @enum {string}
+             */
+            domain: "request" | "rum_vitals" | "rum_errors" | "cmcd";
+            /** Dimension */
+            dimension?: string | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+        };
+        /** HighScaleAggregateResponse */
+        HighScaleAggregateResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Domain */
+            domain: string;
+            /** Dimension */
+            dimension: string;
+            /** Request Count */
+            request_count: number;
+            /** Top Values */
+            top_values: components["schemas"]["HighScaleAggregateValue"][];
+            /** Coverage */
+            coverage: number;
+            /** Freshness Lag Seconds */
+            freshness_lag_seconds: number;
+            /** Exact */
+            exact: boolean;
+            /** Approximation Error */
+            approximation_error: number | null;
+        };
+        /** HighScaleAggregateValue */
+        HighScaleAggregateValue: {
+            /** Value */
+            value: string;
+            /** Count */
+            count: number;
+        };
+        /** HighScaleExportCancelResponse */
+        HighScaleExportCancelResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Export Id */
+            export_id: string;
+            /** Service Id */
+            service_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "running" | "completed" | "cancelled" | "failed" | "expired";
+            /** Rows Written */
+            rows_written: number;
+            /** Bytes Written */
+            bytes_written: number;
+            /** Error */
+            error: string | null;
+            /** Cancelled */
+            cancelled: boolean;
+        };
+        /** HighScaleExportRequest */
+        HighScaleExportRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Limit
+             * @default 500
+             */
+            limit: number;
+            /** Cursor */
+            cursor?: string | null;
+            /** Status */
+            status?: string | number | null;
+            /**
+             * Domain
+             * @default request
+             * @enum {string}
+             */
+            domain: "request" | "rum_vitals" | "rum_errors" | "cmcd";
+            /** Pop */
+            pop?: string | null;
+            /** Country */
+            country?: string | null;
+            /** Batch Id */
+            batch_id?: string | null;
+            /**
+             * Emulate Standard
+             * @default false
+             */
+            emulate_standard: boolean;
+        };
+        /** HighScaleExportResponse */
+        HighScaleExportResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Export Id */
+            export_id: string;
+            /** Service Id */
+            service_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "running" | "completed" | "cancelled" | "failed" | "expired";
+            /** Rows Written */
+            rows_written: number;
+            /** Bytes Written */
+            bytes_written: number;
+            /** Error */
+            error: string | null;
+        };
+        /** HighScaleHistoricalJobCancelResponse */
+        HighScaleHistoricalJobCancelResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Job Id */
+            job_id: string;
+            /** Cancelled */
+            cancelled: boolean;
+        };
+        /** HighScaleHistoricalJobResponse */
+        HighScaleHistoricalJobResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Job Id */
+            job_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "running" | "completed" | "cancelled" | "failed" | "expired";
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            /** Row Count */
+            row_count: number;
+            /** Output Bytes */
+            output_bytes: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Error */
+            error: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Terminal At */
+            terminal_at: string | null;
+        };
+        /** HighScaleQueryPlanResponse */
+        HighScaleQueryPlanResponse: {
+            /** Tier */
+            tier: string;
+            /** Sources */
+            sources: string[];
+            /** Queued */
+            queued: boolean;
+            /** Bounded */
+            bounded: boolean;
+            /** Max Rows */
+            max_rows: number;
+            /** Reason */
+            reason: string;
+        };
+        /** HighScaleQueryRequest */
+        HighScaleQueryRequest: {
+            /**
+             * Domain
+             * @default request
+             * @enum {string}
+             */
+            domain: "request" | "rum_vitals" | "rum_errors" | "cmcd";
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Limit
+             * @default 500
+             */
+            limit: number;
+            /** Cursor */
+            cursor?: string | null;
+        };
+        /** HighScaleQueryResponse */
+        HighScaleQueryResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Domain */
+            domain: string;
+            plan: components["schemas"]["HighScaleQueryPlanResponse"];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Next Cursor */
+            next_cursor: string | null;
+            metadata: components["schemas"]["QueryResponseMetadataResponse"] | null;
+            /** Job Id */
+            job_id: string | null;
+        };
+        /** HighScaleRequestFactRequest */
+        HighScaleRequestFactRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Limit
+             * @default 500
+             */
+            limit: number;
+            /** Cursor */
+            cursor?: string | null;
+            /** Status */
+            status?: string | number | null;
+            /** Domain */
+            domain?: string | null;
+            /** Pop */
+            pop?: string | null;
+            /** Country */
+            country?: string | null;
+            /** Batch Id */
+            batch_id?: string | null;
+            /**
+             * Emulate Standard
+             * @default false
+             */
+            emulate_standard: boolean;
+        };
+        /** HighScaleRequestFactResponse */
+        HighScaleRequestFactResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            metadata: components["schemas"]["QueryResponseMetadataResponse"];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /**
+         * HighScaleRetentionRecommendationResponse
+         * @description Advisory hot/warm retention for one service (never applied automatically).
+         *
+         *     ``effective_retention_days`` is the explicit per-service
+         *     ``provisioning.cron_sync.data_retention_days`` whenever one is set
+         *     (``source="override"``; ``null`` when it is ``0``, meaning keep forever),
+         *     otherwise the recommended warm window (``source="recommendation"``).
+         */
+        HighScaleRetentionRecommendationResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Recommended Hot Days */
+            recommended_hot_days: number;
+            /** Recommended Warm Days */
+            recommended_warm_days: number;
+            /** Reasoning */
+            reasoning: string;
+            /** Volume Total Bytes */
+            volume_total_bytes: number;
+            /**
+             * Volume Total Source
+             * @enum {string}
+             */
+            volume_total_source: "request" | "sampled";
+            /** Explicit Retention Days */
+            explicit_retention_days?: number | null;
+            /** Effective Retention Days */
+            effective_retention_days?: number | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "override" | "recommendation";
+        };
+        /** HighScaleRumFactResponse */
+        HighScaleRumFactResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            metadata: components["schemas"]["QueryResponseMetadataResponse"];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** Http3FallbackInsightCard */
+        Http3FallbackInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "http3_fallback";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_Http3FallbackMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** Http3FallbackMeta */
+        Http3FallbackMeta: {
+            /** Window Quic */
+            window_quic: number;
+            /** Window Total */
+            window_total: number;
+            /** Share Drop Pts */
+            share_drop_pts: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** IOFormatBreakdown */
         IOFormatBreakdown: {
@@ -7147,6 +10720,19 @@ export interface components {
             count: number;
             /** Pct */
             pct: number;
+        };
+        /** IOFormatConversionPair */
+        IOFormatConversionPair: {
+            /** Input Format */
+            input_format?: string | null;
+            /** Output Format */
+            output_format?: string | null;
+            /** Count */
+            count: number;
+            /** Avg Ratio */
+            avg_ratio?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** IOMetrics */
         IOMetrics: {
@@ -7183,9 +10769,7 @@ export interface components {
              * Optimization Opportunities
              * @default []
              */
-            optimization_opportunities: {
-                [key: string]: unknown;
-            }[];
+            optimization_opportunities: components["schemas"]["IOOpportunityRow"][];
             /** Io Actual Bandwidth Saved Bytes */
             io_actual_bandwidth_saved_bytes?: number | null;
             /** Io Actual Compression Ratio */
@@ -7194,9 +10778,7 @@ export interface components {
              * Io Format Conversion Pairs
              * @default []
              */
-            io_format_conversion_pairs: {
-                [key: string]: unknown;
-            }[];
+            io_format_conversion_pairs: components["schemas"]["IOFormatConversionPair"][];
             /**
              * Io Compression Time Series
              * @default []
@@ -7208,6 +10790,35 @@ export interface components {
             image_bandwidth_bytes?: number | null;
             /** Estimated Savings Bytes */
             estimated_savings_bytes?: number | null;
+        };
+        /** IOOpportunityRow */
+        IOOpportunityRow: {
+            /** Url */
+            url?: string | null;
+            /** Request Count */
+            request_count: number;
+            /** Total Bytes */
+            total_bytes: number;
+            /** Avg Kb */
+            avg_kb?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** IcebergCalendarDay */
+        IcebergCalendarDay: {
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * IcebergCalendarResponse
+         * @description ``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys.
+         */
+        IcebergCalendarResponse: {
+            [key: string]: components["schemas"]["IcebergCalendarDay"] | unknown[];
         };
         /** IcebergTableInfoResponse */
         IcebergTableInfoResponse: {
@@ -7243,6 +10854,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7252,6 +10867,92 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
+        };
+        /** ImageOptimizationOpportunitiesInsightCard */
+        ImageOptimizationOpportunitiesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "image_optimization_opportunities";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ImageOptimizationOpportunitiesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ImageOptimizationOpportunitiesMeta */
+        ImageOptimizationOpportunitiesMeta: {
+            /** Requests */
+            requests: number;
+            /** Total Mb */
+            total_mb: number;
+            /** Mobile Ratio */
+            mobile_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** ImpossibleDistanceInsightCard */
+        ImpossibleDistanceInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "impossible_distance";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ImpossibleDistanceMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ImpossibleDistanceMeta */
+        ImpossibleDistanceMeta: {
+            /** Hits */
+            hits: number;
+            /** Excess Km */
+            excess_km: number;
+            /** Pop */
+            pop: string | null;
+            /** Sample Ip */
+            sample_ip: string | null;
+            /** Client Lat */
+            client_lat: number | null;
+            /** Client Lon */
+            client_lon: number | null;
+            /** Pop Lat */
+            pop_lat: number;
+            /** Pop Lon */
+            pop_lon: number;
+            /** Tcp Rtt */
+            tcp_rtt: number | null;
+            /** Country */
+            country: string | null;
+            /** City */
+            city: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * IngestCatchupStatus
@@ -7292,6 +10993,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7327,25 +11032,8 @@ export interface components {
             /** Available */
             available: boolean;
         };
-        /** InsightCard */
-        InsightCard: {
-            /** Id */
-            id: string;
-            /** Title */
-            title: string;
-            /** Description */
-            description: string;
-            /** Severity */
-            severity: string;
-            /** Summary */
-            summary: string;
-            /** Items */
-            items: components["schemas"]["InsightItem"][];
-            /** Category */
-            category?: string | null;
-        };
-        /** InsightItem */
-        InsightItem: {
+        /** InsightItem[AsnConcentrationMeta] */
+        InsightItem_AsnConcentrationMeta_: {
             /** Label */
             label: string;
             /** Current Val */
@@ -7364,13 +11052,1333 @@ export interface components {
              * @default clean
              */
             severity: string;
+            meta: components["schemas"]["AsnConcentrationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[AsnHostingShiftMeta] */
+        InsightItem_AsnHostingShiftMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
             /**
-             * Meta
-             * @default {}
+             * Baseline Label
+             * @default baseline
              */
-            meta: {
-                [key: string]: unknown;
-            };
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["AsnHostingShiftMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[AsnMetroPerformanceMeta] */
+        InsightItem_AsnMetroPerformanceMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["AsnMetroPerformanceMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[BotnetGroupingMeta] */
+        InsightItem_BotnetGroupingMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["BotnetGroupingMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheCollapseMeta] */
+        InsightItem_CacheCollapseMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheCollapseMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheHitCliffMeta] */
+        InsightItem_CacheHitCliffMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheHitCliffMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheTtlMismatchMeta] */
+        InsightItem_CacheTtlMismatchMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheTtlMismatchMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CacheabilityRegressionMeta] */
+        InsightItem_CacheabilityRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CacheabilityRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CipherSpreadMeta] */
+        InsightItem_CipherSpreadMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CipherSpreadMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CityErrorSpikesMeta] */
+        InsightItem_CityErrorSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CityErrorSpikesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CityLatencyRegressionsMeta] */
+        InsightItem_CityLatencyRegressionsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CityLatencyRegressionsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CitySurgesMeta] */
+        InsightItem_CitySurgesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CitySurgesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ConnectionAbuseMeta] */
+        InsightItem_ConnectionAbuseMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ConnectionAbuseMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ConnectionTypeMixMeta] */
+        InsightItem_ConnectionTypeMixMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ConnectionTypeMixMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ContentDiscoveryMeta] */
+        InsightItem_ContentDiscoveryMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ContentDiscoveryMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CrawlerDisparityMeta] */
+        InsightItem_CrawlerDisparityMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CrawlerDisparityMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[CredentialEnumerationMeta] */
+        InsightItem_CredentialEnumerationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["CredentialEnumerationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ErrorSpikesMeta] */
+        InsightItem_ErrorSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ErrorSpikesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[HighScale5xxMeta] */
+        InsightItem_HighScale5xxMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["HighScale5xxMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[Http3FallbackMeta] */
+        InsightItem_Http3FallbackMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["Http3FallbackMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ImageOptimizationOpportunitiesMeta] */
+        InsightItem_ImageOptimizationOpportunitiesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ImageOptimizationOpportunitiesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ImpossibleDistanceMeta] */
+        InsightItem_ImpossibleDistanceMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ImpossibleDistanceMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[LatencyRegressionMeta] */
+        InsightItem_LatencyRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["LatencyRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[LowAndSlowMeta] */
+        InsightItem_LowAndSlowMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["LowAndSlowMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[MethodDriftMeta] */
+        InsightItem_MethodDriftMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["MethodDriftMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[MetroDeliveryDegradationMeta] */
+        InsightItem_MetroDeliveryDegradationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["MetroDeliveryDegradationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NetworkAsnHealthMeta] */
+        InsightItem_NetworkAsnHealthMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NetworkAsnHealthMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewAsnTrafficMeta] */
+        InsightItem_NewAsnTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewAsnTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewCityTrafficMeta] */
+        InsightItem_NewCityTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewCityTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewCountryTrafficMeta] */
+        InsightItem_NewCountryTrafficMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewCountryTrafficMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[NewProbeUrlsMeta] */
+        InsightItem_NewProbeUrlsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["NewProbeUrlsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginErrorRateMeta] */
+        InsightItem_OriginErrorRateMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginErrorRateMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginIpFailureMeta] */
+        InsightItem_OriginIpFailureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginIpFailureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginLatencySpikeMeta] */
+        InsightItem_OriginLatencySpikeMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginLatencySpikeMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OriginRetriesMeta] */
+        InsightItem_OriginRetriesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OriginRetriesMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[OrphanedDeepCrawlMeta] */
+        InsightItem_OrphanedDeepCrawlMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["OrphanedDeepCrawlMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[PayloadCompressionRegressionMeta] */
+        InsightItem_PayloadCompressionRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["PayloadCompressionRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[PopLatencyRegressionMeta] */
+        InsightItem_PopLatencyRegressionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["PopLatencyRegressionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ProxySurgeMeta] */
+        InsightItem_ProxySurgeMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ProxySurgeMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RefererMonocultureMeta] */
+        InsightItem_RefererMonocultureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RefererMonocultureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RegionLatencyMeta] */
+        InsightItem_RegionLatencyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RegionLatencyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RepeatedPatternsFpMeta] */
+        InsightItem_RepeatedPatternsFpMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RepeatedPatternsFpMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RepeatedPatternsMeta] */
+        InsightItem_RepeatedPatternsMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RepeatedPatternsMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[RequestSizeAnomalyMeta] */
+        InsightItem_RequestSizeAnomalyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["RequestSizeAnomalyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ResidentialFingerprintDispersionMeta] */
+        InsightItem_ResidentialFingerprintDispersionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ResidentialFingerprintDispersionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[SessionHarvestingMeta] */
+        InsightItem_SessionHarvestingMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["SessionHarvestingMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[ShieldPathDegradationMeta] */
+        InsightItem_ShieldPathDegradationMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["ShieldPathDegradationMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[StaleBrowserVersionMeta] */
+        InsightItem_StaleBrowserVersionMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["StaleBrowserVersionMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[TailLatencyMeta] */
+        InsightItem_TailLatencyMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["TailLatencyMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[TimeoutSplitMeta] */
+        InsightItem_TimeoutSplitMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["TimeoutSplitMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[UaMonocultureMeta] */
+        InsightItem_UaMonocultureMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["UaMonocultureMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
+        /** InsightItem[WafSignalSpikesMeta] */
+        InsightItem_WafSignalSpikesMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["WafSignalSpikesMeta"];
             /** Investigate Url */
             investigate_url?: string | null;
             /** Tooltip */
@@ -7385,7 +12393,10 @@ export interface components {
             /** Unavailable */
             unavailable?: components["schemas"]["InsightAvailability"][] | null;
         };
-        /** InsightsRequest */
+        /**
+         * InsightsRequest
+         * @description Request payload for /api/insights.
+         */
         InsightsRequest: {
             /** Start Time */
             start_time?: string | null;
@@ -7400,7 +12411,7 @@ export interface components {
             };
             /**
              * Window Size Hrs
-             * @default 1
+             * @default 24
              */
             window_size_hrs: number;
             /**
@@ -7408,6 +12419,11 @@ export interface components {
              * @default 168
              */
             baseline_hours: number;
+            /**
+             * Force Refresh
+             * @default false
+             */
+            force_refresh: boolean;
         };
         /** InsightsResponse */
         InsightsResponse: {
@@ -7417,6 +12433,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7429,7 +12449,7 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Insights */
-            insights: components["schemas"]["InsightCard"][];
+            insights: (components["schemas"]["ErrorSpikesInsightCard"] | components["schemas"]["BotnetGroupingInsightCard"] | components["schemas"]["NewCountryTrafficInsightCard"] | components["schemas"]["CitySurgesInsightCard"] | components["schemas"]["CityErrorSpikesInsightCard"] | components["schemas"]["CityLatencyRegressionsInsightCard"] | components["schemas"]["NewCityTrafficInsightCard"] | components["schemas"]["UaMonocultureInsightCard"] | components["schemas"]["NewProbeUrlsInsightCard"] | components["schemas"]["WafSignalSpikesInsightCard"] | components["schemas"]["ProxySurgeInsightCard"] | components["schemas"]["AsnConcentrationInsightCard"] | components["schemas"]["AsnMetroPerformanceInsightCard"] | components["schemas"]["CacheCollapseInsightCard"] | components["schemas"]["CacheabilityRegressionInsightCard"] | components["schemas"]["LatencyRegressionInsightCard"] | components["schemas"]["ImpossibleDistanceInsightCard"] | components["schemas"]["TailLatencyInsightCard"] | components["schemas"]["CipherSpreadInsightCard"] | components["schemas"]["RequestSizeAnomalyInsightCard"] | components["schemas"]["ConnectionAbuseInsightCard"] | components["schemas"]["RegionLatencyInsightCard"] | components["schemas"]["CacheTtlMismatchInsightCard"] | components["schemas"]["ImageOptimizationOpportunitiesInsightCard"] | components["schemas"]["OriginLatencySpikeInsightCard"] | components["schemas"]["OriginErrorRateInsightCard"] | components["schemas"]["OriginRetriesInsightCard"] | components["schemas"]["OriginIpFailureInsightCard"] | components["schemas"]["ShieldPathDegradationInsightCard"] | components["schemas"]["RepeatedPatternsInsightCard"] | components["schemas"]["RepeatedPatternsFpInsightCard"] | components["schemas"]["LowAndSlowInsightCard"] | components["schemas"]["CredentialEnumerationInsightCard"] | components["schemas"]["NetworkAsnHealthInsightCard"] | components["schemas"]["ContentDiscoveryInsightCard"] | components["schemas"]["RefererMonocultureInsightCard"] | components["schemas"]["MethodDriftInsightCard"] | components["schemas"]["NewAsnTrafficInsightCard"] | components["schemas"]["AsnHostingShiftInsightCard"] | components["schemas"]["MetroDeliveryDegradationInsightCard"] | components["schemas"]["ConnectionTypeMixInsightCard"] | components["schemas"]["PopLatencyRegressionInsightCard"] | components["schemas"]["Http3FallbackInsightCard"] | components["schemas"]["CacheHitCliffInsightCard"] | components["schemas"]["PayloadCompressionRegressionInsightCard"] | components["schemas"]["SessionHarvestingInsightCard"] | components["schemas"]["TimeoutSplitInsightCard"] | components["schemas"]["CrawlerDisparityInsightCard"] | components["schemas"]["StaleBrowserVersionInsightCard"] | components["schemas"]["OrphanedDeepCrawlInsightCard"] | components["schemas"]["ResidentialFingerprintDispersionInsightCard"] | components["schemas"]["HighScale5xxInsightCard"])[];
             /** Window Start */
             window_start: string;
             /** Window End */
@@ -7541,7 +12561,7 @@ export interface components {
             /** Created At */
             created_at?: string | null;
             /** Revoked */
-            revoked?: number | null;
+            revoked?: (0 | 1) | null;
             /** Tos Accepted At */
             tos_accepted_at?: string | null;
             /** Tos Version */
@@ -7549,7 +12569,7 @@ export interface components {
             /** Allow Concurrent Sessions */
             allow_concurrent_sessions?: boolean | null;
             /** Auth Method */
-            auth_method?: string | null;
+            auth_method?: ("passcode" | "oauth") | null;
             /** Oauth Provider */
             oauth_provider?: string | null;
             /** Oauth Subject */
@@ -7558,6 +12578,22 @@ export interface components {
             last_login_at?: string | null;
             /** Service Ids */
             service_ids?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * Ipv6AdoptionRow
+         * @description Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``.
+         */
+        Ipv6AdoptionRow: {
+            /** Time */
+            time?: string | null;
+            /** Pct */
+            pct?: number | null;
+            /** Version */
+            version?: string | null;
+            /** Count */
+            count?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -7598,6 +12634,39 @@ export interface components {
             total_bytes: number;
             /** Status */
             status: number;
+        };
+        /** LatencyRegressionInsightCard */
+        LatencyRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "latency_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_LatencyRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** LatencyRegressionMeta */
+        LatencyRegressionMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * LocalCompactNowResponse
@@ -7656,6 +12725,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7721,6 +12794,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7735,6 +12812,141 @@ export interface components {
              * @default true
              */
             configured: boolean;
+        };
+        /** LogFieldAuditFeature */
+        LogFieldAuditFeature: {
+            /** Name */
+            name: string;
+            /** Required Fields */
+            required_fields: string[];
+            /** Status */
+            status: string;
+            /** Missing Fields */
+            missing_fields: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldAuditResponse */
+        LogFieldAuditResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Enabled Fields */
+            enabled_fields: string[];
+            /** Features */
+            features: components["schemas"]["LogFieldAuditFeature"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldCatalogEntry */
+        LogFieldCatalogEntry: {
+            /** Id */
+            id: string;
+            /** Group */
+            group: string | null;
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Duckdb Type */
+            duckdb_type: string;
+            /** Typical Bytes */
+            typical_bytes?: number | null;
+            /** Required By */
+            required_by?: string[] | null;
+            /** Formatter */
+            formatter?: string | null;
+            /** Unit */
+            unit?: string | null;
+            /** Precision */
+            precision?: number | null;
+            /** Individually Toggleable */
+            individually_toggleable?: boolean | null;
+            /** Default Off */
+            default_off?: boolean | null;
+            /** Note */
+            note?: string | null;
+            /** Limit */
+            limit?: number | null;
+            /** Has Limit */
+            has_limit?: boolean | null;
+            /** Show In Dashboard */
+            show_in_dashboard?: boolean | null;
+            /** Show In Logs */
+            show_in_logs?: boolean | null;
+            /** Filterable */
+            filterable?: boolean | null;
+            /** Value Type */
+            value_type?: string | null;
+            /** Is Custom */
+            is_custom?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldCatalogGroup */
+        LogFieldCatalogGroup: {
+            /** Id */
+            id: string | null;
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Locked */
+            locked: boolean;
+            /** Requires */
+            requires: string | null;
+            /** Note */
+            note: string | null;
+            /** Recommended With */
+            recommended_with: string[] | null;
+            /** Total Bytes */
+            total_bytes: number;
+            /** Fields */
+            fields: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldInsightDefinition */
+        LogFieldInsightDefinition: {
+            /** Id */
+            id: string;
+            /** Category */
+            category: string;
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Required Fields */
+            required_fields: string[];
+            /** Required Groups */
+            required_groups: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldPreset */
+        LogFieldPreset: {
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Groups */
+            groups: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldsCatalogResponse */
+        LogFieldsCatalogResponse: {
+            /** Groups */
+            groups?: components["schemas"]["LogFieldCatalogGroup"][] | null;
+            /** Fields */
+            fields?: components["schemas"]["LogFieldCatalogEntry"][] | null;
+            /** Insights */
+            insights?: components["schemas"]["LogFieldInsightDefinition"][] | null;
+            /** Presets */
+            presets?: {
+                [key: string]: components["schemas"]["LogFieldPreset"];
+            } | null;
+        } & {
+            [key: string]: unknown;
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
@@ -7757,6 +12969,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7819,6 +13035,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7845,6 +13065,140 @@ export interface components {
             /** Version */
             version?: number | string | null;
             cmcd?: components["schemas"]["CmcdSettingsResponse"] | null;
+        };
+        /**
+         * LogsQueryRequest
+         * @description Request schema for querying paginated raw access logs.
+         */
+        LogsQueryRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /**
+             * Sort Dir
+             * @default desc
+             */
+            sort_dir: string;
+            /** Search */
+            search?: string | null;
+            /** Columns */
+            columns?: string[] | null;
+        };
+        /**
+         * LogsQueryResponse
+         * @description Response envelope for paginated raw access logs.
+         */
+        LogsQueryResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows?: {
+                [key: string]: string | number | boolean | null;
+            }[];
+            /**
+             * Total Count
+             * @default 0
+             */
+            total_count: number;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /** Columns */
+            columns?: string[];
+            /** Schema Columns */
+            schema_columns?: components["schemas"]["ColumnMeta"][];
+            /** Missing Fields */
+            missing_fields?: string[];
+        };
+        /** LowAndSlowInsightCard */
+        LowAndSlowInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "low_and_slow";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_LowAndSlowMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** LowAndSlowMeta */
+        LowAndSlowMeta: {
+            /** Hits */
+            hits: number;
+            /** Distinct Paths */
+            distinct_paths: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** LowTtlAssetRow */
         LowTtlAssetRow: {
@@ -7916,6 +13270,39 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** MethodDriftInsightCard */
+        MethodDriftInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "method_drift";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_MethodDriftMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** MethodDriftMeta */
+        MethodDriftMeta: {
+            /** Requests */
+            requests: number;
+            /** Method */
+            method: string | null;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * MetricHistoryBatchResponse
          * @description Every series newer than ``since``, returned by ``GET /api/admin/metric-history/batch``.
@@ -7939,6 +13326,41 @@ export interface components {
             /** Value */
             value: number;
         };
+        /** MetroDeliveryDegradationInsightCard */
+        MetroDeliveryDegradationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "metro_delivery_degradation";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_MetroDeliveryDegradationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** MetroDeliveryDegradationMeta */
+        MetroDeliveryDegradationMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Window Mbps */
+            window_mbps: number;
+            /** Baseline Mbps */
+            baseline_mbps: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * MutationStub
          * @description Generic request body for Phase 0 mutation stubs.
@@ -7956,6 +13378,132 @@ export interface components {
             payload: {
                 [key: string]: unknown;
             };
+        };
+        /** NetworkAsnHealthInsightCard */
+        NetworkAsnHealthInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "network_asn_health";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NetworkAsnHealthMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NetworkAsnHealthMeta */
+        NetworkAsnHealthMeta: {
+            /** Window Packet Loss Pct */
+            window_packet_loss_pct: number;
+            /** Baseline Packet Loss Pct */
+            baseline_packet_loss_pct: number;
+            /** Window Jitter Ms */
+            window_jitter_ms: number;
+            /** Baseline Jitter Ms */
+            baseline_jitter_ms: number;
+            /** Window Retrans Avg */
+            window_retrans_avg: number;
+            /** Baseline Retrans Avg */
+            baseline_retrans_avg: number;
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkBundleRequest */
+        NetworkBundleRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
+            /**
+             * Metric
+             * @default health_score
+             */
+            metric: string;
+            /**
+             * Bucket Seconds
+             * @default 300
+             */
+            bucket_seconds: number;
+            /**
+             * Top N
+             * @default 30
+             */
+            top_n: number;
+            /**
+             * Map Asn
+             * @default all
+             */
+            map_asn: string;
+            /** Sections */
+            sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
+            /**
+             * Region Country
+             * @default US
+             */
+            region_country: string;
+        };
+        /** NetworkBundleResponse */
+        NetworkBundleResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Available
+             * @default true
+             */
+            available: boolean;
+            /** Reason */
+            reason?: string | null;
+            health?: components["schemas"]["NetworkHealthResponse"] | null;
+            quality?: components["schemas"]["NetworkQualityResponse"] | null;
+            /** Pop Health */
+            pop_health?: components["schemas"]["PopHealthItem"][] | null;
+            transport?: components["schemas"]["TransportMetrics"] | null;
         };
         /** NetworkCityEntry */
         NetworkCityEntry: {
@@ -7979,6 +13527,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Metric
              * @default health_score
@@ -8000,11 +13552,7 @@ export interface components {
              */
             map_asn: string;
             /** Sections */
-            sections?: ("summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
+            sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
         };
         /** NetworkHealthResponse */
         NetworkHealthResponse: {
@@ -8014,6 +13562,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8047,16 +13599,12 @@ export interface components {
              * Heatmap
              * @default []
              */
-            heatmap: {
-                [key: string]: unknown;
-            }[];
+            heatmap: components["schemas"]["NetworkHeatmapRow"][];
             /**
              * Map Buckets
              * @default []
              */
-            map_buckets: {
-                [key: string]: unknown;
-            }[];
+            map_buckets: components["schemas"]["NetworkMapBucket"][];
             /**
              * Cities
              * @default []
@@ -8066,16 +13614,12 @@ export interface components {
              * Leaderboard
              * @default []
              */
-            leaderboard: {
-                [key: string]: unknown;
-            }[];
+            leaderboard: components["schemas"]["NetworkLeaderboardRow"][];
             /**
              * Metro Leaderboard
              * @default []
              */
-            metro_leaderboard: {
-                [key: string]: unknown;
-            }[];
+            metro_leaderboard: components["schemas"]["NetworkMetroRow"][];
             summary?: components["schemas"]["NetworkHealthSummary"] | null;
             /**
              * Countries
@@ -8100,6 +13644,124 @@ export interface components {
             worst_asn?: components["schemas"]["NetworkWorstEntry"] | null;
             worst_country?: components["schemas"]["NetworkWorstEntry"] | null;
         };
+        /**
+         * NetworkHeatmapCell
+         * @description One (ASN, time bucket) health cell. ``throughput_bps`` is always ``None`` on the
+         *     high-scale path (no throughput column in ClickHouse).
+         */
+        NetworkHeatmapCell: {
+            /** Bucket Idx */
+            bucket_idx: number;
+            /** Bucket */
+            bucket: string;
+            /** Throughput Bps */
+            throughput_bps?: number | null;
+            /** Rtt Med Us */
+            rtt_med_us?: number | null;
+            /** Rtt Baseline Us */
+            rtt_baseline_us?: number | null;
+            /** Rtt Congestion Us */
+            rtt_congestion_us?: number | null;
+            /** Avg Ploss */
+            avg_ploss?: number | null;
+            /** Rtt Jitter Us */
+            rtt_jitter_us?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+            /** Health Score */
+            health_score: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkHeatmapRow */
+        NetworkHeatmapRow: {
+            /** Asn */
+            asn: number;
+            /** Label */
+            label: string;
+            /** Total Reqs */
+            total_reqs: number;
+            /**
+             * Buckets
+             * @default []
+             */
+            buckets: components["schemas"]["NetworkHeatmapCell"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkLeaderboardRow */
+        NetworkLeaderboardRow: {
+            /** Asn */
+            asn: number;
+            /** Label */
+            label: string;
+            /** Health Score Now */
+            health_score_now?: number | null;
+            /** Health Score 1H Ago */
+            health_score_1h_ago?: number | null;
+            /** Health Score 1W Ago */
+            health_score_1w_ago?: number | null;
+            /**
+             * Trend
+             * @enum {string}
+             */
+            trend: "stable" | "degrading" | "improving";
+            /** Total Reqs */
+            total_reqs: number;
+            /**
+             * C Speed Mix
+             * @default {}
+             */
+            c_speed_mix: {
+                [key: string]: number;
+            };
+            /** P95 Rtt Us */
+            p95_rtt_us?: number | null;
+            /** P99 Rtt Us */
+            p99_rtt_us?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkMapBucket */
+        NetworkMapBucket: {
+            /** Bucket Idx */
+            bucket_idx: number;
+            /** Bucket */
+            bucket: string;
+            /**
+             * Cities
+             * @default []
+             */
+            cities: components["schemas"]["NetworkMapCity"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * NetworkMapCity
+         * @description One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``.
+         */
+        NetworkMapCity: {
+            /** Country */
+            country?: string | null;
+            /** City Idx */
+            city_idx: number;
+            /** Metro Code */
+            metro_code?: number | null;
+            /** Rtt Med Us */
+            rtt_med_us?: number | null;
+            /** Avg Ploss */
+            avg_ploss?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+            /** Health Score */
+            health_score: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** NetworkMetrics */
         NetworkMetrics: {
             /** Http3 Pct */
@@ -8117,6 +13779,36 @@ export interface components {
              * @default []
              */
             protocol_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+        };
+        /** NetworkMetroRow */
+        NetworkMetroRow: {
+            /** Country */
+            country?: string | null;
+            /** Region */
+            region: string;
+            /** Raw City */
+            raw_city: string;
+            /** City */
+            city: string;
+            /** Total Reqs */
+            total_reqs: number;
+            /** Health Score */
+            health_score?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NetworkQualityBarRow */
+        NetworkQualityBarRow: {
+            /** Value */
+            value: string;
+            /** Label */
+            label: string;
+            /** Rtt Ms */
+            rtt_ms: number;
+            /** Reqs */
+            reqs: number;
+        } & {
+            [key: string]: unknown;
         };
         /** NetworkQualityRequest */
         NetworkQualityRequest: {
@@ -8147,6 +13839,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8162,44 +13858,45 @@ export interface components {
              * By Country
              * @default []
              */
-            by_country: {
-                [key: string]: unknown;
-            }[];
+            by_country: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * By Asn
              * @default []
              */
-            by_asn: {
-                [key: string]: unknown;
-            }[];
+            by_asn: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * By Region
              * @default []
              */
-            by_region: {
-                [key: string]: unknown;
-            }[];
+            by_region: components["schemas"]["NetworkQualityBarRow"][];
             /** Region Country */
             region_country?: string | null;
             /**
              * By Pop
              * @default []
              */
-            by_pop: {
-                [key: string]: unknown;
-            }[];
+            by_pop: components["schemas"]["NetworkQualityBarRow"][];
             /**
              * Scatter
              * @default []
              */
-            scatter: {
-                [key: string]: unknown;
-            }[];
+            scatter: components["schemas"]["NetworkQualityScatterPoint"][];
             /**
              * Countries
              * @default []
              */
             countries: string[];
+        };
+        /** NetworkQualityScatterPoint */
+        NetworkQualityScatterPoint: {
+            /** Rtt Ms */
+            rtt_ms: number;
+            /** Ttfb Ms */
+            ttfb_ms: number;
+            /** Cache */
+            cache: string;
+        } & {
+            [key: string]: unknown;
         };
         /** NetworkWorstEntry */
         NetworkWorstEntry: {
@@ -8207,6 +13904,195 @@ export interface components {
             label: string;
             /** Score */
             score?: number | null;
+        };
+        /** NewAsnTrafficInsightCard */
+        NewAsnTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_asn_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewAsnTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewAsnTrafficMeta */
+        NewAsnTrafficMeta: {
+            /** Requests */
+            requests: number;
+            /** Asn */
+            asn: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewCityTrafficInsightCard */
+        NewCityTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_city_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewCityTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewCityTrafficMeta */
+        NewCityTrafficMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewCountryTrafficInsightCard */
+        NewCountryTrafficInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_country_traffic";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewCountryTrafficMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewCountryTrafficMeta */
+        NewCountryTrafficMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NewProbeUrlsInsightCard */
+        NewProbeUrlsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "new_probe_urls";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_NewProbeUrlsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** NewProbeUrlsMeta */
+        NewProbeUrlsMeta: {
+            /** Error Pct */
+            error_pct: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * NgwafStatusResponse
+         * @description ``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;
+         *     ``service_workspace_id`` / ``service_configured`` only when ``service_id`` was passed.
+         */
+        NgwafStatusResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Total Cached Bots */
+            total_cached_bots?: number | null;
+            /** Workspaces */
+            workspaces?: {
+                [key: string]: string | null;
+            } | null;
+            /** Top Bots */
+            top_bots?: {
+                [key: string]: number;
+            } | null;
+            /** Service Workspace Id */
+            service_workspace_id?: string | null;
+            /** Service Configured */
+            service_configured?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * NgwafSyncResponse
+         * @description ``POST /admin/ngwaf/sync/{service_id}``.
+         */
+        NgwafSyncResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Service Id */
+            service_id: string;
+            /** Workspace Id */
+            workspace_id: string;
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafVerifiedBotRow */
+        NgwafVerifiedBotRow: {
+            /** Bot Name */
+            bot_name?: string | null;
+            /** Wellknown Bot Name */
+            wellknown_bot_name?: string | null;
+            /** Category */
+            category?: string | null;
+            /** Request Count */
+            request_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** NgwafVerifiedBotsTsRow */
+        NgwafVerifiedBotsTsRow: {
+            /** Time */
+            time: string;
+            /** Bot Name */
+            bot_name?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /** NgwafWorkspace */
         NgwafWorkspace: {
@@ -8236,6 +14122,10 @@ export interface components {
             error?: string | null;
             /** Message */
             message?: string | null;
+            /** Error Hint */
+            error_hint?: string | null;
+            /** Debug Raw */
+            _debug_raw?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -8319,6 +14209,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Minutes
              * @default 5
@@ -8363,10 +14257,6 @@ export interface components {
             pop_latency_limit: number;
             /** Sections */
             sections?: ("summary" | "timeseries" | "slow_urls" | "status_codes" | "path_breakdown" | "pop_latency" | "ip_health")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /**
          * OriginAggregatesResponse
@@ -8391,6 +14281,76 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            summary?: components["schemas"]["OriginSummarySection"];
+            timeseries?: components["schemas"]["OriginTimeseriesSection"];
+            slow_urls?: components["schemas"]["OriginSlowUrlsSection"];
+            status_codes?: components["schemas"]["OriginStatusCodesSection"];
+            path_breakdown?: components["schemas"]["OriginPathBreakdownSection"];
+            pop_latency?: components["schemas"]["OriginPopLatencySection"];
+            ip_health?: components["schemas"]["OriginIpHealthSection"];
+        };
+        /** OriginDrilldownRequest */
+        OriginDrilldownRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /**
+             * Dimension
+             * @default host
+             * @enum {string}
+             */
+            dimension: "host" | "shield_pop" | "datacenter" | "protocol" | "pop" | "oip";
+            /**
+             * Limit
+             * @default 30
+             */
+            limit: number;
+        };
+        /** OriginDrilldownResponse */
+        OriginDrilldownResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8411,54 +14371,94 @@ export interface components {
              */
             total: number;
             /**
-             * Summary
-             * @default {}
+             * Dimension
+             * @default host
              */
-            summary: {
-                [key: string]: unknown;
-            };
+            dimension: string;
             /**
-             * Timeseries
-             * @default {}
+             * Rows
+             * @default []
              */
-            timeseries: {
-                [key: string]: unknown;
-            };
+            rows: components["schemas"]["OriginDrilldownRow"][];
+        };
+        /** OriginDrilldownRow */
+        OriginDrilldownRow: {
+            /** Key */
+            key: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** P99 Ms */
+            p99_ms?: number | null;
+            /** Error Rate */
+            error_rate: number;
+            /** Bytes */
+            bytes?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginErrorRateInsightCard */
+        OriginErrorRateInsightCard: {
             /**
-             * Slow Urls
-             * @default {}
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
-            slow_urls: {
-                [key: string]: unknown;
+            id: "origin_error_rate";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginErrorRateMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginErrorRateMeta */
+        OriginErrorRateMeta: {
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
             };
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginIpFailureInsightCard */
+        OriginIpFailureInsightCard: {
             /**
-             * Status Codes
-             * @default {}
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
-            status_codes: {
-                [key: string]: unknown;
+            id: "origin_ip_failure";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginIpFailureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginIpFailureMeta */
+        OriginIpFailureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
             };
-            /**
-             * Path Breakdown
-             * @default {}
-             */
-            path_breakdown: {
-                [key: string]: unknown;
-            };
-            /**
-             * Pop Latency
-             * @default {}
-             */
-            pop_latency: {
-                [key: string]: unknown;
-            };
-            /**
-             * Ip Health
-             * @default {}
-             */
-            ip_health: {
-                [key: string]: unknown;
-            };
+        } & {
+            [key: string]: unknown;
         };
         /** OriginIpHealthRequest */
         OriginIpHealthRequest: {
@@ -8489,6 +14489,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8512,9 +14516,70 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginIpHealthRow"][];
+        };
+        /** OriginIpHealthRow */
+        OriginIpHealthRow: {
+            /** Oip */
+            oip: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** Error Pct */
+            error_pct?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginIpHealthSection */
+        OriginIpHealthSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginIpHealthRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginLatencySpikeInsightCard */
+        OriginLatencySpikeInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_latency_spike";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginLatencySpikeMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginLatencySpikeMeta */
+        OriginLatencySpikeMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** OriginPathBreakdownResponse */
         OriginPathBreakdownResponse: {
@@ -8524,6 +14589,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8554,9 +14623,42 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginPathRow"][];
+        };
+        /** OriginPathBreakdownSection */
+        OriginPathBreakdownSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Shielding Detected
+             * @default false
+             */
+            shielding_detected: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginPathRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginPathRow */
+        OriginPathRow: {
+            /** Edge */
+            edge?: boolean | null;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginPopLatencyRequest */
         OriginPopLatencyRequest: {
@@ -8585,6 +14687,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8617,9 +14723,46 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginPopLatencyRow"][];
+        };
+        /** OriginPopLatencyRow */
+        OriginPopLatencyRow: {
+            /** Pop */
+            pop: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** Elevated */
+            elevated: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OriginPopLatencySection */
+        OriginPopLatencySection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Requires Group C
+             * @default false
+             */
+            requires_group_c: boolean;
+            /** Median P95 Ms */
+            median_p95_ms?: number | null;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginPopLatencyRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginRequest */
         OriginRequest: {
@@ -8634,6 +14777,37 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+        };
+        /** OriginRetriesInsightCard */
+        OriginRetriesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "origin_retries";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OriginRetriesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OriginRetriesMeta */
+        OriginRetriesMeta: {
+            /** Max Retries */
+            max_retries: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** OriginShieldingAnalysisRequest */
         OriginShieldingAnalysisRequest: {
@@ -8662,6 +14836,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8697,9 +14875,7 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["ShieldingRow"][];
             /** Total Routes */
             total_routes?: number | null;
             /** Truncated */
@@ -8709,6 +14885,21 @@ export interface components {
              * @default false
              */
             error: boolean;
+        };
+        /** OriginSlowUrlRow */
+        OriginSlowUrlRow: {
+            /** Url */
+            url: string;
+            /** Requests */
+            requests: number;
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** P99 Ms */
+            p99_ms?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginSlowUrlsRequest */
         OriginSlowUrlsRequest: {
@@ -8744,6 +14935,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8767,9 +14962,38 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginSlowUrlRow"][];
+        };
+        /** OriginSlowUrlsSection */
+        OriginSlowUrlsSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginSlowUrlRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OriginStatusCodeRow
+         * @description ``status == -1`` buckets any origin status outside 100-599.
+         */
+        OriginStatusCodeRow: {
+            /** Status */
+            status: number;
+            /** Count */
+            count: number;
+            /** Pct */
+            pct?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginStatusCodesResponse */
         OriginStatusCodesResponse: {
@@ -8781,6 +15005,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8804,9 +15032,24 @@ export interface components {
              * Rows
              * @default []
              */
-            rows: {
-                [key: string]: unknown;
-            }[];
+            rows: components["schemas"]["OriginStatusCodeRow"][];
+        };
+        /** OriginStatusCodesSection */
+        OriginStatusCodesSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["OriginStatusCodeRow"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginSummaryResponse */
         OriginSummaryResponse: {
@@ -8816,6 +15059,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8859,6 +15106,56 @@ export interface components {
             origin_error_rate?: number | null;
             /** Obytes P50 */
             obytes_p50?: number | null;
+        };
+        /** OriginSummarySection */
+        OriginSummarySection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /** Total Misses */
+            total_misses?: number | null;
+            /** Total Passes */
+            total_passes?: number | null;
+            /** Ottfb P50 Ms */
+            ottfb_p50_ms?: number | null;
+            /** Ottfb P75 Ms */
+            ottfb_p75_ms?: number | null;
+            /** Ottfb P95 Ms */
+            ottfb_p95_ms?: number | null;
+            /** Ottfb P99 Ms */
+            ottfb_p99_ms?: number | null;
+            /** Ottlb P50 Ms */
+            ottlb_p50_ms?: number | null;
+            /** Ottlb P95 Ms */
+            ottlb_p95_ms?: number | null;
+            /** Cdn Overhead P50 Ms */
+            cdn_overhead_p50_ms?: number | null;
+            /** Origin Error Rate */
+            origin_error_rate?: number | null;
+            /** Obytes P50 */
+            obytes_p50?: number | null;
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * OriginTimeseriesPoint
+         * @description ``edge`` is only present when the series is split by leg.
+         */
+        OriginTimeseriesPoint: {
+            /** Time */
+            time: string;
+            /** Miss Count */
+            miss_count: number;
+            /** Value */
+            value?: number | null;
+            /** Edge */
+            edge?: boolean | null;
+        } & {
+            [key: string]: unknown;
         };
         /** OriginTimeseriesRequest */
         OriginTimeseriesRequest: {
@@ -8906,6 +15203,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8929,9 +15230,61 @@ export interface components {
              * Series
              * @default []
              */
-            series: {
-                [key: string]: unknown;
-            }[];
+            series: components["schemas"]["OriginTimeseriesPoint"][];
+        };
+        /** OriginTimeseriesSection */
+        OriginTimeseriesSection: {
+            /**
+             * Has Data
+             * @default false
+             */
+            has_data: boolean;
+            /**
+             * Series
+             * @default []
+             */
+            series: components["schemas"]["OriginTimeseriesPoint"][];
+            /** Approx */
+            _approx?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** OrphanedDeepCrawlInsightCard */
+        OrphanedDeepCrawlInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "orphaned_deep_crawl";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_OrphanedDeepCrawlMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** OrphanedDeepCrawlMeta */
+        OrphanedDeepCrawlMeta: {
+            /** Requests */
+            requests: number;
+            /** Distinct Urls */
+            distinct_urls: number;
+            /** Requests Per Url */
+            requests_per_url: number;
+            /** Surge Ratio */
+            surge_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** OverviewMetrics */
         OverviewMetrics: {
@@ -8950,6 +15303,101 @@ export interface components {
             /** Origin Requests */
             origin_requests?: number | null;
         };
+        /** PageTelemetryCall */
+        PageTelemetryCall: {
+            /** Service */
+            service: string;
+            /** Method */
+            method?: string | null;
+            /** Path */
+            path?: string | null;
+            /** Status */
+            status?: string | number | null;
+            /** Time Ms */
+            time_ms?: number | null;
+            /** Caller */
+            caller?: string | null;
+            /** Bytes */
+            bytes?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PageTelemetryQuery */
+        PageTelemetryQuery: {
+            /** Engine */
+            engine?: string | null;
+            /** Sql Query */
+            sql_query?: string | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PageTelemetryResponse
+         * @description ``GET /debug/page-telemetry``.
+         */
+        PageTelemetryResponse: {
+            /** Queries */
+            queries: components["schemas"]["PageTelemetryQuery"][];
+            /** Sections */
+            sections: components["schemas"]["PageTelemetrySection"][];
+            /** Calls */
+            calls: components["schemas"]["PageTelemetryCall"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** PageTelemetrySection */
+        PageTelemetrySection: {
+            /** Section Name */
+            section_name?: string | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PartialHourMergeResponse
+         * @description ``merge_partial_hour`` result dict from ``POST /admin/partial-hour-merge``.
+         */
+        PartialHourMergeResponse: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Hour */
+            hour?: string | null;
+            /** New Files */
+            new_files?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Gc Hours Removed */
+            gc_hours_removed?: number | null;
+            /** Status */
+            status?: string | null;
+            /** Error */
+            error?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PartialHourStatusResponse
+         * @description Partial-hour rollup status from ``GET /admin/partial-hour-status``.
+         */
+        PartialHourStatusResponse: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Hour */
+            hour?: string | null;
+            /** Watermark */
+            watermark?: number | null;
+            /** Watermark Iso */
+            watermark_iso?: string | null;
+            /** File Exists */
+            file_exists?: boolean | null;
+            /** Total Rows */
+            total_rows?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * PasscodePayload
          * @description Body for ``PATCH /api/share-admin/invites/{id}/passcode`` — rotate
@@ -8959,6 +15407,39 @@ export interface components {
             /** Passcode */
             passcode: string;
         };
+        /** PayloadCompressionRegressionInsightCard */
+        PayloadCompressionRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "payload_compression_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_PayloadCompressionRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** PayloadCompressionRegressionMeta */
+        PayloadCompressionRegressionMeta: {
+            /** Window Requests */
+            window_requests: number;
+            /** Baseline Requests */
+            baseline_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** PerformanceAggregatesResponse */
         PerformanceAggregatesResponse: {
             /** Debug Queries */
@@ -8967,6 +15448,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8982,44 +15467,51 @@ export interface components {
              * Top Urls
              * @default []
              */
-            top_urls: {
-                [key: string]: unknown;
-            }[];
+            top_urls: components["schemas"]["PerformanceUrlRow"][];
             /**
              * Top Asns
              * @default []
              */
-            top_asns: {
-                [key: string]: unknown;
-            }[];
+            top_asns: components["schemas"]["PerformanceAsnRow"][];
             /**
              * Ttl Dist
              * @default []
              */
-            ttl_dist: {
-                [key: string]: unknown;
-            }[];
+            ttl_dist: components["schemas"]["PerformanceTtlBucket"][];
             /**
              * Scatter
              * @default []
              */
-            scatter: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Waterfall
-             * @default {}
-             */
-            waterfall: {
-                [key: string]: {
-                    [key: string]: number;
-                };
-            };
+            scatter: components["schemas"]["PerformanceScatterPoint"][];
+            waterfall?: components["schemas"]["PerformanceWaterfall"];
             /**
              * Approx
              * @default false
              */
             _approx: boolean;
+        };
+        /**
+         * PerformanceAsnRow
+         * @description ``asn`` is an int on the repository paths and the raw dimension string on the
+         *     high-scale path, which also does not resolve a ``label``.
+         */
+        PerformanceAsnRow: {
+            /** Asn */
+            asn: number | string;
+            /** Label */
+            label?: string | null;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg?: number | null;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** PerformanceMetrics */
         PerformanceMetrics: {
@@ -9052,6 +15544,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Sort By
              * @default p99
@@ -9060,10 +15556,65 @@ export interface components {
             sort_by: "avg" | "p50" | "p95" | "p99";
             /** Sections */
             sections?: ("waterfall" | "top_urls" | "top_asns" | "ttl_dist" | "scatter")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
+        };
+        /** PerformanceScatterPoint */
+        PerformanceScatterPoint: {
+            /** Origin */
+            origin?: number | null;
+            /** Edge */
+            edge?: number | null;
+            /** Cache */
+            cache?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceTtlBucket */
+        PerformanceTtlBucket: {
+            /** Bucket */
+            bucket: string;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceUrlRow */
+        PerformanceUrlRow: {
+            /** Url */
+            url: string;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg?: number | null;
+            /** P50 */
+            p50?: number | null;
+            /** P95 */
+            p95?: number | null;
+            /** P99 */
+            p99?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * PerformanceWaterfall
+         * @description Empty (``{}``) when scatter/waterfall were not requested or could not be computed.
+         */
+        PerformanceWaterfall: {
+            avg?: components["schemas"]["PerformanceWaterfallAvg"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PerformanceWaterfallAvg */
+        PerformanceWaterfallAvg: {
+            /** Edge Processing */
+            edge_processing: number;
+            /** Origin Wait */
+            origin_wait: number;
+            /** Origin Download */
+            origin_download: number;
+            /** Client Download */
+            client_download: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * PiiPolicyPayload
@@ -9085,9 +15636,9 @@ export interface components {
             /** Error Rate */
             error_rate: number;
             /** P50 Rtt Us */
-            p50_rtt_us: number | null;
+            p50_rtt_us?: number | null;
             /** P95 Ttfb Ms */
-            p95_ttfb_ms: number | null;
+            p95_ttfb_ms?: number | null;
             /** Cache Hit Rate */
             cache_hit_rate: number;
             /** Bandwidth Bytes */
@@ -9103,6 +15654,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9114,6 +15669,39 @@ export interface components {
             }[];
             /** Data */
             data: components["schemas"]["PopHealthItem"][];
+        };
+        /** PopLatencyRegressionInsightCard */
+        PopLatencyRegressionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "pop_latency_regression";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_PopLatencyRegressionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** PopLatencyRegressionMeta */
+        PopLatencyRegressionMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** PopLocation */
         PopLocation: {
@@ -9144,6 +15732,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9171,6 +15763,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9233,6 +15829,11 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
         };
         /** PrefillResponse */
         PrefillResponse: {
@@ -9244,6 +15845,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9306,6 +15911,11 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
             /** Requests Per Day */
             requests_per_day?: number | null;
             /** Edge Requests Per Day */
@@ -9315,19 +15925,30 @@ export interface components {
             /** Rum Beacons Per Day */
             rum_beacons_per_day?: number | null;
         };
+        /** PresetQuery */
+        PresetQuery: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Sql */
+            sql: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** ProvisionCheckConfigItem */
         ProvisionCheckConfigItem: {
             /** Ok */
-            ok?: boolean | null;
+            ok: boolean;
             /** Details */
-            details?: string | null;
+            details: string;
         } & {
             [key: string]: unknown;
         };
         /** ProvisionCheckConfigResponse */
         ProvisionCheckConfigResponse: {
-            logging_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
-            cdn_service?: components["schemas"]["ProvisionCheckConfigItem"] | null;
+            logging_service: components["schemas"]["ProvisionCheckConfigItem"];
+            cdn_service: components["schemas"]["ProvisionCheckConfigItem"];
         } & {
             [key: string]: unknown;
         };
@@ -9556,6 +16177,8 @@ export interface components {
              * @default false
              */
             rum_enabled: boolean;
+            /** Rum Log Period */
+            rum_log_period?: string | null;
             /** Faro Version */
             faro_version?: string | null;
             /** Rum Custom Condition */
@@ -9571,10 +16194,34 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * ProvisionLakeInfoCalendarDay
+         * @description One calendar day. ``data_files`` is a row count on the DuckLake path (see
+         *     ``get_snapshot_calendar``); ``size_bytes`` is ``0`` there.
+         */
+        ProvisionLakeInfoCalendarDay: {
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ProvisionLakeInfoRange
+         * @description Earliest/latest row timestamps (ISO strings; ``None`` for an empty table).
+         */
+        ProvisionLakeInfoRange: {
+            /** Start */
+            start?: string | null;
+            /** End */
+            end?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * ProvisionLakeInfoResponse
-         * @description ``fetch_lake_info`` result. Only the branch-stable keys are declared;
-         *     the table-details payload (row counts / calendar / extents) varies by
-         *     Iceberg layout and rides through ``extra``.
+         * @description ``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present
+         *     only when the table exists.
          */
         ProvisionLakeInfoResponse: {
             /** Ok */
@@ -9585,6 +16232,42 @@ export interface components {
             message?: string | null;
             /** Error */
             error?: string | null;
+            info?: components["schemas"]["ProvisionLakeInfoTable"] | null;
+            /** Calendar */
+            calendar?: {
+                [key: string]: components["schemas"]["ProvisionLakeInfoCalendarDay"];
+            } | null;
+            range?: components["schemas"]["ProvisionLakeInfoRange"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ProvisionLakeInfoTable
+         * @description ``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset).
+         */
+        ProvisionLakeInfoTable: {
+            /** Table Name */
+            table_name?: string | null;
+            /** Snapshots */
+            snapshots?: number | null;
+            /** Data Files */
+            data_files?: number | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /** Latest Snapshot At */
+            latest_snapshot_at?: string | null;
+            /** Buffer Files */
+            buffer_files?: number | null;
+            /** Buffer Size Bytes */
+            buffer_size_bytes?: number | null;
+            /** Table Location */
+            table_location?: string | null;
+            /** Region */
+            region?: string | null;
+            /** Min Timestamp */
+            min_timestamp?: string | null;
+            /** Max Timestamp */
+            max_timestamp?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -9689,7 +16372,7 @@ export interface components {
             /** User Id */
             user_id?: string | null;
             /** Type */
-            type?: string | null;
+            type?: ("user" | "automation") | null;
         } & {
             [key: string]: unknown;
         };
@@ -9720,6 +16403,72 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ProxyDistRow */
+        ProxyDistRow: {
+            /** Type */
+            type?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ProxySurgeInsightCard */
+        ProxySurgeInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "proxy_surge";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ProxySurgeMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ProxySurgeMeta */
+        ProxySurgeMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** QuarantineEvidenceItem */
+        QuarantineEvidenceItem: {
+            /** Id */
+            id: number;
+            /**
+             * Source Type
+             * @enum {string}
+             */
+            source_type: "request" | "rum";
+            /** Original Key */
+            original_key: string;
+            /** Line Ordinal */
+            line_ordinal?: number | null;
+            /** Byte Offset */
+            byte_offset?: number | null;
+            /** Byte Length */
+            byte_length: number;
+            /** Error Category */
+            error_category: string;
+            /** Error Text */
+            error_text: string;
+            /** Sha256 */
+            sha256: string;
+            /** Quarantined At */
+            quarantined_at: string;
+        };
         /** QuarantineListResponse */
         QuarantineListResponse: {
             /** Debug Queries */
@@ -9728,6 +16477,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9739,60 +16492,44 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Files */
-            files?: components["schemas"]["QuarantinedFile"][];
+            /** Items */
+            items?: components["schemas"]["QuarantineEvidenceItem"][];
             /**
              * Total
              * @default 0
              */
             total: number;
-            summary?: components["schemas"]["QuarantineSummary"];
         };
         /** QuarantineSummary */
         QuarantineSummary: {
             /**
-             * Total Files
+             * Total Items
              * @default 0
              */
-            total_files: number;
+            total_items: number;
             /**
-             * Total Corrupt Rows
+             * Total Bytes
              * @default 0
              */
-            total_corrupt_rows: number;
+            total_bytes: number;
+            /**
+             * Request Items
+             * @default 0
+             */
+            request_items: number;
+            /**
+             * Rum Items
+             * @default 0
+             */
+            rum_items: number;
             /** Oldest At */
             oldest_at?: string | null;
             /** Newest At */
             newest_at?: string | null;
-        };
-        /** QuarantinedFile */
-        QuarantinedFile: {
-            /** Id */
-            id: number;
-            /** File Name */
-            file_name: string;
-            /** Error Key */
-            error_key: string;
-            /**
-             * Valid Rows
-             * @default 0
-             */
-            valid_rows: number;
-            /**
-             * Corrupt Rows
-             * @default 0
-             */
-            corrupt_rows: number;
-            /** File Size Bytes */
-            file_size_bytes?: number | null;
-            /** Corrupt Samples */
-            corrupt_samples?: string[];
-            /** Reason Counts */
-            reason_counts?: {
+            /** Category Counts */
+            category_counts?: {
                 [key: string]: number;
             };
-            /** Quarantined At */
-            quarantined_at: string;
         };
         /**
          * QueryAttribution
@@ -9851,6 +16588,96 @@ export interface components {
              */
             explain: boolean;
         };
+        /**
+         * QueryResponse
+         * @description ``POST /api/query`` result.
+         *
+         *     Rows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that
+         *     pydantic's JSON mode would encode differently from ``jsonable_encoder``
+         *     (the pre-typing wire path), so ``data`` is pre-encoded the same way.
+         */
+        QueryResponse: {
+            /** Columns */
+            columns: string[];
+            /** Data */
+            data: {
+                [key: string]: unknown;
+            }[];
+            /** Row Count */
+            row_count: number;
+            /** Total Rows */
+            total_rows: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /** Explain Plan */
+            explain_plan?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** QueryResponseMetadataResponse */
+        QueryResponseMetadataResponse: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "partial" | "queued" | "running" | "failed";
+            /** Exact */
+            exact: boolean;
+            /** Coverage */
+            coverage: number;
+            /** Freshness Lag Seconds */
+            freshness_lag_seconds: number;
+            watermark: components["schemas"]["ServingWatermarkResponse"];
+            /** Approximation Error */
+            approximation_error: number | null;
+            /** Error */
+            error: string | null;
+            /**
+             * Mode
+             * @default clickhouse
+             * @enum {string}
+             */
+            mode: "clickhouse" | "duckdb_emulation";
+        };
+        /** QuerySchemaResponse */
+        QuerySchemaResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Source */
+            source?: string | null;
+            /**
+             * Table Name
+             * @default logs
+             */
+            table_name: string;
+            /** Service Id */
+            service_id?: string | null;
+            /** Schema */
+            schema?: components["schemas"]["SchemaColumn"][];
+            /** Columns */
+            columns?: components["schemas"]["SchemaColumn"][];
+        };
         /** RawRequest */
         RawRequest: {
             /**
@@ -9887,6 +16714,30 @@ export interface components {
              */
             columns: string[];
         };
+        /**
+         * RdnsEnrichResponse
+         * @description ``POST /admin/rdns/enrich``.
+         */
+        RdnsEnrichResponse: {
+            /** Ok */
+            ok: boolean;
+            summary: components["schemas"]["RdnsEnrichSummary"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** RdnsEnrichSummary */
+        RdnsEnrichSummary: {
+            /** Resolved */
+            resolved: number;
+            /** Errors */
+            errors: number;
+            /** Discovered */
+            discovered: number;
+            /** Batch Limit */
+            batch_limit: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** RdnsStats */
         RdnsStats: {
             /** Total */
@@ -9895,6 +16746,26 @@ export interface components {
             pending: number;
             /** Last Enrichment At */
             last_enrichment_at?: string | null;
+        };
+        /** RdnsStatsResponse */
+        RdnsStatsResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Stats */
+            stats?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RealtimeSeedResponse */
+        RealtimeSeedResponse: {
+            /** Ticks */
+            ticks: {
+                [key: string]: unknown;
+            }[];
+        } & {
+            [key: string]: unknown;
         };
         /** RecentSqliteResponse */
         RecentSqliteResponse: {
@@ -9909,6 +16780,37 @@ export interface components {
             /** Last Seq */
             last_seq: number;
         };
+        /** RefererMonocultureInsightCard */
+        RefererMonocultureInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "referer_monoculture";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RefererMonocultureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RefererMonocultureMeta */
+        RefererMonocultureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * RefreshPopLocationsRequest
          * @description Body for ``POST /api/admin/pop-locations/refresh`` — the Fastly API
@@ -9921,6 +16823,180 @@ export interface components {
              * @description Fastly API key
              */
             token: string;
+        };
+        /** RegionLatencyInsightCard */
+        RegionLatencyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "region_latency";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RegionLatencyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RegionLatencyMeta */
+        RegionLatencyMeta: {
+            /** Regression Ratio */
+            regression_ratio: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+            /** Ottfb P95 Ms */
+            ottfb_p95_ms?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RepeatedPatternsFpInsightCard */
+        RepeatedPatternsFpInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "repeated_patterns_fp";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RepeatedPatternsFpMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RepeatedPatternsFpMeta */
+        RepeatedPatternsFpMeta: {
+            /** Score */
+            score: number;
+            /** Cv */
+            cv: number;
+            /** Modal Frac */
+            modal_frac: number;
+            /** Mean Interval S */
+            mean_interval_s: number;
+            /** Stddev S */
+            stddev_s: number;
+            /** Mode Gap S */
+            mode_gap_s: number | null;
+            /** N Gaps */
+            n_gaps: number;
+            /** N Events */
+            n_events: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Distinct Ip */
+            distinct_ip: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RepeatedPatternsInsightCard */
+        RepeatedPatternsInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "repeated_patterns";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RepeatedPatternsMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RepeatedPatternsMeta */
+        RepeatedPatternsMeta: {
+            /** Score */
+            score: number;
+            /** Cv */
+            cv: number;
+            /** Modal Frac */
+            modal_frac: number;
+            /** Mean Interval S */
+            mean_interval_s: number;
+            /** Stddev S */
+            stddev_s: number;
+            /** Mode Gap S */
+            mode_gap_s: number | null;
+            /** N Gaps */
+            n_gaps: number;
+            /** N Events */
+            n_events: number;
+            /** Span S */
+            span_s: number;
+            /** Rps */
+            rps: number;
+            /** Distinct Ua */
+            distinct_ua: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RequestSizeAnomalyInsightCard */
+        RequestSizeAnomalyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "request_size_anomaly";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_RequestSizeAnomalyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** RequestSizeAnomalyMeta */
+        RequestSizeAnomalyMeta: {
+            /** Max Bytes */
+            max_bytes: number;
+            /** Avg Bytes */
+            avg_bytes: number;
+            /** Requests */
+            requests: number;
+            /** P95 Baseline */
+            p95_baseline: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ResetLogsRequest
@@ -9949,6 +17025,163 @@ export interface components {
              */
             preserve_usage_history: boolean;
         };
+        /** ResidentialFingerprintDispersionInsightCard */
+        ResidentialFingerprintDispersionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "residential_fingerprint_dispersion";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ResidentialFingerprintDispersionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ResidentialFingerprintDispersionMeta */
+        ResidentialFingerprintDispersionMeta: {
+            /** Ja4 */
+            ja4: string;
+            /** Ips */
+            ips: number;
+            /** Asns */
+            asns: number;
+            /** Requests */
+            requests: number;
+            /** Asn Expansion Ratio */
+            asn_expansion_ratio: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RollupCompactResponse
+         * @description Result from POST /admin/rollups/compact/{service_id}.
+         */
+        RollupCompactResponse: {
+            /** Status */
+            status?: string | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Rebuilt */
+            rebuilt?: number | null;
+            /** Bundled */
+            bundled?: number | null;
+            /** Retired Files */
+            retired_files?: number | null;
+            /** Retired Bytes */
+            retired_bytes?: number | null;
+            /** Duration S */
+            duration_s?: number | null;
+            /** Summary */
+            summary?: string | null;
+            /** Errors */
+            errors?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RollupHealResponse
+         * @description Result from POST /admin/rollup-heal/{service_id}.
+         */
+        RollupHealResponse: {
+            /** Status */
+            status?: string | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Missing */
+            missing?: number | null;
+            /** Rebuilt Fields */
+            rebuilt_fields?: number | null;
+            /** Bundled */
+            bundled?: number | null;
+            /** Stamped Empty */
+            stamped_empty?: number | null;
+            /** Coverage Verified */
+            coverage_verified?: boolean | null;
+            /** Duration S */
+            duration_s?: number | null;
+            /** Summary */
+            summary?: string | null;
+            /** Run Id */
+            run_id?: number | null;
+            /** Error Message */
+            error_message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RollupStatusResponse
+         * @description Rollup status from GET /admin/rollups/status.
+         */
+        RollupStatusResponse: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Days Bundled */
+            days_bundled?: number | null;
+            /** Hour Bundles */
+            hour_bundles?: number | null;
+            /** Latest Day Bundle */
+            latest_day_bundle?: string | null;
+            /** Earliest Day Bundle */
+            earliest_day_bundle?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumAnalyticsResponse
+         * @description ``GET /{service_id}/rum/analytics`` (data, no-data and failure branches).
+         */
+        RumAnalyticsResponse: {
+            /** Is Mock */
+            is_mock?: boolean | null;
+            /** No Data */
+            no_data?: boolean | null;
+            /** Beacon Count */
+            beacon_count?: number | null;
+            /** Pageview Count */
+            pageview_count?: number | null;
+            /** Interaction Count */
+            interaction_count?: number | null;
+            /** Error Count */
+            error_count?: number | null;
+            /** Message */
+            message?: string | null;
+            /** Error */
+            error?: string | null;
+            vitals?: components["schemas"]["RumVitals"] | null;
+            /** Worst Pages */
+            worst_pages?: components["schemas"]["RumWorstPage"][] | null;
+            /** Errors */
+            errors?: components["schemas"]["RumJsError"][] | null;
+            trends?: components["schemas"]["RumTrends"] | null;
+            environments?: components["schemas"]["RumEnvironments"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumBeaconHealthResponse */
+        RumBeaconHealthResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Beacon Fire Rate */
+            beacon_fire_rate?: number | null;
+            /** Recent Beacons */
+            recent_beacons?: number | null;
+            /** Last Beacon Time */
+            last_beacon_time?: string | null;
+            /** Setup Complete */
+            setup_complete?: boolean | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** RumBreakdownPoint */
         RumBreakdownPoint: {
             /** Date */
@@ -9959,6 +17192,28 @@ export interface components {
             estimated_class_a_ops: number;
             /** Estimated Cost Usd */
             estimated_cost_usd: number;
+        };
+        /** RumCwvDistribution */
+        RumCwvDistribution: {
+            /** Good */
+            good: number;
+            /** Needs Improvement */
+            needs_improvement: number;
+            /** Poor */
+            poor: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumCwvVital
+         * @description One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch.
+         */
+        RumCwvVital: {
+            /** P75 */
+            p75: number | null;
+            distribution: components["schemas"]["RumCwvDistribution"] | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * RumDisableRequest
@@ -10004,6 +17259,49 @@ export interface components {
              */
             activate: boolean;
         };
+        /** RumEnvironments */
+        RumEnvironments: {
+            /** Browsers */
+            browsers: {
+                [key: string]: number;
+            };
+            /** Os */
+            os: {
+                [key: string]: number;
+            };
+            /** Devices */
+            devices: {
+                [key: string]: number;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumFidVital */
+        RumFidVital: {
+            /** P75 */
+            p75: number | null;
+            /** Fcp */
+            fcp: number | null;
+            /** Ttfb */
+            ttfb: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumJsError */
+        RumJsError: {
+            /** Message */
+            message: string | null;
+            /** File */
+            file: string;
+            /** Line */
+            line: number;
+            /** Col */
+            col: number;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * RumSettingsPartial
          * @description Partial-update for RUM-specific config (sync interval + retention).
@@ -10011,6 +17309,8 @@ export interface components {
         RumSettingsPartial: {
             /** Enabled */
             enabled?: boolean | null;
+            /** Log Period */
+            log_period?: number | null;
             /** Sync Interval Seconds */
             sync_interval_seconds?: number | null;
             /** Commit Interval Mins */
@@ -10053,6 +17353,68 @@ export interface components {
              * @default
              */
             token: string;
+        };
+        /** RumSettingsUpdateResponse */
+        RumSettingsUpdateResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Message */
+            message?: string | null;
+            /** Skipped */
+            skipped?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumStatusResponse
+         * @description ``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys.
+         */
+        RumStatusResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Enabled At */
+            enabled_at?: string | null;
+            /** Deployed Vcl Sha */
+            deployed_vcl_sha?: string | null;
+            /** Current Vcl Sha */
+            current_vcl_sha?: string | null;
+            /** Vcl Drift */
+            vcl_drift?: boolean | null;
+            /** Capture Vitals */
+            capture_vitals?: boolean | null;
+            /** Capture Performance */
+            capture_performance?: boolean | null;
+            /** Capture Errors */
+            capture_errors?: boolean | null;
+            /** Capture Events */
+            capture_events?: boolean | null;
+            /** Custom Condition */
+            custom_condition?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumTrends
+         * @description Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``
+         *     are absent on the no-data branch.
+         */
+        RumTrends: {
+            /** Timestamps */
+            timestamps: string[];
+            /** Lcp */
+            lcp: (number | null)[];
+            /** Cls */
+            cls: (number | null)[];
+            /** Error Rate */
+            error_rate: (number | null)[];
+            /** Pageviews */
+            pageviews?: number[] | null;
+            /** Interactions */
+            interactions?: number[] | null;
+            /** Errors */
+            errors?: number[] | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * RumUpgradeRequest
@@ -10098,6 +17460,32 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** RumVitals */
+        RumVitals: {
+            lcp: components["schemas"]["RumCwvVital"];
+            cls: components["schemas"]["RumCwvVital"];
+            inp: components["schemas"]["RumCwvVital"];
+            fid: components["schemas"]["RumFidVital"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumWorstPage */
+        RumWorstPage: {
+            /** Path */
+            path: string;
+            /** Views */
+            views: number;
+            /** Avg Load Time */
+            avg_load_time: number;
+            /** Lcp P75 */
+            lcp_p75: number | null;
+            /** Cls P75 */
+            cls_p75: number | null;
+            /** Error Rate */
+            error_rate: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** SavedView */
         SavedView: {
             /** Id */
@@ -10130,13 +17518,13 @@ export interface components {
          */
         SavedViewRecord: {
             /** Id */
-            id?: string | null;
+            id: string;
             /** Service Id */
-            service_id?: string | null;
+            service_id: string;
             /** Name */
-            name?: string | null;
+            name: string;
             /** Filters Json */
-            filters_json?: string | null;
+            filters_json: string;
             /** Time Range Type */
             time_range_type?: string | null;
             /** Start Time */
@@ -10147,6 +17535,62 @@ export interface components {
             page?: string | null;
             /** Created At */
             created_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** SchemaColumn */
+        SchemaColumn: {
+            /** Column */
+            column: string;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /** Type */
+            type: string;
+            /** Min */
+            min?: string | null;
+            /** Max */
+            max?: string | null;
+            /** Approx Unique */
+            approx_unique?: number | null;
+            /** Null Percentage */
+            null_percentage?: number | null;
+            /** Count */
+            count?: number | null;
+        };
+        /**
+         * SchemaColumnRow
+         * @description One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path.
+         */
+        SchemaColumnRow: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+            /** Min */
+            min?: string | null;
+            /** Max */
+            max?: string | null;
+            /** Approx Unique */
+            approx_unique?: number | null;
+            /** Null Percentage */
+            null_percentage?: number | null;
+            /** Count */
+            count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * SchemaResponse
+         * @description ``GET /api/schema``: cached or live column list plus the safe table name.
+         */
+        SchemaResponse: {
+            /** Schema */
+            schema: components["schemas"]["SchemaColumnRow"][];
+            /** Table Name */
+            table_name: string;
         } & {
             [key: string]: unknown;
         };
@@ -10229,11 +17673,23 @@ export interface components {
         /** ScoringComplianceRow */
         ScoringComplianceRow: {
             /** Hour */
-            hour?: string | null;
+            hour: string;
             /** Compliance */
-            compliance?: string | null;
+            compliance: string;
             /** Count */
-            count?: number | null;
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ScoringConfigCompositeResponse
+         * @description ``GET /scoring/config``: the four token-free config reads in one body.
+         */
+        ScoringConfigCompositeResponse: {
+            status?: components["schemas"]["ScoringStatusResponse"] | null;
+            threshold?: components["schemas"]["ScoringThresholdState"] | null;
+            exclude_regex?: components["schemas"]["ScoringExcludeRegexState"] | null;
+            enforce_status_code?: components["schemas"]["ScoringEnforceStatusCodeState"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -10311,11 +17767,11 @@ export interface components {
         /** ScoringDistributionRow */
         ScoringDistributionRow: {
             /** Hour */
-            hour?: string | null;
+            hour: string;
             /** Bucket */
-            bucket?: string | null;
+            bucket: string;
             /** Count */
-            count?: number | null;
+            count: number;
         } & {
             [key: string]: unknown;
         };
@@ -10348,17 +17804,17 @@ export interface components {
         /** ScoringEnforceStatusCodeState */
         ScoringEnforceStatusCodeState: {
             /** Current */
-            current?: number | null;
+            current: number | null;
             /** Default */
-            default?: number | null;
+            default: number;
             /** Effective */
-            effective?: number | null;
+            effective: number;
             /** Min */
-            min?: number | null;
+            min: number;
             /** Max */
-            max?: number | null;
+            max: number;
             /** Is Default */
-            is_default?: boolean | null;
+            is_default: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -10378,11 +17834,11 @@ export interface components {
         /** ScoringEnforceThresholdResponse */
         ScoringEnforceThresholdResponse: {
             /** Threshold */
-            threshold?: number | null;
+            threshold: number | null;
             /** Enforced */
-            enforced?: boolean | null;
+            enforced: boolean;
             /** Key */
-            key?: string | null;
+            key: string;
         } & {
             [key: string]: unknown;
         };
@@ -10450,13 +17906,13 @@ export interface components {
         /** ScoringExcludeRegexState */
         ScoringExcludeRegexState: {
             /** Current */
-            current?: string | null;
+            current: string;
             /** Is Default */
-            is_default?: boolean | null;
+            is_default: boolean;
             /** Default */
-            default?: string | null;
+            default: string;
             /** Effective */
-            effective?: string | null;
+            effective: string;
         } & {
             [key: string]: unknown;
         };
@@ -10553,29 +18009,40 @@ export interface components {
          */
         ScoringL2EnforceState: {
             /** Available */
-            available?: boolean | null;
+            available: boolean;
             /** Enabled */
-            enabled?: boolean | null;
+            enabled: boolean;
             /** L2 Enabled At */
-            l2_enabled_at?: number | null;
+            l2_enabled_at: number | null;
             /** Days Since Optin */
-            days_since_optin?: number | null;
+            days_since_optin: number | null;
             /** Ramp Progress */
-            ramp_progress?: number | null;
+            ramp_progress: number;
             /** Fully Ramped */
-            fully_ramped?: boolean | null;
+            fully_ramped: boolean;
             /** Warmup Days Remaining */
-            warmup_days_remaining?: number | null;
+            warmup_days_remaining: number | null;
             /** Scoring Enabled At */
-            scoring_enabled_at?: number | null;
+            scoring_enabled_at: number | null;
             /** Deployment Age Days */
-            deployment_age_days?: number | null;
+            deployment_age_days: number | null;
             /** Ready */
-            ready?: boolean | null;
+            ready: boolean;
             /** Ramp Days */
-            ramp_days?: number | null;
+            ramp_days: number;
             /** Readiness Days */
-            readiness_days?: number | null;
+            readiness_days: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ScoringLabelCounts */
+        ScoringLabelCounts: {
+            /** Good */
+            good: number;
+            /** Bad */
+            bad: number;
+            /** Neutral */
+            neutral: number;
         } & {
             [key: string]: unknown;
         };
@@ -10624,16 +18091,28 @@ export interface components {
              */
             sample_url: string;
         };
+        /** ScoringLabelDeleteResponse */
+        ScoringLabelDeleteResponse: {
+            /** Status */
+            status?: string | null;
+            /** Id */
+            id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ScoringLabelRow */
         ScoringLabelRow: {
             /** Id */
-            id?: string | null;
+            id: string;
             /** Service Id */
             service_id?: string | null;
             /** Sid */
-            sid?: string | null;
-            /** Label */
-            label?: string | null;
+            sid: string;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "good" | "bad" | "neutral";
             /** Notes */
             notes?: string | null;
             /** Flagged By */
@@ -10666,18 +18145,9 @@ export interface components {
         };
         /** ScoringLabelsListResponse */
         ScoringLabelsListResponse: {
-            /**
-             * Labels
-             * @default []
-             */
+            /** Labels */
             labels: components["schemas"]["ScoringLabelRow"][];
-            /**
-             * Counts
-             * @default {}
-             */
-            counts: {
-                [key: string]: number;
-            };
+            counts: components["schemas"]["ScoringLabelCounts"];
         } & {
             [key: string]: unknown;
         };
@@ -10955,6 +18425,37 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * ScoringStatusResponse
+         * @description ``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
+         *     live-version and drift keys. Config-derived keys beyond these ride as extras.
+         */
+        ScoringStatusResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Scoring Service Id */
+            scoring_service_id?: string | null;
+            /** Scoring Service Name */
+            scoring_service_name?: string | null;
+            /** Scoring Domain */
+            scoring_domain?: string | null;
+            /** Matrix Version */
+            matrix_version?: string | null;
+            /** Enabled At */
+            enabled_at?: string | null;
+            /** Scoring Active Version */
+            scoring_active_version?: number | null;
+            /** Scoring Activated At */
+            scoring_activated_at?: string | null;
+            /** Scorer Drift */
+            scorer_drift?: boolean | null;
+            /** Drift Detail */
+            drift_detail?: string | null;
+            /** Drift Known */
+            drift_known?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * ScoringThresholdBody
          * @description Body for ``PUT /scoring/threshold`` and ``PUT /scoring/enforce-threshold``.
          *
@@ -11002,11 +18503,11 @@ export interface components {
          */
         ScoringThresholdState: {
             /** Threshold */
-            threshold?: number | null;
+            threshold: number | null;
             /** Set At */
-            set_at?: string | null;
+            set_at: string | null;
             /** Enforced */
-            enforced?: boolean | null;
+            enforced: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -11040,11 +18541,11 @@ export interface components {
         /** ScoringTopFlaggedRow */
         ScoringTopFlaggedRow: {
             /** Timestamp */
-            timestamp?: string | null;
+            timestamp: string;
             /** Edge Sid */
-            edge_sid?: string | null;
+            edge_sid: string | null;
             /** Edge Score */
-            edge_score?: number | null;
+            edge_score: number;
             /** Edge Score L1 */
             edge_score_l1?: number | null;
             /** Edge Score L2 */
@@ -11079,17 +18580,17 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Seconds
              * @default 300
              */
             bucket_seconds: number;
             /** Sections */
-            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
+            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
         };
         /** SecurityAggregatesResponse */
         SecurityAggregatesResponse: {
@@ -11099,6 +18600,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -11114,9 +18619,7 @@ export interface components {
              * Tls Fingerprints
              * @default []
              */
-            tls_fingerprints: {
-                [key: string]: unknown;
-            }[];
+            tls_fingerprints: components["schemas"]["TlsFingerprintRow"][];
             /**
              * Fingerprint Coverage
              * @default {}
@@ -11128,44 +18631,32 @@ export interface components {
              * Req Size Dist
              * @default []
              */
-            req_size_dist: {
-                [key: string]: unknown;
-            }[];
+            req_size_dist: components["schemas"]["BucketCountRow"][];
             /**
              * Top Ips Header
              * @default []
              */
-            top_ips_header: {
-                [key: string]: unknown;
-            }[];
+            top_ips_header: components["schemas"]["TopIpHeaderRow"][];
             /**
              * Ipv6 Adoption
              * @default []
              */
-            ipv6_adoption: {
-                [key: string]: unknown;
-            }[];
+            ipv6_adoption: components["schemas"]["Ipv6AdoptionRow"][];
             /**
              * Proxy Dist
              * @default []
              */
-            proxy_dist: {
-                [key: string]: unknown;
-            }[];
+            proxy_dist: components["schemas"]["ProxyDistRow"][];
             /**
              * Conn Reuse Dist
              * @default []
              */
-            conn_reuse_dist: {
-                [key: string]: unknown;
-            }[];
+            conn_reuse_dist: components["schemas"]["BucketCountRow"][];
             /**
              * Verified Bots Ts
              * @default []
              */
-            verified_bots_ts: {
-                [key: string]: unknown;
-            }[];
+            verified_bots_ts: components["schemas"]["VerifiedBotsTsRow"][];
             /**
              * Ngwaf Configured
              * @default false
@@ -11175,23 +18666,85 @@ export interface components {
              * Ngwaf Verified Bots
              * @default []
              */
-            ngwaf_verified_bots: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_verified_bots: components["schemas"]["NgwafVerifiedBotRow"][];
             /**
              * Ngwaf Verified Bots Ts
              * @default []
              */
-            ngwaf_verified_bots_ts: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_verified_bots_ts: components["schemas"]["NgwafVerifiedBotsTsRow"][];
             /**
              * Wellknown Bots
              * @default []
              */
-            wellknown_bots: {
-                [key: string]: unknown;
-            }[];
+            wellknown_bots: components["schemas"]["WellknownBotRow"][];
+            /**
+             * Bots
+             * @default []
+             */
+            bots: components["schemas"]["SecurityBotRow"][];
+            /**
+             * Ngwaf Bots
+             * @default []
+             */
+            ngwaf_bots: components["schemas"]["SecurityBotRow"][];
+            /**
+             * Active Proxies Count
+             * @default 0
+             */
+            active_proxies_count: number;
+            /**
+             * Tunnel Requests Count
+             * @default 0
+             */
+            tunnel_requests_count: number;
+            /**
+             * Distance Mismatches Count
+             * @default 0
+             */
+            distance_mismatches_count: number;
+            /**
+             * Traffic Quality
+             * @default []
+             */
+            traffic_quality: components["schemas"]["TrafficQualityRow"][];
+            /**
+             * Suspicious Isps
+             * @default []
+             */
+            suspicious_isps: components["schemas"]["SuspiciousIspRow"][];
+            /**
+             * Active Clients
+             * @default []
+             */
+            active_clients: components["schemas"]["ActiveClientItem"][];
+        };
+        /**
+         * SecurityBotRow
+         * @description One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows
+         *     don't (the rollup/direct-join variants only emit name/category/request_count,
+         *     the high-scale one adds the verification counters).
+         */
+        SecurityBotRow: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name: string;
+            /** Category */
+            category?: string | null;
+            /** Request Count */
+            request_count: number;
+            /** Verified Count */
+            verified_count?: number | null;
+            /** Impersonator Count */
+            impersonator_count?: number | null;
+            /** Unverified Count */
+            unverified_count?: number | null;
+            /** Verification Coverage */
+            verification_coverage?: number | null;
+            /** Pending Count */
+            pending_count?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** SecurityMetrics */
         SecurityMetrics: {
@@ -11212,81 +18765,7 @@ export interface components {
              * Top Waf Signals
              * @default []
              */
-            top_waf_signals: {
-                [key: string]: unknown;
-            }[];
-        };
-        /** SecurityProxiesRequest */
-        SecurityProxiesRequest: {
-            /** Start Time */
-            start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /**
-             * Filters
-             * @default {}
-             */
-            filters: {
-                [key: string]: components["schemas"]["FilterSpec"];
-            };
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
-        };
-        /** SecurityProxiesResponse */
-        SecurityProxiesResponse: {
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Is Cached
-             * @default false
-             */
-            _is_cached: boolean;
-            /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Active Proxies Count
-             * @default 0
-             */
-            active_proxies_count: number;
-            /**
-             * Tunnel Requests Count
-             * @default 0
-             */
-            tunnel_requests_count: number;
-            /**
-             * Distance Mismatches Count
-             * @default 0
-             */
-            distance_mismatches_count: number;
-            /**
-             * Traffic Quality
-             * @default []
-             */
-            traffic_quality: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Suspicious Isps
-             * @default []
-             */
-            suspicious_isps: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Active Clients
-             * @default []
-             */
-            active_clients: components["schemas"]["ActiveClientItem"][];
+            top_waf_signals: components["schemas"]["WafSignalRow"][];
         };
         /** SecurityTopBotsResponse */
         SecurityTopBotsResponse: {
@@ -11296,6 +18775,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -11311,16 +18794,12 @@ export interface components {
              * Bots
              * @default []
              */
-            bots: {
-                [key: string]: unknown;
-            }[];
+            bots: components["schemas"]["SecurityBotRow"][];
             /**
              * Ngwaf Bots
              * @default []
              */
-            ngwaf_bots: {
-                [key: string]: unknown;
-            }[];
+            ngwaf_bots: components["schemas"]["SecurityBotRow"][];
         };
         /** ServiceConfig */
         ServiceConfig: {
@@ -11353,6 +18832,16 @@ export interface components {
             logging_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /** Rum */
+            rum?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rum Log Period */
+            rum_log_period?: number | null;
+            /** Analyst Path A Supported */
+            analyst_path_a_supported?: boolean | null;
+            /** Is High Scale */
+            is_high_scale?: boolean | null;
         };
         /**
          * ServiceCredentialsBody
@@ -11422,6 +18911,12 @@ export interface components {
         ServiceCronSync: {
             /** Enabled */
             enabled: boolean;
+            /**
+             * Polling Mode
+             * @default adaptive
+             * @enum {string}
+             */
+            polling_mode: "regular" | "adaptive";
             /** Interval Mins */
             interval_mins?: number | null;
             /** Interval Seconds */
@@ -11430,6 +18925,8 @@ export interface components {
             commit_interval_mins?: number | null;
             /** Delete After */
             delete_after?: boolean | null;
+            /** High Scale Shared Source */
+            high_scale_shared_source?: boolean | null;
             /** Log Enabled */
             log_enabled?: boolean | null;
             /** Log Retention Days */
@@ -11440,6 +18937,8 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
@@ -11464,6 +18963,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -11475,6 +18978,27 @@ export interface components {
             }[];
             /** Services */
             services: components["schemas"]["ServiceConfig"][];
+        };
+        /** ServingWatermarkResponse */
+        ServingWatermarkResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Domain */
+            domain: string;
+            /** Owner Epoch */
+            owner_epoch: number;
+            /** Coverage Start */
+            coverage_start: string | null;
+            /** Coverage End */
+            coverage_end: string | null;
+            /** Last Accepted Cursor */
+            last_accepted_cursor: string | null;
+            /** Last Archived Event Id */
+            last_archived_event_id: string | null;
+            /** Last Visible Event Id */
+            last_visible_event_id: string | null;
+            /** Exact */
+            exact: boolean;
         };
         /** Session */
         Session: {
@@ -11542,6 +19066,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -11555,8 +19083,43 @@ export interface components {
             columns: string[];
             /** Data */
             data: {
-                [key: string]: unknown;
+                [key: string]: string | number | boolean | null;
             }[];
+        };
+        /** SessionHarvestingInsightCard */
+        SessionHarvestingInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "session_harvesting";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_SessionHarvestingMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** SessionHarvestingMeta */
+        SessionHarvestingMeta: {
+            /** Requests */
+            requests: number;
+            /** Distinct Sessions */
+            distinct_sessions: number;
+            /** Baseline Distinct Sessions */
+            baseline_distinct_sessions: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** SessionsRequest */
         SessionsRequest: {
@@ -11581,6 +19144,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Limit
              * @default 50
@@ -11614,6 +19181,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -11657,9 +19228,9 @@ export interface components {
              */
             has_cmcd: boolean;
             /** Min Reqs Flag */
-            min_reqs_flag: number;
+            min_reqs_flag?: number | null;
             /** Min 4Xx Pct Flag */
-            min_4xx_pct_flag: number;
+            min_4xx_pct_flag?: number | null;
         };
         /**
          * SettingsPayload
@@ -11678,12 +19249,30 @@ export interface components {
              */
             ok: boolean;
         };
+        /**
+         * ShareAuditLogRow
+         * @description One ``remote_share_audit_logs`` row (``SELECT *``).
+         */
+        ShareAuditLogRow: {
+            /** Id */
+            id: number;
+            /** Timestamp */
+            timestamp: string;
+            /** Event Type */
+            event_type: string;
+            /** Email */
+            email: string | null;
+            /** Ip Address */
+            ip_address: string;
+            /** Details */
+            details: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareAuditLogsResponse */
         ShareAuditLogsResponse: {
             /** Audit Logs */
-            audit_logs?: {
-                [key: string]: unknown;
-            }[] | null;
+            audit_logs?: components["schemas"]["ShareAuditLogRow"][] | null;
         } & {
             [key: string]: unknown;
         };
@@ -11736,14 +19325,8 @@ export interface components {
             public_url?: string | null;
             /** Active Session Count */
             active_session_count?: number | null;
-            /** Rate Limits */
-            rate_limits?: {
-                [key: string]: unknown;
-            } | null;
-            /** Telemetry */
-            telemetry?: {
-                [key: string]: unknown;
-            } | null;
+            rate_limits?: components["schemas"]["ShareRateLimits"] | null;
+            telemetry?: components["schemas"]["ShareTelemetry"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -11794,6 +19377,60 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * SharePurgeResponse
+         * @description ``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``.
+         */
+        SharePurgeResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Deleted Audit Logs */
+            deleted_audit_logs?: number | null;
+            /** Deleted Expired Invites */
+            deleted_expired_invites?: number | null;
+            /** Deleted Stale Sessions */
+            deleted_stale_sessions?: number | null;
+            /** Deleted Claim Tokens */
+            deleted_claim_tokens?: number | null;
+            /** Audit Retention Days */
+            audit_retention_days?: number | null;
+            /** Max Idle Session Days */
+            max_idle_session_days?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareRateLimitFailure */
+        ShareRateLimitFailure: {
+            /** Ip */
+            ip: string;
+            /** Count */
+            count: number;
+            /** Window S */
+            window_s: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareRateLimitLockout */
+        ShareRateLimitLockout: {
+            /** Ip */
+            ip: string;
+            /** Remaining S */
+            remaining_s: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareRateLimits
+         * @description ``LoginRateLimiter.snapshot()``.
+         */
+        ShareRateLimits: {
+            /** Failures */
+            failures: components["schemas"]["ShareRateLimitFailure"][];
+            /** Lockouts */
+            lockouts: components["schemas"]["ShareRateLimitLockout"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareServiceEntry */
         ShareServiceEntry: {
             /** Service Id */
@@ -11806,6 +19443,56 @@ export interface components {
             sharing_domain?: string | null;
             /** Remote Service Id */
             remote_service_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareSessionRecord
+         * @description One live analyst session: ``AnalystSession.to_dict()`` (a dataclass
+         *     ``asdict``, so every key is always present).
+         */
+        ShareSessionRecord: {
+            /** Session Id */
+            session_id: string;
+            /** Invite Id */
+            invite_id: string;
+            /** Name */
+            name: string;
+            /** Email */
+            email: string;
+            /** Ip Address */
+            ip_address: string;
+            /** User Agent */
+            user_agent: string;
+            /** Fingerprint Signature */
+            fingerprint_signature: string;
+            /** Pii Policy */
+            pii_policy: {
+                [key: string]: unknown;
+            };
+            /** Query Window Hours */
+            query_window_hours: number | null;
+            /** Query Start Time */
+            query_start_time: string | null;
+            /** Query End Time */
+            query_end_time: string | null;
+            /** Login Time */
+            login_time: string;
+            /** Last Active Time */
+            last_active_time: string;
+            /** Last Activity */
+            last_activity: string | null;
+            /** Tos Pending */
+            tos_pending: boolean;
+            /** Service Ids */
+            service_ids: string[];
+            /**
+             * Auth Method
+             * @enum {string}
+             */
+            auth_method: "passcode" | "oauth";
+            /** Oauth Provider */
+            oauth_provider: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -11839,10 +19526,7 @@ export interface components {
         };
         /**
          * ShareStatusResponse
-         * @description ``build_share_status()``. The high-churn nested collections
-         *     (sessions / audit_logs / rate_limits / telemetry) stay free dicts:
-         *     their shapes are owned by TunnelManager internals and consumed
-         *     generically.
+         * @description ``build_share_status()``.
          */
         ShareStatusResponse: {
             /** Sharing Active */
@@ -11864,21 +19548,38 @@ export interface components {
             /** Invites */
             invites?: components["schemas"]["InviteRecord"][] | null;
             /** Sessions */
-            sessions?: {
-                [key: string]: unknown;
-            }[] | null;
+            sessions?: components["schemas"]["ShareSessionRecord"][] | null;
             /** Audit Logs */
-            audit_logs?: {
-                [key: string]: unknown;
-            }[] | null;
-            /** Rate Limits */
-            rate_limits?: {
-                [key: string]: unknown;
-            } | null;
-            /** Telemetry */
-            telemetry?: {
-                [key: string]: unknown;
-            } | null;
+            audit_logs?: components["schemas"]["ShareAuditLogRow"][] | null;
+            rate_limits?: components["schemas"]["ShareRateLimits"] | null;
+            telemetry?: components["schemas"]["ShareTelemetry"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ShareTelemetry
+         * @description ``TunnelManager.get_telemetry()``.
+         */
+        ShareTelemetry: {
+            /** Heartbeat Unauth Count */
+            heartbeat_unauth_count: number;
+            /** Current Uptime S */
+            current_uptime_s: number | null;
+            /** Tunnel Uptime History */
+            tunnel_uptime_history: components["schemas"]["ShareTunnelUptimeEntry"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** ShareTunnelUptimeEntry */
+        ShareTunnelUptimeEntry: {
+            /** Started At */
+            started_at: string;
+            /** Ended At */
+            ended_at: string;
+            /** Duration S */
+            duration_s: number;
+            /** Reason */
+            reason: string;
         } & {
             [key: string]: unknown;
         };
@@ -11888,10 +19589,7 @@ export interface components {
             service_name: string;
             /** Domain Name */
             domain_name: string;
-            /**
-             * Origin Host
-             * @default 34.123.30.195
-             */
+            /** Origin Host */
             origin_host: string;
             /**
              * Origin Port
@@ -11936,6 +19634,35 @@ export interface components {
             service_id: string;
             /** Token Override */
             token_override?: string | null;
+        };
+        /** ShieldPathDegradationInsightCard */
+        ShieldPathDegradationInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "shield_path_degradation";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_ShieldPathDegradationMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** ShieldPathDegradationMeta */
+        ShieldPathDegradationMeta: {
+            /** Ratio */
+            ratio: number;
+            /** Requests */
+            requests: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ShieldingAnalysis
@@ -12006,20 +19733,20 @@ export interface components {
             /** Efficiency Ratio */
             efficiency_ratio?: number | null;
             /**
-             * Anomaly Static
+             * Low Sample
              * @default false
              */
-            anomaly_static: boolean;
+            low_sample: boolean;
             /**
              * Anomaly Eligible
              * @default false
              */
             anomaly_eligible: boolean;
             /**
-             * Low Sample
+             * Anomaly Static
              * @default false
              */
-            low_sample: boolean;
+            anomaly_static: boolean;
             /** Edge Lat */
             edge_lat?: number | null;
             /** Edge Lon */
@@ -12028,6 +19755,16 @@ export interface components {
             shield_lat?: number | null;
             /** Shield Lon */
             shield_lon?: number | null;
+        };
+        /**
+         * SlowQueriesClearResponse
+         * @description Outcome of ``DELETE /api/admin/slow-queries``.
+         */
+        SlowQueriesClearResponse: {
+            /** Deleted */
+            deleted: number;
+            /** Service Id */
+            service_id: string;
         };
         /**
          * SlowQueriesCountResponse
@@ -12088,6 +19825,46 @@ export interface components {
              */
             op: "execute" | "executemany" | "executescript";
         };
+        /** StaleBrowserVersionInsightCard */
+        StaleBrowserVersionInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "stale_browser_version";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_StaleBrowserVersionMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** StaleBrowserVersionMeta */
+        StaleBrowserVersionMeta: {
+            /** Requests */
+            requests: number;
+            /** Ips */
+            ips: number;
+            /** Surge Ratio */
+            surge_ratio: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** StreamMetrics */
+        StreamMetrics: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Total Rows */
+            total_rows?: number | null;
+            /** Last Sync At */
+            last_sync_at?: string | null;
+        };
         /**
          * SummaryResponse
          * @description Cheap counts that power the live-monitor tab badge.
@@ -12102,6 +19879,17 @@ export interface components {
             /** Longest Ms */
             longest_ms: number;
         };
+        /** SuspiciousIspRow */
+        SuspiciousIspRow: {
+            /** Isp */
+            isp: string;
+            /** Asn */
+            asn?: number | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** SustainedLossAlert */
         SustainedLossAlert: {
             /** Started At */
@@ -12112,6 +19900,23 @@ export interface components {
             max_gap_pct: number;
             /** Total Lost Lines */
             total_lost_lines: number;
+        };
+        /**
+         * SyncStartResponse
+         * @description Outcome and run ID from ``POST /admin/sync/{service_id}``.
+         */
+        SyncStartResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /** Message */
+            message?: string | null;
+            /** Run Id */
+            run_id?: number | string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** SyncStatusResponse */
         SyncStatusResponse: {
@@ -12149,12 +19954,18 @@ export interface components {
             } | null;
             /** Ngwaf Workspace Id */
             ngwaf_workspace_id?: string | null;
+            rum?: components["schemas"]["StreamMetrics"] | null;
+            request?: components["schemas"]["StreamMetrics"] | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12194,6 +20005,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12205,6 +20020,43 @@ export interface components {
             }[];
             /** Jobs */
             jobs: components["schemas"]["SystemJobStatus"][];
+        };
+        /** TailLatencyInsightCard */
+        TailLatencyInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "tail_latency";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_TailLatencyMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** TailLatencyMeta */
+        TailLatencyMeta: {
+            /** P99 Ms */
+            p99_ms: number;
+            /** P50 Ms */
+            p50_ms: number;
+            /** Ratio */
+            ratio: number;
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** ThreatIntelItem */
         ThreatIntelItem: {
@@ -12231,6 +20083,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12242,6 +20098,83 @@ export interface components {
             }[];
             /** Data */
             data: components["schemas"]["ThreatIntelItem"][];
+        };
+        /** TimeoutSplitInsightCard */
+        TimeoutSplitInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "timeout_split";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_TimeoutSplitMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** TimeoutSplitMeta */
+        TimeoutSplitMeta: {
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "connect" | "read";
+            /** Connect P95 Ms */
+            connect_p95_ms: number;
+            /** Baseline Connect P95 Ms */
+            baseline_connect_p95_ms: number;
+            /** Read P95 Ms */
+            read_p95_ms: number;
+            /** Baseline Read P95 Ms */
+            baseline_read_p95_ms: number;
+            /** Window Requests */
+            window_requests: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * TlsFingerprintRow
+         * @description Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;
+         *     the high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``.
+         */
+        TlsFingerprintRow: {
+            /** Fingerprint */
+            fingerprint?: string | null;
+            /** Ip Count */
+            ip_count?: number | null;
+            /** Request Count */
+            request_count?: number | null;
+            /** Count */
+            count?: number | null;
+            /** Ips */
+            ips?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TopBotRow */
+        TopBotRow: {
+            /** Name */
+            name?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TopIpHeaderRow */
+        TopIpHeaderRow: {
+            /** Ip */
+            ip?: string | null;
+            /** Max Header */
+            max_header?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * TosAckPayload
@@ -12259,6 +20192,72 @@ export interface components {
             version: string;
             /** Text */
             text: string;
+        };
+        /** TrafficQualityRow */
+        TrafficQualityRow: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TransportMetrics */
+        TransportMetrics: {
+            /**
+             * Has Transport Data
+             * @default true
+             */
+            has_transport_data: boolean;
+            /** Tcp Rtt P50 Ms */
+            tcp_rtt_p50_ms?: number | null;
+            /** Tcp Rtt P90 Ms */
+            tcp_rtt_p90_ms?: number | null;
+            /** Tcp Rtt P95 Ms */
+            tcp_rtt_p95_ms?: number | null;
+            /** Tcp Rtt P99 Ms */
+            tcp_rtt_p99_ms?: number | null;
+            /** Retrans Rate Pct */
+            retrans_rate_pct?: number | null;
+            /** Packet Loss Pct */
+            packet_loss_pct?: number | null;
+            /** Delivery Rate Mbps */
+            delivery_rate_mbps?: number | null;
+            /**
+             * Bandwidth Bytes
+             * @default 0
+             */
+            bandwidth_bytes: number;
+            /**
+             * Total Requests
+             * @default 0
+             */
+            total_requests: number;
+            /**
+             * Protocol Distribution
+             * @default []
+             */
+            protocol_distribution: components["schemas"]["TransportProtocolShare"][];
+            /**
+             * Missing Fields
+             * @default []
+             */
+            missing_fields: string[];
+        };
+        /** TransportProtocolShare */
+        TransportProtocolShare: {
+            /** Protocol */
+            protocol: string;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Share Pct
+             * @default 0
+             */
+            share_pct: number;
         };
         /** TreeNode */
         TreeNode: {
@@ -12292,6 +20291,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12303,6 +20306,37 @@ export interface components {
             }[];
             /** Nodes */
             nodes: components["schemas"]["TreeNode"][];
+        };
+        /** UaMonocultureInsightCard */
+        UaMonocultureInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "ua_monoculture";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_UaMonocultureMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** UaMonocultureMeta */
+        UaMonocultureMeta: {
+            /** Requests */
+            requests: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /** UsageBandwidthPoint */
         UsageBandwidthPoint: {
@@ -12321,6 +20355,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12362,6 +20400,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12488,6 +20530,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12527,6 +20573,8 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /** Billing Zone */
+            billing_zone?: string | null;
             /** Track Duckdb Httpfs */
             track_duckdb_httpfs?: boolean | null;
         } & {
@@ -12556,6 +20604,8 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /** Billing Zone */
+            billing_zone?: string | null;
         };
         /** UsageOperationsPoint */
         UsageOperationsPoint: {
@@ -12574,6 +20624,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12606,6 +20660,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12676,6 +20734,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /** Sections */
             sections?: ("overview" | "caching" | "security" | "bots" | "performance" | "network" | "io")[] | null;
             /**
@@ -12683,10 +20745,6 @@ export interface components {
              * @default 1 day
              */
             chart_interval: string;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** ValueSummaryResponse */
         ValueSummaryResponse: {
@@ -12696,6 +20754,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12714,6 +20776,32 @@ export interface components {
             performance?: components["schemas"]["PerformanceMetrics"] | null;
             network?: components["schemas"]["NetworkMetrics"] | null;
             io?: components["schemas"]["IOMetrics"] | null;
+        };
+        /**
+         * VclHealthResponse
+         * @description ``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run.
+         */
+        VclHealthResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Is Clean */
+            is_clean: boolean;
+            /** Error */
+            error?: string | null;
+            /** Active Version */
+            active_version?: number | string | null;
+            /** Legacy Snippets Found */
+            legacy_snippets_found?: number | null;
+            /** Legacy Names */
+            legacy_names?: string[] | null;
+            /** Consolidated Snippets Found */
+            consolidated_snippets_found?: number | null;
+            /** Consolidated Names */
+            consolidated_names?: string[] | null;
+            /** Recommendation */
+            recommendation?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** VclLintRequest */
         VclLintRequest: {
@@ -12746,6 +20834,17 @@ export interface components {
              */
             format_length_limit: number;
         };
+        /** VerifiedBotsTsRow */
+        VerifiedBotsTsRow: {
+            /** Time */
+            time: string;
+            /** Bot Type */
+            bot_type?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ViewSaveResponse
          * @description Ack from ``POST /api/views/`` — id of the created row.
@@ -12755,6 +20854,46 @@ export interface components {
             id: string;
             /** Status */
             status: string;
+        };
+        /** WafSignalRow */
+        WafSignalRow: {
+            /** Signal */
+            signal?: string | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** WafSignalSpikesInsightCard */
+        WafSignalSpikesInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "waf_signal_spikes";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_WafSignalSpikesMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** WafSignalSpikesMeta */
+        WafSignalSpikesMeta: {
+            /** Spike Ratio */
+            spike_ratio: number;
+            /** Filters */
+            filters: {
+                [key: string]: string | number | null;
+            };
+        } & {
+            [key: string]: unknown;
         };
         /**
          * WebVitalsPayload
@@ -12787,6 +20926,44 @@ export interface components {
             delta?: number | null;
         };
         /**
+         * WellknownBotRow
+         * @description UA-matched bot with FCrDNS verification counters (``verification_coverage`` is
+         *     annotated last, after the counters).
+         */
+        WellknownBotRow: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Category */
+            category: string;
+            /** Request Count */
+            request_count: number;
+            /** Verified Count */
+            verified_count: number;
+            /** Impersonator Count */
+            impersonator_count: number;
+            /** Unverified Count */
+            unverified_count: number;
+            /** Pending Count */
+            pending_count: number;
+            /** Verification Coverage */
+            verification_coverage: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** WizardStateResponse */
+        WizardStateResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Completed Steps */
+            completed_steps: string[];
+            /** Is Complete */
+            is_complete: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * WizardStepRequest
          * @description Request body for recording a wizard step completion.
          */
@@ -12800,6 +20977,15 @@ export interface components {
             details: {
                 [key: string]: unknown;
             };
+        };
+        /** WizardStepResponse */
+        WizardStepResponse: {
+            /** Recorded */
+            recorded: boolean;
+            /** Step */
+            step: string;
+        } & {
+            [key: string]: unknown;
         };
         /** WordphraseResponse */
         WordphraseResponse: {
@@ -13201,6 +21387,1398 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FieldValuesResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    request_export_api_high_scale_services__service_id__exports_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleExportResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    export_status_api_high_scale_services__service_id__exports__export_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+                export_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleExportResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cancel_export_api_high_scale_services__service_id__exports__export_id__cancel_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+                export_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleExportCancelResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_request_facts_root_api_high_scale_request_facts_get: {
+        parameters: {
+            query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                limit?: number;
+                cursor?: string | null;
+                status?: string | null;
+                domain?: string | null;
+                pop?: string | null;
+                country?: string | null;
+                batch_id?: string | null;
+                emulate_standard?: boolean;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRequestFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post_request_facts_root_api_high_scale_request_facts_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRequestFactRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRequestFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    request_facts_api_high_scale_services__service_id__request_facts_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRequestFactRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRequestFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_facts_api_high_scale_services__service_id__rum_facts__domain__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+                domain: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRequestFactRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRumFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cmcd_facts_api_high_scale_services__service_id__cmcd_facts_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRequestFactRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRequestFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    aggregates_api_high_scale_services__service_id__aggregates_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleAggregateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleAggregateResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    submit_query_api_high_scale_services__service_id__queries_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleQueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_job_status_api_high_scale_services__service_id__queries__job_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleHistoricalJobResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cancel_query_job_api_high_scale_services__service_id__queries__job_id__cancel_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleHistoricalJobCancelResponse"];
                 };
             };
             /** @description Bad request */
@@ -13755,7 +23333,116 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["QueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_schema_endpoint_api_query_schema__service_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuerySchemaResponse"];
                 };
             };
             /** @description Bad request */
@@ -13862,7 +23549,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PresetQuery"][];
                 };
             };
             /** @description Bad request */
@@ -14279,6 +23966,234 @@ export interface operations {
             };
         };
     };
+    network_bundle_get_api_network_bundle_get: {
+        parameters: {
+            query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                metric?: string;
+                bucket_seconds?: number;
+                top_n?: number;
+                map_asn?: string;
+                region_country?: string;
+                sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkBundleResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    network_bundle_api_network_bundle_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkBundleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkBundleResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     performance_aggregates_api_performance_aggregates_post: {
         parameters: {
             query?: {
@@ -14390,7 +24305,119 @@ export interface operations {
             };
         };
     };
-    security_aggregates_api_security_aggregates_post: {
+    security_bundle_get_api_security_bundle_get: {
+        parameters: {
+            query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                bucket_seconds?: number;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityAggregatesResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    security_aggregates_api_security_bundle_post: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -14501,7 +24528,7 @@ export interface operations {
             };
         };
     };
-    top_bots_api_security_top_bots_post: {
+    security_aggregates_api_security_aggregates_post: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -14516,7 +24543,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["FilteredRequest"];
+                "application/json": components["schemas"]["SecurityAggregatesRequest"];
             };
         };
         responses: {
@@ -14526,118 +24553,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SecurityTopBotsResponse"];
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    get_proxies_data_api_security_proxies_post: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SecurityProxiesRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityProxiesResponse"];
+                    "application/json": components["schemas"]["SecurityAggregatesResponse"];
                 };
             };
             /** @description Bad request */
@@ -15266,6 +25182,8 @@ export interface operations {
             query?: {
                 /** @description Max alerts to return; oldest dropped. */
                 limit?: number;
+                /** @description Optional filter by alert state: all, alerting, ok, or muted. */
+                status?: ("all" | "alerting" | "ok" | "muted") | null;
             };
             header?: never;
             path?: never;
@@ -15475,6 +25393,8 @@ export interface operations {
             query?: {
                 /** @description Max alerts to return. */
                 limit?: number;
+                /** @description Optional filter by alert state: all, alerting, ok, or muted. */
+                status?: ("all" | "alerting" | "ok" | "muted") | null;
             };
             header?: never;
             path: {
@@ -15491,6 +25411,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AlertListResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    evaluate_alerts_endpoint_api_alerts_evaluate_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertEvaluateRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertEvaluateResponse"];
                 };
             };
             /** @description Bad request */
@@ -15688,7 +25719,7 @@ export interface operations {
             };
         };
     };
-    toggle_alert_enabled_api_alerts__alert_id__enabled_patch: {
+    update_alert_api_alerts__alert_id__put: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -15705,7 +25736,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["_ToggleBody"];
+                "application/json": components["schemas"]["Alert"];
             };
         };
         responses: {
@@ -15824,6 +25855,340 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    toggle_alert_enabled_api_alerts__alert_id__enabled_patch: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_ToggleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_alert_webhook_api_alerts__alert_id__test_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertTestWebhookRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTestWebhookResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_alert_webhook_by_service_api_alerts__service_id___alert_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertTestWebhookRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTestWebhookResponse"];
+                };
             };
             /** @description Bad request */
             400: {
@@ -16907,6 +27272,117 @@ export interface operations {
             };
         };
     };
+    origin_drilldown_api_origin_drilldown_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OriginDrilldownRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OriginDrilldownResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     control_room_tab_api_services__service_id__control_room__tab__get: {
         parameters: {
             query?: never;
@@ -16925,7 +27401,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomTabResponse"];
                 };
             };
             /** @description Bad request */
@@ -17578,8 +28054,123 @@ export interface operations {
     };
     realtime_seed_api_services__service_id__realtime_seed_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeSeedResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    realtime_stream_api_services__service_id__realtime_stream_get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 service_id: string;
             };
@@ -17679,10 +28270,16 @@ export interface operations {
             };
         };
     };
-    realtime_stream_api_services__service_id__realtime_stream_get: {
+    control_room_error_stream_api_services__service_id__control_room_error_stream_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 service_id: string;
             };
@@ -17805,7 +28402,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LogFieldAuditResponse"];
                 };
             };
             /** @description Bad request */
@@ -17918,7 +28515,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CorrelateResponse"];
                 };
             };
             /** @description Bad request */
@@ -18027,7 +28624,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WizardStateResponse"];
                 };
             };
             /** @description Bad request */
@@ -18140,7 +28737,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WizardStepResponse"];
                 };
             };
             /** @description Bad request */
@@ -18679,9 +29276,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -18998,9 +29593,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumSettingsUpdateResponse"];
                 };
             };
             /** @description Bad request */
@@ -19107,9 +29700,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumBeaconHealthResponse"];
                 };
             };
             /** @description Bad request */
@@ -19219,9 +29810,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumAnalyticsResponse"];
                 };
             };
             /** @description Bad request */
@@ -19310,6 +29899,9 @@ export interface operations {
     rum_live_events_api_services__service_id__rum_live_events_get: {
         parameters: {
             query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                filters?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -19622,21 +30214,20 @@ export interface operations {
             };
         };
     };
-    receive_rum_beacon_rum_beacon_get: {
+    assets_aggregates_get_api_assets_aggregates_get: {
         parameters: {
             query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                service?: string | null;
                 service_id?: string | null;
-                rum_metric_name?: string | null;
-                rum_metric_value?: number | null;
-                rum_metric_rating?: string | null;
-                cid?: string | null;
-                rum_pathname?: string | null;
-                rum_error_message?: string | null;
-                rum_error_file?: string | null;
-                rum_error_line?: number | null;
-                rum_error_col?: number | null;
             };
-            header?: never;
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -19648,119 +30239,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    receive_rum_beacon_rum_beacon_post: {
-        parameters: {
-            query?: {
-                service_id?: string | null;
-                rum_metric_name?: string | null;
-                rum_metric_value?: number | null;
-                rum_metric_rating?: string | null;
-                cid?: string | null;
-                rum_pathname?: string | null;
-                rum_error_message?: string | null;
-                rum_error_file?: string | null;
-                rum_error_line?: number | null;
-                rum_error_col?: number | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AssetsAggregatesResponse"];
                 };
             };
             /** @description Bad request */
@@ -19872,6 +30351,700 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssetsAggregatesResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_logs_post_api_logs_query_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LogsQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogsQueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_logs_get_api_logs_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+                from?: string | null;
+                to?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                limit?: number;
+                offset?: number;
+                sort_dir?: string;
+                search?: string | null;
+                columns?: string | null;
+                status?: string | null;
+                pop?: string | null;
+                client_ip?: string | null;
+                url?: string | null;
+                origin?: string | null;
+                asn?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogsQueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_logs_post_api_logs_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LogsQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogsQueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_logs_get_api_logs__service_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                from?: string | null;
+                to?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                limit?: number;
+                offset?: number;
+                sort_dir?: string;
+                search?: string | null;
+                columns?: string | null;
+                status?: string | null;
+                pop?: string | null;
+                client_ip?: string | null;
+                url?: string | null;
+                origin?: string | null;
+                asn?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogsQueryResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    live_log_stream_api_services__service_id__stream_get: {
+        parameters: {
+            query?: {
+                filter?: string | null;
+                status?: string | null;
+                pop?: string | null;
+                client_ip?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    live_log_stream_api_stream__service_id__get: {
+        parameters: {
+            query?: {
+                filter?: string | null;
+                status?: string | null;
+                pop?: string | null;
+                client_ip?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Bad request */
@@ -20085,7 +31258,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SchemaResponse"];
                 };
             };
             /** @description Bad request */
@@ -20192,7 +31365,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LogFieldsCatalogResponse"];
                 };
             };
             /** @description Bad request */
@@ -22304,13 +33477,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description JSON file download (Content-Disposition: attachment) holding the user-defined custom fields. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CustomFieldsExportFile"];
                 };
             };
             /** @description Bad request */
@@ -22529,7 +33702,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AuditLogsResponse"];
                 };
             };
             /** @description Bad request */
@@ -23825,7 +34998,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BotSourceRefreshResponse"];
                 };
             };
             /** @description Bad request */
@@ -23911,6 +35084,722 @@ export interface operations {
             };
         };
     };
+    refresh_all_bot_sources_endpoint_api_admin_bots_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BotSourcesRefreshResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    refresh_all_bot_sources_endpoint_api_admin_bot_sources_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BotSourcesRefreshResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    trigger_rdns_enrich_endpoint_api_admin_rdns_enrich_post: {
+        parameters: {
+            query?: {
+                /** @description Optional override for batch limit */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RdnsEnrichResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_rdns_stats_endpoint_api_admin_rdns_stats_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RdnsStatsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_celery_status_api_admin_celery_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CeleryStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_clickhouse_status_api_admin_clickhouse_status_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseStatusResponse"];
+                };
+            };
+        };
+    };
+    api_clickhouse_replay_api_admin_clickhouse_replay_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClickHouseReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseReplayResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseReplayErrorResponse"];
+                };
+            };
+        };
+    };
     optimize_now_api_admin_optimize_now_post: {
         parameters: {
             query?: {
@@ -23935,6 +35824,224 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OptimizeNowResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    optimize_service_api_admin_optimize__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizeNowResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    expire_snapshots_service_api_admin_expire_snapshots__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExpireSnapshotsResponse"];
                 };
             };
             /** @description Bad request */
@@ -24127,7 +36234,978 @@ export interface operations {
             };
         };
     };
-    local_compact_now_api_admin_local_compact_now_post: {
+    consolidate_rollups_api_admin_consolidate_rollups_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsolidateRollupsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_compact_now_api_admin_rollups_compact__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupCompactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_compact_now_api_admin_rollups_compact_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupCompactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_heal_now_api_admin_rollups_heal__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupHealResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_heal_now_api_admin_rollups_heal_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupHealResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_heal_now_api_admin_rollup_heal__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupHealResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_heal_now_api_admin_rollup_heal_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupHealResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_status_api_admin_rollups_status__service_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollup_status_api_admin_rollups_status_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    local_compact_now_api_admin_compact__service_id__post: {
         parameters: {
             query?: {
                 /** @description Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions). */
@@ -24136,6 +37214,119 @@ export interface operations {
                 dry_run?: boolean;
                 service?: string | null;
                 service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LocalCompactNowResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    local_compact_now_api_admin_local_compact_now_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                /** @description Compact partitions with strictly more files than this. Default 3 = normal cron behaviour. Pass 1 to dedupe the 2-3-file orphan pattern. Pass 0 to force-rewrite every partition through the dedup pipeline (one-shot historical cleanup of intra-file dups in single-parquet partitions). */
+                min_files?: number;
+                /** @description Report what would happen without writing. */
+                dry_run?: boolean;
+                service?: string | null;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -24238,11 +37429,120 @@ export interface operations {
             };
         };
     };
-    compaction_stats_api_admin_compaction_stats_get: {
+    compaction_stats_api_admin_compaction_status__service_id__get: {
         parameters: {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompactionStatsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    compaction_stats_api_admin_compaction_status_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -24260,6 +37560,545 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CompactionStatsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    compaction_stats_api_admin_compaction_stats_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompactionStatsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    partial_hour_merge_now_api_admin_partial_hour_merge__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartialHourMergeResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    partial_hour_merge_now_api_admin_partial_hour_merge_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartialHourMergeResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    partial_hour_status_api_admin_partial_hour_status__service_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartialHourStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    partial_hour_status_api_admin_partial_hour_status_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartialHourStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -24565,11 +38404,120 @@ export interface operations {
             };
         };
     };
-    metadata_cleanup_now_api_admin_metadata_cleanup_post: {
+    metadata_cleanup_now_api_admin_metadata_cleanup__service_id__post: {
         parameters: {
             query?: {
                 service?: string | null;
                 service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    metadata_cleanup_now_api_admin_metadata_cleanup_post: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+                service?: string | null;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -25203,7 +39151,321 @@ export interface operations {
             };
         };
     };
+    trigger_duckdb_recycle_endpoint_api_admin_duckdb_recycle_post: {
+        parameters: {
+            query?: {
+                /** @description Bypass RSS threshold check and force recycle */
+                force?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuckdbRecycleResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_duckdb_status_endpoint_api_admin_duckdb_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuckdbStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     sync_status_api_sync_status_get: {
+        parameters: {
+            query?: {
+                skip_fos?: boolean;
+                force?: boolean;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    sync_status_api_admin_sync_status_get: {
         parameters: {
             query?: {
                 skip_fos?: boolean;
@@ -25631,10 +39893,10 @@ export interface operations {
             };
         };
     };
-    api_vcl_health_api_admin_vcl_health_get: {
+    health_snapshot_api_admin_health_get: {
         parameters: {
-            query: {
-                service_id: string;
+            query?: {
+                probe_fos?: boolean;
             };
             header?: never;
             path?: never;
@@ -25648,9 +39910,321 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HealthSnapshotResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    health_snapshot_api_admin_system_metrics_get: {
+        parameters: {
+            query?: {
+                probe_fos?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthSnapshotResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_vcl_health_api_admin_vcl_health_get: {
+        parameters: {
+            query?: {
+                service_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VclHealthResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_high_scale_retention_recommendation_api_admin_high_scale_retention_recommendation_get: {
+        parameters: {
+            query: {
+                service_id?: string | null;
+                /** @description Observed or estimated request events per second */
+                events_per_second: number;
+                average_row_bytes?: number;
+                /** @description Serving volume size; defaults to the sampled volume */
+                total_bytes?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRetentionRecommendationResponse"];
                 };
             };
             /** @description Bad request */
@@ -25866,7 +40440,116 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["IcebergCalendarResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    iceberg_commit_endpoint_api_admin_commit__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -25955,8 +40638,8 @@ export interface operations {
     iceberg_commit_endpoint_api_admin_commit_iceberg_post: {
         parameters: {
             query?: {
-                service?: string | null;
                 service_id?: string | null;
+                service?: string | null;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -25973,7 +40656,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SyncStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -26080,7 +40763,114 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    ducklake_migrate_endpoint_api_admin_ducklake_migrate_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DucklakeMigrateResponse"];
                 };
             };
             /** @description Bad request */
@@ -26388,6 +41178,777 @@ export interface operations {
             };
         };
     };
+    sync_service_api_admin_sync__service_id__post: {
+        parameters: {
+            query?: {
+                /** @description Force sync even if throttled or intervals not elapsed */
+                force?: boolean;
+                start_time?: string | null;
+                end_time?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    full_sweep_service_api_admin_full_sweep__service_id__post: {
+        parameters: {
+            query?: {
+                /** @description Force full sweep even if active requests or throttled */
+                force?: boolean;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    gap_heal_service_api_admin_gap_heal__service_id__post: {
+        parameters: {
+            query?: {
+                /** @description Force gap heal evaluation even if throttled or active requests */
+                force?: boolean;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    ledger_sweep_service_api_admin_ledger_sweep__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_sync_service_api_admin_rum_sync__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_discovery_service_api_admin_rum_discovery__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_ledger_sweep_service_api_admin_rum_ledger_sweep__service_id__post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncStartResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     ingest_endpoint_api_admin_ingest_logs_post: {
         parameters: {
             query?: {
@@ -26411,9 +41972,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SyncStartResponse"];
                 };
             };
             /** @description Bad request */
@@ -26524,9 +42083,118 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BackfillWindowResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_log_accounting_api_admin_log_accounting__service_id__get: {
+        parameters: {
+            query?: {
+                hours?: number;
+                by?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogAccountingResponse"];
                 };
             };
             /** @description Bad request */
@@ -26615,10 +42283,10 @@ export interface operations {
     api_log_accounting_api_admin_log_accounting_get: {
         parameters: {
             query?: {
+                service_id?: string | null;
                 hours?: number;
                 by?: string;
                 service?: string | null;
-                service_id?: string | null;
             };
             header?: {
                 "x-fastly-service-id"?: string | null;
@@ -26740,6 +42408,213 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MetricHistoryBatchResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    trigger_ngwaf_sync_endpoint_api_admin_ngwaf_sync__service_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NgwafSyncResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_ngwaf_status_endpoint_api_admin_ngwaf_status_get: {
+        parameters: {
+            query?: {
+                /** @description Optional service ID */
+                service_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NgwafStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -27038,6 +42913,8 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: number;
+                error_category?: string | null;
+                source_type?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -27045,6 +42922,114 @@ export interface operations {
                 "x-fastly-service-id"?: string | null;
                 "x-service-id"?: string | null;
             };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuarantineListResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_ledger_quarantine_api_admin_ledger_quarantine_get: {
+        parameters: {
+            query?: {
+                /** @description Service ID to inspect quarantine for */
+                service_id?: string | null;
+                limit?: number;
+                offset?: number;
+                error_category?: string | null;
+                source_type?: string | null;
+            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -27249,114 +43234,7 @@ export interface operations {
             };
         };
     };
-    export_quarantine_api_admin_quarantine_export_get: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    download_quarantined_file_api_admin_quarantine__quarantine_id__download_get: {
+    download_quarantine_evidence_api_admin_quarantine_download__item_id__get: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -27367,7 +43245,7 @@ export interface operations {
                 "x-service-id"?: string | null;
             };
             path: {
-                quarantine_id: number;
+                item_id: number;
             };
             cookie?: never;
         };
@@ -27465,10 +43343,10 @@ export interface operations {
             };
         };
     };
-    purge_quarantine_api_admin_quarantine_purge_post: {
+    purge_quarantine_evidence_api_admin_quarantine_purge_post: {
         parameters: {
             query?: {
-                retention_days?: number;
+                item_id?: number | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -27488,7 +43366,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        [key: string]: unknown;
+                        [key: string]: number;
                     };
                 };
             };
@@ -29074,6 +44952,113 @@ export interface operations {
             };
         };
     };
+    clear_persisted_slow_queries_api_admin_slow_queries_delete: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlowQueriesClearResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get_query_api_admin_queries__qid__get: {
         parameters: {
             query?: never;
@@ -30338,13 +46323,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful Response */
+            /** @description ZIP archive of the generated Terraform files (Content-Disposition: attachment). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/zip": string;
                 };
             };
             /** @description Bad request */
@@ -30539,7 +46524,7 @@ export interface operations {
         parameters: {
             query: {
                 token: string;
-                service_id: string;
+                service_id?: string | null;
                 cdn_service_id: string;
                 bucket: string;
             };
@@ -30643,8 +46628,8 @@ export interface operations {
     };
     provision_ngwaf_workspaces_api_provision_ngwaf_workspaces_get: {
         parameters: {
-            query: {
-                service_id: string;
+            query?: {
+                service_id?: string | null;
                 token?: string;
             };
             header?: {
@@ -30984,7 +46969,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkMessageResponse"];
                 };
             };
             /** @description Bad request */
@@ -31410,9 +47395,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringConfigCompositeResponse"];
                 };
             };
             /** @description Bad request */
@@ -31516,9 +47499,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -31732,9 +47713,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelRow"];
                 };
             };
             /** @description Bad request */
@@ -31838,9 +47817,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelDeleteResponse"];
                 };
             };
             /** @description Bad request */
@@ -31948,9 +47925,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelRow"];
                 };
             };
             /** @description Bad request */
@@ -34921,9 +50896,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CmcdStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -35329,7 +51302,212 @@ export interface operations {
             };
         };
     };
+    recent_sqlite_api_debug_recent_postgres_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                since_seq?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecentSqliteResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     clear_sqlite_api_debug_clear_sqlite_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClearSqliteResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    clear_sqlite_api_debug_clear_postgres_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -35445,7 +51623,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DebugStateResponse"];
                 };
             };
             /** @description Bad request */
@@ -35549,7 +51727,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PageTelemetryResponse"];
                 };
             };
             /** @description Bad request */
@@ -38845,6 +55023,112 @@ export interface operations {
             };
         };
     };
+    trigger_share_purge_api_admin_share_purge_post: {
+        parameters: {
+            query?: {
+                /** @description Audit retention window in days (defaults to share_audit_retention_days setting or 90) */
+                audit_retention_days?: number | null;
+                /** @description Max days an analyst session can remain idle before being pruned */
+                max_idle_session_days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SharePurgeResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     report_web_vitals_api_web_vitals_post: {
         parameters: {
             query?: never;
@@ -38864,9 +55148,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -38971,9 +55253,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Bad request */
@@ -39077,7 +55357,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
             /** @description Bad request */

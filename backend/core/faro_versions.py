@@ -27,11 +27,13 @@ host, one signature the registry actually vouches for.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import io
 import tarfile
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -121,7 +123,8 @@ async def fetch_available_faro_versions() -> list[str]:
     try:
         from backend.utils.telemetry import tracked_call
 
-        async with httpx.AsyncClient() as client:
+        transport = httpx.AsyncHTTPTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
             with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
                 response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
             response.raise_for_status()
@@ -140,6 +143,65 @@ async def fetch_available_faro_versions() -> list[str]:
     stable_versions = [v for v in versions_dict if _is_stable_numeric(v)]
     stable_versions.sort(key=_version_sort_key, reverse=True)
     return stable_versions
+
+
+# The published Faro Web SDK version list changes rarely (a handful of npm
+# releases a year), but ``fetch_available_faro_versions`` makes a live
+# external call to registry.npmjs.org with a 10s timeout. The /rum/versions
+# page-load endpoint called it on EVERY request: measured in the 2026-10-01
+# deploy run, each call took 0.4-12s and, under verify-phase CPU/network
+# saturation, escalated to a 21.5s timeout -> ValueError -> 503 that
+# hard-failed the RUM dashboard on all four environments. This process-level
+# TTL cache (with stale-on-error) makes the page-load path return instantly
+# from memory and never 503 on a transient registry hiccup — the versions
+# list is a non-critical "is an upgrade available?" affordance, not page-
+# critical data. Callers that must distinguish "registry unreachable" from
+# "no newer version" (provisioning, the explicit upgrade action) keep using
+# the raising ``fetch_available_faro_versions`` directly.
+_VERSIONS_CACHE_TTL = 3600.0
+# After a failed refresh we keep serving the stale list but retry sooner than
+# the full TTL so recovery is quick once the registry is reachable again.
+_VERSIONS_ERROR_BACKOFF = 30.0
+_versions_cache_lock = asyncio.Lock()
+# (expiry_monotonic, versions) or None when never successfully fetched.
+_versions_cache: tuple[float, list[str]] | None = None
+
+
+def reset_versions_cache() -> None:
+    """Clear the cached version list (test seam)."""
+    global _versions_cache
+    _versions_cache = None
+
+
+async def get_faro_versions_cached() -> list[str]:
+    """Return the Faro Web SDK version list for page-load use, cached.
+
+    Serves a cached list within the TTL, refreshes past it, and on a refresh
+    failure returns the last known list (stale) rather than raising. Returns
+    an empty list only when the registry has never been reached — so a
+    transient npm hiccup degrades the "update available" badge instead of
+    503-ing the whole RUM page. Never raises.
+    """
+    global _versions_cache
+
+    cached = _versions_cache
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+
+    async with _versions_cache_lock:
+        # Re-check under the lock: a concurrent caller may have just refreshed.
+        cached = _versions_cache
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
+        try:
+            versions = await fetch_available_faro_versions()
+        except ValueError:
+            if cached is not None:
+                _versions_cache = (time.monotonic() + _VERSIONS_ERROR_BACKOFF, cached[1])
+                return cached[1]
+            return []
+        _versions_cache = (time.monotonic() + _VERSIONS_CACHE_TTL, versions)
+        return versions
 
 
 async def _fetch_version_dist(client: httpx.AsyncClient, version: str) -> dict[str, Any]:
@@ -304,7 +366,8 @@ async def fetch_faro_bundle(version: str) -> bytes:
     try:
         from backend.utils.telemetry import tracked_call
 
-        async with httpx.AsyncClient() as client:
+        transport = httpx.AsyncHTTPTransport()
+        async with httpx.AsyncClient(transport=transport) as client:
             dist = await _fetch_version_dist(client, version)
             tarball_url = _tarball_url_from_dist(dist, version)
             with tracked_call("GET", tarball_url, service="NPM Registry"):

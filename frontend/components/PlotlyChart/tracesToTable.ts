@@ -3,9 +3,9 @@
 // so the contract between the helper and the renderer stays in
 // one place.
 //
-// Plotly traces are loosely typed in upstream's d.ts — we accept
-// `any` here and inspect at runtime rather than chase the union of
-// every plotly trace type.
+// Plotly traces are loosely typed upstream — we accept `unknown` here and
+// inspect at runtime rather than chase the union of every plotly trace type.
+import type { PlotlyTrace } from '@/types/plotly'
 
 export interface TableShape {
   /** Optional caption text. Falls back to "Chart data". */
@@ -60,7 +60,7 @@ export function tracesToTable(data: unknown, fallbackTitle = 'Chart data'): Tabl
     return { title: fallbackTitle, columns: [], rows: [], empty: true }
   }
 
-  const traces = data as Array<Record<string, any>>
+  const traces = data as PlotlyTrace[]
 
   // ── Heatmap / surface / contour / any z-matrix trace ───────────
   // These can't be linearised into a flat (x, series…) table: x and y are

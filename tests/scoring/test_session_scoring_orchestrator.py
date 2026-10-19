@@ -772,40 +772,6 @@ def _scoring_meta_full() -> dict:
     }
 
 
-def test_scoring_vcl_matches_edge_true_when_snippets_and_backend_match():
-    """_scoring_vcl_matches_edge returns True only when every live scoring
-    snippet body + the backend override_host match what we'd deploy now."""
-    names = scoring_snippet_names()
-    want = {n: f"body::{n}" for n in names}
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if method == "GET" and path.endswith("/version/7/snippet"):
-            return [{"name": n, "content": f"body::{n}"} for n in names]
-        if method == "GET" and "/backend/" in path:
-            return {"override_host": "scorer.edgecompute.app"}
-        return {}
-
-    with patch.object(sso, "fastly", MagicMock(side_effect=side_effect)):
-        assert sso._scoring_vcl_matches_edge(LOG_SVC, 7, want, "scorer.edgecompute.app", TOKEN) is True
-
-
-def test_scoring_vcl_matches_edge_false_when_a_snippet_differs():
-    names = scoring_snippet_names()
-    want = {n: f"body::{n}" for n in names}
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if method == "GET" and path.endswith("/version/7/snippet"):
-            live = [{"name": n, "content": f"body::{n}"} for n in names]
-            live[0]["content"] = "DRIFTED"  # one snippet changed at the edge
-            return live
-        if method == "GET" and "/backend/" in path:
-            return {"override_host": "scorer.edgecompute.app"}
-        return {}
-
-    with patch.object(sso, "fastly", MagicMock(side_effect=side_effect)):
-        assert sso._scoring_vcl_matches_edge(LOG_SVC, 7, want, "scorer.edgecompute.app", TOKEN) is False
-
-
 def test_deploy_wasm_package_skips_when_package_and_edge_unchanged(tmp_path):
     """_deploy_wasm_package skips the upload (no clone/activate) when the
     committed sha matches the prior stamp AND the live edge files_hash matches —
@@ -844,9 +810,10 @@ def test_deploy_wasm_package_skips_when_package_and_edge_unchanged(tmp_path):
     assert not any(m == "PUT" and p.endswith("/activate") for m, p in methods_paths)
 
 
-def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
-    """On a redeploy where the live VCL already matches, enable_scoring skips the
-    logging-service clone/activate entirely (no version bump)."""
+def test_enable_skips_logging_redeploy_when_reconciler_reports_no_change():
+    """On a redeploy where the declarative reconciler finds the live VCL already
+    current (no activated version), enable_scoring reuses the active logging
+    version and never clones or activates the logging service itself."""
     cfg = {
         "service_id": LOG_SVC,
         "log_fields": {"custom_fields": []},
@@ -871,7 +838,6 @@ def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
             sso, "_deploy_wasm_package", return_value={"version": 2, "sha": "PKG", "files_hash": "F", "skipped": True}
         ),
         patch.object(sso, "_write_matrix_to_kv"),
-        patch.object(sso, "_scoring_vcl_matches_edge", return_value=True),
         patch.object(sso, "_publish_scoring_fos_side_effects"),
         patch.object(sso, "fastly", shared),
         patch("backend.core.fastly.service.fastly", shared),
@@ -883,6 +849,13 @@ def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
     # No new logging version — we reused the active one.
     assert result["logging_service_active_version"] == 8
     reconcile_mock.assert_called_once_with(LOG_SVC, TOKEN, status_cb=None)
+    methods_paths = [(c.args[0], c.args[1]) for c in shared.call_args_list]
+    assert not any(
+        m == "PUT" and p.startswith(f"/service/{LOG_SVC}/") and p.endswith("/clone") for m, p in methods_paths
+    )
+    assert not any(
+        m == "PUT" and p.startswith(f"/service/{LOG_SVC}/") and p.endswith("/activate") for m, p in methods_paths
+    )
 
 
 # ── teardown_scoring_resources (full-teardown scoring step, Part A) ───────────

@@ -21,6 +21,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useLocalStorageString } from '@/hooks/useLocalStorageString'
 
 // localStorage shape: pinned IDs (user-ordered) + MRU IDs (most-recent first).
 // Keyed globally — admin's switch list and analyst's switch list both share
@@ -34,11 +35,9 @@ interface ServicePrefs {
   mru: string[]
 }
 
-function readPrefs(): ServicePrefs {
-  if (typeof window === 'undefined') return { pinned: [], mru: [] }
+function parsePrefs(raw: string | null): ServicePrefs {
+  if (!raw) return { pinned: [], mru: [] }
   try {
-    const raw = window.localStorage.getItem(PREFS_KEY)
-    if (!raw) return { pinned: [], mru: [] }
     const parsed = JSON.parse(raw)
     return {
       pinned: Array.isArray(parsed.pinned) ? parsed.pinned : [],
@@ -46,15 +45,6 @@ function readPrefs(): ServicePrefs {
     }
   } catch {
     return { pinned: [], mru: [] }
-  }
-}
-
-function writePrefs(next: ServicePrefs) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(PREFS_KEY, JSON.stringify(next))
-  } catch {
-    /* quota / private mode — fall back to in-memory only */
   }
 }
 
@@ -73,28 +63,21 @@ export function ServiceSwitcher() {
   const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
   const pathname = usePathname()
 
-  // SSR-safe initial state: empty prefs render fine. Hydrate from localStorage
-  // on mount. We're inside a 'use client' boundary so the server render of
-  // this component is identical to the first client render — no mismatch.
-  const [prefs, setPrefs] = React.useState<ServicePrefs>({ pinned: [], mru: [] })
-  React.useEffect(() => {
-    setPrefs(readPrefs())
-  }, [])
+  // The prefs live in localStorage, read as external state: the server snapshot is empty, so the
+  // first client render matches the server and the stored prefs land right after hydration.
+  const [prefsRaw, writePrefsRaw] = useLocalStorageString(PREFS_KEY)
+  const prefs = React.useMemo(() => parsePrefs(prefsRaw), [prefsRaw])
+  const savePrefs = React.useCallback((next: ServicePrefs) => writePrefsRaw(JSON.stringify(next)), [writePrefsRaw])
 
   // Touch MRU whenever the active service changes (even from outside this
   // switcher — e.g. /admin/_sections/ServicesTable also setActiveServiceId).
   React.useEffect(() => {
-    if (!activeServiceId) return
-    setPrefs((prev) => {
-      if (prev.mru[0] === activeServiceId) return prev
-      const next = {
-        ...prev,
-        mru: [activeServiceId, ...prev.mru.filter((x) => x !== activeServiceId)].slice(0, MAX_MRU),
-      }
-      writePrefs(next)
-      return next
+    if (!activeServiceId || prefs.mru[0] === activeServiceId) return
+    savePrefs({
+      ...prefs,
+      mru: [activeServiceId, ...prefs.mru.filter((x) => x !== activeServiceId)].slice(0, MAX_MRU),
     })
-  }, [activeServiceId])
+  }, [activeServiceId, prefs, savePrefs])
 
   const activeService = services.find((s) => s.id === activeServiceId)
   const byId = React.useMemo(() => {
@@ -140,15 +123,11 @@ export function ServiceSwitcher() {
   }
 
   const handleTogglePin = (id: string) => {
-    setPrefs((prev) => {
-      const next = {
-        ...prev,
-        pinned: prev.pinned.includes(id)
-          ? prev.pinned.filter((x) => x !== id)
-          : [...prev.pinned, id],
-      }
-      writePrefs(next)
-      return next
+    savePrefs({
+      ...prefs,
+      pinned: prefs.pinned.includes(id)
+        ? prefs.pinned.filter((x) => x !== id)
+        : [...prefs.pinned, id],
     })
   }
 

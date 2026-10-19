@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 
+import { formatCount } from '@/lib/format'
 interface ThresholdPreviewStatsProps {
   precision: number | null
   recall: number | null
@@ -35,7 +36,7 @@ export function ThresholdPreviewStats({
       </div>
 
       <p className="text-[11px] text-muted-foreground italic">
-        {totalScoredSessions.toLocaleString()} distinct scored sessions in the last{' '}
+        {formatCount(totalScoredSessions)} distinct scored sessions in the last{' '}
         {sinceHours}h. Precision/recall only count sessions you&apos;ve labeled —
         the &quot;unlabeled&quot; tally is everything else.
       </p>

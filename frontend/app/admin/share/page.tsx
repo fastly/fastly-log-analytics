@@ -17,6 +17,7 @@ import { SharingControlPanel } from '@/components/share-dashboard/SharingControl
 import type { ShareStatus } from '@/components/share-dashboard/utils'
 import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
 import { client, extractApiError } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
 
 // InvitationsPanel is the default tab on cold load — static-importing it
 // keeps the initial paint off the dynamic-chunk fetch path.
@@ -36,10 +37,10 @@ const AuditLogPanel = dynamic(
 // the page reads on mount. Resulting UX: by the time the operator
 // clicks Share Dashboard, the status payload is already in cache —
 // page paints real content immediately instead of skeleton-then-swap.
-export const SHARE_STATUS_QUERY_KEY = ['admin', 'share', 'status'] as const
+export const SHARE_STATUS_QUERY_KEY = queryKeys.admin.shareStatus()
 // Companion key for the lean /live poll — keeps its own cache slot so
 // the mount-time /status query isn't refetched on the 10-s tick.
-export const SHARE_LIVE_QUERY_KEY = ['admin', 'share', 'live'] as const
+export const SHARE_LIVE_QUERY_KEY = queryKeys.admin.shareLive()
 
 type ShareLiveFields = Partial<Pick<
   ShareStatus,
@@ -61,8 +62,7 @@ export default function ShareDashboardPage() {
   const { data: status, error: statusError, refetch } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, response } = await client.GET('/api/admin/share/status' as any, { signal })
+      const { data, response } = await client.GET('/api/admin/share/status', { signal })
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data as ShareStatus
     },
@@ -80,8 +80,7 @@ export default function ShareDashboardPage() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, response } = await client.GET('/api/admin/share/live' as any, { signal })
+      const { data, response } = await client.GET('/api/admin/share/live', { signal })
       if (!response.ok) throw new Error(`live ${response.status}`)
       return data as ShareLiveFields
     },

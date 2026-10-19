@@ -1,0 +1,69 @@
+{{- if .Values.observability.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-tempo-config
+data:
+  tempo.yml: |-
+{{ .Files.Get "files/observability/tempo.yml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-tempo
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: tempo
+          image: {{ .Values.observability.tempo.image | quote }}
+          args: ["-config.file=/etc/tempo/tempo.yml"]
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+            - name: http
+              containerPort: 3200
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fastly-log-analytics.fullname" . }}-tempo-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare "tempo" -- see the prometheus Service's naming note (same reason:
+  # backend/worker OTEL_EXPORTER_OTLP_TRACES_ENDPOINT below resolves it).
+  name: tempo
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: http
+      port: 3200
+      targetPort: http
+{{- end }}

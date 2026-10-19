@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os as _os
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, Field, model_serializer
+
+from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
+from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 
 # ── Annotated clamping types (replaces repeated @field_validator boilerplate) ──
 
@@ -89,6 +93,29 @@ class FilteredRequest(DateRangeMixin):
     filters: FiltersDict = {}
 
 
+class RangeKeyedRequest(FilteredRequest):
+    """``FilteredRequest`` plus the relative-range wire contract (additive, optional).
+
+    When ``range_token`` is a recognized token the SERVER resolves the scan
+    window from (token, ``anchor``) and ignores FE-supplied ``start_time`` /
+    ``end_time`` (see ``RequestContext.resolve_window``), then clamps to the
+    invite ceiling, so an analyst can't widen past their invite by picking
+    ``"30d"``. The token also makes the FE first-paint key server-reproducible
+    (the origin SSR-seed contract) and, on network-health, stabilizes the
+    response-memo key. Absent/unknown token falls back to the legacy absolute
+    bounds path. See ``backend/utils/time_window.py``.
+    """
+
+    range_token: str | None = None
+    anchor: str | None = None
+
+
+class LimitedRequest(FilteredRequest):
+    """``FilteredRequest`` plus a row ``limit`` (clamped to 100, default 30)."""
+
+    limit: Limit100 = 30
+
+
 class PaginationMixin(BaseModel):
     """Mixin for endpoints that page/sort their results.
 
@@ -108,6 +135,17 @@ class DebugQuery(BaseModel):
     sql: str
     time_ms: float
     is_cached: bool = False
+    engine: str | None = None
+    # Bind parameters, when a producer records them. No current producer does, so
+    # the key is dropped from the wire unless it was set (see ``_drop_unset_params``).
+    params: list[Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_params(self, handler):
+        data = handler(self)
+        if "params" not in self.model_fields_set:
+            data.pop("params", None)
+        return data
 
 
 class DebugCall(BaseModel):
@@ -118,11 +156,6 @@ class DebugCall(BaseModel):
     status: str | int | None = None
     details: str | None = None
     caller: str | None = None
-
-
-import os as _os
-
-from pydantic import Field, model_serializer
 
 
 class HasDataMixin(BaseModel):
@@ -181,12 +214,9 @@ class BaseResponse(BaseModel):
     debug_queries: list[DebugQuery] = Field(default_factory=list, serialization_alias="_debug_queries")
     debug_calls: list[DebugCall] = Field(default_factory=list, serialization_alias="_debug_calls")
     # SQLite statements executed while serving THIS request (page-scoped
-    # sibling of debug_queries). Plain dicts — the wire shape is pinned by
-    # backend/models/debug.py::SqliteProfilerEntry, which the ring-buffer
-    # endpoint already exposes; duplicating the model here as a typed field
-    # would force common.py → debug.py imports for zero runtime validation
-    # gain on a debug-only envelope.
+    # Postgres/metadata SQL statements captured for this request.
     debug_sqlite: list[dict] = Field(default_factory=list, serialization_alias="_debug_sqlite")
+    debug_postgres: list[dict] = Field(default_factory=list, serialization_alias="_debug_postgres")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
     # Per-phase wall-clock timing for the handler. Always emitted as
     # _section_timings under serialization. Default empty so endpoints
@@ -202,9 +232,11 @@ class BaseResponse(BaseModel):
             data.pop("_debug_queries", None)
             data.pop("_debug_calls", None)
             data.pop("_debug_sqlite", None)
+            data.pop("_debug_postgres", None)
             data.pop("debug_queries", None)
             data.pop("debug_calls", None)
             data.pop("debug_sqlite", None)
+            data.pop("debug_postgres", None)
         return data
 
     @classmethod
@@ -213,22 +245,38 @@ class BaseResponse(BaseModel):
         from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
         dq = data.pop("debug_queries", None) or get_queries()
-        # Snapshot-copy: get_tracked_calls() below may itself run a SQLite
-        # SELECT (the usage_log iothread augmentation), and the collector
-        # returns a live list — copying first keeps that debug-induced
-        # statement out of the page's view.
-        ds = data.pop("debug_sqlite", None) or list(get_sqlite_queries())
+        ds = data.pop("debug_postgres", None) or data.pop("debug_sqlite", None) or list(get_sqlite_queries())
         dc = data.pop("debug_calls", None) or get_tracked_calls()
 
-        return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds)
+        return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds, debug_postgres=ds)
 
 
-class BootstrapService(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class BootstrapService(PassthroughModel):
     service_id: str
     name: str | None = None
     access_level: str | None = None
     cmcd_enabled: bool | None = None
+    rum_enabled: bool | None = None
+    rum_log_period: int | None = None
+    analyst_path_a_supported: bool = True
+    analyst_path_a_reason: str | None = None
+
+
+class BootstrapPopGeo(WireSafeModel):
+    """One PoP's label parts, parsed from the cached ``/datacenters`` list
+    (``get_pop_location_map``); any part may be an empty string."""
+
+    city: str
+    region: str
+    country: str
+
+
+class BootstrapDebugState(WireSafeModel):
+    """Debug-visibility settings folded into bootstrap (admin only)."""
+
+    debug_responses_enabled: bool
+    query_debug_visibility: str
+    api_call_debug_visibility: str
 
 
 class BootstrapResponse(BaseResponse):
@@ -247,10 +295,11 @@ class BootstrapResponse(BaseResponse):
     # ("DEN (Denver, CO - USA)"). Parsed from the cached /datacenters list;
     # the frontend formats + renders it (see frontend/lib/pop.ts). Separate
     # from `pops` (lat/lon) so the world-map consumer is untouched.
-    pop_geo: dict[str, dict[str, str]] | None = None
+    pop_geo: dict[str, BootstrapPopGeo] | None = None
     settings: dict[str, str | bool | None] | None = None
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
+    ngwaf_configured: bool = False
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.
@@ -260,7 +309,7 @@ class BootstrapResponse(BaseResponse):
     # ['log-fields-catalog', service_id] React Query cache and skip the
     # 35-KB round-trip on every cold page load (perf audit Phase D).
     # None when no active service.
-    log_fields_catalog: dict | None = None
+    log_fields_catalog: LogFieldsCatalogResponse | None = None
     # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
     # returns). Folded in so SyncStatusBadge / logs page hit cache on
     # first mount. ADMIN ONLY — None for analyst sessions (matches the
@@ -290,7 +339,7 @@ class BootstrapResponse(BaseResponse):
     # toggles on first paint instead of paying a separate
     # /api/debug/state round-trip. ADMIN ONLY — analysts never see
     # the diagnostics panel and the toggles aren't user-facing.
-    debug_state: dict | None = None
+    debug_state: BootstrapDebugState | None = None
     # Seed for the OperationsOverview admin cards:
     # ``{queries_summary, log_accounting, slow_queries_count}``.
     # The card-level useQueries (10-s poll, same queryKeys) hit cache

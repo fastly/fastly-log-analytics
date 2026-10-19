@@ -262,13 +262,23 @@ def reconcile_infrastructure(
 
     # Transactional rollback: load & save the previous config to restore in case of failure
     from backend.config import config_path as _config_path
+    from backend.config import mutate_config, restore_config, snapshot_config
 
     config_path = _config_path(logging_service_id)
-    if not config_path.exists():
+    orig_config_content = snapshot_config(logging_service_id)
+    if orig_config_content is None:
         raise RuntimeError(f"Configuration file {config_path} is required for live deployment.")
-
-    orig_config_content = config_path.read_text()
     cfg = json.loads(orig_config_content)
+
+    def _persist_cfg() -> None:
+        """Write the in-memory ``cfg`` through the config lock (atomic write, cache invalidation)."""
+
+        def _replace(disk_cfg: dict) -> None:
+            disk_cfg.clear()
+            disk_cfg.update(cfg)
+
+        if mutate_config(logging_service_id, _replace) is None:
+            raise RuntimeError(f"Configuration file {config_path} disappeared during reconciliation.")
 
     try:
         # ── Phase 1 & Phase 2: Create & Populate Storage + Compute Scorer ─────
@@ -331,7 +341,7 @@ def reconcile_infrastructure(
             status_cb("⏳ Phase 3: Syncing VCL Edge Logging Configurations, Custom Fields, and Backends...")
 
         # Update JSON config on disk before triggering VCL reconciliation so the reconciler sees the live state
-        config_path.write_text(json.dumps(cfg, indent=2))
+        _persist_cfg()
 
         reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb)
 
@@ -364,7 +374,7 @@ def reconcile_infrastructure(
             # Completely clear out the scoring configuration on full teardown success
             if "scoring" in cfg:
                 cfg.pop("scoring", None)
-            config_path.write_text(json.dumps(cfg, indent=2))
+            _persist_cfg()
 
         if status_cb:
             status_cb("✅ Infrastructure state reconciliation completed successfully.")
@@ -374,5 +384,5 @@ def reconcile_infrastructure(
         if status_cb:
             status_cb(f"❌ Error during reconciliation: {err}. Rolling back to previous configuration...")
         # Restore the original config file content to disk
-        config_path.write_text(orig_config_content)
+        restore_config(logging_service_id, orig_config_content)
         raise err

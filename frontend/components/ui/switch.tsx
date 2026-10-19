@@ -17,8 +17,8 @@ function Switch({
   // aria-labelledby. Default to a generic "Toggle" so the residual count
   // is bounded; call sites with a visible adjacent <Label> should still
   // override with aria-labelledby pointing at the real label.
-  const ariaLabel = (props as any)["aria-label"]
-  const ariaLabelledby = (props as any)["aria-labelledby"]
+  const ariaLabel = props["aria-label"]
+  const ariaLabelledby = props["aria-labelledby"]
   const labelProps = !ariaLabel && !ariaLabelledby ? { "aria-label": "Toggle" } : {}
   return (
     <SwitchPrimitive.Root

@@ -3,6 +3,9 @@ import { Badge } from "@/components/ui/badge";
 import { FilterValueCell } from "@/components/FilterValueCell";
 import { PopLabel } from "@/components/PopLabel";
 import { cn } from "@/lib/utils";
+import { formatCount } from "@/lib/format";
+import type { ColumnDef } from "@tanstack/react-table";
+import type { ShieldingRowInput } from "./shielding-rows";
 import { Activity, Shield, AlertTriangle, Search, ActivitySquare, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
 export const GlobalHealthHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
@@ -10,7 +13,7 @@ export const GlobalHealthHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>How it's calculated:</strong> Combines TCP RTT, packet loss (<code>ploss</code>), and RTT variance (jitter) into a single normalized score for each ASN, then takes a traffic-weighted average.</span>
+        <span><strong>How it&apos;s calculated:</strong> Combines TCP RTT, packet loss (<code>ploss</code>), and RTT variance (jitter) into a single normalized score for each ASN, then takes a traffic-weighted average.</span>
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -42,11 +45,11 @@ export const WorstAsnHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <NetworkIcon className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>What causes this:</strong> High RTT + packet loss from a specific ASN typically indicates a peering issue between that ISP and Fastly's edge nodes, or congestion on a transit link.</span>
+        <span><strong>What causes this:</strong> High RTT + packet loss from a specific ASN typically indicates a peering issue between that ISP and Fastly&apos;s edge nodes, or congestion on a transit link.</span>
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>How to act:</strong> Check the ASN Leaderboard to see how many requests this affects and whether the trend is degrading. If it's a large ISP with a worsening trend, Fastly support can investigate peering.</span>
+        <span><strong>How to act:</strong> Check the ASN Leaderboard to see how many requests this affects and whether the trend is degrading. If it&apos;s a large ISP with a worsening trend, Fastly support can investigate peering.</span>
       </li>
     </ul>
   </div>
@@ -58,7 +61,7 @@ export const WorstRegionHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <Globe className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>ISP vs. regional:</strong> If the same country appears in both this card and the Worst ASN, the issue is likely a single dominant ISP. If the ASN is healthy but the country isn't, a regional routing or infrastructure problem is more likely.</span>
+        <span><strong>ISP vs. regional:</strong> If the same country appears in both this card and the Worst ASN, the issue is likely a single dominant ISP. If the ASN is healthy but the country isn&apos;t, a regional routing or infrastructure problem is more likely.</span>
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -98,7 +101,7 @@ export const AsnLeaderboardHelp = () => (
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-red-500" />
-        <span><strong>Trend:</strong> Based on a longer trajectory than 1h Change. An ASN showing "DEGRADING" trend but a high current score may be slowly sliding toward a threshold breach.</span>
+        <span><strong>Trend:</strong> Based on a longer trajectory than 1h Change. An ASN showing &quot;DEGRADING&quot; trend but a high current score may be slowly sliding toward a threshold breach.</span>
       </li>
     </ul>
   </div>
@@ -114,7 +117,7 @@ export const MetroLeaderboardHelp = () => (
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>Requires metro logging:</strong> This panel only appears when <code>req.http.Fastly-Metro</code> or equivalent metro-level fields are present in your logs. If you don't see it, check your log field configuration.</span>
+        <span><strong>Requires metro logging:</strong> This panel only appears when <code>req.http.Fastly-Metro</code> or equivalent metro-level fields are present in your logs. If you don&apos;t see it, check your log field configuration.</span>
       </li>
     </ul>
   </div>
@@ -189,7 +192,7 @@ export const NetworkQualityHelp = () => (
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>Requires Network Quality (Group F) fields</strong> — <code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren't present.</span>
+        <span><strong>Requires Network Quality (Group F) fields</strong> — <code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren&apos;t present.</span>
       </li>
     </ul>
   </div>
@@ -202,38 +205,47 @@ export function HealthBadge({ score }: { score: number | null }) {
   const variant = score >= 80 ? 'outline' : score >= 50 ? 'secondary' : 'destructive'
   const color = score >= 80 ? 'text-green-600 dark:text-green-400' : score >= 50 ? 'text-yellow-600 dark:text-yellow-400' : ''
   return (
-    <Badge variant={variant as any} className={cn("text-[10px]", color)}>
+    <Badge variant={variant} className={cn("text-[10px]", color)}>
       {score.toFixed(0)}/100
     </Badge>
   )
 }
 
-export const SHIELDING_COLUMNS = [
+const shieldingHeader = (label: string) =>
+  function ShieldingHeader() {
+    return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
+  }
+// Cells read their own column through `getValue()` (typed `unknown` for a heterogeneous column set).
+const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
+const numberValue = (v: unknown): number | null => (typeof v === 'number' ? v : null)
+const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</span>
+
+export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   {
     accessorKey: 'edge_pop',
-    id: 'edge_pop', meta: { label: 'Edge POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Edge POP</span>,
-    cell: (info: any) => (
+    id: 'edge_pop', meta: { label: 'Edge POP' }, header: shieldingHeader('Edge POP'),
+    cell: (info) => (
       <FilterValueCell
-        filters={[{ column: 'pop', value: info.getValue() }]}
-        display={<PopLabel code={info.getValue()} />}
+        filters={[{ column: 'pop', value: textValue(info.getValue()) }]}
+        display={<PopLabel code={textValue(info.getValue())} />}
         className={cn('font-bold', info.row.original.anomaly_static ? 'text-destructive' : '')}
       />
     )
   },
   {
     accessorKey: 'shield_pop',
-    id: 'shield_pop', meta: { label: 'Shield POP' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Shield POP</span>,
-    cell: (info: any) => (
+    id: 'shield_pop', meta: { label: 'Shield POP' }, header: shieldingHeader('Shield POP'),
+    cell: (info) => (
       <FilterValueCell
-        filters={[{ column: 'shield_pop', value: info.getValue() }]}
-        display={<PopLabel code={info.getValue()} />}
+        filters={[{ column: 'shield_pop', value: textValue(info.getValue()) }]}
+        display={<PopLabel code={textValue(info.getValue())} />}
         className="font-bold text-purple-500"
       />
     )
   },
   {
-    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Reqs</span>,
-    cell: (info: any) => {
+    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: shieldingHeader('Reqs'),
+    cell: (info) => {
       // Mute the count on low-sample routes so the eye connects "few requests"
       // with the un-graded (grey) efficiency pill. (low-sample gating)
       const lowSample = info.row.original.low_sample
@@ -242,18 +254,27 @@ export const SHIELDING_COLUMNS = [
           className={cn('tabular-nums', lowSample ? 'text-muted-foreground' : '')}
           title={lowSample ? 'Fewer than 30 requests — percentiles unreliable, route not flagged' : undefined}
         >
-          {info.getValue().toLocaleString()}
+          {formatCount(numberValue(info.getValue()) ?? 0)}
         </span>
       )
     }
   },
-  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P50 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P95 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">P99 (E→S)</span>, cell: (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span> },
-  { accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Light Floor</span>, cell: (info: any) => info.getValue() != null ? <span className="text-muted-foreground">{info.getValue().toFixed(1)}ms</span> : <span className="text-muted-foreground">—</span> },
+  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: shieldingHeader('P50 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: shieldingHeader('P95 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: shieldingHeader('P99 (E→S)'), cell: (info) => msCell(info.getValue()) },
   {
-    accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: () => <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">Efficiency</span>, cell: (info: any) => {
-      const ratio = info.getValue()
+    accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: shieldingHeader('Light Floor'),
+    cell: (info) => {
+      const floor = numberValue(info.getValue())
+      return floor != null
+        ? <span className="text-muted-foreground">{floor.toFixed(1)}ms</span>
+        : <span className="text-muted-foreground">—</span>
+    }
+  },
+  {
+    accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: shieldingHeader('Efficiency'),
+    cell: (info) => {
+      const ratio = numberValue(info.getValue())
       if (ratio == null) return <span className="text-muted-foreground">—</span>
       const lowSample = info.row.original.low_sample
       // A negative ratio (transit delta < 0) is meaningless, not "excellent":

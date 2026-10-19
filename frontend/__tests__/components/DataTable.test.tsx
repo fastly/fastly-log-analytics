@@ -16,6 +16,7 @@
  * requires fake pointer events and is brittle. We focus on rendering
  * invariants, column visibility, and the resize-race guard.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { axe } from 'vitest-axe'
@@ -25,7 +26,7 @@ import type { ColumnDef } from '@tanstack/react-table'
 
 vi.mock('@tanstack/react-virtual', () => {
   return {
-    useVirtualizer: (options: any) => ({
+    useVirtualizer: (options: { count: number }) => ({
       getVirtualItems: () => Array.from({ length: options.count }).map((_, i) => ({ index: i, start: i * 40, end: (i + 1) * 40 })),
       getTotalSize: () => options.count * 40,
     })
@@ -33,11 +34,7 @@ vi.mock('@tanstack/react-virtual', () => {
 })
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
   // DataTable measures things via HTMLElement.getBoundingClientRect.
   // jsdom returns zeros; that's fine for our presence-checks.
 })

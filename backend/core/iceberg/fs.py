@@ -26,8 +26,11 @@ from __future__ import annotations
 # the patched __init__ pops it and stashes the source on the instance for the
 # deferred before-send.s3.* header injector.
 import contextvars as _contextvars
+import logging
 import os
 import threading as _threading
+
+logger = logging.getLogger(__name__)
 
 _PENDING_FS_SOURCE: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar("_PENDING_FS_SOURCE", default=None)
 
@@ -188,6 +191,7 @@ try:
         if "config_kwargs" not in kwargs:
             kwargs["config_kwargs"] = {}
         kwargs["config_kwargs"]["request_checksum_calculation"] = "when_required"
+        kwargs["config_kwargs"]["retries"] = {"max_attempts": 10, "mode": "standard"}
 
         from backend.utils import telemetry_proxy as _proxy
 
@@ -354,7 +358,7 @@ try:
                 try:
                     _cache_put(_path, t.result())
                 except Exception:
-                    pass
+                    logger.debug("_on_done: _cache_put failed (ignored)", exc_info=True)
 
             task.add_done_callback(_on_done)
 
@@ -436,7 +440,7 @@ try:
                 try:
                     _cache_put(self._path, bytes(self._buf))
                 except Exception:
-                    pass
+                    logger.debug("close: _cache_put failed (ignored)", exc_info=True)
 
         def __enter__(self):
             return self
@@ -448,7 +452,7 @@ try:
                 try:
                     self._handle.__exit__(exc_type, exc, tb)
                 except Exception:
-                    pass
+                    logger.debug("__exit__: self._handle.__exit__ failed (ignored)", exc_info=True)
                 self._closed = True
 
         def __getattr__(self, name):

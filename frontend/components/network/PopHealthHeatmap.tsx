@@ -3,12 +3,13 @@
 import React from 'react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client, extractApiError } from '@/lib/api'
-import { formatBytes, formatCompactCount } from '@/lib/format'
+import { formatBytes, formatCompactCount, formatCount } from '@/lib/format'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 import {
   Dialog,
   DialogContent,
@@ -17,16 +18,9 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 
-export interface PopHealthItem {
-  pop: string
-  requests: number
-  errors: number
-  error_rate: number
-  p50_rtt_us: number | null
-  p95_ttfb_ms: number | null
-  cache_hit_rate: number
-  bandwidth_bytes: number
-}
+const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
+
+export type PopHealthItem = components['schemas']['PopHealthItem']
 
 interface PopHealthHeatmapProps {
   serviceId: string
@@ -41,8 +35,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const popHealthQuery = useServiceQuery<PopHealthItem[]>(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await client.GET('/api/network/pop-health' as any, {
+      const { data } = await client.GET('/api/network/pop-health', {
         signal,
         params: {
           query: {
@@ -66,7 +59,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (isLoading) {
     return (
-      <Card className="shadow-md">
+      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -79,9 +72,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-            {Array.from({ length: 16 }).map((_, i) => (
-              // eslint-disable-next-line react/no-array-index-key
-              <div key={i} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
+            {SKELETON_IDS.map((id) => (
+              <div key={id} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
             ))}
           </div>
         </CardContent>
@@ -91,7 +83,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (error) {
     return (
-      <Card className="shadow-md border-destructive/20 bg-destructive/5">
+      <Card className="shadow-md border-destructive/20 bg-destructive/5 [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <CardTitle className="text-lg font-bold text-destructive flex items-center gap-2">
             <AlertTriangle className="h-5 w-5" />
@@ -107,7 +99,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (items.length === 0) {
     return (
-      <Card className="shadow-md">
+      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <CardTitle className="text-lg font-bold flex items-center gap-2">
             <Globe className="h-5 w-5 text-muted-foreground" />
@@ -123,7 +115,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   }
 
   return (
-    <Card className="shadow-md transition-all duration-300">
+    <Card className="shadow-md transition-all duration-300 [contain-intrinsic-size:280px] [content-visibility:auto]">
       <CardHeader className="border-b bg-muted/15">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -170,32 +162,34 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
               return (
                 <Tooltip key={pop.pop}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedPop(pop)}
-                      className={cn(
-                        'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
-                        'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
-                        borderClass,
-                        bgClass
-                      )}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
-                        <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
-                          {pop.pop.toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="w-full flex flex-col items-center mt-1">
-                        <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
-                          {formatCompactCount(pop.requests)} reqs
-                        </span>
-                        <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
-                          {pop.cache_hit_rate.toFixed(1)}% Hit
-                        </span>
-                      </div>
-                    </button>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPop(pop)}
+                        className={cn(
+                          'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
+                          'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
+                          borderClass,
+                          bgClass
+                        )}
+                      />
+                    }
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
+                      <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
+                        {pop.pop.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="w-full flex flex-col items-center mt-1">
+                      <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
+                        {formatCompactCount(pop.requests)} reqs
+                      </span>
+                      <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
+                        {pop.cache_hit_rate.toFixed(1)}% Hit
+                      </span>
+                    </div>
                   </TooltipTrigger>
                   <TooltipContent className="p-0 border border-muted bg-popover text-popover-foreground shadow-xl rounded-lg w-64 overflow-hidden">
                     <div className="bg-muted/50 border-b border-muted px-3 py-2 flex items-center justify-between">
@@ -214,7 +208,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Activity className="h-3 w-3" /> Requests
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.requests.toLocaleString()}
+                            {formatCount(pop.requests)}
                           </span>
                         </div>
                         <div className="flex flex-col">
@@ -318,7 +312,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.requests.toLocaleString()}
+                        {formatCount(selectedPop.requests)}
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
                         Routes <strong className="font-mono text-foreground">{((selectedPop.requests / (totalRequests || 1)) * 100).toFixed(2)}%</strong> of total edge traffic.
@@ -336,8 +330,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.cache_hit_rate.toFixed(2)}%
                       </div>
                       <div className="text-[10px] text-muted-foreground/90 font-medium mt-1 space-y-0.5 font-mono">
-                        <div>Hits: {Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100).toLocaleString()}</div>
-                        <div>Misses: {Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100).toLocaleString()}</div>
+                        <div>Hits: {formatCount(Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100))}</div>
+                        <div>Misses: {formatCount(Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100))}</div>
                       </div>
                     </div>
                   </div>
@@ -372,7 +366,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.error_rate.toFixed(2)}%
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
-                        Total Failed Reqs: <strong className="font-mono text-foreground">{Math.round(selectedPop.requests * selectedPop.error_rate / 100).toLocaleString()}</strong>
+                        Total Failed Reqs: <strong className="font-mono text-foreground">{formatCount(Math.round(selectedPop.requests * selectedPop.error_rate / 100))}</strong>
                       </span>
                     </div>
                   </div>

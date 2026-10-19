@@ -16,7 +16,21 @@ import { isUserActive } from '@/lib/userActivity'
  * an explicit 10s since those fire frequently and must not back up. A caller's
  * own `headers` are merged on top (none currently override `X-Remote-Analyst`).
  */
+let analystPageLoadId: string | null = null
+
+function getAnalystPageLoadId(): string | null {
+  if (typeof window === 'undefined') return null
+  if (!analystPageLoadId) {
+    analystPageLoadId =
+      typeof crypto?.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+  return analystPageLoadId
+}
+
 export function analystFetch(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<Response> {
+  const loadId = getAnalystPageLoadId()
   return fetchWithTimeout(
     path,
     {
@@ -25,7 +39,12 @@ export function analystFetch(path: string, init: RequestInit = {}, timeoutMs?: n
       // X-User-Active: idle-timeout activity signal (see lib/userActivity).
       // "0" = no genuine gesture recently → backend must not reset the idle
       // clock. Caller headers win on collision.
-      headers: { 'X-Remote-Analyst': '1', 'X-User-Active': isUserActive() ? '1' : '0', ...init.headers },
+      headers: {
+        'X-Remote-Analyst': '1',
+        'X-User-Active': isUserActive() ? '1' : '0',
+        ...(loadId ? { 'X-Page-Load-ID': loadId } : {}),
+        ...init.headers,
+      },
     },
     timeoutMs,
   )

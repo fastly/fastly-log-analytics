@@ -57,6 +57,11 @@ RUM_TABLE_SCHEMAS = {
     "client_errors": CLIENT_ERRORS_ARROW_SCHEMA,
 }
 
+RUM_NATURAL_KEYS: dict[str, tuple[str, ...]] = {
+    "client_vitals": ("timestamp", "metric_name", "pathname", "cid", "req_id"),
+    "client_errors": ("timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id"),
+}
+
 # PyIceberg schemas
 CLIENT_VITALS_ICEBERG_SCHEMA = Schema(
     NestedField(field_id=1, name="timestamp", field_type=TimestampType(), required=True),

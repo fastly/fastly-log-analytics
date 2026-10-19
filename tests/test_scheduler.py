@@ -1,6 +1,6 @@
 """Tests for ``backend.cron`` — APScheduler wrapper + small jobs.
 
-The big per-service jobs (``_run_service_cron``, ``_run_commit``,
+The big per-service jobs (``_run_log_discovery_cron``, ``_run_commit``,
 ``_run_optimize``, ``_run_expire_snapshots``, ``_run_ngwaf_bot_sync``,
 ``_run_service_alerts_evaluation``, ``_run_metadata_sync``) are heavy
 orchestrators that exercise the full DuckDB+Iceberg+FOS stack; they're
@@ -29,6 +29,15 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from backend.core.metadata.cron_log import CronLeaseHeldError
+from tests._helpers.config_fakes import mutate_via_save
+
+
+@pytest.fixture(autouse=True)
+def clean_dev_no_crons(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
 
 # ── _elapsed_since (pure formatter) ───────────────────────────────────────
 
@@ -272,7 +281,7 @@ def test_sync_jobs_registers_sync_commit_and_alerts_for_readwrite_service():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-1" in s._job_ids
+    assert "log_discovery_svc-1" in s._job_ids
     assert "commit_svc-1" in s._job_ids
     assert "alerts_evaluation_svc-1" in s._job_ids
 
@@ -331,7 +340,7 @@ def test_sync_jobs_skips_alerts_cron_when_no_alerts_configured():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-noalert" in s._job_ids
+    assert "log_discovery_svc-noalert" in s._job_ids
     assert "commit_svc-noalert" in s._job_ids
     # Alerts cron must not be registered until at least one alert exists.
     assert "alerts_evaluation_svc-noalert" not in s._job_ids
@@ -411,6 +420,9 @@ def test_sync_jobs_registers_ngwaf_job_when_workspace_configured():
         s._sync_jobs()
 
     assert "ngwaf_sync_ngwaf-svc" in s._job_ids
+    job = s._sched.get_job("ngwaf_sync_ngwaf-svc")
+    assert job is not None
+    assert job.executor == "maintenance"
 
 
 def test_sync_jobs_omits_optimize_and_expire_when_compact_disabled():
@@ -502,7 +514,7 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     real_add = s._sched.add_job
 
     def capturing_add_job(*args, **kwargs):
-        if kwargs.get("id", "").startswith("sync_svc-priority"):
+        if kwargs.get("id", "").startswith("log_discovery_svc-priority"):
             captured["seconds"] = kwargs.get("seconds")
         return real_add(*args, **kwargs)
 
@@ -572,6 +584,89 @@ def test_sync_jobs_registers_rum_jobs_when_rum_enabled_nested():
 
     assert "rum_sync_svc-rum-nested" in s._job_ids
     assert "rum_commit_svc-rum-nested" in s._job_ids
+
+
+def test_sync_jobs_does_not_register_rum_jobs_when_rum_disabled_in_nested():
+    """RUM sync and commit jobs are NOT registered when `rum.enabled` is False, even if `rum_enabled` is True on root."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum_enabled": True,
+        "rum": {"enabled": False},
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+    ):
+        s._sync_jobs()
+
+    assert "rum_sync_svc-rum-disabled" not in s._job_ids
+    assert "rum_commit_svc-rum-disabled" not in s._job_ids
+
+
+def test_resolve_rum_sync_interval():
+    """Verify RUM sync interval resolution rules."""
+    from backend.cron.scheduler import _resolve_rum_sync_interval
+
+    # Explicit sync_interval_seconds in rum_cfg takes precedence
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 45}, {}, 60) == 45
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 2}, {}, 60) == 5  # min 5s clamp
+
+    # Derived from rum_log_period (nested in rum_cfg or flat in cfg)
+    assert _resolve_rum_sync_interval({"log_period": 300}, {}, 60) == 150  # 300 // 2
+    assert _resolve_rum_sync_interval({"log_period": 60}, {}, 60) == 30  # 60 // 2
+    assert _resolve_rum_sync_interval({"log_period": 600}, {}, 60) == 300  # 600 // 2
+    assert _resolve_rum_sync_interval({"log_period": 10}, {}, 60) == 10  # < 60: max(5, 10)
+    assert _resolve_rum_sync_interval({"log_period": 3}, {}, 60) == 5  # < 60: min 5s clamp
+
+    # From flat cfg when rum_cfg has no log_period
+    assert _resolve_rum_sync_interval({}, {"rum_log_period": 300}, 60) == 150
+
+    # Fallback to default request interval when rum_log_period not configured
+    assert _resolve_rum_sync_interval({}, {}, 120) == 120
+    assert _resolve_rum_sync_interval({}, {}, 2) == 5  # min 5s clamp
+
+
+def test_sync_jobs_schedules_rum_sync_with_derived_interval():
+    """Verify rum_sync job is added to the scheduler with the interval derived from rum_log_period."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-derived",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum": {"enabled": True, "log_period": 300},
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-derived")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch.object(s._sched, "add_job") as mock_add_job,
+    ):
+        s._sync_jobs()
+
+    # Find the call to add rum_sync job
+    rum_sync_calls = [
+        call for call in mock_add_job.call_args_list if call.kwargs.get("id") == "rum_sync_svc-rum-derived"
+    ]
+    assert len(rum_sync_calls) == 1
+    assert rum_sync_calls[0].kwargs["seconds"] == 150  # 300 // 2
 
 
 # ── _log_and_add_progress ─────────────────────────────────────────────────
@@ -1003,6 +1098,133 @@ def test_run_service_alerts_evaluation_swallows_webhook_post_failure():
     assert any("working" in u for u in webhook_attempts)
 
 
+def test_run_service_alerts_evaluation_defers_when_active_requests_present():
+    """When active requests are present on the dashboard, alerts evaluation should defer."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.repositories.alerts.get_alerts") as mock_get_alerts,
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    mock_get_alerts.assert_not_called()
+
+
+def test_run_service_alerts_evaluation_status_warning_when_alert_triggers():
+    """When an alert triggers, cron run status should be logged as 'warning'."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "5xx error spike", "enabled": True}]
+    fake_con = MagicMock()
+    log_calls = []
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, None, None, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "1 alert triggered" in kwargs.get("summary", "")
+
+
+def test_run_service_alerts_evaluation_status_warning_when_webhook_fails():
+    """When a webhook fails to send, status is logged as 'warning' with failure details."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "latency alert", "enabled": True}]
+    fake_con = MagicMock()
+    log_calls = []
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, "https://slack.example/hook", {"text": "boom"}, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("httpx.post", side_effect=RuntimeError("connection timed out")),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "notification failure" in kwargs.get("summary", "")
+
+
+def test_run_service_alerts_evaluation_emits_progress_events():
+    """Progress events should be emitted to cron_progress when alerts trigger and when evaluation finishes."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "bandwidth spike", "enabled": True}]
+    fake_con = MagicMock()
+    progress_mock = MagicMock()
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, None, None, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("backend.cron_progress.start_progress") as mock_start_prog,
+        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress", progress_mock),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    mock_start_prog.assert_called_once_with(42, service_id="svc-1", task="alerts")
+    mock_end_prog.assert_called_once_with(42)
+    # Status event for triggered alert + Done event
+    assert progress_mock.call_count == 2
+    assert "Alert triggered" in progress_mock.call_args_list[0][1]["event"]["message"]
+    assert "done" == progress_mock.call_args_list[1][1]["event"]["type"]
+
+
 # ── _run_metadata_sync (analyst metadata refresh) ────────────────────────
 
 
@@ -1047,7 +1269,7 @@ def test_run_metadata_sync_returns_silently_when_start_cron_run_raises():
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("already running")),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
         patch("backend.core.iceberg.init_iceberg_table") as mock_init,
     ):
         # Should NOT raise
@@ -1091,6 +1313,73 @@ def test_run_metadata_sync_handles_iceberg_table_not_found_gracefully():
     # status arg is "success" (positional or kw)
     summary = kwargs.get("summary") or (args[4] if len(args) > 4 else "")
     assert "Iceberg table not found" in summary or "skipping" in summary.lower()
+
+
+def test_run_metadata_sync_skips_when_the_ducklake_table_does_not_exist_yet():
+    """The v3 shape of "no data committed yet": ``init_iceberg_table``
+    succeeds (the catalog attaches) but the per-service table has not been
+    created, so ``ducklake_table_exists`` is False. Pinned because pre-v3
+    this condition arrived as a pyiceberg ``NoSuchTableError`` and the
+    graceful branch keyed off the exception text — which left a fresh
+    service falling through into the data sync instead of skipping."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=True),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=False),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert "success" in args or kwargs.get("status") == "success"
+    summary = kwargs.get("summary") or (args[4] if len(args) > 4 else "")
+    assert "skipping" in summary.lower()
+
+
+def test_run_metadata_sync_errors_when_the_ducklake_catalog_cannot_attach():
+    """A None return from ``init_iceberg_table`` is an attach failure —
+    bad credentials or config — not "no data yet". It must NOT be laundered
+    into a success row."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=None),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    # The job's own error handler records it — as an error, never a success.
+    statuses = [a for args, _ in log_calls for a in args if isinstance(a, str)]
+    assert "error" in statuses
+    assert "success" not in statuses
 
 
 def test_run_metadata_sync_propagates_non_not_found_iceberg_exception():
@@ -1137,8 +1426,8 @@ def test_run_metadata_sync_persists_time_range_when_explicit_args_provided():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch(
-            "backend.config.save_config",
-            side_effect=lambda sid, c: saved_cfgs.append((sid, dict(c))),
+            "backend.config.mutate_config",
+            side_effect=mutate_via_save(lambda sid, c: saved_cfgs.append((sid, dict(c)))),
         ),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
         patch("backend.core.iceberg.init_iceberg_table"),
@@ -1183,8 +1472,8 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch(
-            "backend.config.save_config",
-            side_effect=lambda sid, c: saved_cfgs.append((sid, dict(c))),
+            "backend.config.mutate_config",
+            side_effect=mutate_via_save(lambda sid, c: saved_cfgs.append((sid, dict(c)))),
         ),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
         patch("backend.core.iceberg.init_iceberg_table"),
@@ -1211,6 +1500,85 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
         None,
     )
     assert cleared is not None
+
+
+def test_run_metadata_sync_defers_when_active_requests_present():
+    """Scheduled metadata_sync must defer when active dashboard requests are executing."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.core.duckdb.start_cron_run") as mock_start_run,
+    ):
+        _run_metadata_sync("svc-1", run_id=None)
+
+    mock_start_run.assert_not_called()
+
+
+def test_run_metadata_sync_does_not_defer_when_manual():
+    """Manual metadata_sync (run_id provided) must NOT defer even if dashboard requests are active."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True) as mock_defer,
+        patch("backend.core.iceberg.init_iceberg_table"),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=False),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_metadata_sync("svc-1", run_id=42)
+
+    # should_defer_cron should not be checked for manual run
+    mock_defer.assert_not_called()
+
+
+def test_run_metadata_sync_status_warning_when_import_admin_state_fails():
+    """When import_admin_state raises, metadata_sync logs warning status with the error detail."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table"),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=True),
+        patch("backend.core.iceberg.sync_data", return_value={"files_downloaded": 0, "rows_downloaded": 0}),
+        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
+        patch("backend.core.iceberg.update_iceberg_view"),
+        patch("backend.core.duckdb.refresh_config_status"),
+        patch("backend.state_sync.import_admin_state", side_effect=RuntimeError("S3 connection error")),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs._common.finalize_cron_duration"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "admin state import warning" in kwargs.get("summary", "")
 
 
 # ── _run_commit (Iceberg snapshot commit) ────────────────────────────────
@@ -1313,7 +1681,7 @@ def test_run_commit_skipped_when_start_cron_run_raises():
             "backend.core.duckdb.get_source_for_service",
             return_value={"name": "svc", "service_id": "svc", "access_level": "read_write"},
         ),
-        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("already running")),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
         patch("backend.core.iceberg.commit_buffer") as mock_commit,
     ):
         _run_commit("svc")
@@ -1323,10 +1691,9 @@ def test_run_commit_skipped_when_start_cron_run_raises():
 
 def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     """Happy path: `commit_buffer` returns ``files_committed > 0`` →
-    `log_cron_run` records success with row counts AND `_run_metadata_sync`
-    is invoked to refresh the local cache. Pinned because losing the
-    auto-sync would leave the dashboard's "rows in lake" counter
-    stale for up to a full sync interval."""
+    `log_cron_run` records success with row counts AND metadata sync is
+    dispatched asynchronously. Pinned because losing the auto-sync would leave
+    the dashboard's "rows in lake" counter stale for up to a full sync interval."""
     from backend.cron.jobs.commit import _run_commit
 
     log_calls = []
@@ -1353,7 +1720,7 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
         # test sandbox.
         patch("backend.core.iceberg.update_iceberg_view"),
         patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
-        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync") as mock_dispatch,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1368,12 +1735,12 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     assert kwargs.get("rows_ingested") == 1500
     summary = kwargs.get("summary", "")
     assert "Committed 3" in summary
-    mock_sync.assert_called_once()
+    mock_dispatch.assert_called_once()
 
 
 def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     """When `files_committed == 0`, log success with "No new data to
-    commit" and do NOT invoke `_run_metadata_sync`. Pinned because
+    commit" and do NOT dispatch a metadata sync. Pinned because
     triggering an empty sync would burn CDN bandwidth and shave the
     DuckDB cache for no reason."""
     from backend.cron.jobs.commit import _run_commit
@@ -1398,7 +1765,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
             "backend.core.iceberg.commit_buffer",
             return_value={"files_committed": 0, "rows_committed": 0},
         ),
-        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync") as mock_dispatch,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1411,7 +1778,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     assert len(log_calls) == 1
     _, kwargs = log_calls[0]
     assert "No new data" in kwargs.get("summary", "")
-    mock_sync.assert_not_called()
+    mock_dispatch.assert_not_called()
 
 
 def test_run_commit_logs_error_when_commit_buffer_raises():
@@ -1481,7 +1848,7 @@ def test_run_optimize_skipped_when_start_cron_run_raises():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
-        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("busy")),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("busy")),
         patch("backend.core.iceberg.optimize_table") as mock_opt,
     ):
         _run_optimize("s")
@@ -1677,6 +2044,8 @@ def test_run_expire_snapshots_swallows_iceberg_exception():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=1),
+        patch("backend.core.duckdb.log_cron_run"),
         patch("backend.core.iceberg.run_cloud_maintenance", side_effect=RuntimeError("S3 throttled")),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
@@ -1692,6 +2061,8 @@ def test_run_expire_snapshots_handles_error_dict_without_raising():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=1),
+        patch("backend.core.duckdb.log_cron_run"),
         patch("backend.core.iceberg.run_cloud_maintenance", return_value={"error": "expire conflict"}),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
@@ -1842,7 +2213,7 @@ def test_run_expire_snapshots_skips_silently_when_start_cron_run_raises(monkeypa
     log_calls: list = []
 
     def _busy(src, task):
-        raise RuntimeError("expire_snapshots already running")
+        raise CronLeaseHeldError("expire_snapshots already running")
 
     monkeypatch.setattr(
         "backend.core.duckdb.get_source_for_service",
@@ -2178,7 +2549,7 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
     assert kw["max_seconds"] == 900
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
-    assert args[3] == "success"
+    assert args[3] == "warning"
     assert "triggering full_sweep" in kwargs["summary"]
 
 
@@ -2220,8 +2591,45 @@ def test_run_gap_heal_respects_throttle_window():
     assert full_sweep_calls == [], "throttle must prevent re-trigger"
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
-    assert args[3] == "success"
+    assert args[3] == "warning"
     assert "throttled" in kwargs["summary"]
+
+
+def test_run_gap_heal_defers_when_active_requests_present():
+    """When active queries are running, gap_heal politely defers without starting a cron run."""
+    from backend.cron.jobs.sync import _run_gap_heal
+
+    start_calls = []
+    with (
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", side_effect=lambda *a, **k: start_calls.append(a)),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(start_calls) == 0
+
+
+def test_run_gap_heal_finalizes_duration():
+    """gap_heal must finalize its duration in finally: block."""
+    from backend.cron.jobs.sync import _run_gap_heal
+
+    update_duration_calls = []
+    with (
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", return_value=77),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.duckdb.update_cron_duration", side_effect=lambda *a, **k: update_duration_calls.append(a)),
+        patch(
+            "backend.routers.admin.compute_log_accounting",
+            return_value={"sustained_loss": None, "buckets": [], "totals": None},
+        ),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(update_duration_calls) == 1
+    assert update_duration_calls[0][1] == 77
 
 
 def test_gap_heal_severity_bands():
@@ -2287,6 +2695,7 @@ def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
     assert sid == "svc-gap"
     assert kw["max_files"] == 100_000, "critical band must widen sweep file budget"
     assert kw["max_seconds"] == 1800, "critical band must widen sweep time budget"
+    assert log_calls[0][0][3] == "warning"
     summary = log_calls[0][1]["summary"]
     assert "severity=critical" in summary
     assert "max_files=100000" in summary
@@ -2329,6 +2738,7 @@ def test_run_gap_heal_severe_uses_15min_throttle():
     sid, kw = full_sweep_calls[0]
     assert kw["max_files"] == 50_000, "severe band widens file budget"
     assert kw["max_seconds"] == 1500
+    assert log_calls[0][0][3] == "warning"
 
 
 def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
@@ -2340,13 +2750,13 @@ def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
     from backend.cron.jobs.sync import _FULL_SWEEP_DEFAULT_MAX_FILES, _FULL_SWEEP_DEFAULT_MAX_SECONDS, _run_full_sweep
 
     sig = inspect.signature(_run_full_sweep)
-    assert sig.parameters["max_files"].default == _FULL_SWEEP_DEFAULT_MAX_FILES == 20_000
-    assert sig.parameters["max_seconds"].default == _FULL_SWEEP_DEFAULT_MAX_SECONDS == 900
+    assert sig.parameters["max_files"].default == _FULL_SWEEP_DEFAULT_MAX_FILES
+    assert sig.parameters["max_seconds"].default == _FULL_SWEEP_DEFAULT_MAX_SECONDS
 
 
 def test_sync_jobs_registers_gap_heal_when_logging_service_id_present():
-    """Gap-heal cron should register only when the service has a
-    logging_service_id (the Fastly Stats API call keys on it)."""
+    """A service with a distinct ``logging_service_id`` config field
+    must register a gap_heal_{id} cron job with 30-min interval."""
     from backend.cron.scheduler import Scheduler
 
     cfg = {
@@ -2425,6 +2835,451 @@ def test_sync_jobs_skips_gap_heal_when_disabled():
         s._sync_jobs()
 
     assert "gap_heal_svc-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_gap_heal_when_interval_changed():
+    """When cron_gap_heal.interval_minutes changes, the existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "logging_service_id": "log-svc-resched",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_gap_heal": {"interval_minutes": 15},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["gap_heal_svc-resched"] = "gap_heal_svc-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", minutes=15)
+
+
+def test_sync_jobs_reschedules_metadata_cleanup_when_hour_changed():
+    """When cron_metadata_cleanup.cron_hour changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-mc-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_cleanup": {"cron_hour": 4, "cron_minute": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["metadata_cleanup_svc-mc-resched"] = "metadata_cleanup_svc-mc-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-mc-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("cron", hour=4, minute=30)
+
+
+def test_sync_jobs_skips_metadata_cleanup_when_disabled():
+    """When cron_metadata_cleanup.enabled is False, job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-mc-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_cleanup": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-mc-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    assert "metadata_cleanup_svc-mc-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_alerts_evaluation_when_interval_changed():
+    """When cron_alerts.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-alert-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_alerts": {"interval_seconds": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["alerts_evaluation_svc-alert-resched"] = "alerts_evaluation_svc-alert-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-alert-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=30)
+
+
+def test_sync_jobs_skips_alerts_evaluation_when_disabled():
+    """When cron_alerts.enabled is False, alerts_evaluation job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-alert-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_alerts": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-alert-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    assert "alerts_evaluation_svc-alert-disabled" not in s._job_ids
+
+
+def test_sync_jobs_registers_insights_prewarmer_for_analyst():
+    """Analyst Path A services (access_level: read_only) must have insights_prewarmer registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-analyst-ip",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "access_level": "read_only",
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-analyst-ip")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-analyst-ip" in s._job_ids
+
+
+def test_sync_jobs_reschedules_insights_prewarmer_when_interval_changed():
+    """When cron_insights_prewarmer.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-ip-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_insights_prewarmer": {"interval_seconds": 120},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["insights_prewarmer_svc-ip-resched"] = "insights_prewarmer_svc-ip-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=120, jitter=15)
+
+
+def test_sync_jobs_skips_insights_prewarmer_when_disabled():
+    """When cron_insights_prewarmer.enabled is False, insights_prewarmer job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-ip-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_insights_prewarmer": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-ip-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_metadata_sync_when_interval_changed():
+    """When cron_metadata_sync.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-meta-resched",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_sync": {"interval_seconds": 45},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["sync_metadata_svc-meta-resched"] = "sync_metadata_svc-meta-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-meta-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=45)
+
+
+def test_sync_jobs_skips_metadata_sync_when_disabled():
+    """When cron_metadata_sync.enabled is False, sync_metadata job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-meta-disabled",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_sync": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-meta-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "sync_metadata_svc-meta-disabled" not in s._job_ids
+
+
+def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
+    """Ledger sweep initializes progress tracking, logs execution, and finalizes duration."""
+    from backend.cron.jobs.sync import _run_ledger_sweep
+
+    fake_cfg = {"service_id": "svc-sweep-1"}
+    fake_src = {"name": "svc-sweep-1", "service_id": "svc-sweep-1"}
+
+    prog_started = []
+    prog_ended = []
+    finalized = []
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.is_high_scale_mode", return_value=True),
+        patch("backend.core.duckdb.start_cron_run", return_value=55),
+        patch("backend.cron_progress.start_progress", side_effect=lambda rid, **kw: prog_started.append((rid, kw))),
+        patch("backend.cron_progress.end_progress", side_effect=lambda rid: prog_ended.append(rid)),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress"),
+        patch(
+            "backend.cron.jobs._common.finalize_cron_duration",
+            side_effect=lambda s, rid, started: finalized.append((s, rid)),
+        ),
+        patch(
+            "backend.core.ingest.sweep_ledger_once",
+            return_value={"reclaimed": 5, "redispatched": 5, "discovered": 10, "broker_ok": True, "dead_letter": 0},
+        ) as mock_sweep,
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *args, **kw: log_calls.append((args, kw))),
+    ):
+        _run_ledger_sweep.__wrapped__("svc-sweep-1")
+
+    assert prog_started == [(55, {"service_id": "svc-sweep-1", "task": "ledger_sweep"})]
+    assert prog_ended == [55]
+    assert finalized == [(fake_src, 55)]
+    mock_sweep.assert_called_once_with("svc-sweep-1", run_id=55)
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "success"
+    assert "reclaimed=5 redispatched=5 discovered=10" in kwargs.get("summary", "")
+
+
+def test_run_ledger_sweep_status_warning_on_dead_letter_or_broker_issue():
+    """When dead-letter rows exist or broker probe fails, ledger sweep records warning status."""
+    from backend.cron.jobs.sync import _run_ledger_sweep
+
+    fake_cfg = {"service_id": "svc-sweep-warn"}
+    fake_src = {"name": "svc-sweep-warn", "service_id": "svc-sweep-warn"}
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.is_high_scale_mode", return_value=True),
+        patch("backend.core.duckdb.start_cron_run", return_value=56),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress"),
+        patch("backend.cron.jobs._common.finalize_cron_duration"),
+        patch(
+            "backend.core.ingest.sweep_ledger_once",
+            return_value={"reclaimed": 0, "redispatched": 0, "discovered": 0, "broker_ok": False, "dead_letter": 3},
+        ),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *args, **kw: log_calls.append((args, kw))),
+    ):
+        _run_ledger_sweep.__wrapped__("svc-sweep-warn")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    summary = kwargs.get("summary", "")
+    assert "Celery broker/queue depth probe failed" in summary
+    assert "3 dead-letter/quarantined row(s)" in summary
+
+
+def test_sync_jobs_reschedules_ledger_sweep_when_interval_changed():
+    """When cron_ledger_sweep.interval_minutes changes, existing job is rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-sweep-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_ledger_sweep": {"interval_minutes": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["ledger_sweep_svc-sweep-resched"] = "ledger_sweep_svc-sweep-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", minutes=30)
+
+
+def test_sync_jobs_skips_ledger_sweep_when_disabled():
+    """When cron_ledger_sweep.enabled is False, ledger_sweep job is not registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-sweep-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_ledger_sweep": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "ledger_sweep_svc-sweep-disabled" not in s._job_ids
 
 
 def test_check_disk_space_passes_when_plenty_free(tmp_path):

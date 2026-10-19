@@ -27,6 +27,7 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useMaskIps } from '@/hooks/useMaskIps'
 import { isIpFamilyField } from '@/lib/pii'
 
+import { formatCount } from '@/lib/format'
 const COMMON_FIELD_IDS = [
   'ip', 'url', 'host', 'method', 'status', 'ua', 'country', 'city',
   'asn', 'p_type', 'p_desc', 'ja4', 'ja3', 'cache', 'edge', 'pop',
@@ -62,7 +63,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
     .filter(id => !(maskIps && isIpFamilyField(id)))
     .map(id => ({
       value: id,
-      label: catalog?.fields?.find((f: any) => f.id === id)?.label ?? id,
+      label: catalog?.fields?.find((f) => f.id === id)?.label ?? id,
     }))
 
   const addFilter = useFilterStore(s => s.addFilter)
@@ -85,7 +86,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const handleSelectSuggestion = (val: string | number) => {
+  const handleSelectSuggestion = (val: unknown) => {
     setValue(String(val))
     // We don't automatically add, let the user confirm or edit
   }
@@ -109,7 +110,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
             <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               Filter Type
             </Label>
-            <Tabs value={mode} onValueChange={(v: any) => setMode(v)} className="w-full">
+            <Tabs value={mode} onValueChange={(v) => { if (v === 'include' || v === 'exclude') setMode(v) }} className="w-full">
               <TabsList className="grid w-full grid-cols-2 h-9">
                 <TabsTrigger value="include" className="text-xs gap-1.5">
                   <Check className="h-3 w-3 text-green-500" /> Include
@@ -169,9 +170,9 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
               <div className="mt-1 border rounded-md bg-background shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                 <ScrollArea className={cn("max-h-[160px]", suggestions.values.length > 5 ? "h-[160px]" : "")}>
                   <div className="p-1">
-                    {suggestions.values.map((v: any, i: number) => (
+                    {suggestions.values.map((v) => (
                       <button
-                        key={i}
+                        key={String(v.value)}
                         type="button"
                         onClick={() => handleSelectSuggestion(v.value)}
                         className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-muted rounded-sm transition-colors text-left group"
@@ -180,7 +181,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
                           {v.value === null ? <em className="text-muted-foreground">NULL</em> : String(v.label || v.value)}
                         </span>
                         <span className="text-[10px] text-muted-foreground group-hover:text-foreground tabular-nums">
-                          {v.count.toLocaleString()} hits
+                          {formatCount(v.count)} hits
                         </span>
                       </button>
                     ))}
@@ -191,7 +192,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
 
             <p className="text-[10px] text-muted-foreground mt-1 leading-tight flex items-start gap-1">
               <span className="text-primary font-bold">Pro Tip:</span>
-              <span>Exact matches by default. Use <code className="bg-background border rounded-[3px] px-1 font-mono text-[9px]">*</code> for wildcards.</span>
+              <span>Exact matches by default. Use <code className="bg-background border rounded-sm px-1 font-mono text-[9px]">*</code> for wildcards.</span>
             </p>
           </div>
         </div>

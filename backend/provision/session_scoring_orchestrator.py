@@ -37,6 +37,7 @@ from backend.core.fastly.service import (
     get_active_version,
     list_vcl_snippets,
 )
+from backend.provision.draft_version import draft_version, rollback_to_version
 from backend.provision.session_scoring_setup import (
     MATRIX_KEY_NAME,
     MATRIX_RESOURCE_LINK_NAME,
@@ -335,38 +336,6 @@ def _live_package_files_hash(scoring_service_id: str, version: int, token: str) 
     return meta.get("files_hash") or meta.get("hashsum") or ""
 
 
-def _scoring_vcl_matches_edge(
-    logging_service_id: str,
-    version: int,
-    vcl_snippets: dict[str, str],
-    scoring_domain: str,
-    token: str,
-) -> bool:
-    """True when the 6 scoring snippets AND the ``session_scorer`` backend LIVE
-    on ``version`` already match byte-for-byte what we would deploy now — i.e. a
-    redeploy would be a pure no-op version bump. Reads the ACTUAL edge state
-    (snippet bodies + backend override_host) instead of trusting the cfg drift
-    stamp, so a manual edge change is treated as drift. Any read error or
-    mismatch returns False (deploy, don't skip)."""
-    try:
-        live = fastly("GET", f"/service/{logging_service_id}/version/{version}/snippet", token=token) or []
-    except RuntimeError:
-        return False
-    live_by_name = {s.get("name"): (s.get("content") or "") for s in live if isinstance(s, dict)}
-    for name in scoring_snippet_names():
-        if live_by_name.get(name) != vcl_snippets.get(name):
-            return False
-    # The scoring backend must exist and still point at the current scorer.
-    try:
-        encoded = urllib.parse.quote(SCORING_BACKEND_API_NAME, safe="")
-        backend = fastly("GET", f"/service/{logging_service_id}/version/{version}/backend/{encoded}", token=token)
-    except RuntimeError:
-        return False
-    if not backend or backend.get("override_host") != scoring_domain:
-        return False
-    return True
-
-
 def _deploy_wasm_package(
     scoring_service_id: str,
     matrix_store_id: str,
@@ -421,44 +390,51 @@ def _deploy_wasm_package(
     # domain/backend/resource-links/package).
     versions = fastly("GET", f"/service/{scoring_service_id}/version", token=token) or []
     base = max(int(v["number"]) for v in versions)
-    # Fastly's clone route is PUT (matches every other clone in this codebase).
-    clone = fastly("PUT", f"/service/{scoring_service_id}/version/{base}/clone", token=token)
-    new_ver = int(clone["number"])
+    # Same sequence as before the helper: no /validate call, no rollback (``base`` is the
+    # highest version, which for a fresh service is a never-active v1 draft, so there is no
+    # known-good version to fall back to), and the activate call passes ``expect_empty``.
+    with draft_version(
+        scoring_service_id,
+        token,
+        base_version=base,
+        call=fastly,
+        validate=False,
+        expect_empty_activate=True,
+        rollback=False,
+    ) as new_ver:
+        # Ensure the matrix KV store is linked on this draft. 409/conflict means
+        # it was already inherited from the cloned version — that's success.
+        if matrix_store_id:
+            try:
+                fastly(
+                    "POST",
+                    f"/service/{scoring_service_id}/version/{new_ver}/resource",
+                    {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": matrix_store_id},
+                    token=token,
+                )
+            except RuntimeError as exc:
+                if not ("409" in str(exc) or "conflict" in str(exc).lower() or "already" in str(exc).lower()):
+                    raise
 
-    # Ensure the matrix KV store is linked on this draft. 409/conflict means
-    # it was already inherited from the cloned version — that's success.
-    if matrix_store_id:
-        try:
-            fastly(
-                "POST",
-                f"/service/{scoring_service_id}/version/{new_ver}/resource",
-                {"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": matrix_store_id},
-                token=token,
-            )
-        except RuntimeError as exc:
-            if not ("409" in str(exc) or "conflict" in str(exc).lower() or "already" in str(exc).lower()):
-                raise
-
-    # Upload the package (multipart/form-data, field "package") then activate.
-    pkg_bytes = _SCORER_PACKAGE.read_bytes()
-    boundary = "----fos-scorer-package-boundary"
-    body = (
-        (
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="package"; filename="session-scorer.tar.gz"\r\n'
-            "Content-Type: application/octet-stream\r\n\r\n"
-        ).encode()
-        + pkg_bytes
-        + f"\r\n--{boundary}--\r\n".encode()
-    )
-    fastly_raw(
-        "PUT",
-        f"/service/{scoring_service_id}/version/{new_ver}/package",
-        body,
-        content_type=f"multipart/form-data; boundary={boundary}",
-        token=token,
-    )
-    fastly("PUT", f"/service/{scoring_service_id}/version/{new_ver}/activate", token=token, expect_empty=True)
+        # Upload the package (multipart/form-data, field "package") then activate.
+        pkg_bytes = _SCORER_PACKAGE.read_bytes()
+        boundary = "----fos-scorer-package-boundary"
+        body = (
+            (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="package"; filename="session-scorer.tar.gz"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+            + pkg_bytes
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        fastly_raw(
+            "PUT",
+            f"/service/{scoring_service_id}/version/{new_ver}/package",
+            body,
+            content_type=f"multipart/form-data; boundary={boundary}",
+            token=token,
+        )
     ok(f"Deployed scorer package + activated v{new_ver}")
     if status_cb:
         status_cb(f"✅ [Compute] Activated scorer service v{new_ver}")
@@ -517,103 +493,6 @@ def _write_matrix_to_kv(
         token=token,
     )
     ok(f"Wrote matrix to KV ({len(data)} bytes FSM1) from {matrix_path.name}")
-
-
-def _add_scoring_backend(
-    logging_service_id: str,
-    version: int,
-    scoring_domain: str,
-    token: str,
-) -> None:
-    """Add the scoring Compute service as a backend on the cloned VCL
-    version. Backend name is the constant from session_scoring_vcl so the
-    recv snippet can reference it by name."""
-    payload = {
-        "name": SCORING_BACKEND_API_NAME,
-        "address": scoring_domain,
-        "port": 443,
-        "use_ssl": True,
-        "ssl_cert_hostname": scoring_domain,
-        "ssl_sni_hostname": scoring_domain,
-        # The Fastly Compute service routes by Host header. Without
-        # override_host, the upstream Host arrives as the customer's
-        # domain (e.g. www.example.com) and the scorer's
-        # edgecompute.app service can't dispatch it — TLS SNI matches
-        # but the Host header doesn't. Forcing it to the scoring
-        # domain fixes routing.
-        "override_host": scoring_domain,
-        # The edgecompute.app cert is from Fastly's internal CA and may not
-        # validate cleanly when one Fastly service backends to another. Both
-        # ends are inside Fastly's network so we trade strict verification
-        # for reliability — security is not at risk because the path never
-        # leaves Fastly's edge.
-        "ssl_check_cert": False,
-        "auto_loadbalance": False,
-        # Wasm execution is ~1ms warm and intra-Fastly network adds ~5-20ms,
-        # so the timeout is a CEILING, not the time a typical request waits.
-        # It only bites cold-start Compute instances (and Fastly Compute is
-        # instance-per-request, so every request is cold). first_byte_timeout
-        # lowered 200→100ms (2026-06-22): successful-scoring RTT sits at
-        # p50 ~5ms / p99 ~18ms / p99.9 ~40ms (max ~830ms), so 100ms clears the
-        # steady-state distribution with wide headroom. The 200ms ceiling had
-        # been rescuing a small cold-slow-instantiation band (~100-200ms RTT,
-        # order ~30 scorings/day) — those now fail open instead. That trade is
-        # accepted: the dominant fail-open class is sandbox-creation contention
-        # from scheduled scanner bursts, which rejects connection-level (or
-        # hangs well past any 100-200ms boundary) and is unaffected by this
-        # knob, so the wider ceiling bought tail-latency for real users without
-        # reducing the visible error spikes. connect_timeout stays 100ms (the
-        # fast rejects are connection-level, not connect timeouts). Tuned from
-        # the edge_score_rtt_us / edge_score_exec_us columns (per-request, see
-        # session_scoring_vcl + the scorer's X-Edge-Score-Exec-Us header).
-        "connect_timeout": 100,
-        "first_byte_timeout": 100,
-        "between_bytes_timeout": 200,
-    }
-    # Idempotent: if the backend already exists, PUT-update it when the
-    # config has drifted (e.g. we tuned the timeouts). POST a new one
-    # only when it's missing. Without the PUT path, re-running enable
-    # on a version with an existing backend would silently keep stale
-    # timeouts in place.
-    existing_match = None
-    try:
-        existing = (
-            fastly(
-                "GET",
-                f"/service/{logging_service_id}/version/{version}/backend",
-                token=token,
-            )
-            or []
-        )
-        for b in existing:
-            if b.get("name") == SCORING_BACKEND_API_NAME:
-                existing_match = b
-                break
-    except RuntimeError:
-        pass
-
-    if existing_match is not None:
-        drift = any(existing_match.get(k) != v for k, v in payload.items() if k in existing_match)
-        if not drift:
-            ok(f"Scoring backend already current on version {version}")
-            return
-        encoded = urllib.parse.quote(SCORING_BACKEND_API_NAME, safe="")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{version}/backend/{encoded}",
-            payload,
-            token=token,
-        )
-        ok(f"Updated scoring backend {SCORING_BACKEND_API_NAME} (drifted settings)")
-        return
-
-    fastly(
-        "POST",
-        f"/service/{logging_service_id}/version/{version}/backend",
-        payload,
-        token=token,
-    )
-    ok(f"Added scoring backend {SCORING_BACKEND_API_NAME} ({scoring_domain})")
 
 
 def _remove_scoring_backend(logging_service_id: str, version: int, token: str) -> None:
@@ -975,21 +854,17 @@ def disable_scoring(
     active_ver = get_active_version(logging_service_id, token)
     if active_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    clone = fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{active_ver}/clone",
-        token=token,
-    )
-    new_ver = int(clone["number"])
     ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{new_ver}",
-        {"comment": f"Disable session scoring {ts}"},
-        token=token,
-    )
 
-    try:
+    # ── Stage 4 (validate + activate) is owned by draft_version. ───────────
+    with draft_version(
+        logging_service_id,
+        token,
+        base_version=active_ver,
+        call=fastly,
+        comment=f"Disable session scoring {ts}",
+        on_failure=lambda exc: fail(f"disable_scoring VCL phase failed: {exc}"),
+    ) as new_ver:
         # ── Stage 2: remove scoring VCL bits. ───────────────────────────────
         _remove_scoring_snippets(logging_service_id, new_ver, token)
         _remove_scoring_backend(logging_service_id, new_ver, token)
@@ -1037,31 +912,7 @@ def disable_scoring(
                 token=token,
             )
 
-        # ── Stage 4: validate + activate. ──────────────────────────────────
-        result = fastly(
-            "GET",
-            f"/service/{logging_service_id}/version/{new_ver}/validate",
-            token=token,
-        )
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{new_ver}/activate",
-            token=token,
-        )
-        ok(f"Logging service version {new_ver} active (scoring stripped)")
-    except Exception as exc:
-        fail(f"disable_scoring VCL phase failed: {exc}")
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
-        raise
+    ok(f"Logging service version {new_ver} active (scoring stripped)")
 
     # ── Stage 5: tear down the Compute service + stores. ───────────────────
     failed_stores = delete_scoring_service(
@@ -1165,33 +1016,19 @@ def teardown_scoring_resources(
             if status_cb:
                 status_cb("Logging service has no active version — skipping VCL strip.")
         else:
-            clone = fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/clone",
-                token=token,
-            )
-            new_ver = int(clone["number"])
             ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}",
-                {"comment": f"Teardown: strip session scoring {ts}"},
-                token=token,
-            )
-            _remove_scoring_snippets(logging_service_id, new_ver, token)
-            _remove_scoring_backend(logging_service_id, new_ver, token)
-            result = fastly(
-                "GET",
-                f"/service/{logging_service_id}/version/{new_ver}/validate",
-                token=token,
-            )
-            if result.get("status") != "ok":
-                raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/activate",
-                token=token,
-            )
+            # rollback=False: nothing went live until the final activate, so a failure
+            # leaves the current version serving; teardown aborts below instead.
+            with draft_version(
+                logging_service_id,
+                token,
+                base_version=active_ver,
+                call=fastly,
+                comment=f"Teardown: strip session scoring {ts}",
+                rollback=False,
+            ) as new_ver:
+                _remove_scoring_snippets(logging_service_id, new_ver, token)
+                _remove_scoring_backend(logging_service_id, new_ver, token)
             ok(f"Logging service version {new_ver} active (scoring VCL stripped)")
         strip_ok = True
     except Exception as exc:
@@ -1242,35 +1079,27 @@ def _clone_swap_snippet(
     ``update_enforce_status_code``: same clone/comment/ensure/validate/
     activate call sequence, only the snippet identity + comment differ.
     Emits NO log lines (callers keep their own info()/ok()/fail()) and does
-    NOT roll back — the caller owns the rollback so it can log fail() in the
-    exact pre-rollback order the originals used. Raises ``RuntimeError`` on a
-    non-``ok`` validate result, matching the inline form.
+    NOT roll back (``rollback=False``) — the caller owns the rollback so it can
+    log fail() in the exact pre-rollback order the originals used. Raises
+    ``RuntimeError`` on a non-``ok`` validate result, matching the inline form.
     """
-    clone = fastly("PUT", f"/service/{sid}/version/{active_ver}/clone", token=token)
-    new_ver = int(clone["number"])
-    fastly(
-        "PUT",
-        f"/service/{sid}/version/{new_ver}",
-        {"comment": comment},
-        token=token,
-    )
-    ensure_vcl_snippet(
-        snippet_name,
-        vcl_type,
-        body,
-        priority,
+    with draft_version(
         sid,
-        new_ver,
         token,
-    )
-    result = fastly("GET", f"/service/{sid}/version/{new_ver}/validate", token=token)
-    if result.get("status") != "ok":
-        raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-    fastly(
-        "PUT",
-        f"/service/{sid}/version/{new_ver}/activate",
-        token=token,
-    )
+        base_version=active_ver,
+        call=fastly,
+        comment=comment,
+        rollback=False,
+    ) as new_ver:
+        ensure_vcl_snippet(
+            snippet_name,
+            vcl_type,
+            body,
+            priority,
+            sid,
+            new_ver,
+            token,
+        )
     return new_ver
 
 
@@ -1356,14 +1185,7 @@ def update_recv_exclusion_regex(
         # Re-activate the prior version so the service isn't left on the
         # half-updated draft. Best-effort — if this fails too, the draft
         # is left for the operator to clean up manually.
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
+        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
         raise
 
     return {
@@ -1450,14 +1272,7 @@ def update_enforce_status_code(
         fail(f"update_enforce_status_code failed: {exc}")
         # Re-activate the prior version so the service isn't left on the
         # half-updated draft. Best-effort.
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
+        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
         raise
 
     return {

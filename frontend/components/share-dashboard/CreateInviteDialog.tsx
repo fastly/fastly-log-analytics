@@ -100,10 +100,10 @@ function CreateInviteDialogInner({
 
   const handleWordphrase = async () => {
     try {
-      const { data, response } = await client.GET('/api/admin/share/wordphrase' as any, {})
+      const { data, response } = await client.GET('/api/admin/share/wordphrase', {})
       if (!response.ok) throw new Error(`status ${response.status}`)
-      setPasscode((data as any).passcode)
-    } catch (e: any) {
+      setPasscode(data?.passcode ?? '')
+    } catch (e) {
       setError(extractApiError(e))
     }
   }
@@ -112,7 +112,7 @@ function CreateInviteDialogInner({
     setError('')
     setCreating(true)
     try {
-      await client.POST('/api/admin/share/invites' as any, {
+      await client.POST('/api/admin/share/invites', {
         body: {
           name,
           email,
@@ -128,10 +128,10 @@ function CreateInviteDialogInner({
           query_window_hours: queryWindow || null,
           allow_concurrent_sessions: allowConcurrent,
         },
-      } as any)
+      })
       await onCreated()
       onOpenChange(false)
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e))
     } finally {
       setCreating(false)
@@ -397,6 +397,9 @@ function CreateInviteDialogInner({
                 Off (default): each new login signs out the previous one. On: several
                 people can share this link — audit events won&apos;t distinguish between them.
               </p>
+            </div>
+            <div className="md:col-span-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+              Note: Analysts are required to review and agree to the Terms of Access upon their first login before dashboard access is granted.
             </div>
           </div>
         </div>

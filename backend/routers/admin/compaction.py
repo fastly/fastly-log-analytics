@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
-from fastapi import Depends, Query
-from sse_starlette.sse import EventSourceResponse
+import logging
+import os
+from datetime import UTC, datetime
 
-from backend.deps import get_source
+from fastapi import Depends, HTTPException, Query
+
+from backend.deps import get_source, require_admin
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
     CompactionStatsResponse,
+    ConsolidateRollupsResponse,
+    ExpireSnapshotsResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
     MetadataStorageResponse,
     OptimizeNowResponse,
+    PartialHourMergeResponse,
+    PartialHourStatusResponse,
+    RollupCompactResponse,
+    RollupHealResponse,
+    RollupStatusResponse,
 )
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+from backend.utils.sse import sse_response
 
 from ._router import router
+
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -39,6 +51,47 @@ def optimize_now(
     from backend.core import iceberg as _ice
 
     return _ice.optimize_table(source, min_files_per_partition=min_files)
+
+
+@router.post(
+    "/admin/optimize/{service_id}",
+    response_model=OptimizeNowResponse,
+    response_model_exclude_unset=True,
+)
+def optimize_service(
+    service_id: str,
+    source: dict = Depends(get_source),
+) -> OptimizeNowResponse:
+    """Trigger an immediate cloud lakehouse optimization pass for service_id.
+    Executes DuckLake durability flush, small-file merge, and data file compaction.
+    Logs execution in cron_runs and returns execution outcome.
+    """
+    from backend.cron.jobs.optimize import _run_optimize
+
+    sid = service_id or source.get("name") or source.get("service_id", "")
+    res = _run_optimize(sid, manual=True)
+    if isinstance(res, dict):
+        return OptimizeNowResponse(**res)
+    return OptimizeNowResponse(files_rewritten=0, files_added=0)
+
+
+@router.post(
+    "/admin/expire-snapshots/{service_id}",
+    response_model=ExpireSnapshotsResponse,
+    response_model_exclude_unset=True,
+)
+def expire_snapshots_service(
+    service_id: str,
+    source: dict = Depends(get_source),
+) -> ExpireSnapshotsResponse:
+    """Trigger an immediate DuckLake retention and snapshot-expiry pass."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run cloud maintenance.")
+
+    from backend.cron.jobs.expire import _run_expire_snapshots
+
+    result = _run_expire_snapshots(service_id, manual=True)
+    return ExpireSnapshotsResponse(**result)
 
 
 @router.post(
@@ -68,7 +121,10 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
 
     Returns the count of bundles written per kind.
     """
+    import logging
+
     from backend.core.rollups import (
+        backfill_network_quality_bundles,
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
         backfill_network_summary_bundles,
@@ -79,10 +135,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_overview_bundles,
         backfill_perf_dims_bundles,
         backfill_perf_latency_bundles,
+        backfill_pop_health_bundles,
         backfill_security_dims_bundles,
         backfill_slow_urls_bundles,
         backfill_verified_bots_ts_bundles,
         backfill_wellknown_bots_rollup,
+        compact_network_quality_closed_days_to_daily,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
         compact_ngwaf_bots_closed_days_to_daily,
@@ -92,11 +150,36 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         compact_overview_closed_days_to_daily,
         compact_perf_dims_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
+        compact_pop_health_closed_days_to_daily,
         compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
     )
+    from backend.core.rollups._common import (
+        SESSIONS_BUNDLE_FILENAME,
+        TIME_SERIES_BUNDLE_FILENAME,
+        backfill_missing_bundles,
+    )
+    from backend.core.rollups.sessions import build_session_bundles
+    from backend.core.rollups.time_series import build_time_series_bundles
 
     sid = source.get("service_id") or source.get("name") or ""
+    n_ts = backfill_missing_bundles(
+        sid,
+        source,
+        bundle_filename=TIME_SERIES_BUNDLE_FILENAME,
+        label="time_series",
+        builder=build_time_series_bundles,
+        logger=logging.getLogger(__name__),
+    )
+    n_sess = backfill_missing_bundles(
+        sid,
+        source,
+        bundle_filename=SESSIONS_BUNDLE_FILENAME,
+        label="sessions",
+        builder=build_session_bundles,
+        logger=logging.getLogger(__name__),
+    )
+
     n_su = backfill_slow_urls_bundles(sid, source)
     n_os = backfill_origin_summary_bundles(sid, source)
     # status_codes reads the existing all_fields.parquet bundle (no dedicated
@@ -110,8 +193,10 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts = backfill_origin_latency_ts_bundles(sid, source)
     n_nr = backfill_network_rtt_bundles(sid, source)
     n_ns = backfill_network_speed_bundles(sid, source)
+    n_nq = backfill_network_quality_bundles(sid, source)
     n_vbts = backfill_verified_bots_ts_bundles(sid, source)
     n_perf = backfill_perf_latency_bundles(sid, source)
+    n_ph = backfill_pop_health_bundles(sid, source)
     # security_dims: req_size / conn_reuse / topips / cov — the all-rows live
     # scans behind /api/security/aggregates' equivalent panels. EXACT.
     n_sd = backfill_security_dims_bundles(sid, source)
@@ -137,12 +222,34 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
     n_nr_day = compact_network_rtt_closed_days_to_daily(sid, source)
     n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
+    n_nq_day = compact_network_quality_closed_days_to_daily(sid, source)
     n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
+    n_ph_day = compact_pop_health_closed_days_to_daily(sid, source)
     n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
     n_ov_day = compact_overview_closed_days_to_daily(sid, source)
+
+    # RUM aggregates backfill
+    n_rum = 0
+    try:
+        from contextlib import closing
+
+        from backend.core.duckdb import get_connection, rum_source_for
+        from backend.core.rollups.rum import recompute_rum_aggregates, table_exists
+        from backend.repositories import rum as rum_repo
+
+        rum_src = rum_source_for(source)
+        with closing(get_connection(rum_src, read_only=False)) as rum_con:
+            recompute_rum_aggregates(rum_con, sid)
+            if table_exists(rum_con, "rum_vitals_aggregates"):
+                bucket_count = rum_repo.count_aggregate_buckets(rum_con, sid)
+                if bucket_count is not None:
+                    n_rum = bucket_count or 0
+    except Exception as rum_backfill_err:
+        logging.getLogger(__name__).warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
+
     return {
         "slow_urls": n_su,
         "origin_summary": n_os,
@@ -155,9 +262,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "network_rtt_days": n_nr_day,
         "network_speed": n_ns,
         "network_speed_days": n_ns_day,
+        "network_quality": n_nq,
+        "network_quality_days": n_nq_day,
         "verified_bots_ts": n_vbts,
         "verified_bots_ts_days": n_vbts_day,
         "perf_latency": n_perf,
+        "pop_health": n_ph,
         "perf_latency_days": n_perf_day,
         "security_dims": n_sd,
         "security_dims_days": n_sd_day,
@@ -169,7 +279,191 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "overview": n_ov,
         "overview_days": n_ov_day,
         "network_summary": n_netsumm,
+        "rum": n_rum,
     }
+
+
+@router.post(
+    "/admin/consolidate-rollups",
+    response_model=ConsolidateRollupsResponse,
+    response_model_exclude_unset=True,
+)
+def consolidate_rollups(source: dict = Depends(get_source)) -> ConsolidateRollupsResponse:
+    """Consolidate historical fragmented rollup files into daily bundles and prune obsolete files.
+
+    Sweeps hour_ip_spread, compacts closed days into day_bundled files, and prunes
+    per-field and obsolete hourly files older than 14 days.
+    """
+    import os
+    import time
+
+    from backend.core.rollups import (
+        _rollups_root,
+        backfill_day_bundles,
+        compact_closed_days_to_daily,
+    )
+    from backend.core.rollups._common import _ip_spread_root
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+    from backend.core.rollups.recompute import cleanup_old_rollups
+
+    sid = source.get("service_id") or source.get("name") or ""
+    t0 = time.time()
+
+    def _count_files(root: str) -> int:
+        if not os.path.isdir(root):
+            return 0
+        cnt = 0
+        try:
+            for _, _, fnames in os.walk(root):
+                cnt += len(fnames)
+        except OSError:
+            pass
+        return cnt
+
+    cache_dir = os.path.dirname(_rollups_root(source))
+    files_before = _count_files(cache_dir)
+
+    # 1. Enumerate and bundle all hour_ip_spread hours
+    ip_spread_root = _ip_spread_root(source)
+    hours_to_bundle: set[str] = set()
+    if os.path.isdir(ip_spread_root):
+        try:
+            for fe in os.listdir(ip_spread_root):
+                if not fe.startswith("field="):
+                    continue
+                fpath = os.path.join(ip_spread_root, fe)
+                try:
+                    for he in os.listdir(fpath):
+                        if he.startswith("hour="):
+                            hours_to_bundle.add(he[5:])
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    ip_rebuilt = bundle_hours_ip_spread(sid, source, sorted(hours_to_bundle)) if hours_to_bundle else 0
+
+    # 2. Compact all closed days to daily per-field and then bundle days
+    days_compacted = compact_closed_days_to_daily(sid, source)
+    days_bundled = backfill_day_bundles(sid, source)
+
+    # 3. Retention & historical hourly prune
+    retention_months = int(source.get("rollup_retention_months", 12))
+    max_age_days = int(source.get("rollups_days", retention_months * 30))
+    cleaned_entries = cleanup_old_rollups(sid, source, max_age_days=max_age_days, hour_bundle_max_age_days=14)
+
+    files_after = _count_files(cache_dir)
+    duration_s = round(time.time() - t0, 3)
+
+    return ConsolidateRollupsResponse(
+        service_id=sid,
+        files_before=files_before,
+        files_after=files_after,
+        files_deleted=max(0, files_before - files_after),
+        hours_ip_bundled=ip_rebuilt,
+        days_compacted=days_compacted,
+        days_bundled=days_bundled,
+        cleaned_entries=cleaned_entries,
+        duration_s=duration_s,
+    )
+
+
+@router.post(
+    "/admin/rollups/compact",
+    response_model=RollupCompactResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/compact/{service_id}",
+    response_model=RollupCompactResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_compact_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupCompactResponse:
+    """Manually trigger daily rollup compaction for closed days over a 30-day window."""
+    sid = service_id or source.get("name") or source.get("service_id")
+    from backend.cron.jobs.rollup_compact import _run_rollup_compact_daily
+
+    res = _run_rollup_compact_daily(sid, manual=True)
+    return RollupCompactResponse(**res)
+
+
+@router.post(
+    "/admin/rollup-heal",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollup-heal/{service_id}",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/heal",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/heal/{service_id}",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_heal_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupHealResponse:
+    """Manually trigger hourly rollup healing for missing closed-hour bundles over 48h."""
+    sid = service_id or source.get("service_id") or source.get("name") or ""
+    from backend.cron.jobs.compaction import _run_rollup_hour_heal
+
+    res = _run_rollup_hour_heal(sid, manual=True)
+    return RollupHealResponse(**res)
+
+
+@router.get(
+    "/admin/rollups/status",
+    response_model=RollupStatusResponse,
+    response_model_exclude_unset=True,
+)
+@router.get(
+    "/admin/rollups/status/{service_id}",
+    response_model=RollupStatusResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_status(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupStatusResponse:
+    """Inspect the status of day and hour rollup bundles."""
+    sid = service_id or source.get("service_id") or source.get("name") or ""
+    from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
+
+    day_root = _day_bundled_root(source)
+    hour_root = _hour_bundled_root(source)
+    days: list[str] = []
+    if os.path.isdir(day_root):
+        for entry in os.listdir(day_root):
+            if entry.startswith("day="):
+                days.append(entry[len("day=") :])
+            elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+                cand = entry[len("day_bundle_") : -len(".parquet")]
+                if len(cand) == 10 and cand not in days:
+                    days.append(cand)
+    days.sort()
+    hour_cnt = 0
+    if os.path.isdir(hour_root):
+        for entry in os.listdir(hour_root):
+            if entry.startswith("hour="):
+                hour_cnt += 1
+    return RollupStatusResponse(
+        service_id=sid,
+        days_bundled=len(days),
+        hour_bundles=hour_cnt,
+        latest_day_bundle=days[-1] if days else None,
+        earliest_day_bundle=days[0] if days else None,
+    )
 
 
 @router.post(
@@ -177,7 +471,13 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     response_model=LocalCompactNowResponse,
     response_model_exclude_unset=True,
 )
+@router.post(
+    "/admin/compact/{service_id}",
+    response_model=LocalCompactNowResponse,
+    response_model_exclude_unset=True,
+)
 def local_compact_now(
+    service_id: str | None = None,
     source: dict = Depends(get_source),
     min_files: int = Query(
         default=3,
@@ -205,7 +505,9 @@ def local_compact_now(
 
 
 @router.get("/admin/compaction-stats", response_model=CompactionStatsResponse)
-def compaction_stats(source: dict = Depends(get_source)) -> CompactionStatsResponse:
+@router.get("/admin/compaction-status", response_model=CompactionStatsResponse)
+@router.get("/admin/compaction-status/{service_id}", response_model=CompactionStatsResponse)
+def compaction_stats(service_id: str | None = None, source: dict = Depends(get_source)) -> CompactionStatsResponse:
     """Snapshot of file-count distribution across local cache partitions.
 
     Useful for monitoring: rising partitions_above_3 means the local
@@ -215,6 +517,84 @@ def compaction_stats(source: dict = Depends(get_source)) -> CompactionStatsRespo
     from backend.core import local_compaction as _lc
 
     return CompactionStatsResponse(**_lc.compaction_stats(source))
+
+
+@router.post(
+    "/admin/partial-hour-merge",
+    response_model=PartialHourMergeResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/partial-hour-merge/{service_id}",
+    response_model=PartialHourMergeResponse,
+    response_model_exclude_unset=True,
+)
+def partial_hour_merge_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+):
+    """Trigger an immediate partial-hour merge tick for the active UTC hour.
+
+    Folds newly-arrived buffer parquets into the active hour's partial-hour rollup.
+    Local-only operation; zero FOS egress.
+    """
+    sid = service_id or source.get("service_id", source.get("name", ""))
+    from backend.core.field_registry import derived
+    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+    from backend.repositories.dashboard import FIELDS
+
+    derived_fields = {f.code for f in derived()}
+    merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS and f not in derived_fields]
+
+    stats = merge_partial_hour(sid, source, merge_fields)
+    removed = gc_stale_partial_hours(source)
+    return {
+        "service_id": sid,
+        "hour": stats.get("hour"),
+        "new_files": stats.get("new_files", 0),
+        "duration_ms": stats.get("duration_ms", 0.0),
+        "gc_hours_removed": removed,
+        "status": "success",
+    }
+
+
+@router.get(
+    "/admin/partial-hour-status",
+    response_model=PartialHourStatusResponse,
+    response_model_exclude_unset=True,
+)
+@router.get(
+    "/admin/partial-hour-status/{service_id}",
+    response_model=PartialHourStatusResponse,
+    response_model_exclude_unset=True,
+)
+def partial_hour_status(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+):
+    """Inspect the status of the current active hour's partial rollup."""
+    from backend.core.rollups.partial_hour import (
+        _all_fields_path,
+        read_partial_hour_total,
+        read_partial_hour_watermark,
+    )
+
+    sid = service_id or source.get("service_id", source.get("name", ""))
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    watermark = read_partial_hour_watermark(source, active_hour)
+    file_exists = os.path.isfile(_all_fields_path(source, active_hour))
+    total_rows = read_partial_hour_total(source, active_hour)
+    watermark_iso = datetime.fromtimestamp(watermark, tz=UTC).isoformat() if watermark > 0 else None
+
+    return {
+        "service_id": sid,
+        "hour": active_hour,
+        "watermark": watermark,
+        "watermark_iso": watermark_iso,
+        "file_exists": file_exists,
+        "total_rows": total_rows,
+    }
 
 
 @router.patch(
@@ -232,34 +612,38 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
     value. Returns the resolved retention (defaults merged with cfg) so the
     UI can confirm what was saved.
     """
-    from backend import config as svcconfig
     from backend.core import metadata as _mdb
     from backend.core.metadata import DEFAULT_METADATA_RETENTION
-    from backend.utils.router_utils import load_service_config
+    from backend.utils.router_utils import load_service_config, mutate_service_config
 
     service_id = source["name"]
-    cfg = load_service_config(service_id)
+    load_service_config(service_id)
 
     from backend.core.metadata import is_ingested_files_dedup_active
 
-    current = dict(cfg.get("metadata_retention") or {})
+    updates: dict[str, int] = {}
     for key in ("usage_log_days", "ingested_files_days", "cron_runs_days"):
         if key in body:
             try:
                 v = int(body[key])
             except (TypeError, ValueError):
                 v = 0
-            current[key] = max(0, v)
+            updates[key] = max(0, v)
 
-    # Mirror the cleanup helper's safety override at the write layer:
-    # if delete_after=false on this service, refuse to persist a non-zero
-    # ingested_files_days. Storing it would mislead the operator into
-    # thinking the value will be honored when the cleanup ignores it.
-    if not is_ingested_files_dedup_active(service_id) and int(current.get("ingested_files_days") or 0) > 0:
-        current["ingested_files_days"] = 0
+    dedup_active = is_ingested_files_dedup_active(service_id)
 
-    cfg["metadata_retention"] = current
-    svcconfig.save_config(service_id, cfg)
+    def _apply(cfg: dict) -> None:
+        merged = dict(cfg.get("metadata_retention") or {})
+        merged.update(updates)
+        # Mirror the cleanup helper's safety override at the write layer:
+        # if delete_after=false on this service, refuse to persist a non-zero
+        # ingested_files_days. Storing it would mislead the operator into
+        # thinking the value will be honored when the cleanup ignores it.
+        if not dedup_active and int(merged.get("ingested_files_days") or 0) > 0:
+            merged["ingested_files_days"] = 0
+        cfg["metadata_retention"] = merged
+
+    current = mutate_service_config(service_id, _apply)["metadata_retention"]
     try:
         _mdb.record_audit(
             service_id=service_id,
@@ -267,7 +651,7 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
             details=current,
         )
     except Exception:
-        pass
+        logger.warning("update_metadata_retention: _mdb.record_audit failed (ignored)", exc_info=True)
 
     return {"retention": {**DEFAULT_METADATA_RETENTION, **current}}
 
@@ -307,7 +691,12 @@ def metadata_storage(source: dict = Depends(get_source)):
 # response_model intentionally omitted: SSE stream (EventSourceResponse),
 # not a JSON body — event shapes are documented in the docstring.
 @router.post("/admin/metadata-cleanup")
-def metadata_cleanup_now(source: dict = Depends(get_source)):
+@router.post("/admin/metadata-cleanup/{service_id}")
+def metadata_cleanup_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+    _admin: None = Depends(require_admin),
+):
     """Trigger an immediate metadata cleanup, streaming progress as SSE.
 
     Equivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but
@@ -336,7 +725,7 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
     from backend.core.duckdb import log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
 
-    service_id = source["name"]
+    service_id = service_id or source.get("name") or source.get("service_id", "")
     cfg = svcconfig.load_config(service_id) or {}
     retention = cfg.get("metadata_retention") or {}
 
@@ -407,4 +796,4 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
             except _queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())

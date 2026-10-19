@@ -9,6 +9,7 @@
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useAnalystHeartbeat } from '@/hooks/useAnalystHeartbeat'
+import { __resetForTests } from '@/lib/userActivity'
 
 const replace = vi.fn()
 vi.mock('next/navigation', () => ({
@@ -28,6 +29,7 @@ describe('useAnalystHeartbeat', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: false })
     vi.setSystemTime(new Date('2026-05-27T00:00:00Z'))
+    __resetForTests(Date.now())
     replace.mockReset()
     Object.defineProperty(document, 'hidden', { configurable: true, value: false })
   })
@@ -50,6 +52,23 @@ describe('useAnalystHeartbeat', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(INTERVAL - 1)
         window.dispatchEvent(new Event('mousemove'))
+        await vi.advanceTimersByTimeAsync(1)
+      })
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('treats touch input as activity (touch-only analysts are not idle)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(INTERVAL - 1)
+        window.dispatchEvent(new Event('touchstart'))
         await vi.advanceTimersByTimeAsync(1)
       })
     }

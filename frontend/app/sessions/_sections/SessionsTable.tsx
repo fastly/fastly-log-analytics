@@ -16,8 +16,9 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
-type SessionsResponse = components['schemas']['SessionsResponse']
+import { formatCountMaybe } from '@/lib/format'
 type SessionRow = components['schemas']['Session']
 
 interface SessionsTableProps {
@@ -92,7 +93,7 @@ export function SessionsTable({
       {
         accessorKey: 'unique_urls',
         header: 'Unique URLs',
-        cell: ({ row }) => (row.getValue('unique_urls') as number)?.toLocaleString() ?? '—',
+        cell: ({ row }) => formatCountMaybe(row.getValue('unique_urls') as number) ?? '—',
       },
       {
         accessorKey: 'asn',
@@ -202,7 +203,13 @@ export function SessionsTable({
   }, [data, relative, full, abbr, labels, labelBySid, idBySid, activeServiceId, onFlagged, onRowClick])
 
   return (
-    <div className={cn("border rounded-lg transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+    <div
+      data-testid="sessions-table-container"
+      className={cn(
+        "border rounded-lg transition-opacity duration-100 min-h-[500px] [contain-intrinsic-size:500px]",
+        isFetching && !isLoadingInitial && "opacity-40 pointer-events-none"
+      )}
+    >
       <DataTable
         columns={columns}
         data={data?.sessions || []}

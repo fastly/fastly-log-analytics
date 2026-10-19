@@ -1,9 +1,12 @@
 'use client'
 
+import type { PlotlyTrace } from '@/types/plotly'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useInViewOnce } from '@/hooks/useInViewOnce'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
+import type { ChartInterval, ReportConfiguration } from '@/hooks/useReportConfig'
 import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
@@ -20,17 +23,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils';
-import { formatBytes } from '@/lib/format'
+import { formatAbbreviatedCount, formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
-function fmtN(n: number): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return n.toLocaleString()
-}
-
-
 const FosOperationsHelp = ({ note }: { note?: string }) => (
   <div className="space-y-4">
     <p>Fastly Object Storage (FOS) bills operations in two classes:</p>
@@ -55,6 +50,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 export default function UsagePage() {
   return (
@@ -80,16 +76,17 @@ function UsagePageContent({
   startTime: string | null
   endTime: string | null
   activeServiceId: string | null
-  config: any
-  setChartInterval: (interval: any) => void
+  config: ReportConfiguration
+  setChartInterval: (interval: ChartInterval) => void
   intervalButtons: React.ReactNode
-  [key: string]: any
 }) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
   const router = useRouter()
   const services = useServiceStore(s => s.services);
-        const isAnalyst = services.find((s: any) => s.id === activeServiceId)?.accessLevel === 'read_only'
+        const activeSvc = services.find((s) => s.id === activeServiceId)
+        const isAnalyst = activeSvc?.accessLevel === 'read_only'
+        const isRumEnabled = activeSvc?.rum_enabled ?? false
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
 
@@ -202,28 +199,9 @@ function UsagePageContent({
   })
 
   const estimatorRef = useRef<HTMLDivElement>(null)
-  const [estimatorVisible, setEstimatorVisible] = useState(false)
-  useEffect(() => {
-    if (estimatorVisible || !estimatorRef.current) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setEstimatorVisible(true)
-      return
-    }
-    const node = estimatorRef.current
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setEstimatorVisible(true)
-          observer.disconnect()
-        }
-      },
-      // 600px rootMargin matches the site-wide LazyMount default so the
-      // fetch fires one screen ahead of the user reaching the section.
-      { rootMargin: '600px' },
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [estimatorVisible])
+  // 600px rootMargin matches the site-wide LazyMount default so the fetch fires one screen
+  // ahead of the user reaching the section.
+  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
 
   const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
@@ -245,8 +223,8 @@ function UsagePageContent({
   const isLoadingInitial = loadingStorage || loadingOps || loadingBw || loadingActivity
 
   // ── Chart colours ──────────────────────────────────────────────────────────
-  const accent = isDark ? '#60a5fa' : '#3b82f6'
-  const accentB = isDark ? '#34d399' : '#10b981'
+  const accent = isDark ? '#60a5fa' : CHART_COLORS.info
+  const accentB = isDark ? '#34d399' : CHART_COLORS.success
   const gridColor = isDark ? '#27272a' : '#e4e4e7'
 
   const baseLayout = useMemo(() => ({
@@ -255,9 +233,9 @@ function UsagePageContent({
   }), [])
 
   // ── Ops chart ──────────────────────────────────────────────────────────────
-  const opsDates = ops?.data.map((d: any) => d.date) ?? []
-  const opsClassA = ops?.data.map((d: any) => d.class_a) ?? []
-  const opsClassB = ops?.data.map((d: any) => d.class_b) ?? []
+  const opsDates = ops?.data.map((d) => d.date) ?? []
+  const opsClassA = ops?.data.map((d) => d.class_a) ?? []
+  const opsClassB = ops?.data.map((d) => d.class_b) ?? []
 
   const opsData = useMemo(() => [
     { type: 'bar', name: 'Class A', x: opsDates, y: opsClassA, marker: { color: accent }, hovertemplate: 'Class A: %{y:,}<extra></extra>' },
@@ -266,8 +244,8 @@ function UsagePageContent({
   const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 
   // ── Bandwidth chart ────────────────────────────────────────────────────────
-  const bwTimes = bw?.data.map((p: any) => p.time) ?? []
-  const bwBytes = bw?.data.map((p: any) => p.bandwidth_bytes ?? 0) ?? []
+  const bwTimes = bw?.data.map((p) => p.time) ?? []
+  const bwBytes = bw?.data.map((p) => p.bandwidth_bytes ?? 0) ?? []
   const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
 
   let bwDiv = 1
@@ -289,7 +267,7 @@ function UsagePageContent({
   const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
   const hasApiCounts = apiCounts.some(v => v != null && v > 0)
 
-  const logProcData: any[] = [
+  const logProcData: PlotlyTrace[] = [
     { type: 'bar', name: 'Log Lines Ingested', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: 'Ingested: %{y:,}<extra></extra>' }
   ]
   if (hasApiCounts) {
@@ -299,8 +277,8 @@ function UsagePageContent({
       name: 'Fastly Requests',
       x: genTimes,
       y: apiCounts,
-      line: { color: '#f59e0b', width: 2 },
-      marker: { color: '#f59e0b', size: 6 },
+      line: { color: CHART_COLORS.warning, width: 2 },
+      marker: { color: CHART_COLORS.warning, size: 6 },
       hovertemplate: 'Requests: %{y:,}<extra></extra>',
     })
   }
@@ -332,7 +310,7 @@ function UsagePageContent({
 
   const costChartData = useMemo(() => [
     { type: 'bar', name: 'Operations', x: opsDates, y: costOpsY, marker: { color: accent }, hovertemplate: '$%{y:.2f}<extra></extra>' },
-    { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: '#f59e0b' }, hovertemplate: '$%{y:.2f}<extra></extra>' },
+    { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: CHART_COLORS.warning }, hovertemplate: '$%{y:.2f}<extra></extra>' },
   ], [opsDates, costOpsY, costEgressY, accent])
   const costLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const, yaxis: { tickprefix: '$', tickformat: '.2f', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }), [baseLayout, gridColor])
 
@@ -345,7 +323,7 @@ function UsagePageContent({
   return (
     <>
       {/* ── Stat cards ─────────────────────────────────────────────────────── */}
-      <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+      <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100 min-h-[140px] [contain-intrinsic-size:140px] [content-visibility:auto]", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
         <StatCard
           title="Storage Impact (Period)"
           value={
@@ -407,7 +385,7 @@ function UsagePageContent({
         />
         <StatCard
           title="Class A Ops (period)"
-          value={fmtN(totalClassA)}
+          value={formatAbbreviatedCount(totalClassA)}
           sub={
             <div className="space-y-1">
               <div>Writes, lists, deletes</div>
@@ -423,7 +401,7 @@ function UsagePageContent({
         />
         <StatCard
           title="Class B Ops (period)"
-          value={fmtN(totalClassB)}
+          value={formatAbbreviatedCount(totalClassB)}
           sub={
             <div className="space-y-1">
               <div>Reads / downloads</div>
@@ -485,7 +463,7 @@ function UsagePageContent({
       </div>
 
       {/* ── Charts ─────────────────────────────────────────────────────────── */}
-      <div className={cn("grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+      <div className={cn("grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100 min-h-[740px] [contain-intrinsic-size:740px] [content-visibility:auto]", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
         <AnalyticsCard
           title="FOS Operations"
           description="Class A and Class B operations from the Historical Stats API"
@@ -498,7 +476,7 @@ function UsagePageContent({
           contentClassName="p-2"
           helpContent={<FosOperationsHelp note={ops?.note} />}
         >
-          <PlotlyChart data={opsData as any[]} layout={opsLayout} height="100%" />
+          <PlotlyChart data={opsData} layout={opsLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -512,7 +490,7 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={bwData as any[]} layout={bwLayout} height="100%" />
+          <PlotlyChart data={bwData} layout={bwLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -526,7 +504,7 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={costChartData as any[]} layout={costLayout} height="100%" />
+          <PlotlyChart data={costChartData} layout={costLayout} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -540,10 +518,10 @@ function UsagePageContent({
           className="h-[360px]"
           contentClassName="p-2"
         >
-          <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
+          <PlotlyChart data={logProcData} layout={baseLayout} height="100%" />
         </AnalyticsCard>
 
-        {rumBreakdown && (
+        {isRumEnabled && rumBreakdown && (
           <AnalyticsCard
             title="Real User Monitoring (RUM) Operations"
             description="RUM beacon volume and estimated FOS Class A operation cost"
@@ -565,14 +543,14 @@ function UsagePageContent({
                 <div className="grid grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Total Beacons</p>
-                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_beacons)}</p>
+                    <p className="text-2xl font-bold">{formatAbbreviatedCount(rumBreakdown.total_beacons)}</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      {rumBreakdown.average_beacons_per_day?.toLocaleString()} / day avg
+                      {formatCountMaybe(rumBreakdown.average_beacons_per_day)} / day avg
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Class A Operations</p>
-                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_estimated_class_a)}</p>
+                    <p className="text-2xl font-bold">{formatAbbreviatedCount(rumBreakdown.total_estimated_class_a)}</p>
                     <p className="text-xs text-muted-foreground mt-1">@${rumBreakdown.class_a_rate_per_1k?.toFixed(3)}/1k</p>
                   </div>
                   <div>
@@ -596,7 +574,7 @@ function UsagePageContent({
 
       {/* ── Cost Estimator ─────────────────────────────────────────────────── */}
       {!isAnalyst && (
-        <div ref={estimatorRef}>
+        <div ref={estimatorRef} className="min-h-[420px] [contain-intrinsic-size:420px] [content-visibility:auto]">
           <AnalyticsCard
             title="Cost Estimator"
             description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."

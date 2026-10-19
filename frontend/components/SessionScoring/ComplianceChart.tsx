@@ -5,38 +5,30 @@ import { ComplianceHelp } from '@/components/SessionScoring/help-content'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
 import { useScoringQuery } from './useScoringQuery'
-import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
+import { client } from '@/lib/api'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface ComplianceChartProps {
   serviceId: string
   sinceHours?: number
 }
 
-// Deliberate narrowing of the all-optional generated ScoringComplianceRow:
-// the compliance-breakdown SQL always emits all three columns per row.
-// Key/type drift against the wire schema fails on the parity guard below.
-interface CompRow {
-  hour: string
-  compliance: string
-  count: number
-}
-export type _CompRowParity = Expect<WireParity<CompRow, components['schemas']['ScoringComplianceRow']>>
+type CompRow = components['schemas']['ScoringComplianceRow']
 
 const COMPLIANCE_COLORS: Record<string, string> = {
-  ok: '#10b981',
-  missing: '#94a3b8',
+  ok: CHART_COLORS.success,
+  missing: CHART_COLORS.neutral,
   tampered: '#e11d48',
-  expired: '#f59e0b',
+  expired: CHART_COLORS.warning,
   unknown: '#7c3aed',
 }
 
 export function ComplianceChart({ serviceId, sinceHours = 24 }: ComplianceChartProps) {
-  const { data, isLoading, isFetching, isError, error } = useScoringQuery<{ rows: CompRow[] }>(
-    ['scoring-compliance', serviceId, sinceHours],
-    serviceId,
-    'compliance-breakdown',
-    { since_hours: sinceHours },
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-compliance', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/compliance-breakdown', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   return (

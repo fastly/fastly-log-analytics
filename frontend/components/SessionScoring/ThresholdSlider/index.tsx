@@ -1,5 +1,6 @@
 'use client'
 
+import { useDerivedState } from '@/hooks/useDerivedState'
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { SlidersHorizontal } from 'lucide-react'
@@ -10,19 +11,25 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 
-import { ThresholdMatrix } from './Matrix'
+import { ThresholdMatrix, type BucketCounts } from './Matrix'
 import { ThresholdPreviewStats } from './Preview'
 import { ThresholdSliderControls } from './Slider'
+import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 
-interface ThresholdPreviewResponse {
-  threshold: number
-  since_hours: number
-  total_scored_sessions: number
-  flagged: { total: number; good: number; bad: number; unlabeled: number }
-  passed: { good: number; bad: number; unlabeled: number }
-  precision: number | null
-  recall: number | null
-}
+type ThresholdPreviewResponse = Simplify<
+  Omit<
+    WithRequiredNullable<
+      WithRequired<
+        components['schemas']['ScoringThresholdPreviewResponse'],
+        'threshold' | 'since_hours' | 'total_scored_sessions'
+      >,
+      'precision' | 'recall'
+    >,
+    'flagged' | 'passed'
+  > & { flagged: BucketCounts; passed: Omit<BucketCounts, 'total'> }
+>
+
+export type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
 
 interface ThresholdSliderProps {
   serviceId: string
@@ -86,38 +93,33 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-threshold-committed', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/threshold' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/threshold',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { threshold: number | null; set_at: string | null; enforced: boolean }
+      return data
     },
     staleTime: 30_000,
   })
 
   // One-shot: when the committed threshold loads, jump the slider to it so
-  // the operator isn't staring at a misleading default of 75. Guarded by a
-  // ref so subsequent edits don't get clobbered by the query refetching.
-  const syncedFromCommittedRef = React.useRef(false)
-  React.useEffect(() => {
-    if (syncedFromCommittedRef.current) return
-    if (committed?.threshold != null && thresholdRaw === 75) {
-      syncedFromCommittedRef.current = true
-      setThresholdRaw(committed.threshold)
-      setThreshold(committed.threshold)
-    }
-    // intentionally not depending on thresholdRaw — one-shot sync
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committed?.threshold])
+  // the operator isn't staring at a misleading default of 75. Guarded so
+  // subsequent edits don't get clobbered by the query refetching.
+  const [syncedFromCommitted, setSyncedFromCommitted] = React.useState(false)
+  if (!syncedFromCommitted && committed?.threshold != null && thresholdRaw === 75) {
+    setSyncedFromCommitted(true)
+    setThresholdRaw(committed.threshold)
+    setThreshold(committed.threshold)
+  }
 
   const commitMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/threshold' as any,
+        '/api/services/{service_id}/scoring/threshold',
         {
           params: { path: { service_id: serviceId } },
           body: { threshold: newThreshold },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data
@@ -135,11 +137,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-enforce-threshold', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-threshold' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/enforce-threshold',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as { threshold: number | null; enforced: boolean }
+      return data
     },
     staleTime: 30_000,
   })
@@ -147,14 +149,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const enforceMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-threshold' as any,
+        '/api/services/{service_id}/scoring/enforce-threshold',
         {
           params: {
             path: { service_id: serviceId },
             query: { confirm: true },
           },
           body: { threshold: newThreshold },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data
@@ -173,18 +175,11 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     queryKey: ['scoring-enforce-status-code', serviceId],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-status-code' as any,
-        { params: { path: { service_id: serviceId } } } as any,
+        '/api/services/{service_id}/scoring/enforce-status-code',
+        { params: { path: { service_id: serviceId } } },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as {
-        current: number | null
-        default: number
-        effective: number
-        min: number
-        max: number
-        is_default: boolean
-      }
+      return data
     },
     staleTime: 30_000,
   })
@@ -192,14 +187,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const statusCodeMutation = useMutation({
     mutationFn: async (newCode: number | null) => {
       const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-status-code' as any,
+        '/api/services/{service_id}/scoring/enforce-status-code',
         {
           params: {
             path: { service_id: serviceId },
             query: { confirm: true },
           },
           body: { status_code: newCode },
-        } as any,
+        },
       )
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data
@@ -219,10 +214,7 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   // don't fire a re-publish on every keystroke. Sync once when the query
   // resolves, and again whenever the committed value changes from elsewhere
   // (e.g. after this user clicks Apply → confirm → mutation succeeds).
-  const [codeDraft, setCodeDraft] = React.useState<string>(String(effectiveStatusCode))
-  React.useEffect(() => {
-    setCodeDraft(String(effectiveStatusCode))
-  }, [effectiveStatusCode])
+  const [codeDraft, setCodeDraft] = useDerivedState(String(effectiveStatusCode))
 
   const codeDraftNum = Number(codeDraft)
   const codeDraftValid =

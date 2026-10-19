@@ -48,6 +48,8 @@ _DEFAULT_PLACEHOLDERS: dict[str, str] = {
     # filters / where
     "where_clause": "1=1",
     "where": "1=1",
+    "total_misses": "NULL",
+    "total_passes": "NULL",
     "extra_where": "",
     "search_clause": "",
     "search_cond": "",

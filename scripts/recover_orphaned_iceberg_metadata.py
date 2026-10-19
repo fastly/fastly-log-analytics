@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Recover data orphaned by an Iceberg metadata rollback.
 
-Background — 2026-08 SE-demo incident. ``_read_metadata_pointer``'s discovery
+Background — 2026-08 production incident. ``_read_metadata_pointer``'s discovery
 fallback used an unpaginated ``list_objects_v2``. A response caps at 1000 keys
 and pyiceberg zero-pads the metadata version prefix, so the first page holds
 the OLDEST versions; ``sorted(...)[-1]`` resolved v952 while v13723 was

@@ -15,7 +15,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import expire
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
 
 
 @pytest.fixture
@@ -49,7 +55,7 @@ def test_returns_when_source_missing(monkeypatch):
 def test_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_cron_log):
     """``start_cron_run`` raises (e.g. another instance already running)
     → log and return without invoking iceberg.run_cloud_maintenance."""
-    stub_cron_log["start"].side_effect = RuntimeError("already running")
+    stub_cron_log["start"].side_effect = CronLeaseHeldError("already running")
     maint = MagicMock()
     monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", maint)
 

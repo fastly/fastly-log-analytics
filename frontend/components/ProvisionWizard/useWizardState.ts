@@ -10,10 +10,12 @@ import { showToast } from "@/lib/toast";
 import {
   INITIAL_CONFIG,
   WIZARD_DRAFT_VERSION,
+  ANALYST_PATH_A_UNSUPPORTED_REASON,
   getStepsForMode,
   type DomainStatus,
   type FosStatus,
   type JoinPhase,
+  type LakeInfo,
   type ProvisionConfig,
   type ProvisionService,
   type Step,
@@ -63,6 +65,7 @@ export function useWizardState(
   onOpenChange: (open: boolean) => void,
 ): WizardState {
   const setActiveServiceId = useServiceStore(s => s.setActiveServiceId)
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const setServices = useServiceStore(s => s.setServices)
   const services = useServiceStore(s => s.services);
   const { timezone } = useTimezoneStore();
@@ -116,7 +119,7 @@ export function useWizardState(
   const [ngwafDebugRaw, setNgwafDebugRaw] = useState("");
 
   // Analyst Flow state
-  const [lakeInfo, setLakeInfo] = useState<any>(null);
+  const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [importMode, setImportMode] = useState<"all" | "range">("all");
   const [importRange, setImportRange] = useState<{
@@ -124,6 +127,18 @@ export function useWizardState(
     end: string;
   }>({ start: "", end: "" });
   const [syncEnabled, setSyncEnabled] = useState(true);
+  const capabilityService = React.useMemo(() => {
+    if (!services.length) return null;
+    if (!activeServiceId) return services[0] ?? null;
+    return services.find((service) => service.id === activeServiceId) ?? null;
+  }, [activeServiceId, services]);
+  const analystPathASupported =
+    capabilityService?.analystPathASupported ?? true;
+  const analystPathAReason =
+    analystPathASupported
+      ? null
+      : capabilityService?.analystPathAReason ??
+        ANALYST_PATH_A_UNSUPPORTED_REASON;
 
   const [pendingDraft, setPendingDraft] = useState<WizardDraft | null>(() =>
     open ? loadDraft() : null,
@@ -190,7 +205,7 @@ export function useWizardState(
         err.code = (error as { detail?: { error?: string } })?.detail?.error;
         throw err;
       }
-      return data as any;
+      return data ?? [];
     },
     enabled: !!submittedToken,
     retry: false,
@@ -212,7 +227,7 @@ export function useWizardState(
     queryKey: ["services", "catalog"],
     queryFn: async () => {
       const { data } = await client.GET("/api/log-fields/catalog");
-      return data as any;
+      return data;
     },
     enabled: step === "fields",
   });
@@ -392,7 +407,7 @@ export function useWizardState(
         if (end && dateStr > end.split("T")[0]) continue;
       }
 
-      total += (stats as any).size_bytes || 0;
+      total += stats.size_bytes;
     }
     return total;
   }, [lakeInfo, importMode, importRange]);
@@ -412,6 +427,7 @@ export function useWizardState(
   const handleJoin = () =>
     runJoin({
       config,
+      analystPathASupported,
       syncIntervalMins,
       syncEnabled,
       icebergMetadataLocation,
@@ -506,15 +522,13 @@ export function useWizardState(
       setStep,
     });
 
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    setPendingDraft(loadDraft());
-    return () => {
-      setPendingDraft(null);
-    };
-  }, [open]);
+  // The saved draft is loaded when the wizard opens and dropped when it closes (adjusted during
+  // render, keyed on `open`).
+  const [draftOpen, setDraftOpen] = useState(false);
+  if (open !== draftOpen) {
+    setDraftOpen(open);
+    setPendingDraft(open ? loadDraft() : null);
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -631,6 +645,8 @@ export function useWizardState(
     ngwafDebugRaw,
     lakeInfo,
     isAnalyzing,
+    analystPathASupported,
+    analystPathAReason,
     importMode,
     setImportMode,
     importRange,

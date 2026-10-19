@@ -40,7 +40,7 @@ def test_ngwaf_top_bots_join_renders_with_temp_table_and_n():
     rendered = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table="t_filtered_xyz", n=15)
     assert "SELECT nb.bot_name, nb.category, count(*) AS cnt" in rendered
     assert "FROM t_filtered_xyz t" in rendered
-    assert "INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)" in rendered
+    assert "INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id)" in rendered
     assert "WHERE nb.bot_name IS NOT NULL" in rendered
     assert "LIMIT 15" in rendered
 
@@ -76,7 +76,7 @@ def test_ngwaf_verified_bots_renders_with_temp_table():
     assert "nb.category" in rendered
     assert "count(*) AS request_count" in rendered
     assert "FROM t_filtered_xyz t" in rendered
-    assert "INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)" in rendered
+    assert "INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)" in rendered
     assert "GROUP BY 1, 2, 3" in rendered
     assert "ORDER BY 4 DESC" in rendered
 
@@ -92,7 +92,7 @@ def test_ngwaf_verified_bots_ts_renders_with_bucket_and_temp_table():
     rendered = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=60, temp_table="t_filtered_xyz")
     assert "time_bucket(INTERVAL '60 seconds', t.timestamp)" in rendered
     assert "FROM t_filtered_xyz t" in rendered
-    assert "INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)" in rendered
+    assert "INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)" in rendered
     assert "WHERE nb.bot_name IS NOT NULL" in rendered
     assert "GROUP BY 1, 2" in rendered
 

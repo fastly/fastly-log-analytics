@@ -154,13 +154,10 @@ def list_labels(service_id: str, limit: int = 500) -> list[dict]:
             return cached
 
     con = get_con(service_id)
-    # ROWID DESC as secondary sort: SQLite's datetime('now') is only
-    # second-precision, so rows inserted within the same wall-clock
-    # second otherwise return in implementation-defined order (which
-    # tripped the most-recent-first test). ROWID is insertion-order
-    # so the tie-break matches the admin's mental model.
+    # Keep the tie-break portable across SQLite and Postgres. SQLite's
+    # ROWID is not available in the shared Postgres metadata store.
     rows = con.execute(
-        "SELECT * FROM scoring_labels WHERE service_id = ? ORDER BY updated_at DESC, ROWID DESC LIMIT ?",
+        "SELECT * FROM scoring_labels WHERE service_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?",
         (service_id, int(limit)),
     ).fetchall()
     result = [_row_to_dict(r) for r in rows]

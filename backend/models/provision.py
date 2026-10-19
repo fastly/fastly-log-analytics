@@ -7,14 +7,16 @@ canonical home for them.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, Field
+
+from backend.models._base import PassthroughModel
 
 
 class CheckFosRequest(BaseModel):
     """Body for ``POST /api/provision/check-fos`` — FOS credentials to
-    validate by attempting a single list-objects call."""
+    validate against the raw request/RUM prefixes and a representative object."""
 
     bucket: str
     region: str
@@ -67,6 +69,7 @@ class ProvisionExecuteRequest(BaseModel):
     cmcd_version: int | None = None
     logging_enabled: bool = True
     rum_enabled: bool = False
+    rum_log_period: str | None = None
     faro_version: str | None = None
     rum_custom_condition: str | None = None
 
@@ -150,7 +153,7 @@ class RumSettingsUpdateRequest(BaseModel):
     token: str = ""
 
 
-class ProvisionConfigRequest(BaseModel):
+class ProvisionConfigRequest(PassthroughModel):
     """Body shape shared by ``/provision/terraform/preview``,
     ``/provision/terraform/export``, and ``/provision/ingest``.
 
@@ -163,8 +166,6 @@ class ProvisionConfigRequest(BaseModel):
     every UI tweak. Required-field checks (token / fos_bucket_name on
     the ingest path) stay in the handlers so the existing 400 envelopes
     are preserved."""
-
-    model_config = ConfigDict(extra="allow")
 
     token: str | None = None
     service_id: str | None = None
@@ -207,6 +208,11 @@ class CustomFieldsImportBody(BaseModel):
     custom_fields: list[dict[str, Any]] = []
 
 
+class CustomFieldsExportFile(CustomFieldsImportBody):
+    """Body of the ``GET /api/services/{id}/custom-fields/export`` file download:
+    the exact shape ``/custom-fields/import`` accepts, so an export round-trips."""
+
+
 # ── Wire-safe response models for the provision wizard endpoints ────────────
 #
 # Same contract as backend/models/session_scoring.py: ``extra="allow"`` +
@@ -216,17 +222,16 @@ class CustomFieldsImportBody(BaseModel):
 # telemetry envelope pass through byte-identically.
 
 
-class _ProvisionRead(BaseModel):
+class _ProvisionRead(PassthroughModel):
     """Base for provision responses — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ProvisionTokenInfo(_ProvisionRead):
     id: str | None = None
     name: str | None = None
     user_id: str | None = None
-    type: str | None = None
+    # ``"user"`` when the token carries a user_id, else ``"automation"``.
+    type: Literal["user", "automation"] | None = None
 
 
 class ProvisionDefaults(_ProvisionRead):
@@ -260,15 +265,48 @@ class ProvisionCheckFosResponse(_ProvisionRead):
     error: str | None = None
 
 
+class ProvisionLakeInfoRange(_ProvisionRead):
+    """Earliest/latest row timestamps (ISO strings; ``None`` for an empty table)."""
+
+    start: str | None = None
+    end: str | None = None
+
+
+class ProvisionLakeInfoCalendarDay(_ProvisionRead):
+    """One calendar day. ``data_files`` is a row count on the DuckLake path (see
+    ``get_snapshot_calendar``); ``size_bytes`` is ``0`` there."""
+
+    data_files: int
+    size_bytes: int
+
+
+class ProvisionLakeInfoTable(_ProvisionRead):
+    """``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset)."""
+
+    table_name: str | None = None
+    snapshots: int | None = None
+    data_files: int | None = None
+    size_bytes: int | None = None
+    latest_snapshot_at: str | None = None
+    buffer_files: int | None = None
+    buffer_size_bytes: int | None = None
+    table_location: str | None = None
+    region: str | None = None
+    min_timestamp: str | None = None
+    max_timestamp: str | None = None
+
+
 class ProvisionLakeInfoResponse(_ProvisionRead):
-    """``fetch_lake_info`` result. Only the branch-stable keys are declared;
-    the table-details payload (row counts / calendar / extents) varies by
-    Iceberg layout and rides through ``extra``."""
+    """``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present
+    only when the table exists."""
 
     ok: bool | None = None
     table_exists: bool | None = None
     message: str | None = None
     error: str | None = None
+    info: ProvisionLakeInfoTable | None = None
+    calendar: dict[str, ProvisionLakeInfoCalendarDay] | None = None
+    range: ProvisionLakeInfoRange | None = None
 
 
 class ProvisionIngestResponse(_ProvisionRead):
@@ -277,13 +315,14 @@ class ProvisionIngestResponse(_ProvisionRead):
 
 
 class ProvisionCheckConfigItem(_ProvisionRead):
-    ok: bool | None = None
-    details: str | None = None
+    ok: bool
+    details: str
 
 
 class ProvisionCheckConfigResponse(_ProvisionRead):
-    logging_service: ProvisionCheckConfigItem | None = None
-    cdn_service: ProvisionCheckConfigItem | None = None
+    # ``provision_check_config`` always seeds both blocks before probing.
+    logging_service: ProvisionCheckConfigItem
+    cdn_service: ProvisionCheckConfigItem
 
 
 class NgwafWorkspace(_ProvisionRead):
@@ -296,6 +335,9 @@ class NgwafWorkspacesResponse(_ProvisionRead):
     note: str | None = None
     error: str | None = None
     message: str | None = None
+    error_hint: str | None = None
+    # Raw upstream request/response excerpt the wizard shows when a lookup comes back empty.
+    debug_raw: str | None = Field(default=None, alias="_debug_raw")
 
 
 class NgwafWorkspaceSetResponse(_ProvisionRead):

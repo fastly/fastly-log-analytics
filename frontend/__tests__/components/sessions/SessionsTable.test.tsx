@@ -15,18 +15,19 @@
  * default measureElement returns 0 and the virtualizer would render
  * nothing).
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
 import { SessionsTable } from '@/app/sessions/_sections/SessionsTable'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count: number }) => ({
     getVirtualItems: () =>
       Array.from({ length: options.count }).map((_, i) => ({
         index: i,
@@ -46,11 +47,7 @@ vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
 }))
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
+  stubResizeObserver()
 })
 
 afterEach(() => cleanup())

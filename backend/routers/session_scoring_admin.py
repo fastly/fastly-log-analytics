@@ -30,9 +30,9 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Header, HTTPException, Path, Query, Request
+from fastapi import Depends, Header, HTTPException, Path, Query, Request
 
-from backend.deps import ServiceId
+from backend.deps import ServiceId, require_admin
 from backend.models.session_scoring import (
     ScoringAuditListResponse,
     ScoringDashboardResponse,
@@ -279,6 +279,14 @@ def l2_enforce_readiness_block(service_id: str) -> dict:
     "/{service_id}/scoring/retrain",
     response_model=ScoringRetrainResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.post(
+    "/{service_id}/session-scoring/retrain",
+    response_model=ScoringRetrainResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_retrain(
     service_id: ServiceId,
@@ -336,7 +344,7 @@ def scoring_retrain(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("scoring_retrain: con.close failed (ignored)", exc_info=True)
 
     matrix_dict = tmatrix.to_json_dict(version=matrix_version)
 
@@ -471,6 +479,12 @@ def scoring_retrain(
     response_model=ScoringSessionEventsResponse,
     response_model_exclude_unset=True,
 )
+@router.get(
+    "/{service_id}/session-scoring/sessions/{sid}/events",
+    response_model=ScoringSessionEventsResponse,
+    response_model_exclude_unset=True,
+    include_in_schema=False,
+)
 def scoring_session_events(
     request: Request,
     service_id: ServiceId,
@@ -510,6 +524,14 @@ def scoring_session_events(
     "/{service_id}/scoring/enforce-threshold",
     response_model=ScoringEnforceThresholdResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/enforce-threshold",
+    response_model=ScoringEnforceThresholdResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_enforce_threshold_get(
     service_id: ServiceId,
@@ -569,6 +591,14 @@ def scoring_enforce_threshold_get(
     "/{service_id}/scoring/enforce-threshold",
     response_model=ScoringEnforceThresholdPutResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.put(
+    "/{service_id}/session-scoring/enforce-threshold",
+    response_model=ScoringEnforceThresholdPutResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_enforce_threshold_put(
     body: ScoringThresholdBody,
@@ -660,6 +690,14 @@ def scoring_enforce_threshold_put(
     "/{service_id}/scoring/l2-enforce",
     response_model=ScoringL2EnforceState,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/l2-enforce",
+    response_model=ScoringL2EnforceState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_l2_enforce_get(
     service_id: ServiceId,
@@ -699,6 +737,14 @@ def scoring_l2_enforce_get(
     "/{service_id}/scoring/l2-enforce",
     response_model=ScoringL2EnforcePutResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.put(
+    "/{service_id}/session-scoring/l2-enforce",
+    response_model=ScoringL2EnforcePutResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_l2_enforce_put(
     body: ScoringL2EnforceBody,
@@ -813,6 +859,14 @@ def scoring_l2_enforce_put(
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexState,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/exclude-regex",
+    response_model=ScoringExcludeRegexState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     """Return the operator-configured URL-exclusion regex for the recv snippet.
@@ -859,6 +913,14 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexPutResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.put(
+    "/{service_id}/session-scoring/exclude-regex",
+    response_model=ScoringExcludeRegexPutResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_exclude_regex_put(
     body: ScoringExcludeRegexBody,
@@ -973,6 +1035,14 @@ def scoring_exclude_regex_put(
     "/{service_id}/scoring/exclude-regex/validate",
     response_model=ScoringExcludeRegexValidateResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.post(
+    "/{service_id}/session-scoring/exclude-regex/validate",
+    response_model=ScoringExcludeRegexValidateResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_exclude_regex_validate(
     body: ScoringExcludeRegexBody,
@@ -1033,6 +1103,14 @@ def scoring_exclude_regex_validate(
     "/{service_id}/scoring/enforce-status-code",
     response_model=ScoringEnforceStatusCodeState,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/enforce-status-code",
+    response_model=ScoringEnforceStatusCodeState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     """Return the operator-configured HTTP status code that the enforce
@@ -1077,6 +1155,14 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     "/{service_id}/scoring/enforce-status-code",
     response_model=ScoringEnforceStatusCodePutResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.put(
+    "/{service_id}/session-scoring/enforce-status-code",
+    response_model=ScoringEnforceStatusCodePutResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_enforce_status_code_put(
     body: ScoringEnforceStatusCodeBody,
@@ -1171,6 +1257,14 @@ def scoring_enforce_status_code_put(
     "/{service_id}/scoring/matrix-versions",
     response_model=ScoringMatrixVersionsResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/matrix-versions",
+    response_model=ScoringMatrixVersionsResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     """List historical scoring matrices archived in FOS.
@@ -1194,6 +1288,14 @@ def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     "/{service_id}/scoring/matrix-versions/{version}/restore",
     response_model=ScoringMatrixRestoreResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.post(
+    "/{service_id}/session-scoring/matrix-versions/{version}/restore",
+    response_model=ScoringMatrixRestoreResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_matrix_versions_restore(
     service_id: ServiceId,
@@ -1245,11 +1347,9 @@ def scoring_matrix_versions_restore(
         logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
 
     # Update cfg.scoring.matrix_version so /scoring/status reflects the rollback.
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        scoring = cfg.setdefault("scoring", {})
-        scoring["matrix_version"] = version
-        svcconfig.save_config(service_id, cfg)
+    cfg = svcconfig.mutate_config(
+        service_id, lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", version)
+    )
 
     # Push the FOS-restored matrix into the scoring_matrix KV Store so the live
     # scorer rolls back too. _write_matrix_to_kv resolves via the FOS chain
@@ -1298,6 +1398,14 @@ def scoring_matrix_versions_restore(
     "/{service_id}/scoring/rotate-key",
     response_model=ScoringRotateKeyResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.post(
+    "/{service_id}/session-scoring/rotate-key",
+    response_model=ScoringRotateKeyResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_rotate_key(
     service_id: ServiceId,
@@ -1374,6 +1482,14 @@ def scoring_rotate_key(
     "/{service_id}/scoring/audit",
     response_model=ScoringAuditListResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/audit",
+    response_model=ScoringAuditListResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_audit_list(
     service_id: ServiceId,
@@ -1411,6 +1527,14 @@ def scoring_audit_list(
     "/{service_id}/scoring/threshold",
     response_model=ScoringThresholdState,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/threshold",
+    response_model=ScoringThresholdState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_threshold_get(service_id: ServiceId) -> dict:
     """Return the operator's chosen score threshold.
@@ -1437,6 +1561,14 @@ def scoring_threshold_get(service_id: ServiceId) -> dict:
     "/{service_id}/scoring/threshold",
     response_model=ScoringThresholdState,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.put(
+    "/{service_id}/session-scoring/threshold",
+    response_model=ScoringThresholdState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_threshold_put(
     body: ScoringThresholdBody,
@@ -1456,14 +1588,20 @@ def scoring_threshold_put(
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
-    scoring = cfg.setdefault("scoring", {})
-    prior_threshold = scoring.get("operator_threshold")
-    if threshold is None:
-        scoring.pop("operator_threshold", None)
-        scoring.pop("operator_threshold_set_at", None)
-    else:
-        scoring["operator_threshold"] = threshold
-        scoring["operator_threshold_set_at"] = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    prior_threshold = cfg.get("scoring", {}).get("operator_threshold")
+    set_at = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+
+    def _apply_threshold(c: dict) -> None:
+        scoring = c.setdefault("scoring", {})
+        if threshold is None:
+            scoring.pop("operator_threshold", None)
+            scoring.pop("operator_threshold_set_at", None)
+        else:
+            scoring["operator_threshold"] = threshold
+            scoring["operator_threshold_set_at"] = set_at
+
+    _apply_threshold(cfg)
+    scoring = cfg["scoring"]
     # Operator audit trail — every threshold change is attributable.
     from backend.core import metadata as metadata_db
 
@@ -1472,7 +1610,7 @@ def scoring_threshold_put(
         "threshold_committed" if threshold is not None else "threshold_cleared",
         details={"prior_threshold": prior_threshold, "new_threshold": threshold},
     )
-    svcconfig.save_config(service_id, cfg)
+    svcconfig.mutate_config(service_id, _apply_threshold)
 
     _bust_analytics_cache(service_id)  # so /scoring/status reflects it next fetch
     return {
@@ -1489,6 +1627,14 @@ def scoring_threshold_put(
     "/{service_id}/scoring/evaluation/per-reason",
     response_model=ScoringPerReasonResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/evaluation/per-reason",
+    response_model=ScoringPerReasonResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_evaluation_per_reason(
     service_id: ServiceId,
@@ -1551,6 +1697,14 @@ def scoring_evaluation_per_reason(
     "/{service_id}/scoring/dashboard",
     response_model=ScoringDashboardResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+@router.get(
+    "/{service_id}/session-scoring/dashboard",
+    response_model=ScoringDashboardResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+    include_in_schema=False,
 )
 def scoring_dashboard(
     request: Request,

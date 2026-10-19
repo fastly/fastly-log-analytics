@@ -445,7 +445,9 @@ def test_shielding_analysis_returns_requires_fields_when_columns_missing(in_memo
     """If the table schema is missing rid/prid/edge/pop/ottfb, return
     the ``requires_fields`` list so the frontend can show the field-
     picker hint ("enable these custom fields to see this view")."""
-    in_memory_duckdb.execute(f"CREATE TABLE {_safe_table(test_service_source['name'])} (timestamp TIMESTAMP)")
+    in_memory_duckdb.execute(
+        f"CREATE TABLE {_safe_table(test_service_source['name'])} (timestamp TIMESTAMP, dummy VARCHAR)"
+    )
     out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
     assert out["has_data"] is False
     assert "requires_fields" in out

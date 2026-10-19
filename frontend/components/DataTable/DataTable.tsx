@@ -7,6 +7,7 @@ import {
   SortingState,
   VisibilityState,
   ColumnOrderState,
+  Table as TableInstance,
   getCoreRowModel,
   getFilteredRowModel,
   getPaginationRowModel,
@@ -45,6 +46,7 @@ import { DataTableBody } from './DataTableBody'
 import { DataTablePagination } from './DataTablePagination'
 import { useDataTableState } from './useDataTableState'
 import { reportUxEvent } from '@/lib/ux-telemetry'
+import { columnIdOf } from './columnId'
 import { cn } from '@/lib/utils'
 
 interface DataTableProps<TData, TValue> {
@@ -62,7 +64,7 @@ interface DataTableProps<TData, TValue> {
   title?: React.ReactNode
   compactToolbar?: boolean
   extraToolbarContent?: React.ReactNode
-  renderToolbar?: (table: any) => React.ReactNode
+  renderToolbar?: (table: TableInstance<TData>) => React.ReactNode
   hideToolbar?: boolean
   columnVisibility?: VisibilityState
   onColumnVisibilityChange?: (visibility: VisibilityState) => void
@@ -144,7 +146,7 @@ function DataTableImpl<TData, TValue>({
   // can't desync.
   const defaultColumnOrder = React.useMemo<ColumnOrderState>(() => {
     const allIds = columns.map(
-      (column) => column.id as string || (column as any).accessorKey as string,
+      columnIdOf,
     )
     if (initialColumnOrder && initialColumnOrder.length > 0) {
       const validInitial = initialColumnOrder.filter((id) => allIds.includes(id))
@@ -300,7 +302,7 @@ function DataTableImpl<TData, TValue>({
     }
   }
 
-  const tableHeader = React.useMemo(() => (
+  const tableHeader = (
     <TableHeader>
       {table.getHeaderGroups().map((headerGroup) => (
         <TableRow key={headerGroup.id}>
@@ -315,10 +317,7 @@ function DataTableImpl<TData, TValue>({
         </TableRow>
       ))}
     </TableHeader>
-  // columnVisibility is a dep because TanStack Table's `table` ref is stable
-  // across visibility changes — without it the header would show stale columns.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [table, columnOrder, columnVisibility, columnSizing])
+  )
 
   return (
     <div className="w-full">

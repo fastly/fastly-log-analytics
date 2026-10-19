@@ -176,7 +176,7 @@ def process_context_scope(name: str):
 
                 current_attribution.set(prev_attribution)
             except Exception:
-                pass
+                logger.debug("process_context_scope: current_attribution.set failed (ignored)", exc_info=True)
         with _LATEST_PROCESS_CONTEXT_LOCK:
             try:
                 # Remove the *last* occurrence so nested scopes with the
@@ -314,7 +314,7 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
             try:
                 con.close()
             except Exception:
-                pass
+                logger.debug("_query_iothread_calls_from_usage_log: con.close failed (ignored)", exc_info=True)
         return [
             {
                 "service": "CDN" if r[6] == "CDN" else "FOS",
@@ -396,6 +396,35 @@ def get_sqlite_queries() -> list[dict]:
     return res
 
 
+def debug_envelope(res: dict, *, gated: bool, is_cached: bool = False) -> dict:
+    """Attach the ``_debug_*`` / ``_is_cached`` envelope to a plain-dict response.
+
+    Two gating semantics exist on purpose (each caller keeps its own):
+
+    * ``gated=False`` (RUM): ALWAYS inject ``_debug_queries``, ``_debug_sqlite`` and
+      ``_debug_calls`` from the request's collectors, mutating ``res`` in place.
+    * ``gated=True`` (session scoring): never injects. Returns a copy with
+      ``_is_cached`` set and, unless ``DEBUG_RESPONSES`` is on, any ``_debug_queries`` /
+      ``_debug_calls`` already present dropped (mirrors
+      ``BaseResponse._strip_debug_when_disabled``).
+    """
+    if not gated:
+        res["_debug_queries"] = get_queries()
+        res["_debug_sqlite"] = list(get_sqlite_queries())
+        res["_debug_calls"] = get_tracked_calls()
+        res["_is_cached"] = is_cached
+        return res
+
+    from backend.models.common import _debug_responses_enabled
+
+    out = dict(res)
+    out["_is_cached"] = is_cached
+    if not _debug_responses_enabled():
+        out.pop("_debug_queries", None)
+        out.pop("_debug_calls", None)
+    return out
+
+
 def clear_queries():
     _QUERIES.set([])
 
@@ -434,7 +463,7 @@ def record_call(
                 caller = code.co_name
                 break
         except Exception:
-            pass
+            logger.debug("record_call: step failed (ignored)", exc_info=True)
 
     # Use the un-augmented view: this is the in-thread append path, and
     # triggering the iothread/usage_log query here would add a coalescer
@@ -485,7 +514,7 @@ def record_call(
     except Exception:
         # OTel SDK import or recording failure must never fail the caller —
         # this is best-effort telemetry, not load-bearing.
-        pass
+        logger.debug("record_call: step failed (ignored)", exc_info=True)
 
 
 class track_query:
@@ -506,7 +535,7 @@ class track_query:
         elapsed = round((time.time() - self.t0) * 1000, 2)
 
         queries = get_queries()
-        queries.append({"sql": self.query.strip(), "time_ms": elapsed})
+        queries.append({"sql": self.query.strip(), "time_ms": elapsed, "engine": "DuckDB"})
         _QUERIES.set(queries)
 
         # New persistent SQLite recording
@@ -550,7 +579,7 @@ class track_query:
                     },
                 )
         except Exception:
-            pass
+            logger.debug("__exit__: step failed (ignored)", exc_info=True)
 
 
 def is_full_miss(x_cache: str | None) -> bool:
@@ -609,7 +638,7 @@ def record_cdn_call(
             age = headers.get("Age") or headers.get("age")
             cache_control = headers.get("Cache-Control") or headers.get("cache-control")
         except Exception:
-            pass
+            logger.debug("record_cdn_call: headers.get failed (ignored)", exc_info=True)
 
     detail_parts: list[str] = []
     if x_cache:

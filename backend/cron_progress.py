@@ -95,6 +95,25 @@ def list_active_runs() -> list[dict]:
     return out
 
 
+def active_task_for_service(service_id: str, tasks: tuple[str, ...]) -> str | None:
+    """In-memory only: the first of ``tasks`` with a live run for ``service_id``,
+    else None. Same liveness rule as ``list_active_runs`` minus its DB
+    cross-check, so it is cheap enough for a cron to poll between work units;
+    a ghost entry ages out after ``_STALE_AFTER_SECONDS`` without updates."""
+    now = time.time()
+    with _lock:
+        for run_id, meta in _run_metadata.items():
+            if meta.get("service_id") != service_id or meta.get("task") not in tasks:
+                continue
+            events = _progress.get(run_id) or []
+            if events and events[-1].get("type") in ("done", "error"):
+                continue
+            if now - _last_update.get(run_id, now) > _STALE_AFTER_SECONDS:
+                continue
+            return meta["task"]
+    return None
+
+
 def _db_status_is_terminal(service_id: str | None, run_id: int) -> bool:
     """Return True if the cron_runs row for this run_id has a terminal
     status ('success' or 'error') in per-service SQLite.

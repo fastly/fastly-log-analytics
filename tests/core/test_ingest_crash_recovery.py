@@ -22,7 +22,7 @@ intermediate on-disk / SQLite state, then runs a clean ``ingest()`` tick
 (the "restart") and asserts the file lands exactly once.
 
 The harness mirrors ``tests/test_e2e_pipeline.py::test_full_pipeline_including_raw_gzip_ingest``
-— real ``ingest()`` + real PyIceberg against a local-FS warehouse + moto S3.
+— real ``ingest()`` + real DuckLake commit (Postgres catalog, local data path) + moto S3.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import gzip
 import io
 import json
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -44,19 +45,21 @@ from backend.core import metadata as metadata_db
 
 @pytest.fixture
 def ingest_env(s3_mock, fos_source, tmp_path, monkeypatch):
-    """Wire ``ingest()`` to moto S3 + a local-FS Iceberg warehouse.
+    """Wire ``ingest()`` to moto S3 + a local DuckLake data path.
 
-    Yields a dict with the moto client, the source dict, and the warehouse /
-    cache paths so a test can re-seed and re-run ``ingest()`` across a
+    Yields a dict with the moto client, the source dict, and the cache
+    path so a test can re-seed and re-run ``ingest()`` across a
     simulated restart.
     """
+    # DuckLake tables persist in the shared per-worker Postgres catalog across
+    # tests; a reused service_id would resolve a table whose relative data dir
+    # was never created under this test's tmp data root.
+    fos_source["service_id"] = f"cr{uuid.uuid4().hex[:10]}"
+    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
-    warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
 
@@ -83,7 +86,6 @@ def ingest_env(s3_mock, fos_source, tmp_path, monkeypatch):
     return {
         "s3": s3_mock,
         "src": fos_source,
-        "warehouse": warehouse_path,
         "cache": cache_path,
         "bucket": fos_source["bucket"],
     }
@@ -99,7 +101,7 @@ def _seed_gz(s3, bucket: str, key: str, rows: list[dict]) -> None:
 def _one_log_file(s3, bucket: str, n_rows: int = 4) -> tuple[str, int]:
     """Seed a single Fastly-shaped .gz log file; return (key, n_rows)."""
     base = datetime.now(UTC) - timedelta(hours=2)
-    key = "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz"
+    key = "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz"
     rows = [
         {
             "timestamp": (base + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S+0000"),
@@ -118,6 +120,19 @@ def _one_log_file(s3, bucket: str, n_rows: int = 4) -> tuple[str, int]:
 
 def _drain(gen) -> list[dict]:
     return list(gen)
+
+
+def _lake_count(src: dict) -> int:
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import ducklake_table_name
+
+    con = get_connection(src)
+    try:
+        row = con.execute(f'SELECT count(*) FROM lake."{ducklake_table_name(src)}"').fetchone()
+        assert row is not None
+        return int(row[0])
+    finally:
+        con.close()
 
 
 def _ingested_names(sid: str) -> set[str]:
@@ -174,7 +189,7 @@ def test_crash_before_write_to_buffer_recovers_clean(ingest_env, monkeypatch):
     assert _ingested_names(sid) == set()
     assert len(metadata_db.list_in_flight(sid)) == 1
     assert ice.buffer_files(src) == []
-    assert "Contents" in s3.list_objects_v2(Bucket=ingest_env["bucket"], Prefix="raw/"), "raw .gz orphaned/lost"
+    assert "Contents" in s3.list_objects_v2(Bucket=ingest_env["bucket"], Prefix="raw/request/"), "raw .gz orphaned/lost"
 
     # Restart: the recovery sweep drops the dangling row, then the file
     # re-LISTs and ingests cleanly (write_to_buffer now delegates).
@@ -221,9 +236,10 @@ def test_crash_before_insert_ingested_files_promotes_buffer(ingest_env, monkeypa
     assert set(os.path.basename(p) for p in ice.buffer_files(src)) == buf_before, "duplicate buffer created"
     assert _summary(sid)["total_rows"] == n
 
-    # Commit the promoted buffer → rows land in Iceberg exactly once.
+    # Commit the promoted buffer → rows land in DuckLake exactly once.
     res = ice.commit_buffer(src)
     assert res["rows_committed"] == n
+    assert _lake_count(src) == n, "rows must land in the DuckLake table exactly once"
 
 
 # ── Checkpoint 3→4: crash before clear_in_flight ─────────────────────────────
@@ -259,6 +275,7 @@ def test_crash_before_clear_in_flight_is_idempotent(ingest_env, monkeypatch):
     assert _summary(sid)["file_count"] == 1, "summary file_count double-counted the re-insert"
     res = ice.commit_buffer(src)
     assert res["rows_committed"] == n
+    assert _lake_count(src) == n, "rows must land in the DuckLake table exactly once"
 
 
 # ── SHA-256 deterministic buffer name: "same file twice" after a crash ───────
@@ -305,3 +322,4 @@ def test_sha256_name_prevents_duplicate_buffer_if_recovery_skipped(ingest_env, m
     assert os.path.basename(bufs[0]) == crashed_buf_name
     res = ice.commit_buffer(src)
     assert res["rows_committed"] == n, "double-commit despite deterministic buffer name"
+    assert _lake_count(src) == n

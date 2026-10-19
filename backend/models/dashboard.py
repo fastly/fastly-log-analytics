@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
+from backend.models._base import ScalarCell
+from backend.models.common import (
+    BaseResponse,
+    FilteredRequest,
+    Limit500,
+    LogExtentsMixin,
+    PaginationMixin,
+    RangeKeyedRequest,
+)
 from backend.models.security import SecurityTopBotsResponse
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
@@ -39,7 +47,7 @@ ChartMetric = Literal[
 DashboardSectionName = Literal["core", "topten", "bots"]
 
 
-class AggregatesRequest(FilteredRequest):
+class AggregatesRequest(RangeKeyedRequest):
     chart_interval: str = "1 minute"
     chart_metric: ChartMetric = "requests"
     fields: list[str] | None = None
@@ -60,16 +68,6 @@ class AggregatesRequest(FilteredRequest):
     # knobs stay for backwards compat with the /charts callers that already
     # pass them).
     sections: list[DashboardSectionName] | None = None
-    # Relative-range wire contract (additive, optional) — see
-    # backend/routers/origin.py / backend/utils/time_window.py. When
-    # ``range_token`` is recognized the SERVER resolves the scan window from
-    # (token, anchor), ignoring FE-supplied start/end, then clamps to the invite
-    # ceiling. Consumed by /dashboard/bundle + /dashboard/aggregates so the FE
-    # first-paint key is server-reproducible (origin SSR-seed contract). The
-    # dashboard response memo is hard-disabled (DASHBOARD_CACHE_TTL=0) so the
-    # token does not interact with it. Absent/unknown token → legacy path.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class FieldTopEntry(BaseModel):
@@ -150,134 +148,25 @@ class FieldValuesResponse(BaseResponse):
 
 
 # ── Insights ──────────────────────────────────────────────────────────────────
-
-
-class InsightsRequest(FilteredRequest):
-    # M2: bound both windows. Unbounded, these fed
-    # ``baseline_start = now - (baseline_hours + window_size_hrs)`` into a
-    # temp-table scan — a value like 8_760_000 reached ~1000 years back and
-    # scanned every retained row (DoS + time-scope bypass). 168h / 2160h
-    # (7d / 90d) cover every legitimate insight selection.
-    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
-    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
-
-
-class InsightItem(BaseModel):
-    label: str
-    current_val: float | None = None
-    baseline_val: float | None = None
-    baseline_label: str = "baseline"
-    unit: str | None = None
-    severity: str = "clean"
-    meta: dict[str, Any] = {}
-    investigate_url: str | None = None
-    tooltip: str | None = None
-
-
-class InsightCard(BaseModel):
-    id: str
-    title: str
-    description: str
-    severity: str
-    summary: str
-    items: list[InsightItem]
-    # Thematic section key ({security, origin, edge, traffic}); drives the
-    # sectioned Anomaly Detection page (frontend/lib/insight-sections.ts).
-    # Optional-with-default, NOT required: the /api/insights cache stores the
-    # raw pre-serialisation dict, so a stale pre-deploy entry that predates
-    # this field must serialise as ``null`` instead of raising a
-    # ValidationError for the whole TTL window. The field is load-bearing —
-    # a ``category`` key on the repo dict alone is silently dropped on the
-    # wire (Pydantic ``extra='ignore'``), the same way window_total_requests is.
-    category: str | None = None
-
-
-class InsightsResponse(BaseResponse):
-    insights: list[InsightCard]
-    window_start: str
-    window_end: str
-    baseline_start: str
-    baseline_end: str
-    computed_at: str
-    window_hours: float
-    baseline_hours: float
-
-
-class InsightAvailability(BaseModel):
-    id: str
-    title: str
-    description: str
-    # Same thematic section key as InsightCard.category, mirrored here so the
-    # availability-derived skeleton cards group into the identical sections
-    # (CLS: the loading layout must match the loaded layout). Sourced from the
-    # INSIGHT_DEFINITIONS dicts in backend/core/_log_fields_data.py — a
-    # SEPARATE subsystem from the runtime registry, so category is set in both.
-    category: str | None = None
-    missing_fields: list[str] | None = None
-    missing_groups: list[str] | None = None
-    enable_url: str | None = None
-    required_fields: list[str] | None = None
-    required_groups: list[str] | None = None
-    available: bool
-
-
-class InsightsAvailabilityResponse(BaseModel):
-    available: bool | list[str]
-    insights: list[InsightAvailability] | None = None
-    unavailable: list[InsightAvailability] | None = None
-
-
-# ── Cache Collapse Detail ─────────────────────────────────────────────────────
-
-
-class CacheCollapseDetailRequest(BaseModel):
-    url: str
-    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
-    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
-
-
-class CacheCollapseTimelinePoint(BaseModel):
-    bucket: str
-    expected_hits: float
-    real_hits: int
-    misses: int
-    total_requests: int
-    hit_rate: float
-
-
-class CacheMissPoint(BaseModel):
-    timestamp: str
-    cache: str
-    pop: str | None = None
-    ip: str | None = None
-    status: int | None = None
-
-
-class CacheBreakdown(BaseModel):
-    # Window-scoped request counts by cache disposition.
-    hits: int
-    misses: int
-    passes: int
-    other: int
-
-
-class CacheCollapseDetailResponse(BaseResponse):
-    url: str
-    timeline: list[CacheCollapseTimelinePoint]
-    recent_misses: list[CacheMissPoint]
-    breakdown: CacheBreakdown
-    # Cacheable hit ratio HIT/(HIT+MISS); PASS excluded.
-    baseline_hit_rate: float
-    window_hit_rate: float
-    # Uncacheable share PASS/total.
-    baseline_pass_rate: float
-    window_pass_rate: float
-
+# Carved out to backend.models.insights; re-exported here for backward compatibility.
+from backend.models.insights import (  # noqa: F401
+    CacheBreakdown,
+    CacheCollapseDetailRequest,
+    CacheCollapseDetailResponse,
+    CacheCollapseTimelinePoint,
+    CacheMissPoint,
+    InsightAvailability,
+    InsightCard,
+    InsightItem,
+    InsightsAvailabilityResponse,
+    InsightsRequest,
+    InsightsResponse,
+)
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 
-class SessionsRequest(FilteredRequest, PaginationMixin):
+class SessionsRequest(RangeKeyedRequest, PaginationMixin):
     limit: Limit500 = 50
     sort_by: str = "session_start"
     flagged_only: bool = False
@@ -335,8 +224,8 @@ class SessionsResponse(BaseResponse):
     has_edge: bool
     has_edge_sid: bool = False
     has_cmcd: bool = False
-    min_reqs_flag: int
-    min_4xx_pct_flag: float
+    min_reqs_flag: int | None = None
+    min_4xx_pct_flag: float | None = None
 
 
 class SessionDetailRequest(BaseModel):
@@ -356,36 +245,17 @@ class SessionDetailRequest(BaseModel):
 
 class SessionDetailResponse(BaseResponse):
     columns: list[str]
-    data: list[dict[str, Any]]
+    # Raw-log rows: every column is a scalar (custom fields are limited to the same types).
+    data: list[dict[str, ScalarCell]]
 
 
-# ── Query ─────────────────────────────────────────────────────────────────────
+# ── Query (re-exported from backend.models.query for back-compat) ─────────────
 
-
-class QueryRequest(BaseModel):
-    sql: str
-    dataset: Literal["logs", "client_vitals", "client_errors"] = "logs"
-    # M1: bound max_rows so an analyst can't request tens of millions of rows
-    # and OOM the worker (it's interpolated into ``LIMIT max_rows+1`` and the
-    # result is fully materialized via ``to_arrow_table().to_pylist()`` before
-    # truncation). The Pydantic clamp is the first line of defense; the repo's
-    # ``execute_query`` re-clamps against ``MAX_QUERY_ROWS`` so internal callers
-    # that bypass the model can't exceed it either.
-    max_rows: int = Field(default=500, ge=1, le=10_000)
-    explain: bool = False
-
-
-class QueryResponse(BaseResponse):
-    columns: list[str]
-    data: list[dict[str, Any]]
-    row_count: int
-    total_rows: int
-    truncated: bool
-    elapsed_ms: int
-    explain_plan: str | None = None
-
-
-class PresetQuery(BaseModel):
-    name: str
-    description: str
-    sql: str
+from backend.models.query import (  # noqa: E402, F401
+    PresetQuery,
+    QueryDataset,
+    QueryRequest,
+    QueryResponse,
+    QuerySchemaResponse,
+    SchemaColumn,
+)

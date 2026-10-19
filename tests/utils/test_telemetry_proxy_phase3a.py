@@ -1,7 +1,5 @@
 """Phase 3a tests for the telemetry proxy — DuckDB httpfs through the proxy.
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md (§Phase 3a)
-
 These tests live in their own file (matching the Phase 2 split) so the
 Phase 3a fixtures don't pollute earlier files. Shared infrastructure with
 Phase 1/2 is duplicated on purpose — moving it to conftest.py would
@@ -155,6 +153,34 @@ def test_configure_fos_creates_proxy_secret_with_cdn(proxy_server):
         assert "x-fastly-key=fastly-secret-abc" in secret_string, (
             f"CDN-configured source must inject x-fastly-key\nsecret_string={secret_string}"
         )
+    finally:
+        con.close()
+
+
+def test_configure_fos_uses_native_fos_when_edge_only_is_false(proxy_server):
+    """An explicitly disabled edge-only mode must keep DuckDB reads on native FOS."""
+    from backend.core import duckdb as _ddb
+
+    source = {
+        "name": "phase3a-native-reads",
+        "service_id": "phase3a-native-reads",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "cdn.example.com",
+        "cdn_url": "https://cdn.example.com",
+        "cdn_secret": "fastly-secret-abc",
+        "provisioning": {"edge_only": False},
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+
+        secret_string = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
+        assert "X-Fos-Target=us-east-1.object.fastlystorage.app" in secret_string
+        assert "X-Fos-Target=cdn.example.com" not in secret_string
+        assert "x-fastly-key" not in secret_string.lower()
     finally:
         con.close()
 

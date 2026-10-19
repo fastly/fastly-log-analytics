@@ -4,7 +4,7 @@ import UsagePage from '@/app/usage/page'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
-import { spyOnConsoleError } from '../helpers/page-smoke'
+import { spyOnConsoleError, type ReportLayoutChildArgs } from '../helpers/page-smoke'
 
 // R-6: render-smoke for the usage analytics page.
 
@@ -36,7 +36,7 @@ vi.mock('@/components/CostCalculator/CostCalculator', () => ({
 }))
 
 vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: any) => (
+  ReportLayout: ({ children, title }: { children: (a: ReportLayoutChildArgs) => React.ReactNode; title: string }) => (
     <div>
       <h1>{title}</h1>
       {children({

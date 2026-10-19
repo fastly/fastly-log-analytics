@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import commit
 
 
@@ -56,8 +57,8 @@ def stub_cron_envelope(monkeypatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    # Post-commit metadata-sync resolves off backend.cron.jobs.metadata.
-    monkeypatch.setattr("backend.cron.jobs.metadata._run_metadata_sync", MagicMock())
+    # Post-commit metadata-sync dispatch resolves off backend.cron.jobs.metadata.
+    monkeypatch.setattr("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync", MagicMock())
     return {
         "start": start,
         "log": log,
@@ -134,7 +135,7 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
 ):
     """Happy path: commit_buffer returns rows_committed > 0 →
     log_cron_run records 'success' with the row count + snapshot id,
-    refresh_view_and_warm_pool fires, and metadata_sync gets kicked."""
+    refresh_view_and_warm_pool fires, and metadata_sync is dispatched."""
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer",
         MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
@@ -149,10 +150,10 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
     assert "8675309" in kwargs["summary"]
 
     from backend.cron.jobs import _common
-    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
 
     _common.refresh_view_and_warm_pool.assert_called_once()
-    _sync_shim.assert_called_once_with("svc-1")
+    dispatch_post_commit_metadata_sync.assert_called_once_with("svc-1")
 
 
 def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
@@ -170,15 +171,58 @@ def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_conf
     assert args[3] == "success"
     assert "No new data" in kwargs["summary"]
 
-    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
 
-    _sync_shim.assert_not_called()
+    dispatch_post_commit_metadata_sync.assert_not_called()
 
 
-def test_quarantined_files_appear_in_summary(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
-    """commit_buffer reports unreadable buffer files via
-    ``quarantined_files``; the summary must surface the count so the
-    user can act on the corrupt-input signal."""
+def test_metadata_sync_dispatch_failure_does_not_fail_durable_commit(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 1, "rows_committed": 12, "snapshot_id": "ducklake"}),
+    )
+    monkeypatch.setattr(
+        "backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync",
+        MagicMock(side_effect=RuntimeError("worker unavailable")),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    assert stub_cron_envelope["log"].call_args.args[3] == "success"
+    assert any(
+        call.kwargs.get("event", {}).get("type") == "warning" for call in stub_cron_envelope["log_event"].call_args_list
+    )
+
+
+def test_commit_failure_without_progress_is_not_a_successful_noop(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(
+            return_value={
+                "files_committed": 0,
+                "rows_committed": 0,
+                "snapshot_id": "ducklake",
+                "error": "write attach unavailable",
+            }
+        ),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["error_message"] == "write attach unavailable"
+    assert "No buffer files committed" in kwargs["summary"]
+
+
+def test_quarantined_files_log_incomplete_commit(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
+    """Quarantining unreadable input is surfaced as an error, not a successful drain."""
+    monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer",
         MagicMock(
@@ -194,8 +238,70 @@ def test_quarantined_files_appear_in_summary(monkeypatch, stub_load_config, stub
     commit._run_commit.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
-    assert args[3] == "success"
+    assert args[3] == "error"
     assert "quarantined 2" in kwargs["summary"]
+    assert "2 unreadable buffer file(s) quarantined" in kwargs["error_message"]
+    assert stub_cron_envelope["log_event"].call_args.kwargs["event"]["type"] == "error"
+
+
+def test_partial_commit_error_preserves_counts_and_refreshes_durable_rows(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(
+            return_value={
+                "files_committed": 1,
+                "rows_committed": 12,
+                "snapshot_id": "ducklake",
+                "quarantined_files": 0,
+                "error": "later chunk attach failed",
+            }
+        ),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["rows_ingested"] == 12
+    assert kwargs["error_message"] == "later chunk attach failed"
+    assert "Committed 1 buffer file(s) (12 rows)" in kwargs["summary"]
+    assert "commit incomplete: later chunk attach failed" in kwargs["summary"]
+    from backend.cron.jobs import _common
+
+    _common.refresh_view_and_warm_pool.assert_called_once()
+
+
+def test_high_scale_commit_uses_ledger_merge_not_standard_buffer(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    merge_calls = []
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: merge_calls.append(("merge", sid)))
+    monkeypatch.setattr(
+        "backend.core.ingest.finalize_committed_raw",
+        lambda sid: merge_calls.append(("finalize", sid)) or {"delete_after": False, "deleted": 0},
+    )
+    meta_con = MagicMock()
+    meta_con.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=None)),
+        MagicMock(fetchone=MagicMock(return_value=(0,))),
+    ]
+    monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+    standard_commit = MagicMock()
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", standard_commit)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    assert merge_calls == [("merge", "svc-1"), ("finalize", "svc-1")]
+    standard_commit.assert_not_called()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "success"
+    assert "merged small lake files" in kwargs["summary"]
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+
+    dispatch_post_commit_metadata_sync.assert_not_called()
 
 
 def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
@@ -214,3 +320,102 @@ def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stu
     assert args[3] == "error"
     assert "snapshot conflict" in kwargs["error_message"]
     stub_cron_envelope["end_progress"].assert_called_once()
+
+
+def test_lease_held_is_clean_skip_without_row_or_progress(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    stub_cron_envelope["start"].side_effect = CronLeaseHeldError("lease held")
+    cb = MagicMock()
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    cb.assert_not_called()
+    stub_cron_envelope["log"].assert_not_called()
+    stub_cron_envelope["end_progress"].assert_not_called()
+
+
+def test_caller_supplied_run_id_is_reused_without_new_lease(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 0, "rows_committed": 0}),
+    )
+
+    commit._run_commit.__wrapped__("svc-1", run_id=77)
+
+    stub_cron_envelope["start"].assert_not_called()
+    assert stub_cron_envelope["log"].call_args.kwargs["run_id"] == 77
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_disk_check_failure_row_has_no_log_output_and_progress_is_closed(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.cron.jobs.commit._check_disk_space", lambda *a, **kw: (False, "disk 95% full"))
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    assert stub_cron_envelope["log"].call_args.kwargs["log_output"] is None
+    stub_cron_envelope["end_progress"].assert_called_once_with(33)
+
+
+def test_exception_after_success_row_overwrites_with_error_row(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 1, "rows_committed": 5, "snapshot_id": 9}),
+    )
+    monkeypatch.setattr(
+        "backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock(side_effect=RuntimeError("warm failed"))
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    statuses = [c.args[3] for c in stub_cron_envelope["log"].call_args_list]
+    assert statuses == ["success", "error"]
+    last = stub_cron_envelope["log"].call_args
+    assert last.kwargs["summary"] == "Buffer commit failed"
+    assert last.kwargs["error_message"] == "warm failed"
+
+
+def test_high_scale_failure_records_error_row_without_log_output(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", MagicMock(side_effect=RuntimeError("merge broke")))
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "DuckLake merge / raw finalization failed"
+    assert kwargs["error_message"] == "merge broke"
+    assert kwargs["log_output"] is None
+    assert kwargs["run_id"] == 33
+
+
+def test_high_scale_previous_commit_lookup_is_scoped_to_the_service(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: None)
+    monkeypatch.setattr("backend.core.ingest.finalize_committed_raw", lambda sid: {"delete_after": False, "deleted": 0})
+    meta_con = MagicMock()
+    meta_con.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=None)),
+        MagicMock(fetchone=MagicMock(return_value=(4,))),
+    ]
+    monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    sql, params = meta_con.execute.call_args_list[0].args
+    assert "service_id = ? AND task = 'commit'" in sql
+    assert params == ("svc-1",)
+    assert stub_cron_envelope["log"].call_args.kwargs["files_downloaded"] == 4

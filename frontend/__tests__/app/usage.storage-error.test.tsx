@@ -38,7 +38,7 @@ vi.mock('@/lib/api', () => ({
 vi.mock('@/components/PlotlyChart/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/CostCalculator/CostCalculator', () => ({ CostCalculator: () => <div data-testid="cost-calculator" /> }))
 vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: any) => (
+  ReportLayout: ({ children, title }: { children: (args: Record<string, unknown>) => React.ReactNode; title: string }) => (
     <div>
       <h1>{title}</h1>
       {children({

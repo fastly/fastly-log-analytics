@@ -27,8 +27,64 @@ import {
 } from "@/components/ui/select"
 import type { components } from '@/types/api.generated'
 import { AlertPreview } from './AlertPreview'
+import { oneOf } from '@/lib/narrow'
+import { keyByOccurrence } from '@/lib/utils'
 
 type Alert = components["schemas"]["Alert"]
+type AlertChannel = components["schemas"]["AlertChannel"]
+type AlertPreviewData = components["schemas"]["AlertPreviewData"]
+type Category = Alert["category"]
+type Metric = Alert["metric"]
+type EvalType = Alert["evaluation_type"]
+type EvalScope = Alert["evaluation_scope"]
+type Operator = Alert["operator"]
+type ChannelType = AlertChannel["type"]
+
+const CATEGORIES: readonly Category[] = ['reliability', 'performance', 'traffic', 'caching']
+const EVAL_TYPES: readonly EvalType[] = ['absolute', 'relative_increase', 'relative_decrease', 'anomaly_zscore']
+const EVAL_SCOPES: readonly EvalScope[] = ['all', 'edge', 'origin']
+const OPERATORS: readonly Operator[] = ['>', '<', '>=', '<=']
+const CHANNEL_TYPES: readonly ChannelType[] = ['slack', 'pagerduty', 'webhook']
+
+// Metrics offered per category (changing the category resets the metric to the first entry).
+const METRICS_BY_CATEGORY: Record<Category, { value: Metric; label: string }[]> = {
+  reliability: [
+    { value: '5xx', label: '5xx Count' },
+    { value: '5xx_rate', label: '5xx Rate (%)' },
+    { value: '4xx', label: '4xx Count' },
+    { value: '4xx_rate', label: '4xx Rate (%)' },
+    { value: 'specific_status', label: 'Specific Status Codes' },
+    { value: 'specific_status_rate', label: 'Specific Status Codes Rate (%)' },
+  ],
+  traffic: [
+    { value: 'requests', label: 'Request Count' },
+    { value: 'bandwidth', label: 'Bandwidth (Bytes)' },
+  ],
+  performance: [
+    { value: 'p95_latency', label: 'Edge P95 Latency (ms)' },
+    { value: 'ttfb', label: 'Origin TTFB (ms)' },
+  ],
+  caching: [{ value: 'hit_rate', label: 'Cache Hit Rate (%)' }],
+}
+const ALL_METRICS: readonly Metric[] = Object.values(METRICS_BY_CATEGORY).flatMap((ms) => ms.map((m) => m.value))
+
+function LabelWithInfo({ htmlFor, children, tooltip }: { htmlFor?: string; children: React.ReactNode; tooltip: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger type="button" tabIndex={-1} className="text-muted-foreground hover:text-foreground">
+            <Info className="h-3.5 w-3.5" />
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[300px] text-xs">
+            {tooltip}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  )
+}
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null, onSuccess: () => void }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -41,11 +97,11 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const queryClient = useQueryClient()
 
   const [name, setName] = React.useState(initialAlert?.name || '')
-  const [category, setCategory] = React.useState((initialAlert?.category as any) || 'traffic')
-  const [metric, setMetric] = React.useState((initialAlert?.metric as any) || 'requests')
-  const [evalType, setEvalType] = React.useState((initialAlert?.evaluation_type as any) || 'absolute')
-  const [evalScope, setEvalScope] = React.useState((initialAlert?.evaluation_scope as any) || 'all')
-  const [operator, setOperator] = React.useState(initialAlert?.operator || '>')
+  const [category, setCategory] = React.useState<Category>(initialAlert?.category ?? 'traffic')
+  const [metric, setMetric] = React.useState<Metric>(initialAlert?.metric ?? 'requests')
+  const [evalType, setEvalType] = React.useState<EvalType>(initialAlert?.evaluation_type ?? 'absolute')
+  const [evalScope, setEvalScope] = React.useState<EvalScope>(initialAlert?.evaluation_scope ?? 'all')
+  const [operator, setOperator] = React.useState<Operator>(initialAlert?.operator ?? '>')
   const [threshold, setThreshold] = React.useState(initialAlert?.threshold?.toString() || '')
   const [windowMin, setWindowMin] = React.useState(initialAlert?.window_min?.toString() || '5')
   const [compPeriodMin, setCompPeriodMin] = React.useState(initialAlert?.comparison_period_min?.toString() || '60')
@@ -53,11 +109,11 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const [webhookUrl, setWebhookUrl] = React.useState(initialAlert?.webhook_url || '')
   const [zscoreThreshold, setZscoreThreshold] = React.useState(initialAlert?.zscore_threshold?.toString() || '3.0')
   const [baselinePeriodDays, setBaselinePeriodDays] = React.useState(initialAlert?.baseline_period_days?.toString() || '7')
-  const [channels, setChannels] = React.useState<any[]>(initialAlert?.channels || [])
-  const [newChannelType, setNewChannelType] = React.useState<'slack' | 'pagerduty' | 'webhook'>('slack')
+  const [channels, setChannels] = React.useState<AlertChannel[]>(initialAlert?.channels || [])
+  const [newChannelType, setNewChannelType] = React.useState<ChannelType>('slack')
   const [newChannelUrl, setNewChannelUrl] = React.useState('')
   const [isSaving, setIsSaving] = React.useState(false)
-  const [previewData, setPreviewData] = React.useState<any>(null)
+  const [previewData, setPreviewData] = React.useState<AlertPreviewData | null>(null)
   const [isPreviewLoading, setIsPreviewLoading] = React.useState(false)
   const [lookbackHours, setLookbackHours] = React.useState(24)
 
@@ -79,8 +135,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     setChannels([...channels, { type: newChannelType, url: newChannelUrl.trim() }])
     setNewChannelUrl('')
   }
-  const handleRemoveChannel = (index: number) => {
-    setChannels(channels.filter((_, i) => i !== index))
+  const handleRemoveChannel = (channel: AlertChannel) => {
+    setChannels(channels.filter((c) => c !== channel))
   }
 
   // Fetch preview data on change
@@ -113,10 +169,10 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             enabled: true,
             zscore_threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : undefined,
             baseline_period_days: evalType === 'anomaly_zscore' ? (parseInt(baselinePeriodDays) || 7) : undefined,
-          } as any
+          },
         })
         if (data) {
-          setPreviewData((data as any).data)
+          setPreviewData(data.data ?? null)
         }
       } catch (err) {
         console.error('Preview fetch failed', err)
@@ -129,40 +185,19 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     return () => clearTimeout(timer)
   }, [activeServiceId, isAnalyst, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, zscoreThreshold, baselinePeriodDays, lookbackHours])
 
-  // Dynamic metrics based on category
-  const metricsByCategory: Record<string, {value: string, label: string}[]> = {
-    reliability: [
-      { value: '5xx', label: '5xx Count' },
-      { value: '5xx_rate', label: '5xx Rate (%)' },
-      { value: '4xx', label: '4xx Count' },
-      { value: '4xx_rate', label: '4xx Rate (%)' },
-      { value: 'specific_status', label: 'Specific Status Codes' },
-      { value: 'specific_status_rate', label: 'Specific Status Codes Rate (%)' },
-    ],
-    traffic: [
-      { value: 'requests', label: 'Request Count' },
-      { value: 'bandwidth', label: 'Bandwidth (Bytes)' },
-    ],
-    performance: [
-      { value: 'p95_latency', label: 'Edge P95 Latency (ms)' },
-      { value: 'ttfb', label: 'Origin TTFB (ms)' },
-    ],
-    caching: [
-      { value: 'hit_rate', label: 'Cache Hit Rate (%)' },
-    ]
-  }
-
   // Handle category change -> reset metric
   const handleCategoryChange = (val: string | null) => {
-    if (!val) return
-    setCategory(val as any)
-    setMetric(metricsByCategory[val][0].value as any)
+    const next = val ? oneOf(CATEGORIES, val) : undefined
+    if (!next) return
+    setCategory(next)
+    setMetric(METRICS_BY_CATEGORY[next][0].value)
   }
 
   // Handle eval type change -> reset operator
   const handleEvalTypeChange = (val: string | null) => {
-    if (!val) return
-    setEvalType(val as any)
+    const next = val ? oneOf(EVAL_TYPES, val) : undefined
+    if (!next) return
+    setEvalType(next)
     if (val === 'anomaly_zscore') {
       setOperator('>')
     } else if (val !== 'absolute') {
@@ -188,27 +223,36 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
     setIsSaving(true)
     try {
-      await client.POST("/api/alerts/", {
-        body: {
-          id: initialAlert?.id,
-          service_id: activeServiceId,
-          name,
-          category,
-          metric,
-          evaluation_type: evalType,
-          evaluation_scope: evalScope,
-          operator: evalType === 'anomaly_zscore' ? '>' : operator,
-          threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
-          window_min: parseFloat(windowMin),
-          comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
-          status_codes: parsedCodes,
-          webhook_url: webhookUrl || undefined,
-          channels: channels,
-          zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
-          baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
-          enabled: initialAlert ? initialAlert.enabled : true
-        } as any
-      })
+      const payload: Alert = {
+        id: initialAlert?.id,
+        service_id: activeServiceId,
+        name,
+        category,
+        metric,
+        evaluation_type: evalType,
+        evaluation_scope: evalScope,
+        operator: evalType === 'anomaly_zscore' ? '>' : operator,
+        threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
+        window_min: parseFloat(windowMin),
+        comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
+        status_codes: parsedCodes,
+        webhook_url: webhookUrl || undefined,
+        channels: channels,
+        zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
+        baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
+        enabled: initialAlert ? initialAlert.enabled : true
+      }
+
+      if (initialAlert?.id) {
+        await client.PUT("/api/alerts/{alert_id}", {
+          params: { path: { alert_id: initialAlert.id } },
+          body: payload,
+        })
+      } else {
+        await client.POST("/api/alerts/", {
+          body: payload,
+        })
+      }
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       onSuccess()
     } catch (error) {
@@ -221,22 +265,6 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
       setIsSaving(false)
     }
   }
-
-  const LabelWithInfo = ({ htmlFor, children, tooltip }: { htmlFor?: string, children: React.ReactNode, tooltip: React.ReactNode }) => (
-    <div className="flex items-center gap-1.5">
-      <Label htmlFor={htmlFor}>{children}</Label>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger type="button" tabIndex={-1} className="text-muted-foreground hover:text-foreground">
-            <Info className="h-3.5 w-3.5" />
-          </TooltipTrigger>
-          <TooltipContent className="max-w-[300px] text-xs">
-            {tooltip}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    </div>
-  )
 
   return (
     <form onSubmit={handleSave} className="flex flex-col overflow-hidden">
@@ -285,12 +313,12 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <LabelWithInfo tooltip="The specific data point to measure. Rate metrics represent a percentage of total traffic.">
                 Metric
               </LabelWithInfo>
-              <Select value={metric} onValueChange={(v) => v && setMetric(v as any)}>
+              <Select value={metric} onValueChange={(v) => { const m = v ? oneOf(ALL_METRICS, v) : undefined; if (m) setMetric(m) }}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {metricsByCategory[category]?.map(m => (
+                  {METRICS_BY_CATEGORY[category].map(m => (
                      <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
                   ))}
                 </SelectContent>
@@ -319,7 +347,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <LabelWithInfo tooltip="Restricts the alert to a specific traffic scope. 'Edge Only' filters for edge responses. 'Origin Only' filters for requests that went to your origin.">
                 Evaluation Scope
               </LabelWithInfo>
-              <Select value={evalScope} onValueChange={(v) => v && setEvalScope(v as any)}>
+              <Select value={evalScope} onValueChange={(v) => { const sc = v ? oneOf(EVAL_SCOPES, v) : undefined; if (sc) setEvalScope(sc) }}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -408,7 +436,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 <LabelWithInfo tooltip="The mathematical condition to trigger the alert.">
                   Operator
                 </LabelWithInfo>
-                <Select value={operator} onValueChange={(v) => v && setOperator(v)}>
+                <Select value={operator} onValueChange={(v) => { const op = v ? oneOf(OPERATORS, v) : undefined; if (op) setOperator(op) }}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -470,8 +498,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
             {channels.length > 0 ? (
               <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
-                {channels.map((chan, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
+                {keyByOccurrence(channels, (c) => `${c.type}|${c.url}`).map(({ key, item: chan }) => (
+                  <div key={key} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
                     <div className="flex items-center gap-2 overflow-hidden">
                       <span className="font-semibold capitalize px-1.5 py-0.5 rounded bg-accent/60 text-[10px]">
                         {chan.type}
@@ -485,7 +513,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                       variant="ghost"
                       size="sm"
                       className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
-                      onClick={() => handleRemoveChannel(idx)}
+                      onClick={() => handleRemoveChannel(chan)}
                     >
                       ×
                     </Button>
@@ -497,7 +525,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             )}
 
             <div className="flex gap-2">
-              <Select value={newChannelType} onValueChange={(v: any) => setNewChannelType(v)}>
+              <Select value={newChannelType} onValueChange={(v) => { const ct = v ? oneOf(CHANNEL_TYPES, v) : undefined; if (ct) setNewChannelType(ct) }}>
                 <SelectTrigger className="w-[110px] text-xs h-8">
                   <SelectValue />
                 </SelectTrigger>

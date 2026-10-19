@@ -95,20 +95,6 @@ sub test_deliver_promotes_and_cleans {
 
 
 @pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
-def test_falco_origin_field_miss_pass_only(run_falco_test):
-    """Test that origin fields set to log 'miss_pass' are ONLY promoted on cache miss.
-    Note: Falco currently has a bug injecting 'fastly_info.state' for !~ regex checks,
-    so the *semantic* (executed-VCL) version stays skipped until Falco is updated.
-
-    The miss_pass deliver-gate is NOT uncovered, though: falco-free string-level
-    coverage of the generated `fastly_info.state !~ "HIT"` guard (and that the
-    promotion is nested inside it) lives in tests/utils/test_fastly_api.py::
-    test_generate_capture_vcl_miss_pass_gates_promotion_behind_cache_miss.
-    """
-    pytest.skip("Falco testing.inject_variable('fastly_info.state') does not bind correctly for !~ operator.")
-
-
-@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
 def test_falco_shield_interaction(run_falco_test):
     """Test that shield nodes keep origin data for edge nodes, but edge nodes strip it."""
     cfg = {

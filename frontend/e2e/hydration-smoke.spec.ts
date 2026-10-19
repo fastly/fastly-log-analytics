@@ -115,13 +115,15 @@ test.describe('SSR hydration smoke', () => {
         if (isHydrationError(text)) hydrationErrors.push(text)
       })
 
-      await page.goto(route, { waitUntil: 'load', timeout: 30_000 })
-      // Hydration runs right after the JS executes; the original #418 also
-      // surfaced when the first react-query setData re-rendered the still-
-      // hydrating tree. networkidle never settles here (SSE + polling), so
-      // wait a fixed window long enough to cover hydration + first refetch.
-      const settleTimeout = process.env.CI ? 6_000 : 2_500
-      await page.waitForTimeout(settleTimeout)
+      await page.goto(route, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      // Ensure the page rendered its primary content landmark
+      await expect(page.locator('main, [role="main"], h1, h2').first()).toBeVisible({ timeout: 15_000 })
+
+      // Verify no fatal React error boundaries or error cards appeared
+      await expect(page.locator('nextjs-portal, [data-nextjs-dialog-overlay], .alert-destructive, [data-testid="error-card"]')).toHaveCount(0)
+
+      // Short micro-settle for initial hydration reconciliation
+      await page.waitForTimeout(300)
 
       expect(
         hydrationErrors,

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.deps import get_source
 from backend.main import app
 
@@ -99,7 +100,7 @@ def test_ingest_logs_starts_sync_and_returns_run_id():
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=42),
             patch("backend.cron_progress.start_progress"),
-            patch("backend.cron.jobs.sync._run_service_cron"),
+            patch("backend.cron.jobs.sync._run_log_discovery_cron"),
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()
@@ -122,11 +123,11 @@ def test_ingest_logs_already_running_returns_existing_run_id():
     from backend.cron_progress import _run_metadata
 
     run_id = 99
-    _run_metadata[run_id] = {"service_id": "test_service", "task": "sync"}
+    _run_metadata[run_id] = {"service_id": "test_service", "task": "log_discovery"}
     try:
         app.dependency_overrides[get_source] = lambda: _TEST_SOURCE
 
-        with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("already running")):
+        with patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")):
             client = TestClient(app)
             response = client.post("/api/admin/ingest-logs")
 
@@ -149,7 +150,7 @@ def test_ingest_logs_read_only_source_starts_metadata_sync():
             patch("backend.core.duckdb.start_cron_run", return_value=7),
             patch("backend.cron_progress.start_progress"),
             patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
-            patch("backend.cron.jobs.sync._run_service_cron") as mock_cron,
+            patch("backend.cron.jobs.sync._run_log_discovery_cron") as mock_cron,
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()
@@ -206,7 +207,7 @@ def test_commit_iceberg_already_running_returns_existing_run_id():
     try:
         app.dependency_overrides[get_source] = lambda: _TEST_SOURCE
 
-        with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("busy")):
+        with patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("busy")):
             client = TestClient(app)
             response = client.post("/api/admin/commit-iceberg")
 

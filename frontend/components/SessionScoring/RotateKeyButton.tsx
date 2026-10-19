@@ -6,18 +6,15 @@ import { KeyRound, Loader2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
 interface RotateKeyButtonProps {
   serviceId: string
   onRotated?: () => void
 }
 
-interface RotateKeyResponse {
-  ok?: boolean
-  rotated_at?: string
-  [k: string]: unknown
-}
+type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']
 
 /**
  * Rotate the AES cookie key used to encrypt session scoring cookies.
@@ -36,17 +33,16 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RotateKeyResponse> => {
-      const { data, response } = await client.POST(
-        '/api/services/{service_id}/scoring/rotate-key' as any,
+      const { data, error: errBody, response } = await client.POST(
+        '/api/services/{service_id}/scoring/rotate-key',
         {
           params: { path: { service_id: serviceId } },
-        } as any,
+        },
       )
-      if (!response.ok) {
-        const msg = (data as any)?.detail?.error ?? `status ${response.status}`
-        throw new Error(msg)
+      if (!response.ok || !data) {
+        throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
       }
-      return data as RotateKeyResponse
+      return data
     },
     onSuccess: () => {
       setStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })

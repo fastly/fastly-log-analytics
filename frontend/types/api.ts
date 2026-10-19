@@ -8,6 +8,9 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     name: s.name || s.service_id,
     accessLevel: s.access_level ?? undefined,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
+    rum_enabled: s.rum_enabled ?? undefined,
+    analystPathASupported: s.analyst_path_a_supported ?? true,
+    analystPathAReason: s.analyst_path_a_reason ?? null,
   }
 }
 
@@ -31,7 +34,7 @@ export type Expect<T extends true> = T
 
 /** Drop the `[key: string]: unknown` index signature the extra=allow models
  *  generate, keeping only the declared keys. */
-type StripIndex<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] }
+export type StripIndex<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] }
 
 /** StripIndex applied through arrays and nested objects, so interface-typed
  *  local fields stay assignable to their (index-signature-carrying) wire
@@ -54,6 +57,25 @@ export type WireParity<Local, Wire, W = StripIndex<Wire>> =
       : { keys_not_on_wire: Exclude<keyof Local, keyof W> }
     : { wire_keys_missing_from_local: Exclude<keyof W, keyof Local> }
 
+/** Flatten an intersection into a single object type for readable tooltips. */
+export type Simplify<T> = { [K in keyof T]: T[K] } & {}
+
+/** Wire models generated from `extra=allow` Pydantic classes are all-optional
+ *  and nullable. Mark `K` required and non-null where the producer always
+ *  emits a value, so consumers get the narrowed type while the key set and
+ *  value types stay derived from the generated schema. */
+export type WithRequired<T, K extends keyof StripIndex<T>> = Simplify<
+  Omit<StripIndex<T>, K> & { [P in K]-?: NonNullable<StripIndex<T>[P]> }
+>
+
+/** Strip `null` from every value while keeping each key's optionality. */
+export type DropNull<T> = Simplify<{ [K in keyof StripIndex<T>]: NonNullable<StripIndex<T>[K]> }>
+
+/** Like WithRequired but keeps `null` in the value (key always present, value may be null). */
+export type WithRequiredNullable<T, K extends keyof StripIndex<T>> = Simplify<
+  Omit<StripIndex<T>, K> & { [P in K]-?: Exclude<StripIndex<T>[P], undefined> }
+>
+
 // ── Shared request/response primitives ───────────────────────────────────────
 
 /** Sourced from the generated OpenAPI schema — includes the caller field. */
@@ -70,26 +92,36 @@ export type { components } from '@/types/api.generated'
 
 export type BootstrapService = components['schemas']['BootstrapService']
 
+export type ServiceConfig = components['schemas']['ServiceConfig']
+
+export type LogFieldsConfig = components['schemas']['LogFieldsConfig']
+
+export type StreamMetrics = components['schemas']['StreamMetrics']
+
 export type BootstrapResponse = components['schemas']['BootstrapResponse']
 
 export type DashboardTableData = components['schemas']['FieldAggregate']
 
 export type DashboardMapData = components['schemas']['MapPoint']
 
-export type InsightItem = Omit<components['schemas']['InsightItem'], 'meta'> & {
-  meta?: Record<string, any>
-}
-
-export type InsightCardData = Omit<components['schemas']['InsightCard'], 'items'> & {
-  items: InsightItem[]
-}
-
 export type InsightsResponse = components['schemas']['InsightsResponse']
+
+/** One card, discriminated on `id`; `items[].meta` is the per-detection model for that id. */
+export type InsightCardData = InsightsResponse['insights'][number]
+
+export type InsightItem = InsightCardData['items'][number]
 
 export type InsightAvailabilityResponse = components['schemas']['InsightsAvailabilityResponse']
 
 export type Session = components['schemas']['Session']
 
+export type ShareBanner = WithRequiredNullable<
+  WithRequired<components['schemas']['ShareBannerResponse'], 'sharing_active'>,
+  'public_url'
+>
+
 export type SessionsResponse = components['schemas']['SessionsResponse']
+
+export type LogsQueryResponse = components['schemas']['LogsQueryResponse']
 
 export type SessionDetailResponse = components['schemas']['SessionDetailResponse']

@@ -9,7 +9,7 @@ therefore either:
   - a contradiction — ``~ "^/api/"`` makes the whole condition identically
     false, disabling ALL RUM logging with no error anywhere.
 
-Both are valid VCL, so Fastly's ``validate`` accepts them. The SE-demo service
+Both are valid VCL, so Fastly's ``validate`` accepts them. A production service
 shipped the no-op form for a month, copied from what the settings dialog used to
 offer as its example.
 """
@@ -29,7 +29,7 @@ def test_empty_condition_is_allowed(cond):
 @pytest.mark.parametrize(
     "cond",
     [
-        'req.url.path !~ "^/api/"',  # the exact value the SE-demo service ran
+        'req.url.path !~ "^/api/"',  # the exact value the affected service ran
         'req.url.path ~ "^/api/"',  # the kill-switch inverse
         'req.url ~ "^/api/"',
         'client.ip != "203.0.113.5" && req.url.path !~ "^/api/"',

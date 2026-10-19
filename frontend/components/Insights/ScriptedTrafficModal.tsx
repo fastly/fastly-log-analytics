@@ -13,36 +13,19 @@ import { ScanSearch, Gauge, Timer, Activity, Repeat, Hash, Users, Clock } from '
 import { cn } from '@/lib/utils'
 import { ScriptedTrafficData } from './types'
 
+import { formatCount } from '@/lib/format'
+import { formatDuration } from '@/lib/date'
 interface ScriptedTrafficModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
   data: ScriptedTrafficData | null
 }
 
-// Seconds → compact human string ("45s", "12m 30s", "2h 15m", "3d 4h").
-function humanizeDuration(totalSeconds: number): string {
-  const s = Math.max(0, Math.round(totalSeconds))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) {
-    const rem = s % 60
-    return rem ? `${m}m ${rem}s` : `${m}m`
-  }
-  const h = Math.floor(m / 60)
-  if (h < 24) {
-    const remM = m % 60
-    return remM ? `${h}h ${remM}m` : `${h}h`
-  }
-  const d = Math.floor(h / 24)
-  const remH = h % 24
-  return remH ? `${d}d ${remH}h` : `${d}d`
-}
-
 // Inter-arrival gap: keep sub-90s readable in seconds, humanize longer cadences.
 function formatInterval(sec: number | null): string {
   if (sec == null) return '—'
-  if (sec < 90) return `${sec.toLocaleString(undefined, { maximumFractionDigits: 1 })}s`
-  return humanizeDuration(sec)
+  if (sec < 90) return `${formatCount(sec, { maximumFractionDigits: 1 })}s`
+  return formatDuration(Math.max(0, sec))
 }
 
 interface StatCardProps {
@@ -71,7 +54,7 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
   if (!data) return null
 
   const modalPct = Math.round(data.modal_frac * 100)
-  const span = humanizeDuration(data.span_s)
+  const span = formatDuration(Math.max(0, data.span_s))
   // Score colour tracks the backend severity bands (≥90 critical, ≥70 warning).
   const scoreColor =
     data.score >= 90 ? 'text-red-500' : data.score >= 70 ? 'text-amber-500' : 'text-blue-500'
@@ -94,7 +77,7 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
           <div className="p-4 rounded-lg bg-muted/30 border border-border">
             <p className="text-sm leading-relaxed">
               <span className="font-semibold">{data.label}</span> made{' '}
-              <span className="font-semibold">{data.n_events.toLocaleString()}</span> requests over{' '}
+              <span className="font-semibold">{formatCount(data.n_events)}</span> requests over{' '}
               <span className="font-semibold">{span}</span> on a near-constant{' '}
               <span className="font-semibold">~{formatInterval(data.mean_interval_s)}</span> cadence
               {' '}— <span className="font-semibold">{modalPct}%</span> of the gaps between requests
@@ -136,8 +119,8 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
             <StatCard
               icon={<Hash className="h-3 w-3" />}
               label="Total Requests"
-              value={data.n_events.toLocaleString()}
-              hint={`${data.n_gaps.toLocaleString()} gaps measured`}
+              value={formatCount(data.n_events)}
+              hint={`${formatCount(data.n_gaps)} gaps measured`}
             />
             <StatCard
               icon={<Clock className="h-3 w-3" />}
@@ -147,12 +130,12 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
             <StatCard
               icon={<Gauge className="h-3 w-3" />}
               label="Requests / sec"
-              value={data.rps.toLocaleString(undefined, { maximumFractionDigits: 3 })}
+              value={formatCount(data.rps, { maximumFractionDigits: 3 })}
             />
             <StatCard
               icon={<Users className="h-3 w-3" />}
               label={data.distinct_ip != null ? 'Distinct IPs' : 'Distinct UAs'}
-              value={(data.distinct_ip ?? data.distinct_ua).toLocaleString()}
+              value={formatCount(data.distinct_ip ?? data.distinct_ua)}
             />
           </div>
 
@@ -175,21 +158,21 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
               </li>
               <li>
                 <span className="font-semibold">Volume &amp; span.</span>{' '}
-                {data.n_events.toLocaleString()} requests over {span} ({data.rps.toLocaleString(undefined, { maximumFractionDigits: 3 })} req/s),
+                {formatCount(data.n_events)} requests over {span} ({formatCount(data.rps, { maximumFractionDigits: 3 })} req/s),
                 sustained but below volumetric rate-limit thresholds — the pattern this insight is
                 designed to catch.
               </li>
               <li>
                 {data.distinct_ip != null ? (
                   <>
-                    <span className="font-semibold">Distinct IPs ({data.distinct_ip.toLocaleString()}).</span>{' '}
+                    <span className="font-semibold">Distinct IPs ({formatCount(data.distinct_ip)}).</span>{' '}
                     This fingerprint appeared across multiple source addresses, which is why
                     IP-based detection alone would miss it. IP rotation with a stable TLS fingerprint
                     is a strong signal of coordinated scripted traffic.
                   </>
                 ) : (
                   <>
-                    <span className="font-semibold">Distinct user-agents ({data.distinct_ua.toLocaleString()}).</span>{' '}
+                    <span className="font-semibold">Distinct user-agents ({formatCount(data.distinct_ua)}).</span>{' '}
                     Shown for context only — it is <span className="italic">not</span> a reason to dismiss
                     the flag. A high UA count combined with this regular timing usually signals a
                     UA-rotating scraper, which is <span className="font-semibold">more</span> suspicious,

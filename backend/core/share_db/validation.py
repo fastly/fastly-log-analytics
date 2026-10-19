@@ -68,7 +68,7 @@ def validate_name(name: str) -> str:
         raise InvalidNameError("name contains disallowed characters (HTML special characters not permitted)")
     if "\x00" in name or any(ord(c) < 32 for c in name):
         raise InvalidNameError("name contains control characters")
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         raise InvalidNameError(
             "name must be 1-80 characters; letters, digits, spaces, periods, commas, apostrophes, hyphens only"
         )
@@ -77,7 +77,7 @@ def validate_name(name: str) -> str:
 
 def validate_email(email: str) -> str:
     email = (email or "").strip().lower()
-    if not _EMAIL_RE.match(email):
+    if not _EMAIL_RE.fullmatch(email):
         raise InvalidEmailError("email is not in a valid format")
     return email
 
@@ -307,7 +307,7 @@ def apply_pii_policy(obj, policy: dict):
 # country codes, JA4 fingerprints, hashes, etc. before the more expensive
 # ``ipaddress`` parse — keeps the per-cell cost negligible on the large
 # free-form result sets ``/api/query`` can return (up to MAX_QUERY_ROWS rows).
-_MAYBE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
+_MAYBE_IP_RE = re.compile(r"[0-9A-Fa-f:.]+")
 
 
 def _mask_ip_scalar(value: str) -> str:
@@ -322,13 +322,18 @@ def _mask_ip_scalar(value: str) -> str:
       * ``"1.2.3.4, 5.6.7.8"`` (XFF list, every element an IP) → each masked.
       * any string with a non-IP element → returned unchanged.
     """
-    if _MAYBE_IP_RE.match(value):
+    # Strip surrounding whitespace first: ``ip_address("1.2.3.4\n")`` raises, so an IP
+    # padded with a newline/space would otherwise sail through unmasked.
+    # Intentional: the masked value is returned WITHOUT the original padding (and an XFF list is
+    # re-joined with ", "). Pinned by tests/security/test_mask_ip_scalar_padding.py.
+    bare = value.strip()
+    if _MAYBE_IP_RE.fullmatch(bare):
         try:
-            ipaddress.ip_address(value)
+            ipaddress.ip_address(bare)
         except ValueError:
             pass
         else:
-            return mask_ip(value)
+            return mask_ip(bare)
     # XFF-style list: mask only when EVERY comma-separated element is an IP.
     # mask_ip's own fail-closed branch can't help here (the whole string isn't
     # an IP), so we split and verify before masking — a list with any non-IP

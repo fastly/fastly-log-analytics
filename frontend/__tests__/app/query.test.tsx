@@ -10,8 +10,13 @@ import {
   _resetUrlHydrationFlag,
   hydrateFilterStoreFromUrl,
 } from '@/lib/urlFilterHydration'
-import { client } from '@/lib/api'
 import React from 'react'
+
+type ApiStub = { data?: unknown; error?: unknown }
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn<(url: string) => Promise<ApiStub>>(),
+  mockPost: vi.fn<(url: string) => Promise<ApiStub>>(),
+}))
 
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
@@ -20,7 +25,7 @@ vi.mock('next/navigation', () => ({
     replace: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(window.location.search),
   usePathname: () => '/query',
 }))
 
@@ -28,14 +33,14 @@ vi.mock('next/navigation', () => ({
 // file path (so /query's initial bundle stays slim), while other consumers
 // may still hit the barrel — stub both so the dynamic loader resolves to
 // the textarea regardless of entry point.
-const MockCodeEditor = ({ value, onChange }: any) => (
+const MockCodeEditor = ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
   <textarea data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
 )
 vi.mock('@/components/CodeEditor', () => ({ CodeEditor: MockCodeEditor }))
 vi.mock('@/components/CodeEditor/CodeEditor', () => ({ CodeEditor: MockCodeEditor }))
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count?: number }) => ({
     getVirtualItems: () => {
       const count = options.count || 0
       return Array.from({ length: count }).map((_, i) => ({
@@ -51,8 +56,8 @@ vi.mock('@tanstack/react-virtual', () => ({
 // Mock the API client
 vi.mock('@/lib/api', () => ({
   client: {
-    GET: vi.fn(),
-    POST: vi.fn(),
+    GET: mockGet,
+    POST: mockPost,
     use: vi.fn()
   },
   extractApiError: vi.fn(e => String(e)),
@@ -73,27 +78,27 @@ beforeEach(() => {
 test('renders query page and executes a query', async () => {
   const user = userEvent.setup()
   // Mock API responses
-  vi.mocked(client.GET).mockImplementation(async (url: any) => {
+  mockGet.mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { data: { fields: [] } } as any
+      return { data: { fields: [] } }
     }
     if (url.includes('/api/schema')) {
-      return { data: { schema: [] } } as any
+      return { data: { schema: [] } }
     }
     if (url.includes('/api/presets')) {
-      return { data: [] } as any
+      return { data: [] }
     }
-    return { data: {} } as any
+    return { data: {} }
   })
 
-  vi.mocked(client.POST).mockResolvedValue({
+  mockPost.mockResolvedValue({
     data: {
       columns: ['timestamp', 'client_ip'],
       data: [{ timestamp: '2026-01-01T00:00:00Z', client_ip: '1.1.1.1' }],
       total_rows: 1,
       elapsed_ms: 10
     }
-  } as any)
+  })
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -130,10 +135,10 @@ test('renders query page and executes a query', async () => {
 // ReportLayout pages — every filter mutation rewrites ?filters= via
 // history.replaceState so the visible URL stays shareable.
 test('/query keeps ?filters= in the URL after a filter mutation', async () => {
-  vi.mocked(client.GET).mockResolvedValue({ data: { fields: [] } } as any)
-  vi.mocked(client.POST).mockResolvedValue({
+  mockGet.mockResolvedValue({ data: { fields: [] } })
+  mockPost.mockResolvedValue({
     data: { columns: [], data: [], total_rows: 0, elapsed_ms: 1 },
-  } as any)
+  })
 
   const inbound = { status: { values: ['200'], mode: 'include' } }
   window.history.replaceState(
@@ -180,4 +185,127 @@ test('/query keeps ?filters= in the URL after a filter mutation', async () => {
       country: { values: ['US'], mode: 'include' },
     })
   })
+})
+
+test('renders engine initializing skeleton when service is not yet initialized', () => {
+  useServiceStore.setState({ activeServiceId: null, isInitialized: false })
+  mockGet.mockImplementation(() => new Promise<ApiStub>(() => {}))
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  expect(screen.getByTestId('query-engine-initializing')).toBeInTheDocument()
+  expect(screen.getByText(/Initializing DuckDB analytical engine/i)).toBeInTheDocument()
+})
+
+test('enforces zero-CLS layout reservations and renders schema sidebar in Raw SQL mode', async () => {
+  const user = userEvent.setup()
+  mockGet.mockImplementation(async (url: string) => {
+    if (url.includes('/api/schema')) {
+      return {
+        data: {
+          schema: [
+            { name: 'timestamp', type: 'TIMESTAMP' },
+            { name: 'client_ip', type: 'VARCHAR' },
+          ],
+        },
+      }
+    }
+    return { data: { fields: [] } }
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  const pageRoot = screen.getByTestId('query-page-root')
+  expect(pageRoot.className).toContain('contain-intrinsic-size')
+
+  const editorContainer = screen.getByTestId('query-editor-container')
+  expect(editorContainer.className).toContain('contain-intrinsic-size')
+
+  await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
+
+  const sidebar = await screen.findByTestId('query-schema-sidebar')
+  expect(sidebar).toBeInTheDocument()
+  expect(screen.getByText('timestamp')).toBeInTheDocument()
+  expect(screen.getByText('client_ip')).toBeInTheDocument()
+})
+
+test('displays user-friendly error alert when mutating SQL is rejected by AST validator', async () => {
+  const user = userEvent.setup()
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  mockPost.mockResolvedValue({
+    error: JSON.stringify({
+      detail: {
+        error: 'sql_not_permitted',
+        message: 'only SELECT / WITH / UNION statements allowed (got DROP)',
+      },
+    }),
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
+  const editor = screen.getByTestId('mock-editor')
+  await user.clear(editor)
+  await user.type(editor, 'DROP TABLE logs')
+  await user.click(screen.getByRole('button', { name: /run query/i }))
+
+  const alert = await screen.findByTestId('query-error-alert')
+  expect(alert).toBeInTheDocument()
+  expect(alert.textContent).toMatch(/only SELECT \/ WITH \/ UNION statements allowed/i)
+})
+
+test('renders CSV export button and virtualized results table after query execution', async () => {
+  const user = userEvent.setup()
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  mockPost.mockResolvedValue({
+    data: {
+      columns: ['url', 'requests'],
+      data: [
+        { url: '/index.html', requests: 42 },
+        { url: '/api/v1/items', requests: 19 },
+      ],
+      total_rows: 2,
+      elapsed_ms: 8,
+    },
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  await user.click(screen.getByRole('button', { name: /run query/i }))
+
+  await waitFor(() => {
+    expect(screen.getByTestId('query-results-table')).toBeInTheDocument()
+  })
+  expect(screen.getByTestId('query-csv-export-btn')).toBeInTheDocument()
+  expect(screen.getByText('/index.html')).toBeInTheDocument()
+})
+
+test('hydrates Raw SQL mode when ?q= URL parameter is provided', async () => {
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  window.history.replaceState({}, '', '/query?q=' + encodeURIComponent('SELECT count(*) FROM logs'))
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  const editor = await screen.findByTestId('mock-editor')
+  expect((editor as HTMLTextAreaElement).value).toBe('SELECT count(*) FROM logs')
 })

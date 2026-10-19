@@ -8,7 +8,8 @@
  * @vitest-environment jsdom
  */
 import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { describe, it, expect, beforeEach } from 'vitest'
 import React from 'react'
 
@@ -18,7 +19,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useFilterStore } from '@/stores/filterStore'
 
 function makeWrapper(maskIps: boolean | undefined) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const qc = createTestQueryClient()
   if (maskIps !== undefined) {
     qc.setQueryData(queryKeys.bootstrap(), { settings: { mask_ips: maskIps } })
   }

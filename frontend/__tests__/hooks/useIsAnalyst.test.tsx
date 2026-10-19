@@ -9,7 +9,8 @@
  *   2. bootstrap.settings.is_remote_analyst === true
  */
 import { renderHook } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import { describe, it, expect, beforeEach } from 'vitest'
 import React from 'react'
 
@@ -18,7 +19,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 
 function makeWrapper(opts: { isRemoteAnalyst?: boolean } = {}) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const qc = createTestQueryClient()
   const settings: Record<string, unknown> = {}
   if (opts.isRemoteAnalyst !== undefined) {
     settings.is_remote_analyst = opts.isRemoteAnalyst

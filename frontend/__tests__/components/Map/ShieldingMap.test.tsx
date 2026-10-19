@@ -8,6 +8,8 @@
  */
 import { render, act, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import type { MapOptions } from 'maplibre-gl'
 import React from 'react'
 import {
   ShieldingMap,
@@ -23,29 +25,34 @@ vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
 
-const mapInstances: any[] = []
+type MockMapListener = (e: Record<string, unknown>) => void
+interface MockMapInstance {
+  sources: Record<string, unknown>
+  removed: boolean
+}
+const mapInstances: MockMapInstance[] = []
 vi.mock('maplibre-gl', () => {
-  class MockMap {
+  class MockMap implements MockMapInstance {
     container: HTMLElement | undefined
-    listeners: Record<string, ((e: any) => void)[]> = {}
-    sources: Record<string, any> = {}
-    layers: any[] = []
+    listeners: Record<string, MockMapListener[]> = {}
+    sources: Record<string, unknown> = {}
+    layers: unknown[] = []
     removed = false
-    constructor(opts: any) {
-      this.container = opts.container
+    constructor(opts: Partial<MapOptions>) {
+      this.container = opts.container as HTMLElement | undefined
       mapInstances.push(this)
       queueMicrotask(() => this.emit('load'))
     }
-    on(event: string, ...rest: any[]) {
-      const fn = rest.length === 2 ? rest[1] : rest[0]
+    on(event: string, ...rest: unknown[]) {
+      const fn = (rest.length === 2 ? rest[1] : rest[0]) as MockMapListener
       this.listeners[event] = this.listeners[event] || []
       this.listeners[event].push(fn)
     }
     off() {}
-    addSource(id: string, src: any) {
+    addSource(id: string, src: Record<string, unknown>) {
       this.sources[id] = { ...src, setData: vi.fn() }
     }
-    addLayer(layer: any) {
+    addLayer(layer: unknown) {
       this.layers.push(layer)
     }
     removeLayer() {}
@@ -83,7 +90,7 @@ vi.mock('maplibre-gl', () => {
     }
     setMaxBounds() {}
     addControl() {}
-    emit(event: string, payload: any = {}) {
+    emit(event: string, payload: Record<string, unknown> = {}) {
       ;(this.listeners[event] || []).forEach((fn) => fn(payload))
     }
   }
@@ -99,12 +106,9 @@ vi.mock('maplibre-gl', () => {
 
 vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}))
 
-class MockResizeObserver {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-}
-;(globalThis as any).ResizeObserver = (globalThis as any).ResizeObserver || MockResizeObserver
+beforeEach(() => {
+  stubResizeObserver()
+})
 
 // ── Helper unit tests ─────────────────────────────────────────────────────────
 
@@ -186,7 +190,7 @@ describe('ShieldingMap helpers', () => {
       originalRAF = globalThis.requestAnimationFrame
       globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
         rafCallbacks.push(cb)
-        return rafCallbacks.length as unknown as number
+        return rafCallbacks.length
       }) as typeof globalThis.requestAnimationFrame
     })
 

@@ -9,6 +9,27 @@ this module is the pure data builder both call paths use.
 
 from __future__ import annotations
 
+TASK_MAP = {
+    "sync_metadata": "metadata_sync",
+    "log_discovery": "log_discovery",
+    "rum_sync": "rum_sync",
+    "full_sync": "full_sync",
+    "gap_heal": "gap_heal",
+    "commit": "commit",
+    "rum_commit": "rum_commit",
+    "optimize": "optimize",
+    "local_compact": "local_compact",
+    "expire": "expire_snapshots",
+    "alerts_evaluation": "alerts",
+    "ngwaf_sync": "ngwaf_sync",
+    "metadata_cleanup": "metadata_cleanup",
+    "insights_prewarmer": "insights_prewarmer",
+    "rollup_heal": "rollup_hour_heal",
+    "rollup_compact": "rollup_compact_daily",
+    "ledger_sweep": "ledger_sweep",
+}
+_TASK_MAP = TASK_MAP
+
 
 def build_cron_schedule_payload(source: dict) -> dict:
     """Return ``{"schedules": [...]}`` for the given ``source``.
@@ -37,23 +58,9 @@ def build_cron_schedule_payload(source: dict) -> dict:
             }
     except Exception:
         pass
-    _TASK_MAP = {
-        "sync_metadata": "metadata_sync",
-        "sync": "sync",
-        "rum_sync": "rum_sync",
-        "full_sync": "full_sync",
-        "gap_heal": "gap_heal",
-        "commit": "commit",
-        "rum_commit": "rum_commit",
-        "optimize": "optimize",
-        "local_compact": "local_compact",
-        "expire": "expire",
-        "alerts_evaluation": "alerts",
-        "ngwaf_sync": "ngwaf_sync",
-        "metadata_cleanup": "metadata_cleanup",
-        "insights_prewarmer": "insights_prewarmer",
-    }
     schedules = []
+
+    # Pod-local APScheduler jobs — the ONLY source of cron jobs.
     for job in sched._sched.get_jobs():
         job_id = getattr(job, "id", "")
         if not job_id.endswith(f"_{service_id}"):
@@ -66,7 +73,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
             continue
         from backend.utils.date_utils import iso_z
 
-        next_run = iso_z(job.next_run_time) if job.next_run_time else None
+        next_run = iso_z(job.next_run_time) if job.next_run_time else None  # type: ignore
         schedules.append({"task": db_task, "next_run_time": next_run, **last_runs.get(db_task, {})})
     existing = {s["task"] for s in schedules}
     for task, info in last_runs.items():

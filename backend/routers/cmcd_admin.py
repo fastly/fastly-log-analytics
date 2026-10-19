@@ -13,10 +13,11 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+from backend.models.status_reads import CmcdStatusResponse
+from backend.utils.router_utils import resolve_fastly_token as _resolve_token
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["cmcd-admin"], responses=DEFAULT_ERROR_RESPONSES)
@@ -32,18 +33,7 @@ class CmcdDisableBody(BaseModel):
     token: str = ""
 
 
-def _resolve_token(service_id: str, override_token: str = "") -> str:
-    if override_token:
-        return override_token
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        return cfg.get("fastly_api_key", "") or ""
-    return ""
-
-
-@router.get("/{service_id}/cmcd/status")
+@router.get("/{service_id}/cmcd/status", response_model=CmcdStatusResponse, response_model_exclude_unset=True)
 def cmcd_status(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -82,14 +72,18 @@ def cmcd_enable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    cfg["cmcd"] = {
-        "enabled": True,
-        "mode": mode,
-        "version": version,
-        "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-    }
-    svcconfig.save_config(service_id, cfg)
+    svcconfig.mutate_config(
+        service_id,
+        lambda c: c.__setitem__(
+            "cmcd",
+            {
+                "enabled": True,
+                "mode": mode,
+                "version": version,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            },
+        ),
+    )
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_cmcd
     from backend.provision.orchestrator import run_with_events
@@ -115,7 +109,7 @@ def cmcd_enable(
             logger.exception("cmcd_enable failed for %s", service_id)
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/{service_id}/cmcd/disable")
@@ -133,10 +127,11 @@ def cmcd_disable(
 
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id) or {}
-    if "cmcd" in cfg:
-        cfg["cmcd"]["enabled"] = False
-    svcconfig.save_config(service_id, cfg)
+    def _disable(c: dict) -> None:
+        if "cmcd" in c:
+            c["cmcd"]["enabled"] = False
+
+    svcconfig.mutate_config(service_id, _disable)
 
     from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_cmcd
     from backend.provision.orchestrator import run_with_events
@@ -152,4 +147,4 @@ def cmcd_disable(
             logger.exception("cmcd_disable failed for %s", service_id)
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())

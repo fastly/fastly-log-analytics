@@ -23,6 +23,10 @@ import pytest
 
 from backend.core import metadata as metadata_db
 
+# The endpoint and each test both derive hour buckets from "now"; under load the
+# two reads straddle an hour boundary and the seeded buckets stop lining up.
+pytestmark = pytest.mark.usefixtures("frozen_clock")
+
 
 @pytest.fixture(autouse=True)
 def _clear_log_accounting_ttl_caches():

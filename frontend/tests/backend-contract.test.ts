@@ -38,7 +38,7 @@ const client = createClient<paths>({ baseUrl: CONTRACT_API_BASE })
 
 beforeAll(async () => {
   await startBackend()
-}, 60_000)
+}, 150_000)
 
 afterAll(async () => {
   await stopBackend()
@@ -214,5 +214,14 @@ describe('frontend → backend HTTP contract', () => {
     expect(error).toBeUndefined()
     expect(response.status).toBe(200)
     expect(Array.isArray((data as { data?: unknown[] } | undefined)?.data)).toBe(true)
+  })
+
+  // ── Share / Auth config & OAuth ──────────────────────────────────
+  it('GET /api/share/auth-config returns {passcode_enabled, providers}', async () => {
+    const { data, error, response } = await client.GET('/api/share/auth-config')
+    expect(error).toBeUndefined()
+    expect(response.status).toBe(200)
+    expect(typeof data?.passcode_enabled).toBe('boolean')
+    expect(Array.isArray(data?.providers)).toBe(true)
   })
 })

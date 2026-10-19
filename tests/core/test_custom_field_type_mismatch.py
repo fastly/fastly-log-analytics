@@ -16,7 +16,7 @@ path must:
    in the chunk) still has to land.
 
 These assertions pin the contract end-to-end against the real ingest
-generator + real PyIceberg buffer write. The locked contract lives in
+generator + real buffer write + real DuckLake commit. The locked contract lives in
 TESTING_PLAN_3.md Section 7. The NULL-fill half of the contract is
 implemented by DuckDB's ``read_json_auto(..., ignore_errors=true)``; the
 "increment a per-file ``error_count``" half is deferred to the schema-
@@ -25,7 +25,7 @@ without breaking existing service DBs.
 
 Coverage gap closed: the existing
 ``tests/core/test_custom_field_lifecycle.py`` exercises enable / disable
-/ Iceberg field-id stability — it does not exercise what happens at
+/ field-id stability — it does not exercise what happens at
 ingest time when a declared type doesn't match the value on the wire.
 """
 
@@ -35,9 +35,9 @@ import gzip
 import io
 import json
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 
-import duckdb
 import pytest
 
 
@@ -45,19 +45,21 @@ import pytest
 def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
     """Lightweight wrapper around the ingest harness used by test_e2e_pipeline.
 
-    Sets up moto S3 + a local-FS PyIceberg warehouse + cache, plus the
+    Sets up moto S3 + a local DuckLake data path + cache, plus the
     `_get_fos_client` monkeypatch for both the duckdb and ingest module
     namespaces, plus a config loader stub that returns whatever custom
     fields the test asks for. Returns helpers for seeding gzipped log
     rows and draining the ingest generator.
     """
+    # DuckLake tables persist in the shared per-worker Postgres catalog across
+    # tests, so each test needs its own service_id (table name) — a reused one
+    # resolves a table whose data dir was never created under this tmp root.
+    fos_source["service_id"] = f"tm{uuid.uuid4().hex[:10]}"
+    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
-    warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
 
     class _CallerHintShim:
@@ -73,7 +75,7 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
     shim = _CallerHintShim(s3_mock)
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
 
-    # Reset iceberg caches (autouse fixture does this too)
+    # Reset view caches (autouse fixture does this too)
     from backend.core import iceberg as ice
 
     ice._catalog_cache.clear()
@@ -106,7 +108,6 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
 
     return {
         "fos_source": fos_source,
-        "warehouse": warehouse_path,
         "cache": cache_path,
         "set_custom_fields": _set_custom_fields,
         "seed_gz": _seed_gz,
@@ -130,25 +131,19 @@ def _well_typed_row(ts: datetime, idx: int, custom_field_name: str, custom_value
 
 
 def _query_view(env, custom_field_name: str) -> list:
+    """Read the committed rows back through the DuckLake-backed ``logs`` view."""
     from backend.core import iceberg as ice
+    from backend.core.duckdb import get_connection
     from backend.repositories._base import _safe_table
 
     src = env["fos_source"]
-    # Manually sync warehouse → cache so DuckDB sees the parquet
-    import glob
-    import shutil
-
-    data_dir = os.path.join(env["cache"], "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for sp in glob.glob(os.path.join(env["warehouse"], "**", "*.parquet"), recursive=True):
-        dst = os.path.join(data_dir, os.path.basename(sp))
-        if not os.path.exists(dst):
-            shutil.copy2(sp, dst)
-
-    con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src)
-    view_name = _safe_table(src["name"])
-    return con.execute(f"SELECT url, {custom_field_name} FROM {view_name} ORDER BY url").fetchall()
+    con = get_connection(src)
+    try:
+        ice.update_iceberg_view(con, src)
+        view_name = _safe_table(src["name"])
+        return con.execute(f"SELECT url, {custom_field_name} FROM {view_name} ORDER BY url").fetchall()
+    finally:
+        con.close()
 
 
 # ── Tests ────────────────────────────────────────────────────────────────
@@ -176,7 +171,7 @@ def test_integer_field_with_string_value_nulls_only_that_cell(custom_field_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz",
         [
             _well_typed_row(base, 0, "user_score", 42),
             _well_typed_row(base + timedelta(seconds=1), 1, "user_score", "NaN"),
@@ -231,7 +226,7 @@ def test_integer_field_with_string_float_truncates_not_nulls(custom_field_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz",
         [
             _well_typed_row(base, 0, "score", 1),
             _well_typed_row(base + timedelta(seconds=1), 1, "score", "3.14"),
@@ -276,7 +271,7 @@ def test_boolean_field_with_arbitrary_string_nulls_the_cell(custom_field_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz",
         [
             _well_typed_row(base, 0, "is_bot", True),
             _well_typed_row(base + timedelta(seconds=1), 1, "is_bot", "maybe"),
@@ -300,7 +295,7 @@ def test_boolean_field_with_arbitrary_string_nulls_the_cell(custom_field_env):
 def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env):
     """Two files in the same batch; one is entirely bad values, the other
     is entirely good. Bad file must not abort the good file's commit, and
-    the good rows must land in Iceberg cleanly.
+    the good rows must land in DuckLake cleanly.
     """
     from backend.core import iceberg as ice
 
@@ -311,11 +306,11 @@ def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env)
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.bad.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.bad.gz",
         [_well_typed_row(base + timedelta(seconds=i), i, "n", "bad") for i in range(3)],
     )
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-05-00.good.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=05/2026-05-20T10-05-00.good.gz",
         [_well_typed_row(base + timedelta(minutes=5, seconds=i), 100 + i, "n", 50 + i) for i in range(3)],
     )
 
@@ -374,7 +369,7 @@ def test_typed_field_with_invalid_string_value_nulls_cell(custom_field_env, ddb_
     ice.init_iceberg_table(env["fos_source"])
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-21/10/2026-05-21T10-00-00.matrix.gz",
+        "raw/request/year=2026/month=05/day=21/hour=10/minute=00/2026-05-21T10-00-00.matrix.gz",
         [
             _well_typed_row(base, 0, "metric", 1),
             _well_typed_row(base + timedelta(seconds=1), 1, "metric", bad_value),

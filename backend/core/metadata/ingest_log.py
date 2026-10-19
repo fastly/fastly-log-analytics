@@ -1,4 +1,4 @@
-"""Ingested-files tracking + dedup + activity reporting in metadata SQLite.
+"""Ingested-files tracking + dedup + activity reporting in the metadata Postgres database.
 
 Covers the ``ingested_files``, ``ingested_files_summary``, ``ingest_in_flight``,
 and ``local_compacted_files`` tables. Also exposes the helpers powering the
@@ -9,7 +9,8 @@ join against ``usage_log`` (for the unbackfilled-edge-files sweep).
 from __future__ import annotations
 
 import json
-import sqlite3
+import logging
+from typing import Any
 
 from backend.core.metadata.base import (
     _ingested_filenames_cache,
@@ -18,6 +19,8 @@ from backend.core.metadata.base import (
     get_con,
     get_con_readonly,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_ingested_filenames(service_id: str, limit: int | None = None, table_name: str = "logs") -> set[str]:
@@ -138,7 +141,7 @@ def list_ingested_files_for_status(service_id: str) -> list[tuple[str, str, int 
     return [(r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"]) for r in rows]
 
 
-def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) -> dict:
+def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
     """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
 
     Pays the full ~4 s scan ONCE per service per app lifetime so subsequent
@@ -173,7 +176,7 @@ def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) 
         "latest_file_name": (latest_fn_row["file_name"] if latest_fn_row else None),
     }
     con.execute(
-        """INSERT INTO ingested_files_summary
+        """INSERT INTO ingested_files_summary AS summary
                (source_name, file_count, total_rows, total_bytes,
                 count_with_bytes, latest_file_name, last_ingested)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -198,7 +201,7 @@ def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) 
     return summary
 
 
-def recompute_ingested_files_summary(con: sqlite3.Connection, service_id: str) -> dict:
+def recompute_ingested_files_summary(con: Any, service_id: str) -> dict:
     """Recompute the ``ingested_files_summary`` rollup from the current table.
 
     Public entry point for callers that mutate ``ingested_files`` *outside* of
@@ -313,6 +316,7 @@ def get_log_accounting_counts(
     end_date = sql_end[:10]
     sql_start_space = sql_start.replace("T", " ")
     sql_end_space = sql_end.replace("T", " ")
+    date_pattern_check = " ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
 
     # Optimize fast arm SELECT expression and parameters based on width
     fast_params: tuple[int, ...]
@@ -335,11 +339,11 @@ def get_log_accounting_counts(
         """
         slow_params = ()
     else:
-        slow_bucket_expr = """
+        slow_bucket_expr = f"""
               CASE
                 WHEN instr(file_name, 'T') >= 11
                  AND substr(file_name, instr(file_name, 'T') - 10, 10)
-                     GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                     {date_pattern_check}
                 THEN substr(file_name, instr(file_name, 'T') - 10, ?)
                 WHEN ingested_at IS NOT NULL
                 THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
@@ -378,7 +382,7 @@ def get_log_accounting_counts(
               AND ingested_at <= ?
               AND file_name != '__seeding_attempted__'
             GROUP BY 1
-        )
+        ) AS combined
         GROUP BY bucket
         HAVING bucket IS NOT NULL AND bucket >= ? AND bucket <= ?
     """
@@ -467,6 +471,9 @@ def list_unbackfilled_fastly_edge_files(
     # do the anti-join in Python. The set membership check is O(1) per
     # row; the SELECT on usage_log uses idx_usage_dedup keyed on
     # (service_id, function_name, url).
+    if not rows:
+        return []
+
     from backend.core.metadata import usage_log_db as _usage_log_db
 
     backfilled: set[str] = set()
@@ -478,19 +485,26 @@ def list_unbackfilled_fastly_edge_files(
         # against an empty table returns every outer row).
         ul_con = None
     if ul_con is not None:
+        # Scope the lookup to the outer rows' names: loading every historical
+        # fastly.edge URL (~450k on long-lived services) cost ~5 s per tick.
+        names = [r["file_name"] for r in rows]
         try:
-            backfilled.update(
-                r[0]
-                for r in ul_con.execute(
-                    "SELECT url FROM usage_log WHERE service_id = ? AND function_name = 'fastly.edge'",
-                    (service_id,),
-                ).fetchall()
-            )
+            for i in range(0, len(names), 500):
+                chunk = names[i : i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                backfilled.update(
+                    r[0]
+                    for r in ul_con.execute(
+                        "SELECT url FROM usage_log WHERE service_id = ? AND function_name = 'fastly.edge'"
+                        f" AND url IN ({placeholders})",
+                        (service_id, *chunk),
+                    ).fetchall()
+                )
         finally:
             try:
                 ul_con.close()
             except Exception:
-                pass
+                logger.debug("list_unbackfilled_fastly_edge_files: ul_con.close failed (ignored)", exc_info=True)
 
     return [
         (r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"])
@@ -510,7 +524,7 @@ def get_latest_ingest_ts(service_id: str) -> str | None:
     con = get_con(service_id)
     row = con.execute(
         """
-        SELECT datetime(max(ingested_at)) AS latest
+        SELECT max(ingested_at) AS latest
         FROM ingested_files
         WHERE source_name = ? AND file_name != '__seeding_attempted__'
         """,
@@ -534,8 +548,8 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
 
     try:
         con = _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
-        # Fresh service before the writer has created the file — no rows.
+    except Exception:
+        # Fresh service before the writer has created the table — no rows.
         return None
     try:
         row = con.execute(
@@ -563,8 +577,8 @@ def register_locally_compacted(service_id: str, file_names: list[str]) -> None:
         return
     con = get_con(service_id)
     con.executemany(
-        "INSERT OR IGNORE INTO local_compacted_files (file_name) VALUES (?)",
-        [(n,) for n in file_names],
+        "INSERT OR IGNORE INTO local_compacted_files (service_id, file_name) VALUES (?, ?)",
+        [(service_id, n) for n in file_names],
     )
     con.commit()
 
@@ -575,7 +589,12 @@ def get_locally_compacted_basenames(service_id: str) -> set[str]:
     Cached at the call site if used in a hot loop.
     """
     con = get_con(service_id)
-    return {row[0] for row in con.execute("SELECT file_name FROM local_compacted_files").fetchall()}
+    return {
+        row[0]
+        for row in con.execute(
+            "SELECT file_name FROM local_compacted_files WHERE service_id = ?", (service_id,)
+        ).fetchall()
+    }
 
 
 def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]], table_name: str = "logs") -> None:
@@ -666,30 +685,34 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
                file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
         [(fn, service_id, rc, sz, _parse_file_date(fn), table_name) for (fn, rc, sz) in rows],
     )
+    # Postgres needs an explicit target alias to disambiguate the aggregate
+    # row from EXCLUDED.
     # Use the just-applied DB clock so last_ingested matches the row's
     # ingested_at default (datetime('now')) — keeps the rollup honest.
     now_str = con.execute("SELECT datetime('now')").fetchone()[0]
     con.execute(
-        """INSERT INTO ingested_files_summary
+        """INSERT INTO ingested_files_summary AS summary
                (source_name, file_count, total_rows, total_bytes,
                 count_with_bytes, latest_file_name, last_ingested)
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_name) DO UPDATE SET
-               file_count       = file_count + excluded.file_count,
-               total_rows       = total_rows + excluded.total_rows,
-               total_bytes      = total_bytes + excluded.total_bytes,
-               count_with_bytes = count_with_bytes + excluded.count_with_bytes,
+               file_count       = summary.file_count + excluded.file_count,
+               total_rows      = summary.total_rows + excluded.total_rows,
+               total_bytes      = summary.total_bytes + excluded.total_bytes,
+               count_with_bytes = summary.count_with_bytes + excluded.count_with_bytes,
                latest_file_name = CASE
-                   WHEN latest_file_name IS NULL OR
+                   WHEN summary.latest_file_name IS NULL OR
                         substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
-                        substr(latest_file_name, instr(latest_file_name, '.gz') + 3, 19)
+                        substr(summary.latest_file_name,
+                               instr(summary.latest_file_name, '.gz') + 3, 19)
                        THEN excluded.latest_file_name
-                   ELSE latest_file_name
+                   ELSE summary.latest_file_name
                END,
                last_ingested = CASE
-                   WHEN last_ingested IS NULL OR excluded.last_ingested > last_ingested
+                   WHEN summary.last_ingested IS NULL OR
+                        excluded.last_ingested > summary.last_ingested
                        THEN excluded.last_ingested
-                   ELSE last_ingested
+                   ELSE summary.last_ingested
                END""",
         (
             service_id,
@@ -878,7 +901,7 @@ def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> 
         rows = con.execute(
             """
             SELECT bucket, sum(rc) AS rc, sum(bs) AS bs FROM (
-                SELECT file_date AS bucket,
+                SELECT CAST(file_date AS text) AS bucket,
                        sum(row_count) AS rc,
                        sum(file_size_bytes) AS bs
                 FROM ingested_files
@@ -899,7 +922,7 @@ def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> 
                   AND ingested_at >= ?
                   AND ingested_at <= ?
                 GROUP BY bucket
-            )
+            ) AS combined
             GROUP BY bucket ORDER BY bucket
             """,
             (service_id, start_date, end_date, service_id, start_iso, end_iso),
@@ -987,9 +1010,51 @@ def get_node_count_avg(service_id: str) -> float | None:
                  AND file_date IS NULL
                  AND instr(file_name, 'T') >= 11
                GROUP BY substr(file_name, instr(file_name, 'T') - 10, 19)
-           )""",
+           ) AS combined""",
         (service_id, service_id),
     ).fetchone()
     if not row or row["avg_c"] is None:
         return None
     return float(row["avg_c"])
+
+
+_RUM_TABLES_SQL = "table_name IN ('client_vitals', 'client_errors')"
+
+
+def get_rum_beacons_avg_per_day(service_id: str) -> float | None:
+    """Mean of per-day RUM beacon rows (client_vitals + client_errors) in ``ingested_files``."""
+    con = get_con(service_id)
+    row = con.execute(
+        f"""
+        SELECT AVG(daily_beacons) FROM (
+            SELECT SUM(row_count) as daily_beacons
+            FROM ingested_files
+            WHERE source_name = ?
+              AND {_RUM_TABLES_SQL}
+            GROUP BY file_date
+        ) sub
+        """,
+        (service_id,),
+    ).fetchone()
+    val = row[0]
+    return float(val) if val is not None else None
+
+
+def get_rum_beacons_by_date(service_id: str, start_date: str, end_date: str) -> dict[str, int]:
+    """``{file_date: beacon_rows}`` for RUM tables in ``[start_date, end_date)``."""
+    con = get_con(service_id)
+    rows = con.execute(
+        f"""
+        SELECT
+            file_date as date,
+            SUM(row_count) as beacon_count
+        FROM ingested_files
+        WHERE source_name = ?
+          AND {_RUM_TABLES_SQL}
+          AND file_date >= ? AND file_date < ?
+        GROUP BY file_date
+        ORDER BY date
+        """,
+        (service_id, start_date, end_date),
+    ).fetchall()
+    return {str(row["date"]): row["beacon_count"] for row in rows if row["date"]}

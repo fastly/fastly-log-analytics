@@ -7,6 +7,7 @@ Run from the project root:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -48,6 +49,7 @@ from contextlib import asynccontextmanager
 # import. bridge_uvicorn_loggers() (called from lifespan startup, which runs
 # after uvicorn's logging setup) re-points them at root so access lines render
 # through the same chain — see its docstring for the boot-line caveat.
+from backend.models.admin_actions import HealthResponse
 from backend.utils.structlog_config import bridge_uvicorn_loggers, configure_structlog  # noqa: E402
 
 configure_structlog()
@@ -61,6 +63,15 @@ logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 # long as this lands before the first iceberg call we're safe — but the
 # earlier the better, since any future eager import would otherwise win.
 from backend.core.iceberg import fs as _iceberg_fs_patches  # noqa: E402, F401
+
+# Prevent OpenTelemetry FastAPI instrumentation from crashing on fastapi.routing._IncludedRouter
+try:
+    import fastapi.routing
+
+    if hasattr(fastapi.routing, "_IncludedRouter"):
+        setattr(fastapi.routing._IncludedRouter, "path", property(lambda self: ""))
+except Exception:
+    pass
 
 logger = logging.getLogger("backend.main")
 
@@ -81,8 +92,13 @@ from concurrent.futures import ThreadPoolExecutor
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 from datetime import UTC, datetime
 
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 from backend import config as svcconfig
+from backend.core import clickhouse_client, clickhouse_observer, request_telemetry
 from backend.core import duckdb as _db
+from backend.high_scale.registry import get_high_scale_service_registry
+from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
 
 
 def _initialize_service(cfg: dict):
@@ -111,7 +127,7 @@ def _initialize_service(cfg: dict):
 
                 n = metadata_db.reap_running_cron_runs(sid)
                 if n:
-                    logging.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
+                    logger.info("[fastapi] Service %s: reaped %d orphaned cron run(s).", sid, n)
             except Exception as e:
                 # Transient on the first boot after an unclean shutdown — SQLite
                 # WAL recovery rolls the file forward on the next connection, so
@@ -119,13 +135,13 @@ def _initialize_service(cfg: dict):
                 # malformed-image case, WARN otherwise.
                 msg = str(e)
                 if "malformed" in msg or "is locked" in msg:
-                    logging.info(
+                    logger.info(
                         "[fastapi] Service %s: orphan-cron reap deferred (%s); WAL recovery will resolve on the next connection.",
                         sid,
                         msg,
                     )
                 else:
-                    logging.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
+                    logger.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
 
             src = _db.get_source_for_service(sid)
             if src:
@@ -143,11 +159,11 @@ def _initialize_service(cfg: dict):
 
                     compute_sync_status_cached(sid)
                 except Exception as e:
-                    logging.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
+                    logger.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
 
-                logging.info("[fastapi] Service %s initialised.", sid)
+                logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
-            logging.warning("[fastapi] Could not initialise service %s: %s", sid, e)
+            logger.warning("[fastapi] Could not initialise service %s: %s", sid, e)
 
 
 def _ensure_persistent_view(sid: str, src: dict) -> None:
@@ -167,6 +183,9 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
     (data/services/<sid>/iceberg_catalog.db) + local parquet/buffer
     files — no cloud round-trip. When the view already exists, this is
     a single information_schema lookup and a no-op."""
+    if svcconfig.is_durable_serving_mode(src):
+        logger.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
+        return
     try:
         from backend.core import iceberg as _ice
         from backend.core.duckdb import get_connection
@@ -177,15 +196,15 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
         # until a sync writer rebuilds it again. The previous "skip if
         # already exists" behaviour kept stale views around when buffer
         # files had been appended since the last writer close.
-        logging.info("[fastapi] Service %s: pre-warming Iceberg view at startup", sid)
+        logger.info("[fastapi] Service %s: pre-warming Iceberg view at startup", sid)
         writer = get_connection(source=src, read_only=False)
         try:
             _ice.update_iceberg_view(writer, src)
         finally:
             writer.close()
-        logging.info("[fastapi] Service %s: view pre-warmed", sid)
+        logger.info("[fastapi] Service %s: view pre-warmed", sid)
     except Exception as e:
-        logging.warning("[fastapi] Service %s: view pre-warm failed: %s", sid, e)
+        logger.warning("[fastapi] Service %s: view pre-warm failed: %s", sid, e)
 
 
 def _ensure_pop_cache():
@@ -200,12 +219,12 @@ def _ensure_pop_cache():
             if api_key:
                 ok = fetch_pop_locations(api_key)
                 if ok:
-                    logging.info("[fastapi] POP locations cached at startup.")
+                    logger.info("[fastapi] POP locations cached at startup.")
                 else:
-                    logging.warning("[fastapi] POP locations fetch failed at startup.")
+                    logger.warning("[fastapi] POP locations fetch failed at startup.")
                 break
     except Exception as e:
-        logging.warning("[fastapi] Could not prefetch POP locations: %s", e)
+        logger.warning("[fastapi] Could not prefetch POP locations: %s", e)
 
 
 def _ensure_scoring_matrix():
@@ -256,6 +275,33 @@ def _ensure_scoring_matrix():
                 logging.warning("[fastapi] Could not pull scoring matrix for %s: %s", sid, e)
     except Exception as e:
         logging.warning("[fastapi] _ensure_scoring_matrix failed: %s", e)
+
+
+def _start_legacy_adoption(configs: list[dict]) -> None:
+    """Adopt each service's pre-v3 pyiceberg parquet into DuckLake, once ever.
+
+    An operator upgrading 2.x → 3.0 should only have to restart: without
+    this, their pre-upgrade history stays stranded in an Iceberg table
+    nothing reads any more. Runs on its own background thread (adopting a
+    large table registers thousands of files), is guarded by a durable
+    ``cron_runs`` row so a restart never re-adopts — re-adding a path
+    duplicates its rows — and is non-fatal by construction. Observable as
+    ``ducklake_adopt`` rows in ``cron_runs``.
+    """
+    try:
+        from backend.cron.scheduler import dev_mode_no_crons
+
+        if dev_mode_no_crons():
+            logging.info("[fastapi] FLA_DEV_NO_CRONS=1 — skipping legacy DuckLake adoption sweep.")
+            return
+
+        from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
+
+        sids = [sid for cfg in configs if (sid := cfg.get("service_id") or cfg.get("name"))]
+        if start_legacy_adoption_sweep(sids) is not None:
+            logging.info("[fastapi] Legacy DuckLake adoption sweep started for %d service(s).", len(sids))
+    except Exception as e:
+        logging.error("[fastapi] Could not start the legacy DuckLake adoption sweep: %s", e, exc_info=True)
 
 
 _startup_complete = False
@@ -318,6 +364,8 @@ def _background_startup():
                         "[fastapi] Some services are taking longer to initialize; continuing startup in background."
                     )
                 executor.shutdown(wait=False)
+
+                _start_legacy_adoption(configs)
 
             except Exception as e:
                 logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
@@ -406,10 +454,33 @@ def _enforce_proxy_headers_configured() -> None:
     env-equivalent of the ``--forwarded-allow-ips`` CLI flag). If a future
     refactor passes the CLI flag without exporting our companion env var,
     uvicorn's variable lets us detect it.
+
+    A wildcard (``*``) in either variable is ALWAYS fatal, strict mode or
+    not: it makes uvicorn honor X-Forwarded-For from any TCP peer, so any
+    direct client can stamp ``X-Forwarded-For: 127.0.0.1`` and be classified
+    loopback-admin by the remote-access middleware. There is no deployment
+    where that is a safe configuration — pin the proxy's real source
+    IPs/subnet instead (e.g. the fixed compose-network subnet in
+    docker-compose.multipod.yml).
     """
     trusted = (os.environ.get("TRUSTED_PROXY_IPS") or "").strip()
     uvicorn_trusted = (os.environ.get("UVICORN_FORWARDED_ALLOW_IPS") or "").strip()
     require_strict = os.environ.get("REQUIRE_PROXY_HEADERS") == "1" or os.environ.get("STRICT_DATA_DIR_CHECK") == "1"
+    for var_name, var_value in (
+        ("TRUSTED_PROXY_IPS", trusted),
+        ("UVICORN_FORWARDED_ALLOW_IPS", uvicorn_trusted),
+    ):
+        if "*" in var_value:
+            wildcard_msg = (
+                f"FATAL: {var_name}={var_value!r} contains a wildcard. Trusting "
+                "X-Forwarded-For from every peer lets any direct client spoof "
+                "X-Forwarded-For: 127.0.0.1 and be classified loopback-admin. "
+                "Pin the reverse proxy's real IPs or subnet instead (e.g. "
+                "TRUSTED_PROXY_IPS=172.28.0.0/16 for the multipod compose "
+                "network). Refusing to start."
+            )
+            logging.critical(wildcard_msg)
+            raise RuntimeError(wildcard_msg)
     effective = trusted or uvicorn_trusted
     if effective:
         logging.info(
@@ -434,9 +505,26 @@ def _enforce_proxy_headers_configured() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup / shutdown lifecycle."""
-    import asyncio
+    """Own ClickHouse cleanup even if a later startup/shutdown step raises."""
+    from backend.request_metrics_observer import observer as request_metrics_observer
 
+    try:
+        async with _application_lifespan(app):
+            try:
+                # Serving observation is independent of ingestion cron guards.
+                request_metrics_observer.start()
+                yield
+            finally:
+                await asyncio.to_thread(request_metrics_observer.stop)
+    finally:
+        await asyncio.to_thread(request_telemetry.force_flush)
+        await asyncio.to_thread(clickhouse_observer.stop_clickhouse_observer)
+        await asyncio.to_thread(clickhouse_client.close_clickhouse_client)
+
+
+@asynccontextmanager
+async def _application_lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle."""
     from backend.core.realtime.publisher import publisher as _rt_publisher
     from backend.cron.scheduler import get_scheduler
     from backend.cron_runs_publisher import publisher as _cron_runs_publisher
@@ -470,6 +558,36 @@ async def lifespan(app: FastAPI):
     # --forwarded-allow-ips flag). Without it, IP-based gates become
     # ineffective and the Host-spoof admin bypass returns.
     _enforce_proxy_headers_configured()
+    validate_admin_gateway_config()
+
+    # Ensure the Postgres metadata schema BEFORE anything issues a metadata
+    # query. SQLite self-initialises via the pool's schema_fn; Postgres had
+    # no equivalent, so a stack that skipped scripts/setup_pg_schema.py
+    # booted clean and then failed every metadata query with
+    # `relation "cron_runs" does not exist`. Idempotent, once per process,
+    # cheap no-op when METADATA_DSN is unset, and non-fatal on failure (it
+    # logs CRITICAL — see ensure_pg_schema).
+    from backend.core.metadata.pg_schema import ensure_pg_schema
+
+    ensure_pg_schema()
+
+    # Deployment-mode sanity: DEPLOYMENT_MODE is the single gate for the
+    # high-scale data plane (standard vs high_scale), and
+    # high_scale mode requires a multi-writer (Postgres) DuckLake catalog.
+    svcconfig.validate_deployment_mode()
+
+    # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
+    # or silently switch engines when this startup probe fails.
+    clickhouse = clickhouse_client.get_clickhouse_client()
+    if clickhouse is not None:
+        await asyncio.to_thread(clickhouse.health)
+        clickhouse_observer.start_clickhouse_observer()
+    registered_high_scale = register_high_scale_services_from_environment(
+        get_high_scale_service_registry(),
+        client=clickhouse,
+    )
+    if registered_high_scale:
+        logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
 
     # Verify dependencies
     try:
@@ -511,16 +629,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.exception("[fastapi] failed to rehydrate analyst sessions")
 
-    yield
-
-    # Shutdown
     try:
-        _bounded_scheduler_shutdown(get_scheduler(), timeout_secs=60.0)
-    except Exception as e:
-        logging.warning("[fastapi] Failed to stop scheduler: %s", e)
+        yield
+    finally:
+        # Shutdown
+        try:
+            _bounded_scheduler_shutdown(get_scheduler(), timeout_secs=60.0)
+        except Exception as e:
+            logging.warning("[fastapi] Failed to stop scheduler: %s", e)
 
-    _db.close_all_connections()
-    logging.info("[fastapi] Shutdown complete.")
+        _db.close_all_connections()
+        logging.info("[fastapi] Shutdown complete.")
 
 
 def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> None:
@@ -593,13 +712,40 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.4.1",
+    version="3.0.0-beta4",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
     ),
     lifespan=lifespan,
 )
+
+
+def _maybe_instrument_asgi(_app: FastAPI) -> None:
+    """Wrap the app in FastAPIInstrumentor, unless OTel is disabled.
+
+    Only the routers already migrated to build_request_context open an OTel
+    span today (RequestTelemetry.start_request). FastAPIInstrumentor covers
+    every route regardless of which dependency pattern it uses, so legacy
+    get_source/get_con routes (most of admin/*, bootstrap.py) get RED
+    metrics too instead of being invisible to any span-metrics processor.
+    Gated the same way _setup_sdk is — skip the middleware-wrapping cost
+    entirely when nothing will ever be exported (default: OTEL_EXPORTER=none,
+    or pytest). request_telemetry.start_request() reuses this span instead
+    of opening a second one for migrated routes, so a span-metrics
+    processor doesn't double-count them — see its docstring.
+    """
+    if not request_telemetry.asgi_instrumentation_enabled():
+        return
+    request_telemetry.ensure_initialized()
+    # exclude_spans: the ASGI receive/send child spans are pure transport
+    # plumbing, not a route — left in, a span-metrics processor buckets
+    # them as their own "{route} http send" series and pollutes every RED
+    # dashboard built from span_name.
+    FastAPIInstrumentor.instrument_app(_app, exclude_spans=["receive", "send"])
+
+
+_maybe_instrument_asgi(app)
 
 # ── Middleware stack ──────────────────────────────────────────────────────────
 #
@@ -825,6 +971,7 @@ async def telemetry_middleware(request: Request, call_next):
 # reach the telemetry layer so blocked analyst hits don't pollute
 # usage_log with admin-scoped rows AND sets analyst_session early so
 # the inner telemetry middleware can attribute correctly.
+from backend.utils.admin_gateway import validate_admin_gateway_config  # noqa: E402
 from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
 
 app.add_middleware(RemoteAccessMiddleware)
@@ -893,7 +1040,9 @@ from backend.routers import (
     cmcd,
     control_room,
     dashboard,
+    high_scale,
     insights,
+    logs,
     network,
     origin,
     performance,
@@ -901,11 +1050,13 @@ from backend.routers import (
     rum,
     security,
     sessions,
+    stream,
     value,
     views,
 )
 
 app.include_router(dashboard.router)
+app.include_router(high_scale.router)
 app.include_router(insights.router)
 app.include_router(sessions.router)
 app.include_router(query.router)
@@ -921,6 +1072,8 @@ app.include_router(cmcd.router)
 app.include_router(rum.router)
 app.include_router(rum.asset_router)
 app.include_router(assets.router)
+app.include_router(logs.router)
+app.include_router(stream.router)
 
 from backend.routers import (
     admin,
@@ -979,7 +1132,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.4.1"
+    _APP_VERSION = "3.0.0-beta4"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -1002,7 +1155,26 @@ _HEALTH_ERROR_RESPONSES = {code: spec for code, spec in DEFAULT_ERROR_RESPONSES.
 _STUCK_SYNC_RUNNING_MINS = 15
 
 
-@app.get("/api/health", tags=["meta"], responses=_HEALTH_ERROR_RESPONSES)
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    try:
+        from fastapi.responses import Response
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except ImportError:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=501, detail="Prometheus client not installed")
+
+
+@app.get(
+    "/api/health",
+    tags=["meta"],
+    responses=_HEALTH_ERROR_RESPONSES,
+    response_model=HealthResponse,
+    response_model_exclude_unset=True,
+)
 def health_check(
     request: Request,
     deep: bool = False,
@@ -1079,10 +1251,31 @@ def health_check(
             last_ingest = row["last_ingest"] if row else None
             svc_state["last_ingest"] = last_ingest
 
+            has_service_id = False
+            try:
+                con.execute("SELECT service_id FROM cron_runs LIMIT 0")
+                has_service_id = True
+            except Exception:
+                pass
+
+            has_id = False
+            try:
+                con.execute("SELECT id FROM cron_runs LIMIT 0")
+                has_id = True
+            except Exception:
+                pass
+
+            order_suffix = ", id DESC" if has_id else ""
+            where_service = "service_id = ? AND " if has_service_id else ""
+            service_args = (sid,) if has_service_id else ()
+
+            # task IN (…): the ingest cron was renamed sync → log_discovery in
+            # v3.0.0-beta1; match both so pre-upgrade history still satisfies the probe.
             cron_row = con.execute(
-                "SELECT status, started_at, error_message FROM cron_runs "
-                "WHERE task = 'sync' AND status != 'running' "
-                "ORDER BY started_at DESC LIMIT 1"
+                f"SELECT status, started_at, error_message FROM cron_runs "
+                f"WHERE {where_service}task IN ('sync', 'log_discovery') AND status != 'running' "
+                f"ORDER BY started_at DESC{order_suffix} LIMIT 1",
+                service_args,
             ).fetchone()
             if cron_row:
                 svc_state["last_sync_status"] = cron_row["status"]
@@ -1103,9 +1296,10 @@ def health_check(
             if svc_state["status"] == "ok":
                 try:
                     stuck = con.execute(
-                        "SELECT started_at FROM cron_runs "
-                        "WHERE task = 'sync' AND status = 'running' "
-                        "ORDER BY started_at DESC LIMIT 1"
+                        f"SELECT started_at FROM cron_runs "
+                        f"WHERE {where_service}task IN ('sync', 'log_discovery') AND status = 'running' "
+                        f"ORDER BY started_at DESC{order_suffix} LIMIT 1",
+                        service_args,
                     ).fetchone()
                     if stuck and stuck["started_at"]:
                         stuck_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=_STUCK_SYNC_RUNNING_MINS))
@@ -1129,12 +1323,33 @@ def health_check(
             # for the same reason as SRE-04 above.
             if svc_state["status"] == "ok":
                 try:
+                    # Recency window: only degrade on errors from the last 24h.
+                    # A per-task-latest scan with no window pins 'degraded'
+                    # FOREVER on a task that never runs again — e.g. a restart
+                    # reap errors the last metadata_sync row of a read_write
+                    # service (metadata_sync is scheduled only for read_only),
+                    # so nothing ever supersedes it. A live failing cron keeps
+                    # re-erroring inside the window, so real incidents still
+                    # degrade.
+                    crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
+                    critical_tasks = ["commit"]
+                    if not config.is_durable_serving_mode():
+                        critical_tasks.append("metadata_sync")
+                    placeholders = ", ".join("?" for _ in critical_tasks)
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
                         "  SELECT task, status, error_message, "
-                        "         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn "
-                        "  FROM cron_runs WHERE task IN ('commit', 'metadata_sync') AND status != 'running'"
-                        ") WHERE rn = 1 AND status = 'error' LIMIT 1"
+                        f"         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC{order_suffix}) AS rn "
+                        f"  FROM cron_runs WHERE {where_service}task IN ({placeholders}) AND status != 'running'"
+                        "  AND started_at >= ?"
+                        # Boot-reap rows are lifecycle artifacts (the process
+                        # stopped mid-run), not failing crons — a task that is
+                        # never scheduled again (metadata_sync on a read_write
+                        # service) would otherwise hold 'degraded' for the whole
+                        # window on every restart.
+                        "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
+                        ") WHERE rn = 1 AND status = 'error' LIMIT 1",
+                        (*service_args, *critical_tasks, crit_cutoff),
                     ).fetchone()
                     if crit_row:
                         svc_state["status"] = "degraded"

@@ -4,6 +4,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests._helpers.config_fakes import mutate_via_save
 
 client = TestClient(app)
 
@@ -55,10 +56,11 @@ def test_long_running_endpoint_preserves_background_changes(
     mock_update.side_effect = fake_generator
 
     # Call the endpoint (security: GET → POST)
-    response = client.post(
-        "/api/services/test-service/logging-settings/update",
-        params={"period": 3600, "sample_rate": 50, "edge_only": True},
-    )
+    with patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save_config)):
+        response = client.post(
+            "/api/services/test-service/logging-settings/update",
+            params={"period": 3600, "sample_rate": 50, "edge_only": True},
+        )
 
     assert response.status_code == 200
 

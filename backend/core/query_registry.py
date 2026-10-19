@@ -59,6 +59,7 @@ from backend.core.query_attribution import (
     _capture_caller,
     current_attribution,
 )
+from backend.utils.error_redaction import scrub_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,11 @@ _SLOW_QUERY_PERSIST_DISABLED = os.environ.get("QUERY_REGISTRY_PERSIST_DISABLED",
     "true",
     "yes",
 )
+try:
+    _POOL_QUERY_TIMEOUT_S = max(1.0, float(os.environ.get("DUCKDB_POOL_QUERY_TIMEOUT_S", "120")))
+except (TypeError, ValueError):
+    _POOL_QUERY_TIMEOUT_S = 120.0
+_POOL_QUERY_WATCH_INTERVAL_S = 1.0
 
 _seq = itertools.count(1)
 
@@ -159,6 +165,11 @@ class CompletedQuery:
     # ``memory_used`` setting returns a parseable value (see
     # :func:`backend.core.query_instrumentation._probe_duckdb_memory`).
     peak_memory_mb: float | None = None
+
+
+# The cid salt is now bound as a parameter (backend/repositories/query.py), so it is no longer a SQL
+# literal; the by-value scrub stays as defence in depth for every SQL/error text the registry records.
+_scrub_secrets = scrub_secrets
 
 
 def _truncate(text: str, cap: int) -> str:
@@ -249,7 +260,7 @@ class QueryRegistry:
             active = ActiveQuery(
                 query_id=qid,
                 db_type=db_type,
-                sql=_truncate(sql if isinstance(sql, str) else str(sql), _SQL_TRUNCATE),
+                sql=_truncate(_scrub_secrets(sql if isinstance(sql, str) else str(sql)), _SQL_TRUNCATE),
                 attribution=attribution,
                 service_id=service_id,
                 started_at_mono=time.monotonic(),
@@ -296,7 +307,7 @@ class QueryRegistry:
             err_type = type(error).__name__ if error is not None else None
             err_msg: str | None = None
             if error is not None:
-                err_msg = _truncate(str(error), _ERR_TRUNCATE)
+                err_msg = _truncate(_scrub_secrets(str(error)), _ERR_TRUNCATE)
 
             self._history.append(
                 CompletedQuery(
@@ -346,6 +357,34 @@ class QueryRegistry:
             )
         except Exception:
             logger.debug("query_registry.deregister failed", exc_info=True)
+
+    def expire_pool_queries(self, *, now_mono: float | None = None) -> int:
+        """Interrupt pooled DuckDB statements that exceed the serving budget.
+
+        This is deliberately limited to queries stamped with a pool slot.
+        Cron and ingest connections are not pooled and must not be interrupted
+        by the serving-tier watchdog.
+        """
+        now = time.monotonic() if now_mono is None else now_mono
+        now_wall = time.time()
+        for active in tuple(self._queries.values()):
+            if active.cancelled_at is not None and (now_wall - active.cancelled_at) >= 5.0:
+                self.deregister(active.query_id)
+
+        expired = [
+            active.query_id
+            for active in tuple(self._queries.values())
+            if active.db_type == "DuckDB"
+            and active.attribution.pool_slot is not None
+            and active.cancelled_at is None
+            and now - active.started_at_mono >= _POOL_QUERY_TIMEOUT_S
+        ]
+        interrupted = 0
+        for qid in expired:
+            if self.cancel_query(qid, admin_id="pool-timeout") == "cancelled":
+                interrupted += 1
+                logger.warning("interrupting pooled DuckDB query after %.1fs", _POOL_QUERY_TIMEOUT_S)
+        return interrupted
 
     # ── cancel ───────────────────────────────────────────────────────────────
 
@@ -612,3 +651,19 @@ def _row_for_completed(c: CompletedQuery, full_sql: bool) -> dict[str, Any]:
 
 # Process-wide singleton — every instrumentation site imports this.
 query_registry = QueryRegistry()
+
+
+def _pool_query_watchdog() -> None:
+    while True:
+        try:
+            query_registry.expire_pool_queries()
+        except Exception:
+            logger.debug("pooled-query watchdog failed", exc_info=True)
+        time.sleep(_POOL_QUERY_WATCH_INTERVAL_S)
+
+
+threading.Thread(
+    target=_pool_query_watchdog,
+    name="duckdb-pool-query-watchdog",
+    daemon=True,
+).start()

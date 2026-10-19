@@ -15,7 +15,6 @@
  */
 import { render } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import React from 'react'
 
 import {
   mapInstances,
@@ -42,7 +41,7 @@ describe('ChoroplethMap', () => {
 
   it('mounts a map instance into the container ref', async () => {
     const { container } = render(
-      <ChoroplethMap data={[{ country: 'US', count: 100 } as any]} />,
+      <ChoroplethMap data={[{ country: 'US', count: 100 }]} />,
     )
     // Container div is rendered
     expect(container.querySelector('div')).toBeInTheDocument()
@@ -58,13 +57,13 @@ describe('ChoroplethMap', () => {
 
   it('re-renders without crashing when the data prop changes', () => {
     const { rerender, container } = render(
-      <ChoroplethMap data={[{ country: 'US', count: 10 } as any]} />,
+      <ChoroplethMap data={[{ country: 'US', count: 10 }]} />,
     )
     rerender(
       <ChoroplethMap
         data={[
-          { country: 'US', count: 50 } as any,
-          { country: 'GB', count: 5 } as any,
+          { country: 'US', count: 50 },
+          { country: 'GB', count: 5 },
         ]}
       />,
     )
@@ -73,7 +72,7 @@ describe('ChoroplethMap', () => {
 
   it('accepts an onCountryClick handler without invoking it on mount', async () => {
     const handler = vi.fn()
-    render(<ChoroplethMap data={[{ country: 'US', count: 1 } as any]} onCountryClick={handler} />)
+    render(<ChoroplethMap data={[{ country: 'US', count: 1 }]} onCountryClick={handler} />)
     await Promise.resolve()
     expect(handler).not.toHaveBeenCalled()
   })

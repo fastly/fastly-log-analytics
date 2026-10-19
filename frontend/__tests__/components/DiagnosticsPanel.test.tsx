@@ -5,7 +5,8 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi, beforeEach } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
 import { DiagnosticsPanel } from '@/app/admin/_sections/DiagnosticsPanel'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -72,7 +73,7 @@ vi.mock('@/components/ui/select', () => {
 })
 
 function makeClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return createTestQueryClient()
 }
 
 describe('DiagnosticsPanel — debug settings API triggers', () => {

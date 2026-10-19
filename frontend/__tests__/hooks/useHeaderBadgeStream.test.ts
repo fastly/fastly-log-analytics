@@ -17,7 +17,7 @@ vi.mock('@/lib/api', () => ({
 // status reactively. Mock useBootstrap so every test can control
 // is_remote_analyst. Each test that wants the hook to fire must set
 // mockBootstrap = { settings: { is_remote_analyst: true } }.
-const mockBootstrap: { data: any } = {
+const mockBootstrap: { data: Record<string, unknown> } = {
   data: { settings: { is_remote_analyst: true }, header_badge: {} },
 }
 vi.mock('@/hooks/useBootstrap', () => ({
@@ -33,10 +33,10 @@ let mockState: {
 }
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockState) : mockState,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    { getState: () => mockState },
   )
-  useServiceStore.getState = () => mockState
   return { useServiceStore }
 })
 
@@ -81,6 +81,63 @@ afterEach(() => {
 })
 
 describe('useHeaderBadgeStream', () => {
+  it.each([
+    { latest_log_at: null, local_rows: null, request: null, rum: null },
+    {
+      latest_log_at: null,
+      local_rows: 0,
+      request: { latest_log_at: null, total_rows: 0 },
+      rum: { latest_log_at: null, total_rows: 0 },
+    },
+  ])('preserves explicit clears from the stream instead of reviving cached metrics: %j', async (cleared) => {
+    const seed = {
+      settings: { is_remote_analyst: true },
+      header_badge: {
+        latest_log_at: '2026-06-15T22:00:00Z',
+        local_rows: 1000,
+        request: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 900 },
+        rum: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 100 },
+      },
+    }
+    vi.mocked(fetch).mockImplementation(async () =>
+      makeStreamResponse([`data: ${JSON.stringify(cleared)}\r\n\r\n`]),
+    )
+    const qc = makeQueryClient(seed)
+    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
+    await waitFor(() => {
+      expect(qc.getQueryData(['bootstrap'])).toEqual({ ...seed, header_badge: cleared })
+    })
+  })
+
+  it('accepts backwards timestamps while preserving omitted fields in sparse updates', async () => {
+    const seed = {
+      header_badge: {
+        latest_log_at: '2026-06-15T22:00:00Z',
+        local_rows: 1000,
+        request: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 900 },
+        rum: { latest_log_at: '2026-06-15T21:00:00Z', total_rows: 100 },
+      },
+    }
+    const earlier = '2026-06-14T22:00:00Z'
+    const payload = { latest_log_at: earlier, request: { latest_log_at: earlier } }
+    vi.mocked(fetch).mockImplementation(async () =>
+      makeStreamResponse([`data: ${JSON.stringify(payload)}\r\n\r\n`]),
+    )
+    const qc = makeQueryClient(seed)
+    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
+    await waitFor(() => {
+      expect(qc.getQueryData(['bootstrap'])).toEqual({
+        header_badge: {
+          ...seed.header_badge,
+          latest_log_at: earlier,
+          request: { ...seed.header_badge.request, latest_log_at: earlier },
+        },
+      })
+    })
+  })
+
   it('merges incoming payload into bootstrap.header_badge', async () => {
     const seed = { settings: { is_remote_analyst: true }, header_badge: { latest_log_at: '2026-06-15T22:00:00Z', local_rows: 1000 } }
     vi.mocked(fetch).mockImplementation(async () =>
@@ -94,7 +151,10 @@ describe('useHeaderBadgeStream', () => {
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => {
-      const bs = qc.getQueryData<any>(['bootstrap'])
+      const bs = qc.getQueryData<{
+        settings?: { is_remote_analyst?: boolean }
+        header_badge?: { latest_log_at?: string; local_rows?: number }
+      }>(['bootstrap'])
       expect(bs?.header_badge?.latest_log_at).toBe('2026-06-15T22:05:00Z')
       expect(bs?.header_badge?.local_rows).toBe(1234)
       // Unrelated bootstrap fields should be preserved.
@@ -150,8 +210,8 @@ describe('useHeaderBadgeStream', () => {
 
   it('aborts on unmount', async () => {
     let abortSignal: AbortSignal | undefined
-    vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-      abortSignal = (init as RequestInit | undefined)?.signal as AbortSignal
+    vi.mocked(fetch).mockImplementation(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      abortSignal = init?.signal ?? undefined
       const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
       return new Response(stream, { status: 200 })
     })

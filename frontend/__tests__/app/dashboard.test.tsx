@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { expect, test, vi, beforeEach } from 'vitest'
+import { expect, test, vi } from 'vitest'
 // app/dashboard/page.tsx is now an async RSC shell that SSR-prefetches the
 // bundle and dehydrates into <DashboardClient />; RTL can't render an async
 // component, so the smoke test targets the client component that owns the
@@ -8,6 +8,7 @@ import DashboardClient from '@/app/dashboard/_sections/DashboardClient'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import * as apiLib from '@/lib/api'
+import { getOk, postOk } from '@/__tests__/helpers/api-result'
 import React from 'react'
 
 vi.mock('@/stores/serviceStore', () => {
@@ -19,8 +20,10 @@ vi.mock('@/stores/serviceStore', () => {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn()
   }
-  const useServiceStore: any = vi.fn((selector) => selector ? selector(state) : state)
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 
@@ -49,11 +52,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test')
 }))
 
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/dashboard'),
-  useSearchParams: vi.fn(() => new URLSearchParams()),
-  useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
 vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly-chart">PlotlyChart</div> }))
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart">TimeSeriesChart</div> }))
@@ -62,19 +61,17 @@ vi.mock('@/components/Map/ChoroplethMap', () => ({ ChoroplethMap: () => <div dat
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
 test('renders dashboard and fetches data', async () => {
-  vi.mocked(apiLib.client.GET).mockImplementation(async (url: any) => {
+  vi.mocked(apiLib.client.GET).mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { data: { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} } } as any
+      return getOk({ fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} })
     }
-    return { data: {} } as any
+    return getOk({})
   })
 
-  vi.mocked(apiLib.client.POST).mockResolvedValue({
-    data: {
+  vi.mocked(apiLib.client.POST).mockResolvedValue(postOk({
       summary: { total: 1234 },
-      time_series: []
-    }
-  } as any)
+      time_series: [],
+    }))
 
   render(
     <QueryClientProvider client={queryClient}>

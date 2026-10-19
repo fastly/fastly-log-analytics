@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { formatBytes } from '@/lib/format'
 import {
   Dialog,
@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/select'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
+import { useDerivedState } from '@/hooks/useDerivedState'
 import { SSEProgressView } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import { adminFetch } from '@/lib/api'
@@ -32,6 +33,8 @@ import {
   panelDialogFooter,
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
+import { useRumStatus } from '@/hooks/useRumStatus'
+import { queryKeys } from '@/lib/query-keys'
 
 const RUM_FIELDS = [
   { name: 'rum_cid', bytes: 12, categories: ['base'] },
@@ -63,7 +66,22 @@ interface RumSettingsDialogProps {
   onComplete?: () => void
 }
 
-export function RumSettingsDialog({
+/**
+ * Remounts the body on every open so toggles, logs and execution state start fresh
+ * without an effect that resets state.
+ */
+export function RumSettingsDialog(props: RumSettingsDialogProps) {
+  const { open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <RumSettingsDialogBody key={generation} {...props} />
+}
+
+function RumSettingsDialogBody({
   serviceId,
   open,
   onOpenChange,
@@ -74,7 +92,7 @@ export function RumSettingsDialog({
 }: RumSettingsDialogProps) {
   const queryClient = useQueryClient()
   const [isExecuting, setIsExecuting] = useState(false)
-  const [selectedVersion, setSelectedVersion] = useState<string>(
+  const [selectedVersion, setSelectedVersion] = useDerivedState<string>(
     currentVersion ?? latestVersion ?? availableVersions[0] ?? ''
   )
 
@@ -116,21 +134,13 @@ export function RumSettingsDialog({
   }, [captureVitals, capturePerformance, captureErrors, captureEvents])
 
   // Fetch full status which includes capture toggles
-  const { data: statusData, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`)
-      return res.ok ? res.json() : null
-    },
-    enabled: !!serviceId && open,
-  })
+  const { data: statusData, isLoading: isStatusLoading } = useRumStatus(serviceId, { enabled: open })
 
   const initializedRef = useRef<string | null>(null)
 
   // Set initial toggles when loaded
   useEffect(() => {
-    if (statusData && serviceId && initializedRef.current !== serviceId) {
+    if (statusData && !statusData.unauthorized && serviceId && initializedRef.current !== serviceId) {
       setCaptureVitals(statusData.capture_vitals ?? true)
       setCapturePerformance(statusData.capture_performance ?? true)
       setCaptureErrors(statusData.capture_errors ?? true)
@@ -141,18 +151,6 @@ export function RumSettingsDialog({
   }, [statusData, serviceId])
 
   const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop, reset: sseReset } = useSSE()
-
-  // Reset open props when modal opens
-  useEffect(() => {
-    if (open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSelectedVersion(currentVersion ?? latestVersion ?? availableVersions[0] ?? '')
-      setLocalLogs([])
-      setSyncStatus('idle')
-      setSyncError(null)
-      initializedRef.current = null
-    }
-  }, [open, currentVersion, latestVersion, availableVersions])
 
   // Clean up state on close
   useEffect(() => {
@@ -171,7 +169,7 @@ export function RumSettingsDialog({
     if (isDone && !completedRef.current) {
       completedRef.current = true
       onComplete?.()
-      queryClient.invalidateQueries({ queryKey: ['rum-status', serviceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
       queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] })
     }
     if (!isDone) {

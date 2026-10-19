@@ -8,79 +8,80 @@ job writes through PyIceberg and DOES update FOS. Pinned to 04:00 UTC by
 from __future__ import annotations
 
 import logging
-import time
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
     _display_label,
-    _extract_log_text,
-    _log_and_add_progress,
 )
 
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("optimize_iceberg")
-def _run_optimize(service_id: str) -> None:
+@cron_task("cron.optimize", job_name="optimize")
+def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
     """Daily job: compact small Iceberg data files into target-sized ones."""
     from backend.core import iceberg as db_iceberg
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.active_requests import should_defer_cron
+
+    if not manual and dev_mode_no_crons():
+        logger.warning("🚫 [scheduler] %s: FLA_DEV_NO_CRONS=1 — optimize refused.", service_id)
+        return {"status": "skipped", "service_id": service_id, "summary": "Skipped due to FLA_DEV_NO_CRONS=1"}
 
     # Active-request gate (perf #84): Iceberg optimize rewrites parquet
     # through PyIceberg + S3 — pool slot + bandwidth contention. Daily
     # cadence so deferral cost is negligible.
-    if should_defer_cron("optimize", service_id):
-        return
+    if not manual and should_defer_cron("optimize", service_id):
+        logger.info("⏸️  [optimize] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
 
     src = get_source_for_service(service_id)
     if src is None:
-        return
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
 
-    try:
-        run_id = start_cron_run(src, "optimize")
-    except RuntimeError as e:
-        logger.info("⏭️  \x1b[92m[optimize]\x1b[0m %s: skipping — %s", service_id, str(e))
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="optimize")
     _display = _display_label(src, service_id)
-    logger.info("▶️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
-    _log_and_add_progress(
-        run_id,
+    outcome: dict | None = None
+    with cron_run(
         service_id,
-        job_name="optimize",
-        event={"type": "status", "message": "Scanning Iceberg table for small files to compact..."},
-    )
+        "optimize",
+        source=src,
+        error_summary="Iceberg optimize failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error": str(exc),
+            "files_rewritten": 0,
+            "files_added": 0,
+            "summary": "Iceberg optimize failed",
+        },
+        finalize_duration=True,
+        skip_log_prefix="optimize",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
 
-    start_time = time.time()
-    try:
+        logger.info("🏎️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning Iceberg table for small files to compact..."})
+
         # Pin the cron's threshold to the conservative original (>10 files
         # per partition) so the daily FOS-touching pass stays cheap. The
         # auto-derive heuristic stays available for the admin endpoint
         # (`/admin/optimize-now`) when you want to force aggressive cleanup.
         result = db_iceberg.optimize_table(src, min_files_per_partition=10)
-        duration = time.time() - start_time
         if "error" in result:
-            log_cron_run(
-                src,
-                "optimize",
-                duration,
-                "error",
-                error_message=result["error"],
-                summary="Iceberg optimize failed",
-                run_id=run_id,
-                log_output=_extract_log_text(run_id),
-            )
-            _log_and_add_progress(
-                run_id, service_id, job_name="optimize", event={"type": "error", "message": result["error"]}
-            )
-            _log_and_add_progress(
-                run_id, service_id, job_name="optimize", event={"type": "warning", "message": result["error"]}
-            )
+            run.fail("Iceberg optimize failed", error_message=result["error"])
+            run.log_progress({"type": "error", "message": result["error"]})
+            run.log_progress({"type": "warning", "message": result["error"]})
+            outcome = {
+                "status": "error",
+                "service_id": service_id,
+                "error": result["error"],
+                "files_rewritten": 0,
+                "files_added": 0,
+                "summary": "Iceberg optimize failed",
+            }
         else:
             summary = f"Rewrote {result.get('files_rewritten', 0)} files into {result.get('files_added', 0)} files"
             partition_errors = result.get("partition_errors") or []
@@ -95,46 +96,41 @@ def _run_optimize(service_id: str) -> None:
             else:
                 err_preview = None
                 status = "success"
-            log_cron_run(
-                src,
-                "optimize",
-                duration,
+            run.record(
                 status,
-                run_id=run_id,
-                parquet_files_optimized=result.get("files_rewritten", 0),
-                parquet_files_created=result.get("files_added", 0),
                 summary=summary,
                 error_message=err_preview,
-                log_output=_extract_log_text(run_id),
+                parquet_files_optimized=result.get("files_rewritten", 0),
+                parquet_files_created=result.get("files_added", 0),
             )
             event_type = "done" if status == "success" else status
-            _log_and_add_progress(
-                run_id, service_id, job_name="optimize", event={"type": event_type, "message": summary}
-            )
+            run.log_progress({"type": event_type, "message": summary})
             logger.info(
                 "[scheduler] %s: optimize complete — %s",
                 service_id,
                 summary,
             )
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "optimize",
-            duration,
-            "error",
-            error_message=str(e),
-            summary="Iceberg optimize failed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(run_id, service_id, job_name="optimize", event={"type": "error", "message": str(e)})
-        logger.exception("[scheduler] %s: optimize failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
+            outcome = {
+                "status": status,
+                "service_id": service_id,
+                "files_rewritten": result.get("files_rewritten", 0),
+                "files_added": result.get("files_added", 0),
+                "eligible_partitions": result.get("eligible_partitions", 0),
+                "partition_errors": partition_errors,
+                "summary": summary,
+            }
+    if run.result is not None:
+        outcome = run.result
 
-    from backend.cron.jobs._common import finalize_cron_duration
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
 
-    finalize_cron_duration(src, run_id, start_time)
+        _snapshot = compute_sync_status_cached(service_id)
+        if _snapshot is not None:
+            _sync_status_publisher.publish(service_id, _snapshot)
+    except Exception:
+        logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
 
-    logger.info("⏹️  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
+    logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
+    return outcome

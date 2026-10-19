@@ -10,9 +10,11 @@ carries a real schema instead of an opaque ``dict``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
 class ScoringThresholdBody(BaseModel):
@@ -116,17 +118,17 @@ class ScoringLabelUpdate(BaseModel):
 # ``+00:00`` to ``Z`` on UTC-configured hosts — a silent wire change.
 
 
-class _ScoringRead(BaseModel):
+class _ScoringRead(PassthroughModel):
     """Base for the scoring read responses — passes the telemetry envelope
     (and any undeclared key) through instead of stripping it."""
 
-    model_config = ConfigDict(extra="allow")
-
 
 class ScoringTopFlaggedRow(_ScoringRead):
-    timestamp: str | None = None
-    edge_sid: str | None = None
-    edge_score: int | None = None
+    # The TOP_FLAGGED SQL always selects these three (edge_score is filtered
+    # non-null); the rest depend on masking and which log fields are enabled.
+    timestamp: str
+    edge_sid: str | None
+    edge_score: int
     edge_score_l1: int | None = None
     edge_score_l2: int | None = None
     edge_cookie_compliance: str | None = None
@@ -144,9 +146,9 @@ class ScoringTopFlaggedResponse(_ScoringRead):
 
 
 class ScoringDistributionRow(_ScoringRead):
-    hour: str | None = None
-    bucket: str | None = None
-    count: int | None = None
+    hour: str
+    bucket: str
+    count: int
 
 
 class ScoringScoreDistributionResponse(_ScoringRead):
@@ -155,9 +157,9 @@ class ScoringScoreDistributionResponse(_ScoringRead):
 
 
 class ScoringComplianceRow(_ScoringRead):
-    hour: str | None = None
-    compliance: str | None = None
-    count: int | None = None
+    hour: str
+    compliance: str
+    count: int
 
 
 class ScoringComplianceBreakdownResponse(_ScoringRead):
@@ -314,10 +316,12 @@ class ScoringLabelRow(_ScoringRead):
     # created_at/updated_at are plain SQLite text strings (datetime('now')), so
     # no .isoformat() coercion is needed — they pass through verbatim. id is a
     # UUID string (not an autoincrement int).
-    id: str | None = None
+    # id/sid/label survive the analyst projection and every producer path.
+    id: str
     service_id: str | None = None
-    sid: str | None = None
-    label: str | None = None
+    sid: str
+    # Mirrors the scoring_labels CHECK constraint and labels.ALLOWED_LABELS.
+    label: Literal["good", "bad", "neutral"]
     notes: str | None = None
     flagged_by: str | None = None
     sample_ip: str | None = None
@@ -327,9 +331,16 @@ class ScoringLabelRow(_ScoringRead):
     updated_at: str | None = None
 
 
+class ScoringLabelCounts(_ScoringRead):
+    # labels.counts_by_label always seeds all three keys (0 when unlabeled).
+    good: int
+    bad: int
+    neutral: int
+
+
 class ScoringLabelsListResponse(_ScoringRead):
-    labels: list[ScoringLabelRow] = []
-    counts: dict[str, int] = {}
+    labels: list[ScoringLabelRow]
+    counts: ScoringLabelCounts
 
 
 # ── Response models for the admin endpoints (session_scoring_admin.py) ───────
@@ -399,9 +410,9 @@ class ScoringSessionEventsResponse(_ScoringRead):
 
 
 class ScoringEnforceThresholdResponse(_ScoringRead):
-    threshold: int | None = None
-    enforced: bool | None = None
-    key: str | None = None
+    threshold: int | None
+    enforced: bool
+    key: str
 
 
 class ScoringEnforceThresholdPutResponse(_ScoringRead):
@@ -416,18 +427,18 @@ class ScoringL2EnforceState(_ScoringRead):
     also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
     there for wire-compat; this standalone GET carries the real schema)."""
 
-    available: bool | None = None
-    enabled: bool | None = None
-    l2_enabled_at: int | None = None
-    days_since_optin: float | None = None
-    ramp_progress: float | None = None
-    fully_ramped: bool | None = None
-    warmup_days_remaining: float | None = None
-    scoring_enabled_at: int | None = None
-    deployment_age_days: float | None = None
-    ready: bool | None = None
-    ramp_days: float | None = None
-    readiness_days: float | None = None
+    available: bool
+    enabled: bool
+    l2_enabled_at: int | None
+    days_since_optin: float | None
+    ramp_progress: float
+    fully_ramped: bool
+    warmup_days_remaining: float | None
+    scoring_enabled_at: int | None
+    deployment_age_days: float | None
+    ready: bool
+    ramp_days: float
+    readiness_days: float
 
 
 class ScoringL2EnforcePutResponse(_ScoringRead):
@@ -438,10 +449,10 @@ class ScoringL2EnforcePutResponse(_ScoringRead):
 
 
 class ScoringExcludeRegexState(_ScoringRead):
-    current: str | None = None
-    is_default: bool | None = None
-    default: str | None = None
-    effective: str | None = None
+    current: str
+    is_default: bool
+    default: str
+    effective: str
 
 
 class ScoringExcludeRegexPutResponse(_ScoringRead):
@@ -464,12 +475,12 @@ class ScoringExcludeRegexValidateResponse(_ScoringRead):
 
 
 class ScoringEnforceStatusCodeState(_ScoringRead):
-    current: int | None = None
-    default: int | None = None
-    effective: int | None = None
-    min: int | None = None
-    max: int | None = None
-    is_default: bool | None = None
+    current: int | None
+    default: int
+    effective: int
+    min: int
+    max: int
+    is_default: bool
 
 
 class ScoringEnforceStatusCodePutResponse(_ScoringRead):
@@ -527,9 +538,9 @@ class ScoringAuditListResponse(_ScoringRead):
 class ScoringThresholdState(_ScoringRead):
     """GET and PUT /scoring/threshold both return this exact shape."""
 
-    threshold: int | None = None
-    set_at: str | None = None
-    enforced: bool | None = None
+    threshold: int | None
+    set_at: str | None
+    enforced: bool
 
 
 class ScoringPerReasonBucket(_ScoringRead):
@@ -575,3 +586,34 @@ class ScoringDashboardResponse(_ScoringRead):
     config_threshold: ScoringThresholdState | None = None
     exclude_regex: ScoringExcludeRegexState | None = None
     enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringStatusResponse(_ScoringRead):
+    """``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
+    live-version and drift keys. Config-derived keys beyond these ride as extras."""
+
+    enabled: bool | None = None
+    scoring_service_id: str | None = None
+    scoring_service_name: str | None = None
+    scoring_domain: str | None = None
+    matrix_version: str | None = None
+    enabled_at: str | None = None
+    scoring_active_version: int | None = None
+    scoring_activated_at: str | None = None
+    scorer_drift: bool | None = None
+    drift_detail: str | None = None
+    drift_known: bool | None = None
+
+
+class ScoringConfigCompositeResponse(_ScoringRead):
+    """``GET /scoring/config``: the four token-free config reads in one body."""
+
+    status: ScoringStatusResponse | None = None
+    threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringLabelDeleteResponse(_ScoringRead):
+    status: str | None = None
+    id: str | None = None

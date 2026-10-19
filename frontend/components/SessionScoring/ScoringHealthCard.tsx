@@ -9,7 +9,9 @@ import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
 import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
+import { client } from '@/lib/api'
 
+import { formatCount } from '@/lib/format'
 interface ScoringHealthCardProps {
   serviceId: string
   sinceHours?: number
@@ -53,11 +55,10 @@ function Metric({
 }
 
 export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthCardProps) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery<HealthResponse>(
-    ['scoring-health', serviceId, sinceHours],
-    serviceId,
-    'health',
-    { since_hours: sinceHours },
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/health', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
   )
 
   if (isError) {
@@ -147,7 +148,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
           icon={Activity}
           label="Fire Rate"
           value={`${(data.fire_rate_pct ?? 0).toFixed(1)}%`}
-          sub={`${(data.scored_rows ?? 0).toLocaleString()} of ${(data.total_edge_rows ?? 0).toLocaleString()} edge rows`}
+          sub={`${formatCount(data.scored_rows ?? 0)} of ${formatCount(data.total_edge_rows ?? 0)} edge rows`}
           tone={fireRateTone}
         />
         <Metric
@@ -159,13 +160,13 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
         <Metric
           icon={Users}
           label="Sessions"
-          value={(data.distinct_sids ?? 0).toLocaleString()}
+          value={formatCount(data.distinct_sids ?? 0)}
           sub="distinct sids seen"
         />
         <Metric
           icon={XCircle}
           label="Scorer Errors"
-          value={scorerErrors.toLocaleString()}
+          value={formatCount(scorerErrors)}
           sub={failRate != null ? `${failRate.toFixed(2)}% of edge rows` : 'fail-open + auth fail rows'}
           tone={errorsTone}
         />
@@ -186,7 +187,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
           value={topReasons[0]?.reason ?? '—'}
           sub={
             topReasons[0]
-              ? `${(topReasons[0].count ?? 0).toLocaleString()} hits`
+              ? `${formatCount(topReasons[0].count ?? 0)} hits`
               : 'no scored rows yet'
           }
         />
@@ -203,7 +204,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border bg-muted/40 text-xs"
               >
                 <span className="font-mono">{r.reason}</span>
-                <span className="text-muted-foreground tabular-nums">{(r.count ?? 0).toLocaleString()}</span>
+                <span className="text-muted-foreground tabular-nums">{formatCount(r.count ?? 0)}</span>
               </div>
             ))}
           </div>
@@ -217,8 +218,8 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: ScoringHealthC
             <div className="font-semibold text-amber-900">Matrix may be stale</div>
             <div className="text-amber-800">
               {(data.matrix_staleness.l2_high_pct ?? 0).toFixed(1)}% of L2-evaluated sessions
-              {' '}({(data.matrix_staleness.l2_high_count ?? 0).toLocaleString()} of{' '}
-              {(data.matrix_staleness.l2_evaluated ?? 0).toLocaleString()}) are scoring
+              {' '}({formatCount(data.matrix_staleness.l2_high_count ?? 0)} of{' '}
+              {formatCount(data.matrix_staleness.l2_evaluated ?? 0)}) are scoring
               ≥50 — above the {data.matrix_staleness.threshold_pct ?? 0}% threshold.
               The matrix is treating too much real traffic as rare. Click
               <strong className="px-0.5">Retrain matrix</strong> in the header

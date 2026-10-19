@@ -26,7 +26,9 @@ def svc_id(tmp_path, monkeypatch):
     # under test CPU starvation never get flagged as slow queries and pollute the database.
     monkeypatch.setattr("backend.core.query_registry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
     svc = "test-slow-queries-svc"
-    _meta.get_con(svc).execute("SELECT 1")  # trigger migrations
+    con = _meta.get_con(svc)
+    con.execute("DELETE FROM slow_queries WHERE service_id = ?", (svc,))
+    con.commit()
     return svc
 
 
@@ -97,7 +99,7 @@ def test_list_default_sort_is_recent_first(svc_id):
     _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=200, started=now - 30))
     _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=200, started=now - 10))
     rows = _meta.list_slow_queries(svc_id, since_utc=now - 60)
-    assert [r["query_id"] for r in rows] == [2, 1]
+    assert [r["query_id"] for r in rows if r["query_id"] in {1, 2}] == [2, 1]
 
 
 def test_list_sort_by_duration_flips_order(svc_id):
@@ -156,7 +158,11 @@ def test_deregister_persists_slow_query(svc_id, fresh_registry, monkeypatch):
     # Pretend the query took 500 ms — over threshold.
     fresh_registry._queries[slow_qid].started_at_mono = time.monotonic() - 0.5
     fresh_registry.deregister(slow_qid)
-    rows = _meta.list_slow_queries(svc_id, since_utc=time.time() - 60)
+    rows = [
+        row
+        for row in _meta.list_slow_queries(svc_id, since_utc=time.time() - 60)
+        if row["sql_preview"] == "SELECT pg_sleep(1)"
+    ]
     assert len(rows) == 1
     assert rows[0]["duration_ms"] >= 100
     assert rows[0]["sql_preview"] == "SELECT pg_sleep(1)"

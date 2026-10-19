@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse
 
 
 class ServiceCronSync(BaseModel):
     enabled: bool
+    polling_mode: Literal["regular", "adaptive"] = "adaptive"
     interval_mins: int | None = None
     # Persisted sync configs use interval_seconds (the scheduler reads it, with
     # interval_mins winning when both are present). Modelled here so this full
@@ -16,11 +18,18 @@ class ServiceCronSync(BaseModel):
     interval_seconds: int | None = None
     commit_interval_mins: int | None = None
     delete_after: bool | None = None
+    # When true, this service's raw request/RUM stream is shared with an
+    # out-of-band high-scale consumer: the high-scale archive deletion
+    # controller is the sole raw-deletion authority, and every legacy
+    # raw-deletion path (this delete_after included) stands down regardless
+    # of its own setting. See backend.config.resolve_raw_delete_after.
+    high_scale_shared_source: bool | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    rollup_retention_months: int | None = None
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
 
@@ -60,6 +69,10 @@ class ServiceConfig(BaseModel):
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
+    rum: dict[str, Any] | None = None
+    rum_log_period: int | None = None
+    analyst_path_a_supported: bool | None = None
+    is_high_scale: bool | None = None
 
 
 class ServicesListResponse(BaseResponse):
@@ -130,6 +143,7 @@ class CronSettingsPartial(BaseModel):
     didn't touch."""
 
     enabled: bool | None = None
+    polling_mode: Literal["regular", "adaptive"] | None = None
     interval_mins: int | None = None
     # The persisted sync config uses interval_seconds, and the scheduler reads
     # it (interval_mins takes priority when both are set). Omitting it here made
@@ -144,6 +158,7 @@ class CronSettingsPartial(BaseModel):
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    rollup_retention_months: int | None = None
     # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
     # the scheduler's expire job). keep_snapshot_days drives metadata.json size
     # and therefore per-commit cost; expire_interval_mins is how often it's
@@ -151,12 +166,14 @@ class CronSettingsPartial(BaseModel):
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
     delete_after: bool | None = None
+    high_scale_shared_source: bool | None = None
 
 
 class RumSettingsPartial(BaseModel):
     """Partial-update for RUM-specific config (sync interval + retention)."""
 
     enabled: bool | None = None
+    log_period: int | None = None
     sync_interval_seconds: int | None = None
     commit_interval_mins: int | None = None
     delete_after: bool | None = None
@@ -192,7 +209,7 @@ class ServiceCredentialsBody(BaseModel):
     secret_key: str = ""
 
 
-class CronRunEntry(BaseModel):
+class CronRunEntry(PassthroughModel):
     """One row of GET /api/cron-runs.
 
     ``extra="allow"`` passes any future cron_runs column through verbatim, and
@@ -202,12 +219,12 @@ class CronRunEntry(BaseModel):
     store ``0.0``), the count columns are ints, ``parquet_keys`` is the
     json.loads'd list."""
 
-    model_config = ConfigDict(extra="allow")
-    id: int | None = None
-    task: str | None = None
-    started_at: str | None = None
+    # ``id`` / ``task`` / ``started_at`` are NOT NULL columns; ``status`` is nullable text.
+    id: int
+    task: str
+    started_at: str
     duration_s: float | None = None
-    status: str | None = None
+    status: str | None
     error_message: str | None = None
     files_downloaded: int | None = None
     files_deleted_fos: int | None = None
@@ -219,8 +236,7 @@ class CronRunEntry(BaseModel):
     summary: str | None = None
 
 
-class CronRunsResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CronRunsResponse(PassthroughModel):
     total: int | None = None
     page: int | None = None
     per_page: int | None = None
@@ -234,32 +250,29 @@ class CronRunsResponse(BaseModel):
 # key sets stay byte-identical on the wire.
 
 
-class OkMessageResponse(BaseModel):
+class OkMessageResponse(PassthroughModel):
     """``{ok, message}`` ack used by time-range clear and similar routes."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
 
 
-class CredentialsUpdateResponse(BaseModel):
+class CredentialsUpdateResponse(PassthroughModel):
     """PATCH /services/{id}/credentials — ``access_key_id`` present only on
     the Fastly-API rotation branch."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
     access_key_id: str | None = None
 
 
-class CronScheduleEntry(BaseModel):
+class CronScheduleEntry(PassthroughModel):
     """One row of GET /api/cron-schedule (``build_cron_schedule_payload``).
     ``disabled_reason`` appears only on synthesized disabled rows; the
     last_run_* trio only when a run has been recorded."""
 
-    model_config = ConfigDict(extra="allow")
-    task: str | None = None
-    next_run_time: str | None = None
+    task: str
+    next_run_time: str | None
     last_run_time: str | None = None
     last_run_status: str | None = None
     last_run_duration_s: float | None = None
@@ -267,24 +280,21 @@ class CronScheduleEntry(BaseModel):
     disabled_reason: str | None = None
 
 
-class CronScheduleResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CronScheduleResponse(PassthroughModel):
     schedules: list[CronScheduleEntry] = []
 
 
-class LogFieldsUpdateResponse(BaseModel):
+class LogFieldsUpdateResponse(PassthroughModel):
     """POST /services/{id}/log-fields — no-change branch carries
     ``message``; the applied branch carries ``estimate`` +
     ``line_budget_warning`` (the ``waf_warning``-shaped dict, or null)."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
     estimate: int | None = None
     line_budget_warning: dict[str, Any] | None = None
 
 
-class CustomFieldsImportResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CustomFieldsImportResponse(PassthroughModel):
     ok: bool | None = None
     imported_count: int | None = None

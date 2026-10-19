@@ -38,8 +38,8 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
                 </div>
                 <p className="text-sm text-muted-foreground leading-relaxed">
                   We found an active data lake in this bucket with{" "}
-                  <strong>{lakeInfo.info.data_files}</strong> data files and{" "}
-                  <strong>{lakeInfo.info.snapshots}</strong> snapshots.
+                  <strong>{lakeInfo.info?.data_files}</strong> data files and{" "}
+                  <strong>{lakeInfo.info?.snapshots}</strong> snapshots.
                 </p>
 
                 <div className="grid grid-cols-2 gap-4 pt-2">
@@ -50,7 +50,7 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
                     <div className="flex flex-col font-mono text-sm font-semibold">
                       <div className="flex items-center gap-2">
                         <Calendar className="h-3.5 w-3.5 text-primary" />
-                        {formatDateTime(lakeInfo.range.start, s.timezone)}
+                        {formatDateTime(lakeInfo.range?.start, s.timezone)}
                       </div>
                     </div>
                   </div>
@@ -61,7 +61,7 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
                     <div className="flex flex-col font-mono text-sm font-semibold">
                       <div className="flex items-center gap-2">
                         <Calendar className="h-3.5 w-3.5 text-primary" />
-                        {formatDateTime(lakeInfo.range.end, s.timezone)}
+                        {formatDateTime(lakeInfo.range?.end, s.timezone)}
                       </div>
                     </div>
                   </div>
@@ -130,9 +130,9 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
                         type="datetime-local"
                         step="1"
                         value={formatForInput(importRange.start, s.timezone)}
-                        min={formatForInput(lakeInfo.range.start, s.timezone)}
+                        min={formatForInput(lakeInfo.range?.start ?? '', s.timezone)}
                         max={formatForInput(
-                          importRange.end || lakeInfo.range.end,
+                          importRange.end || lakeInfo.range?.end || '',
                           s.timezone,
                         )}
                         onChange={(e) =>
@@ -155,10 +155,10 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
                         step="1"
                         value={formatForInput(importRange.end, s.timezone)}
                         min={formatForInput(
-                          importRange.start || lakeInfo.range.start,
+                          importRange.start || lakeInfo.range?.start || '',
                           s.timezone,
                         )}
-                        max={formatForInput(lakeInfo.range.end, s.timezone)}
+                        max={formatForInput(lakeInfo.range?.end ?? '', s.timezone)}
                         onChange={(e) =>
                           setImportRange((prev) => ({
                             ...prev,
@@ -187,7 +187,7 @@ export function AnalyzeStep({ s }: { s: WizardState }) {
               <div className="space-y-1">
                 <h4 className="font-bold">No Data Found</h4>
                 <p className="text-sm text-muted-foreground max-w-xs mx-auto">
-                  We couldn't find an Iceberg table in this bucket. The admin
+                  We couldn&apos;t find an Iceberg table in this bucket. The admin
                   might not have started the ingestion yet.
                 </p>
               </div>

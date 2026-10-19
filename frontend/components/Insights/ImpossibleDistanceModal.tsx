@@ -17,7 +17,10 @@ import { Info, Zap, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ImpossibleDistanceData } from './types'
 import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { useMapResize } from '@/components/Map/useMapResize'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCount } from '@/lib/format'
 function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: boolean }) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
@@ -91,7 +94,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
           source: 'points',
           filter: ['==', ['get', 'type'], 'path'],
           paint: {
-            'line-color': '#ef4444',
+            'line-color': CHART_COLORS.danger,
             'line-width': 2,
             'line-dasharray': [2, 2]
           }
@@ -107,7 +110,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
             'circle-color': [
               'match',
               ['get', 'type'],
-              'client', '#3b82f6',
+              'client', CHART_COLORS.info,
               'pop', '#22c55e',
               '#000000'
             ],
@@ -171,17 +174,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
     }
   }, [data, isDark])
 
-  // Automatically resize the map when the container dimensions change
-  useEffect(() => {
-    if (!mapContainer.current) return
-    const resizeObserver = new ResizeObserver(() => {
-      if (map.current) {
-        map.current.resize()
-      }
-    })
-    resizeObserver.observe(mapContainer.current)
-    return () => resizeObserver.disconnect()
-  }, [])
+  useMapResize(map, mapContainer)
 
   // Extra hack for initial mount resize (common with Mapbox/MapLibre inside modals)
   useEffect(() => {
@@ -284,7 +277,7 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
                 </div>
                 <div className="p-2 rounded-md bg-muted/50 border">
                   <p className="text-[11px] sm:text-[10px] text-muted-foreground">Geo Distance</p>
-                  <p className="font-mono text-sm">{data.distance_km.toLocaleString()} km</p>
+                  <p className="font-mono text-sm">{formatCount(data.distance_km)} km</p>
                 </div>
               </div>
             </div>
@@ -298,11 +291,11 @@ export function ImpossibleDistanceModal({ isOpen, onOpenChange, data }: Impossib
               </h4>
               <div className="space-y-1">
                 <p className="text-xs leading-relaxed">
-                  To cover {data.distance_km.toLocaleString()} km in {one_way_ms.toFixed(2)} ms (one-way),
+                  To cover {formatCount(data.distance_km)} km in {one_way_ms.toFixed(2)} ms (one-way),
                   the signal would need to travel at:
                 </p>
                 <p className="font-mono text-lg font-bold text-center py-1">
-                  {required_speed.toLocaleString(undefined, { maximumFractionDigits: 0 })} km/s
+                  {formatCount(required_speed, { maximumFractionDigits: 0 })} km/s
                 </p>
                 <div className="space-y-1 text-xs sm:text-[11px]">
                   <div className="flex justify-between items-center">

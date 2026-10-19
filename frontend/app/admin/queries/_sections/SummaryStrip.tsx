@@ -4,7 +4,7 @@ import * as React from 'react'
 
 import { Badge } from '@/components/ui/badge'
 
-import { durationColor, formatDuration } from '../_helpers'
+import { durationColor, formatDurationMs } from '../_helpers'
 import type { SnapshotResponse, SummaryResponse } from '../_types'
 
 interface SummaryStripProps {
@@ -52,7 +52,7 @@ export function SummaryStrip({ snapshot }: SummaryStripProps) {
       ))}
       {data.longest_ms > 0 && (
         <span className={`text-xs ${durationColor(data.longest_ms)}`}>
-          longest: {formatDuration(data.longest_ms)}
+          longest: {formatDurationMs(data.longest_ms)}
         </span>
       )}
       <div role="status" aria-live="polite" className="sr-only">

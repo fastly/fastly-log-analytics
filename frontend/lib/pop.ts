@@ -1,6 +1,7 @@
+import type { components } from '@/types/api.generated'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 
-export type PopGeo = { city?: string; region?: string; country?: string }
+export type PopGeo = components['schemas']['BootstrapPopGeo']
 
 // Shield-derived 2-letter country codes that read better in their customary
 // short form. Anything else falls back to the uppercased code (DE, FR, JP…).

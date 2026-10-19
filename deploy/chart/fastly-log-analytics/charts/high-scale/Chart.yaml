@@ -1,0 +1,6 @@
+apiVersion: v2
+name: high-scale
+description: Portable high-scale application workloads for Fastly Log Analytics
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -11,13 +11,18 @@ test_security_ngwaf.py's ``_create_cache_db``).
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
@@ -41,11 +46,6 @@ def _create_cache_db(db_path: str, entries: list[tuple[str, str, str]]) -> None:
     con.close()
 
 
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
 def _build_patches(cache_root, table: str, con_factory):
     return (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
@@ -57,11 +57,6 @@ def _build_patches(cache_root, table: str, con_factory):
             side_effect=lambda c, _src, fn: fn(c),
         ),
     )
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
 
 
 # ── Writer ───────────────────────────────────────────────────────────────────
@@ -304,14 +299,19 @@ def test_reader_live_topup_joins_active_hour_buffer(tmp_path):
 
     con = duckdb.connect(":memory:")
     con.execute("INSTALL sqlite; LOAD sqlite;")
-    con.execute(f"ATTACH '{db_path}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
-    runner = QueryRunner(con, {"name": "svc-nb-7"})
-    runner.get_schema_cols = lambda: ["timestamp", "waf_req_id"]  # type: ignore[method-assign]
+    from backend.repositories._base import attach_ngwaf_cache
 
-    st = closed[0].isoformat()
-    et = (active_dt + timedelta(minutes=30)).isoformat()
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        got = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=10)
+    with (
+        patch("backend.config.ngwaf_db_path", return_value=db_path),
+        attach_ngwaf_cache(con, ["waf_req_id"], "ngwaf_top"),
+    ):
+        runner = QueryRunner(con, {"name": "svc-nb-7"})
+        runner.get_schema_cols = lambda: ["timestamp", "waf_req_id"]  # type: ignore[method-assign]
 
-    # Closed: 2 hours × 2; live buffer adds w1 (matched) but not w9 (unmatched).
-    assert got == [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 5}]
+        st = closed[0].isoformat()
+        et = (active_dt + timedelta(minutes=30)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            got = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=10)
+
+        # Closed: 2 hours × 2; live buffer adds w1 (matched) but not w9 (unmatched).
+        assert got == [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 5}]

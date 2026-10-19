@@ -4,19 +4,28 @@ import { ArrowUpRight, MapIcon, LineChart, ScanSearch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DeltaIndicator } from '@/components/DeltaIndicator'
 import { useServiceStore } from '@/stores/serviceStore'
-import { InsightItem } from '@/types/api'
-import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
+import { InsightCardData } from '@/types/api'
+import type {
+  ImpossibleDistanceData,
+  ImpossibleDistanceItem,
+  RepeatedPatternsFpItem,
+  RepeatedPatternsItem,
+  ScriptedTrafficData,
+} from './types'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
 interface InsightItemRowProps {
-  item: InsightItem
-  insightId: string
+  /** The owning card; its `id` fixes the type of `items[index].meta`. */
+  insight: InsightCardData
+  index: number
   onMapClick?: (data: ImpossibleDistanceData) => void
   onCacheCollapseClick?: (url: string) => void
   onScriptedTrafficClick?: (data: ScriptedTrafficData) => void
 }
 
-export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightItemRowProps) {
+export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightItemRowProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const item = insight.items[index]
 
   const investigateHref = React.useMemo(() => {
     if (!item.investigate_url) return null
@@ -32,38 +41,10 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
       <div className="flex flex-col min-w-0 flex-1">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="font-medium truncate">{item.label}</span>
-          {insightId === 'impossible_distance'
-            && Number.isFinite(item.meta?.client_lat)
-            && Number.isFinite(item.meta?.pop_lat)
-            && Number.isFinite(item.meta?.pop_lon)
-            && onMapClick && (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Show ${item.label} on map`}
-              className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
-              onClick={() => {
-                if (!item.meta) return
-                onMapClick({
-                  label: item.label,
-                  client_lat: item.meta.client_lat,
-                  client_lon: item.meta.client_lon,
-                  pop_lat: item.meta.pop_lat,
-                  pop_lon: item.meta.pop_lon,
-                  pop: item.meta.pop,
-                  tcp_rtt: item.meta.tcp_rtt,
-                  distance_km: item.current_val || 0,
-                  max_km: item.baseline_val || 0,
-                  city: item.meta.city,
-                  country: item.meta.country,
-                })
-              }}
-              title="View on Map"
-            >
-              <MapIcon className="h-3 w-3" aria-hidden="true" />
-            </Button>
+          {insight.id === 'impossible_distance' && onMapClick && (
+            <MapAction item={insight.items[index]} onMapClick={onMapClick} />
           )}
-          {(insightId === 'cache_collapse' || insightId === 'cacheability_regression') && onCacheCollapseClick && (
+          {(insight.id === 'cache_collapse' || insight.id === 'cacheability_regression') && onCacheCollapseClick && (
             <Button
               variant="ghost"
               size="icon"
@@ -77,35 +58,19 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
               <LineChart className="h-3 w-3" aria-hidden="true" />
             </Button>
           )}
-          {(insightId === 'repeated_patterns' || insightId === 'repeated_patterns_fp') && item.meta && onScriptedTrafficClick && (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Why ${item.label} was flagged`}
-              className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
-              onClick={() => {
-                const m = item.meta
-                if (!m) return
-                onScriptedTrafficClick({
-                  label: item.label,
-                  score: m.score ?? 0,
-                  cv: m.cv ?? 0,
-                  modal_frac: m.modal_frac ?? 0,
-                  mean_interval_s: m.mean_interval_s ?? item.current_val ?? 0,
-                  stddev_s: m.stddev_s ?? item.baseline_val ?? 0,
-                  mode_gap_s: m.mode_gap_s ?? null,
-                  n_gaps: m.n_gaps ?? 0,
-                  n_events: m.n_events ?? 0,
-                  span_s: m.span_s ?? 0,
-                  rps: m.rps ?? 0,
-                  distinct_ua: m.distinct_ua ?? 0,
-                  distinct_ip: m.distinct_ip,
-                })
-              }}
-              title="Why we flagged this"
-            >
-              <ScanSearch className="h-3 w-3" aria-hidden="true" />
-            </Button>
+          {insight.id === 'repeated_patterns' && onScriptedTrafficClick && (
+            <ScriptedAction
+              item={insight.items[index]}
+              distinct={{ distinct_ua: insight.items[index].meta.distinct_ua }}
+              onScriptedTrafficClick={onScriptedTrafficClick}
+            />
+          )}
+          {insight.id === 'repeated_patterns_fp' && onScriptedTrafficClick && (
+            <ScriptedAction
+              item={insight.items[index]}
+              distinct={{ distinct_ua: 0, distinct_ip: insight.items[index].meta.distinct_ip }}
+              onScriptedTrafficClick={onScriptedTrafficClick}
+            />
           )}
         </div>
         {item.tooltip && (
@@ -116,12 +81,12 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
         <div className="flex items-center gap-1.5">
           <DeltaIndicator current={item.current_val ?? 0} baseline={item.baseline_val} />
           <span className="font-bold tabular-nums">
-            {item.current_val?.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
+            {formatCountMaybe(item.current_val, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         </div>
         {item.baseline_val != null && (
           <span className="text-[11px] sm:text-[10px] text-muted-foreground tabular-nums">
-            {item.baseline_label || 'baseline'}: {item.baseline_val.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
+            {item.baseline_label || 'baseline'}: {formatCount(item.baseline_val, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         )}
         {investigateHref && (
@@ -136,5 +101,76 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
         )}
       </div>
     </div>
+  )
+}
+
+function MapAction({ item, onMapClick }: { item: ImpossibleDistanceItem; onMapClick: (data: ImpossibleDistanceData) => void }) {
+  const { client_lat, client_lon, pop_lat, pop_lon, pop, tcp_rtt, city, country } = item.meta
+  if (!Number.isFinite(client_lat) || client_lat === null || client_lon === null || tcp_rtt === null) return null
+  if (!Number.isFinite(pop_lat) || !Number.isFinite(pop_lon)) return null
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={`Show ${item.label} on map`}
+      className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
+      onClick={() =>
+        onMapClick({
+          label: item.label,
+          client_lat,
+          client_lon,
+          pop_lat,
+          pop_lon,
+          pop: pop ?? '',
+          tcp_rtt,
+          distance_km: item.current_val || 0,
+          max_km: item.baseline_val || 0,
+          city: city ?? undefined,
+          country: country ?? undefined,
+        })
+      }
+      title="View on Map"
+    >
+      <MapIcon className="h-3 w-3" aria-hidden="true" />
+    </Button>
+  )
+}
+
+function ScriptedAction({
+  item,
+  distinct,
+  onScriptedTrafficClick,
+}: {
+  item: RepeatedPatternsItem | RepeatedPatternsFpItem
+  distinct: Pick<ScriptedTrafficData, 'distinct_ua' | 'distinct_ip'>
+  onScriptedTrafficClick: (data: ScriptedTrafficData) => void
+}) {
+  const m = item.meta
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={`Why ${item.label} was flagged`}
+      className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
+      onClick={() =>
+        onScriptedTrafficClick({
+          label: item.label,
+          score: m.score,
+          cv: m.cv,
+          modal_frac: m.modal_frac,
+          mean_interval_s: m.mean_interval_s,
+          stddev_s: m.stddev_s,
+          mode_gap_s: m.mode_gap_s,
+          n_gaps: m.n_gaps,
+          n_events: m.n_events,
+          span_s: m.span_s,
+          rps: m.rps,
+          ...distinct,
+        })
+      }
+      title="Why we flagged this"
+    >
+      <ScanSearch className="h-3 w-3" aria-hidden="true" />
+    </Button>
   )
 }

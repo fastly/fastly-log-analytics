@@ -10,9 +10,11 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useTimeLayout } from '@/lib/chart-helpers'
 import { formatDate } from '@/lib/date'
 import { useTimezoneStore } from '@/stores/timezoneStore'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import type { components } from '@/types/api.generated'
 
 interface AlertPreviewProps {
-  previewData: any
+  previewData: components['schemas']['AlertPreviewData'] | null
   isPreviewLoading: boolean
   lookbackHours: number
   setLookbackHours: (h: number) => void
@@ -95,8 +97,8 @@ export function AlertPreview({
                      type: (metric === 'requests' || metric === '5xx' || metric === '4xx' || metric === 'specific_status') ? 'bar' : 'scatter',
                      mode: (metric === 'requests' || metric === '5xx' || metric === '4xx' || metric === 'specific_status') ? undefined : 'lines+markers',
                      name: 'Current',
-                     marker: { color: '#3b82f6' },
-                     line: { color: '#3b82f6', width: 2 },
+                     marker: { color: CHART_COLORS.info },
+                     line: { color: CHART_COLORS.info, width: 2 },
                      hovertemplate: getHoverTemplate(metric, 'Current')
                   },
                   ...(previewData.type === 'relative' && previewData.hist_values ? [{

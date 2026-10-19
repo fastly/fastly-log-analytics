@@ -247,6 +247,22 @@ def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Call
             status_cb(f"⚠️  RUM JS upload warning: {e}")
 
 
+def _update_local_config(service_id: str, mutate: Callable[[dict], None]) -> None:
+    """Best-effort locked edit of the local config cache.
+
+    Goes through ``mutate_config`` (cross-process lock + fresh read) so activation metadata
+    never clobbers or races a concurrent writer; a read-only volume is skipped, as before.
+    """
+    from backend.config import mutate_config
+
+    try:
+        mutate_config(service_id, mutate)
+    except OSError as e:
+        import logging
+
+        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+
+
 def reconcile_vcl_state(
     service_id: str,
     token: str,
@@ -299,7 +315,16 @@ def reconcile_vcl_state(
             if not config_path.exists():
                 # Bootstrap from Fastly if config missing (Gotcha 1)
                 desired_state = _bootstrap_featurestate_from_fastly(service_id, token)
-                config_path.write_text(json.dumps(asdict(desired_state), indent=2))
+                try:
+                    from backend.config import config_lock, save_config
+
+                    with config_lock(service_id):
+                        if not config_path.exists():
+                            save_config(service_id, asdict(desired_state))
+                except OSError as e:
+                    import logging
+
+                    logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
             else:
                 cfg = json.loads(config_path.read_text())
                 desired_state = FeatureState.from_config(cfg)
@@ -403,10 +428,8 @@ def reconcile_vcl_state(
                     status_cb("⏳ Validating draft configuration...")
                 validation_errors = _validate_draft(service_id, token, draft_version)
                 if validation_errors:
-                    # Assertion: active version unchanged after validation failure
-                    active_now = _fetch_active_version(service_id, token)
-                    active_before = _fetch_active_version(service_id, token)
-                    assert active_before == active_now, "Active version changed during validation failure"
+                    # No active-version guard here: the draft was never activated, and an out-of-band
+                    # activation (e.g. Fastly console) must not mask the validation errors we report.
                     raise VclValidationError(service_id, draft_version, validation_errors)
 
                 result.draft_version = draft_version
@@ -436,9 +459,7 @@ def reconcile_vcl_state(
                     _purge_rum_surrogate_key(service_id, token)
 
                     # Update local config with activation metadata
-                    cfg = json.loads(config_path.read_text())
-                    cfg["last_activated_version"] = draft_version
-                    config_path.write_text(json.dumps(cfg, indent=2))
+                    _update_local_config(service_id, lambda c: c.__setitem__("last_activated_version", draft_version))
                 else:
                     if status_cb:
                         status_cb(
@@ -539,10 +560,21 @@ def reconcile_cdn_service_state(
         if status_cb:
             status_cb(f"⏳ Finding existing CDN service named '{cdn_service_name}'...")
         existing = find_service_by_name(cdn_service_name, token)
+        if existing and existing.get("id") == logging_service_id:
+            # A customer service may share the requested display name. Never
+            # adopt it as the analytics CDN or allow rollback to delete it.
+            existing = None
+            if status_cb:
+                status_cb(
+                    f"⚠️ Ignoring service {logging_service_id} as CDN candidate; "
+                    "the analytics CDN must be a separate service."
+                )
         if existing:
             cdn_service_id = existing["id"]
             if status_cb:
                 status_cb(f"✓ Found existing CDN service: {cdn_service_id}")
+            if not dry_run:
+                _ensure_cdn_domain(cdn_service_id, domain, token, status_cb=status_cb)
         else:
             if dry_run:
                 if status_cb:
@@ -577,15 +609,16 @@ def reconcile_cdn_service_state(
                 status_cb("✓ Domain added to CDN service")
 
         # Persist cdn_service_id back to config
-        if "fos_proxy" not in cfg:
-            cfg["fos_proxy"] = {}
-        cfg["fos_proxy"]["service_id"] = cdn_service_id
-        cfg["fos_proxy"]["service_name"] = cdn_service_name
-        cfg["fos_proxy"]["domain"] = cdn_url
-        cfg["fos_proxy"]["shield"] = cdn_shield
-        cfg["fos_proxy"]["secret"] = cdn_secret
-        cfg["cdn_service_id"] = cdn_service_id  # flat key
-        config_path.write_text(json.dumps(cfg, indent=2))
+        def _persist_cdn(c: dict) -> None:
+            proxy = c.setdefault("fos_proxy", {})
+            proxy["service_id"] = cdn_service_id
+            proxy["service_name"] = cdn_service_name
+            proxy["domain"] = cdn_url
+            proxy["shield"] = cdn_shield
+            proxy["secret"] = cdn_secret
+            c["cdn_service_id"] = cdn_service_id  # flat key
+
+        _update_local_config(logging_service_id, _persist_cdn)
 
     result = ReconciliationResult(service_id=cdn_service_id)
 
@@ -756,12 +789,12 @@ def reconcile_cdn_service_state(
                     result.activated_version = draft_version
 
                     # Update local config with activation metadata
-                    cfg = json.loads(config_path.read_text())
-                    if "fos_proxy" not in cfg:
-                        cfg["fos_proxy"] = {}
-                    cfg["fos_proxy"]["last_activated_version"] = draft_version
-                    cfg["last_activated_version_cdn"] = draft_version
-                    config_path.write_text(json.dumps(cfg, indent=2))
+
+                    def _persist_activation(c: dict) -> None:
+                        c.setdefault("fos_proxy", {})["last_activated_version"] = draft_version
+                        c["last_activated_version_cdn"] = draft_version
+
+                    _update_local_config(logging_service_id, _persist_activation)
                 else:
                     if status_cb:
                         status_cb(
@@ -848,11 +881,15 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
             pass
 
     log_period = 60
+    rum_log_period = None
     sample_rate = 100
     for endpoint in endpoints:
-        if "Fastly Log Analytics" in endpoint.name and "RUM" not in endpoint.name:
+        if (
+            "Fastly Log Analytics" in endpoint.name or "Fastly Object Storage Logs" in endpoint.name
+        ) and "RUM" not in endpoint.name:
             log_period = endpoint.period
-            break
+        elif "RUM" in endpoint.name:
+            rum_log_period = endpoint.period
 
     return FeatureState(
         service_id=service_id,
@@ -863,6 +900,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
         fos_prefix="raw",
         fos_endpoint="fos.example.com",
         rum_enabled=rum_enabled,
+        rum_log_period=rum_log_period,
         cmcd=CmcdConfig(enabled=cmcd_enabled),
         scoring=ScoringConfig(
             enabled=scoring_enabled,
@@ -901,6 +939,39 @@ def _fetch_dictionaries(service_id: str, token: str) -> list[ServiceDictionary]:
     if active_ver is None:
         return []
     return fastly_integration.fetch_dictionaries(service_id, active_ver, token)
+
+
+def _ensure_cdn_domain(
+    service_id: str, domain: str, token: str, status_cb: Callable[[str], None] | None = None
+) -> None:
+    """Add ``domain`` to a REUSED CDN service if it isn't already attached.
+
+    A service adopted via find-by-name (not freshly created) skips the
+    "Add domain to version 1" step above entirely, since that step only
+    runs in the create branch. Left unchecked, a service originally
+    provisioned under an older cdn_prefix convention (e.g. bucket-name-
+    based) silently keeps that domain forever while config.cdn_url reflects
+    whatever the CURRENT default computes (e.g. service-id-based) — every
+    read through the CDN then 500s with Fastly's "unknown domain" error
+    because the domain in config was never actually registered.
+    """
+    active_ver = fastly_integration.fetch_active_version(service_id, token)
+    if active_ver is None:
+        return
+    existing_domains = fastly("GET", f"/service/{service_id}/version/{active_ver}/domain", token=token)
+    names = {d.get("name", "").lower() for d in existing_domains} if isinstance(existing_domains, list) else set()
+    if domain.lower() in names:
+        return
+    if status_cb:
+        status_cb(f"⏳ Domain '{domain}' missing from existing CDN service; adding...")
+    draft_version = fastly_integration.clone_version(service_id, active_ver, token, f"Add missing domain {domain}")
+    fastly("POST", f"/service/{service_id}/version/{draft_version}/domain", {"name": domain}, token=token)
+    error = _validate_draft(service_id, token, draft_version)
+    if error:
+        raise RuntimeError(f"Failed to validate CDN domain addition for {service_id}: {error}")
+    _activate_draft(service_id, token, draft_version)
+    if status_cb:
+        status_cb(f"✓ Domain '{domain}' added to existing CDN service")
 
 
 def _fetch_active_version(service_id: str, token: str) -> int:
@@ -1074,10 +1145,11 @@ def _apply_diff(
 
     # Step 6.3: Purge old backends (with whitelist guard)
     for backend_name in diff.backends_to_remove:
-        assert backend_name in MANAGED_BACKEND_NAMES, (
-            f"CRITICAL: Attempted to delete non-whitelisted backend '{backend_name}'. "
-            f"Whitelisted: {MANAGED_BACKEND_NAMES}"
-        )
+        if backend_name not in MANAGED_BACKEND_NAMES:
+            raise RuntimeError(
+                f"CRITICAL: Attempted to delete non-whitelisted backend '{backend_name}'. "
+                f"Whitelisted: {MANAGED_BACKEND_NAMES}"
+            )
         if status_cb:
             status_cb(f"🧹 Removing outdated backend '{backend_name}'...")
         try:
@@ -1087,10 +1159,11 @@ def _apply_diff(
 
     # Step 6.4: Purge old dictionaries (with whitelist guard)
     for dict_name in diff.dictionaries_to_remove:
-        assert dict_name in MANAGED_DICTIONARY_NAMES, (
-            f"CRITICAL: Attempted to delete non-whitelisted dictionary '{dict_name}'. "
-            f"Whitelisted: {MANAGED_DICTIONARY_NAMES}"
-        )
+        if dict_name not in MANAGED_DICTIONARY_NAMES:
+            raise RuntimeError(
+                f"CRITICAL: Attempted to delete non-whitelisted dictionary '{dict_name}'. "
+                f"Whitelisted: {MANAGED_DICTIONARY_NAMES}"
+            )
         if status_cb:
             status_cb(f"🧹 Removing outdated edge dictionary '{dict_name}'...")
         try:
@@ -1106,7 +1179,9 @@ def _apply_diff(
     if has_main_cond:
         if status_cb:
             status_cb("➕ Configuring log analytics condition 'log_analytics_condition'...")
-        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
+        cond_parts = ["!segmented_caching.is_inner_req"]
+        if desired_state and desired_state.rum_enabled:
+            cond_parts.append('req.url.path != "/rum-beacon"')
         if desired_state:
             scoring_enabled = desired_state.scoring.enabled
             if desired_state.edge_only:
@@ -1138,7 +1213,7 @@ def _apply_diff(
     if has_rum_cond:
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
-        statement = 'req.url.path == "/rum-beacon"'
+        statement = 'req.url.path == "/rum-beacon" && req.method == "POST"'
         if (
             desired_state
             and getattr(desired_state, "rum_custom_condition", None)
@@ -1199,8 +1274,8 @@ def _apply_diff(
             status_cb(f"➕ Installing edge dictionary '{dictionary.name}'...")
         try:
             fastly_integration.create_or_update_dictionary(service_id, draft_version, dictionary, token)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to install/update edge dictionary '%s': %s", dictionary.name, e)
 
     # Step 6.7: Install/update consolidated snippets
     for snippet in diff.snippets_to_add + diff.snippets_to_update:
@@ -1227,9 +1302,6 @@ def _apply_diff(
                 secret_key=secret_key,
             )
         except Exception as e:
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:
                 status_cb(f"❌ Failed to install logging endpoint '{endpoint.name}': {e}")
@@ -1254,13 +1326,6 @@ def _is_legacy_snippet(name: str) -> bool:
         "CMCD",
     ]
     return any(name.startswith(prefix) for prefix in legacy_prefixes)
-
-
-def _is_strict_logging_legacy_snippet(name: str) -> bool:
-    """Check if snippet is one of our strict old capture logging snippets."""
-    return (name.startswith("Fastly Log Analytics") or name.startswith("Fastly Log Analysis")) and not name.startswith(
-        "Fastly Log Analytics - "
-    )
 
 
 def _detect_and_queue_legacy_cleanup(
@@ -1293,7 +1358,8 @@ def _detect_and_queue_legacy_cleanup(
 def _validate_draft(service_id: str, token: str, draft_version: int) -> str:
     """Validate draft version via Fastly API. Return error string if invalid."""
     try:
-        fastly_integration.validate_version(service_id, draft_version, token)
+        if not fastly_integration.validate_version(service_id, draft_version, token):
+            return f"VCL validation failed: version {draft_version} did not validate (status not ok)"
         return ""  # Valid
     except RuntimeError as e:
         return str(e)  # Error message

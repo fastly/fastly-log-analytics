@@ -1,8 +1,7 @@
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import type { components } from '@/types/api.generated'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -22,17 +21,22 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { Bot } from 'lucide-react'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface Props {
   service: ServiceConfig | null
   onClose: () => void
 }
 
-export function NgwafDialog({ service, onClose }: Props) {
+/** Keyed on the service id so opening a different service starts from fresh form state. */
+export function NgwafDialog(props: Props) {
+  return <NgwafDialogBody key={props.service?.service_id ?? ''} {...props} />
+}
+
+function NgwafDialogBody({ service, onClose }: Props) {
   const queryClient = useQueryClient()
-  const [ngwafWorkspaceId, setNgwafWorkspaceId] = useState('')
+  const [ngwafWorkspaceId, setNgwafWorkspaceId] = useState(service?.ngwaf_workspace_id || '')
   const [ngwafWorkspaces, setNgwafWorkspaces] = useState<{ id: string; name: string }[]>([])
   const [ngwafFetchError, setNgwafFetchError] = useState('')
   const [ngwafFetching, setNgwafFetching] = useState(false)
@@ -44,17 +48,6 @@ export function NgwafDialog({ service, onClose }: Props) {
   // match in the backend lets through the legitimate admin flow without
   // requiring them to remember it from somewhere else.
   const [ngwafApiToken, setNgwafApiToken] = useState('')
-
-  // Re-init whenever a new service is opened.
-  useEffect(() => {
-    if (!service) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setNgwafWorkspaceId(service.ngwaf_workspace_id || '')
-    setNgwafWorkspaces([])
-    setNgwafFetchError('')
-    setNgwafSaved(false)
-    setNgwafApiToken('')
-  }, [service?.service_id])
 
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) onClose() }}>
@@ -100,13 +93,13 @@ export function NgwafDialog({ service, onClose }: Props) {
                     setNgwafFetchError('')
                     setNgwafFetching(true)
                     try {
-                      const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
+                      const { data } = await client.GET("/api/provision/ngwaf-workspaces", {
                         params: { query: { service_id: service.service_id } },
                         headers: { Authorization: `Bearer ${ngwafApiToken}` }
                       })
-                      setNgwafWorkspaces((data as any)?.workspaces || [])
-                    } catch (e: any) {
-                      setNgwafFetchError(e?.message || 'Could not load workspaces')
+                      setNgwafWorkspaces((data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : [])))
+                    } catch (e) {
+                      setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
                     } finally {
                       setNgwafFetching(false)
                     }
@@ -165,17 +158,17 @@ export function NgwafDialog({ service, onClose }: Props) {
                     // entered above; backend accepts either the stored key
                     // (constant-time match) or a token with the 'global'
                     // scope on this service.
-                    await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace" as any, {
+                    await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
                       params: {
                         path: { service_id: service.service_id },
                       },
                       headers: { Authorization: `Bearer ${ngwafApiToken}` },
-                      body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null } as any,
+                      body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null },
                     })
                     setNgwafSaved(true)
                     queryClient.invalidateQueries({ queryKey: ['services'] })
-                  } catch (e: any) {
-                    setNgwafFetchError(e?.message || 'Failed to save')
+                  } catch (e) {
+                    setNgwafFetchError(extractApiError(e) || 'Failed to save')
                   } finally {
                     setNgwafSaving(false)
                   }

@@ -20,41 +20,27 @@ parallel suite (-n auto) doesn't share an iceberg/cache key.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
+from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
+from tests._helpers.dates import yesterday_iso as _yesterday_iso
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
-
-
 def _hour_dt(day: str, h: int) -> datetime:
     return datetime.strptime(f"{day}-{h:02d}", "%Y-%m-%d-%H").replace(tzinfo=UTC)
-
-
-def _yesterday_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-
-def _three_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=3)).strftime("%Y-%m-%d")
-
-
-def _two_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=2)).strftime("%Y-%m-%d")
 
 
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict], *, cols: str | None = None) -> None:

@@ -10,24 +10,21 @@ import {
 } from "@/components/ui/tooltip"
 import { useNowMs } from '@/hooks/useNowSeconds'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { useElapsedTime } from '@/hooks/useElapsedTime'
+import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
-import { CRON_EXPLANATIONS } from './CronExplanations'
+import type { WithRequired, components } from '@/types/api'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 
 export function LiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-500 tabular-nums text-xs font-medium animate-pulse">{fmt}</span>
+  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium" />
 }
 
 // Tile-sized variant: inline-styled for the cron schedule pill so the
 // 9px tile typography isn't blown out by LiveTimer's text-xs (12px).
-// Same pulse + tabular-nums so widths stay stable across digit counts.
+// Same tabular-nums so widths stay stable across digit counts.
 function TileLiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-500 tabular-nums text-[9px] font-medium animate-pulse">{fmt}</span>
+  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium" />
 }
 
 function NextRunCountdown({ when }: { when: string | null | undefined }) {
@@ -36,18 +33,30 @@ function NextRunCountdown({ when }: { when: string | null | undefined }) {
   return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
 }
 
+type CronSchedule = Pick<
+  WithRequired<components['schemas']['CronScheduleEntry'], 'task'>,
+  'task' | 'disabled_reason' | 'last_run_time' | 'next_run_time'
+>
+
+type ActiveCronJob = {
+  id: number | string
+  started_at?: string | null
+}
+
 export function CronScheduleBox({
-  schedule,
+  schedule: _schedule,
   compact = false,
   activeJob = null,
   onOpenConsole
 }: {
-  schedule: any;
+  schedule: CronSchedule;
   compact?: boolean;
-  activeJob?: any;
+  activeJob?: ActiveCronJob | null;
   onOpenConsole?: (jobId: number | string) => void
 }) {
   const { full, abbr } = useDateFormat()
+  const schedule = _schedule
+  void compact
 
   if (schedule.disabled_reason === 'no_alerts_configured') {
     return (
@@ -84,9 +93,9 @@ export function CronScheduleBox({
         <TooltipProvider delay={200}>
           <Tooltip>
             <TooltipTrigger render={
-              <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isRunning ? 'text-blue-500' : 'text-muted-foreground'}`} />
+              <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isRunning ? 'text-blue-700 dark:text-blue-300' : 'text-muted-foreground'}`} />
             }>
-              {schedule.task === 'metadata_sync' ? 'sync' : schedule.task}
+              {CRON_DISPLAY_NAMES[schedule.task] || schedule.task}
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-[250px] text-xs">
               {CRON_EXPLANATIONS[schedule.task] || 'Background job.'}
@@ -98,11 +107,11 @@ export function CronScheduleBox({
         {isRunning ? (
           <button
             onClick={() => onOpenConsole?.(activeJob.id)}
-            className="flex-1 min-w-0 text-left text-[9px] text-blue-500 hover:text-blue-600 hover:underline font-medium flex items-center justify-between cursor-pointer"
+            className="flex-1 min-w-0 text-left text-[9px] text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200 hover:underline font-medium flex items-center justify-between cursor-pointer"
             aria-label={`Running for ${schedule.task} — click for logs`}
           >
             <span className="flex items-center gap-1 min-w-0">
-              <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
+              <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-700 dark:text-blue-300" aria-hidden="true" />
               {activeJob.started_at && <TileLiveTimer startedAt={activeJob.started_at} />}
             </span>
             <span className="text-[8px] bg-blue-500/20 px-1 py-0.2 rounded border border-blue-500/20 shrink-0 ml-1">LOGS</span>

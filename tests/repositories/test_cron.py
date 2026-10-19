@@ -15,9 +15,10 @@ def _seed_runs(service_id: str, runs: list[dict]) -> list[int]:
     ids: list[int] = []
     for r in runs:
         cur = con.execute(
-            "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys, summary) "
-            "VALUES (?, ?, ?, ?, '[]', ?)",
+            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys, summary) "
+            "VALUES (?, ?, ?, ?, ?, '[]', ?)",
             (
+                service_id,
                 r.get("task", "sync"),
                 r.get("started_at", "2026-05-15T00:00:00Z"),
                 r.get("duration_s", 1.0),
@@ -180,3 +181,37 @@ def test_get_cron_logs_since_id_combines_with_task_filter():
     # ids[1] (commit) is excluded by task filter. ids[0] is sync but old + not running.
     assert returned_ids == {ids[3]}
     assert total == 1
+
+
+def test_get_cron_logs_rum_sync_matches_rum_discovery():
+    """Verify that filtering task=rum_sync matches both rum_sync and rum_discovery."""
+    sid = "svc-cron-rum"
+    _seed_runs(
+        sid,
+        [
+            {"task": "rum_sync", "status": "success"},
+            {"task": "rum_discovery", "status": "success"},
+            {"task": "log_discovery", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="rum_sync")
+    assert total == 2
+    tasks = {e["task"] for e in entries}
+    assert tasks == {"rum_sync", "rum_discovery"}
+
+
+def test_get_cron_logs_comma_separated_tasks():
+    """Verify that comma-separated task lists are supported."""
+    sid = "svc-cron-multi"
+    _seed_runs(
+        sid,
+        [
+            {"task": "log_discovery", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "optimize", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="log_discovery,commit")
+    assert total == 2
+    tasks = {e["task"] for e in entries}
+    assert tasks == {"log_discovery", "commit"}

@@ -1,0 +1,307 @@
+'use client'
+
+import { useState } from 'react'
+import { AlertCircle, ArrowLeft, ArrowRight, Database, Filter, X } from 'lucide-react'
+import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
+import { useTimeRange } from '@/hooks/useTimeRange'
+import { useHighScaleRequestFacts } from '@/hooks/useHighScaleRequestFacts'
+import { extractApiError } from '@/lib/api'
+import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/format'
+import { NoServiceSelected } from '@/components/NoServiceSelected'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
+
+function valueAsString(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  return String(value)
+}
+
+function formatTimestamp(value: unknown): string {
+  if (typeof value !== 'string') return valueAsString(value)
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
+}
+
+function formatFreshness(seconds: number): string {
+  return formatElapsed(seconds, ELAPSED_FRESHNESS)
+}
+
+function Metadata({ metadata }: { metadata: NonNullable<ReturnType<typeof useHighScaleRequestFacts>['data']>['metadata'] }) {
+  return (
+    <div
+      className="grid gap-3 sm:grid-cols-3 [contain-intrinsic-size:auto_88px] [content-visibility:auto]"
+      data-testid="high-scale-metadata"
+    >
+      <div className="rounded-lg border bg-muted/30 p-3">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">Status</div>
+        <div className="mt-1 flex items-center gap-2 font-medium">
+          <Badge variant={metadata.status === 'complete' ? 'default' : 'secondary'}>
+            {metadata.status}
+          </Badge>
+          {metadata.exact ? 'Exact' : 'Approximate'}
+        </div>
+      </div>
+      <div className="rounded-lg border bg-muted/30 p-3">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">Freshness</div>
+        <div className="mt-1 font-medium">{formatFreshness(metadata.freshness_lag_seconds)} lag</div>
+      </div>
+      <div className="rounded-lg border bg-muted/30 p-3">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">Coverage</div>
+        <div className="mt-1 font-medium">{Math.round(metadata.coverage * 100)}%</div>
+      </div>
+    </div>
+  )
+}
+
+export function HighScaleRequestFactsPanel() {
+  const serviceId = useEffectiveServiceId()
+  const bootstrapResolved = useBootstrapResolved()
+  const { startTime, endTime } = useTimeRange()
+
+  const [statusFilter, setStatusFilter] = useState('')
+  const [domainFilter, setDomainFilter] = useState('')
+  const [popFilter, setPopFilter] = useState('')
+  const [countryFilter, setCountryFilter] = useState('')
+  const [batchIdFilter, setBatchIdFilter] = useState('')
+
+  const parsedStatus = statusFilter.trim() !== '' && !Number.isNaN(Number(statusFilter.trim()))
+    ? Number(statusFilter.trim())
+    : null
+
+  const facts = useHighScaleRequestFacts({
+    serviceId,
+    startTime,
+    endTime,
+    status: parsedStatus,
+    domain: domainFilter.trim() || null,
+    pop: popFilter.trim() || null,
+    country: countryFilter.trim() || null,
+    batchId: batchIdFilter.trim() || null,
+    emulateStandard: true,
+  })
+
+  const hasFilters = Boolean(
+    statusFilter.trim() ||
+    domainFilter.trim() ||
+    popFilter.trim() ||
+    countryFilter.trim() ||
+    batchIdFilter.trim()
+  )
+
+  const clearFilters = () => {
+    setStatusFilter('')
+    setDomainFilter('')
+    setPopFilter('')
+    setCountryFilter('')
+    setBatchIdFilter('')
+  }
+
+  if (!bootstrapResolved) {
+    return (
+      <div className="min-h-[600px] [contain-intrinsic-size:auto_600px] [content-visibility:auto]" data-testid="high-scale-bootstrap-skeleton">
+        <Skeleton className="h-64 w-full" />
+      </div>
+    )
+  }
+
+  if (!serviceId) {
+    return <NoServiceSelected icon={Database} message="Select a service to query high-scale request facts." />
+  }
+
+  if (facts.isLoading) {
+    return (
+      <Card
+        className="min-h-[600px] [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+        data-testid="high-scale-loading-card"
+      >
+        <CardHeader>
+          <CardTitle>Loading request facts…</CardTitle>
+          <p className="text-sm text-muted-foreground">Querying distributed cluster shards...</p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-48 w-full" />
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (facts.isError) {
+    return (
+      <Alert variant="destructive" role="alert">
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>High-scale request facts unavailable</AlertTitle>
+        <AlertDescription>{extractApiError(facts.error)}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  const response = facts.data
+  if (!response) return null
+
+  const isEmulated = (response.metadata as { mode?: string }).mode === 'duckdb_emulation'
+
+  return (
+    <Card
+      className="min-h-[600px] [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+      data-testid="high-scale-facts-card"
+    >
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span>Request facts</span>
+            <Badge
+              variant={isEmulated ? 'secondary' : 'outline'}
+              data-testid="high-scale-mode-badge"
+            >
+              {isEmulated ? 'DuckDB Standard Mode Emulation' : 'ClickHouse Distributed Cluster'}
+            </Badge>
+          </div>
+          <span className="text-sm font-normal text-muted-foreground">
+            Page {facts.pageIndex + 1}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <Metadata metadata={response.metadata} />
+
+        <div
+          className="grid gap-2 sm:grid-cols-6 [contain-intrinsic-size:auto_48px] [content-visibility:auto]"
+          data-testid="high-scale-filters"
+        >
+          <div className="flex items-center gap-1.5 sm:col-span-1">
+            <Filter className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <Input
+              aria-label="Filter by HTTP status"
+              data-testid="filter-status"
+              placeholder="Status (e.g. 200)"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </div>
+          <Input
+            aria-label="Filter by domain or host"
+            data-testid="filter-domain"
+            placeholder="Host / Domain"
+            value={domainFilter}
+            onChange={(e) => setDomainFilter(e.target.value)}
+            className="h-8 text-xs sm:col-span-1"
+          />
+          <Input
+            aria-label="Filter by edge POP"
+            data-testid="filter-pop"
+            placeholder="POP (e.g. IAD)"
+            value={popFilter}
+            onChange={(e) => setPopFilter(e.target.value)}
+            className="h-8 text-xs sm:col-span-1"
+          />
+          <Input
+            aria-label="Filter by country"
+            data-testid="filter-country"
+            placeholder="Country (e.g. US)"
+            value={countryFilter}
+            onChange={(e) => setCountryFilter(e.target.value)}
+            className="h-8 text-xs sm:col-span-1"
+          />
+          <Input
+            aria-label="Filter by batch ID"
+            data-testid="filter-batch-id"
+            placeholder="Batch ID"
+            value={batchIdFilter}
+            onChange={(e) => setBatchIdFilter(e.target.value)}
+            className="h-8 text-xs sm:col-span-1"
+          />
+          <div className="flex items-center justify-end sm:col-span-1">
+            {hasFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearFilters}
+                data-testid="filter-clear"
+                className="h-8 text-xs"
+              >
+                <X className="mr-1 h-3.5 w-3.5" />
+                Clear filters
+              </Button>
+            )}
+          </div>
+        </div>
+
+        <div
+          className={`overflow-x-auto rounded-lg border transition-opacity ${
+            facts.isFetching && !facts.isLoading ? 'opacity-40 pointer-events-none' : ''
+          }`}
+          data-testid="high-scale-table-wrapper"
+        >
+          <table className="w-full text-sm">
+            <caption className="sr-only">High-scale request facts</caption>
+            <thead className="bg-muted/50 text-left">
+              <tr>
+                <th className="px-3 py-2 font-medium">Timestamp</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Host</th>
+                <th className="px-3 py-2 font-medium">POP</th>
+                <th className="px-3 py-2 font-medium">Country</th>
+                <th className="px-3 py-2 font-medium">Client IP</th>
+                <th className="px-3 py-2 font-medium">URL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {response.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                    No request facts in this time range.
+                  </td>
+                </tr>
+              ) : (
+                response.rows.map((row) => (
+                  <tr key={valueAsString(row.event_id)} className="border-t">
+                    <td className="whitespace-nowrap px-3 py-2">{formatTimestamp(row.timestamp)}</td>
+                    <td className="px-3 py-2">{valueAsString(row.status)}</td>
+                    <td className="px-3 py-2">{valueAsString(row.host)}</td>
+                    <td className="px-3 py-2">{valueAsString(row.pop)}</td>
+                    <td className="px-3 py-2">{valueAsString(row.country)}</td>
+                    <td className="px-3 py-2">{valueAsString(row.client_ip)}</td>
+                    <td className="max-w-xl truncate px-3 py-2" title={valueAsString(row.url)}>
+                      {valueAsString(row.url)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-muted-foreground">
+            Server-side cursor pagination; access controls and analyst masking are applied by the API.
+          </span>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={facts.previousPage}
+              disabled={!facts.canPreviousPage || facts.isFetching}
+            >
+              <ArrowLeft className="mr-1 h-4 w-4" />
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={facts.nextPage}
+              disabled={!facts.canNextPage || facts.isFetching}
+            >
+              Next
+              <ArrowRight className="ml-1 h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}

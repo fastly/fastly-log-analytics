@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, Field, model_serializer
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, LogExtentsMixin
 
 # ── Metric snapshots history ───────────────────────────────────────────────
@@ -74,21 +75,6 @@ class HealthInFlightRun(BaseModel):
     started_at: str | None = None
 
 
-class HealthPoolWaitStat(BaseModel):
-    """One per-pool snapshot from the DuckDB-pool wait sampler.
-
-    Shape is open — different pool types report slightly different
-    fields (the Phase 6 sampler returns a dict-of-dicts keyed by pool
-    name). The Any escape hatch matches what callers read.
-    """
-
-    name: str
-    samples: int = 0
-    wait_p95_ms: float | None = None
-    wait_p99_ms: float | None = None
-    extras: dict[str, Any] = {}
-
-
 class HealthCronFailure(BaseModel):
     """One service+task whose most recent terminal cron run ended in error.
 
@@ -139,6 +125,42 @@ class HealthFosProbe(BaseModel):
     error: str | None = None
 
 
+class HealthCeleryStats(BaseModel):
+    queue_depth: int
+    active_workers: int
+    broker_reachable: bool
+
+
+class HealthHighScaleDisk(BaseModel):
+    """Latest serving-volume disk-guard evaluation (high-scale topology only)."""
+
+    mode: Literal["normal", "warning", "protective", "emergency"]
+    free_fraction: float
+    reserve_bytes: int
+    total_bytes: int
+    free_bytes: int
+    reasoning: str
+    sample_age_s: float
+
+
+class HealthHighScaleTopology(BaseModel):
+    """Configured portable topology profile (what production HA claims rest on)."""
+
+    name: str
+    clickhouse_replicas_per_shard: int
+    keeper_members: int
+    persistent_serving_storage: bool
+    production_ha: bool
+    shard_count: int
+
+
+class HealthHighScale(BaseModel):
+    """High-scale-only health block; absent from the payload in standard mode."""
+
+    disk: HealthHighScaleDisk | None = None
+    topology: HealthHighScaleTopology | None = None
+
+
 class HealthSnapshotResponse(BaseModel):
     """One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
 
@@ -165,12 +187,26 @@ class HealthSnapshotResponse(BaseModel):
     # SRE-03: services+tasks whose latest terminal cron run errored — the
     # cross-service glance the ADR-09 §2.3 runbook assumes exists.
     recent_cron_failures: list[HealthCronFailure] = Field(default_factory=list)
+    # True once this process ran a config write without the cross-process flock (read-only FS / no fcntl).
+    config_lock_degraded: bool = False
     # SRE-20: effective log/exporter mode so an incident grep is informed.
     observability: HealthObservability | None = None
     # SRE-11: freshness of the off-VM service-config backup (None = no marker).
     config_backup: HealthConfigBackup | None = None
     # SRE-13: per-service FOS reachability — only populated when probe_fos=1.
     fos: dict[str, HealthFosProbe] | None = None
+    # Scaling Phase 10: Celery metrics (queue depth and worker count)
+    celery: HealthCeleryStats | None = None
+    # High-scale topology only (serving-volume disk guard). Omitted entirely in
+    # standard mode so that mode's payload is unchanged.
+    high_scale: HealthHighScale | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_inactive_high_scale(self, handler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if isinstance(data, dict) and data.get("high_scale") is None:
+            data.pop("high_scale", None)
+        return data
 
 
 class TreeNode(BaseModel):
@@ -212,29 +248,38 @@ class IngestedFilesResponse(BaseResponse):
     files: list[IngestedFile]
 
 
-class QuarantinedFile(BaseModel):
+class QuarantineEvidenceItem(BaseModel):
     id: int
-    file_name: str
-    error_key: str
-    valid_rows: int = 0
-    corrupt_rows: int = 0
-    file_size_bytes: int | None = None
-    corrupt_samples: list[str] = Field(default_factory=list)
-    reason_counts: dict[str, int] = Field(default_factory=dict)
+    source_type: Literal["request", "rum"]
+    original_key: str
+    line_ordinal: int | None = None
+    byte_offset: int | None = None
+    byte_length: int
+    error_category: str
+    error_text: str
+    sha256: str
     quarantined_at: str
 
 
 class QuarantineSummary(BaseModel):
-    total_files: int = 0
-    total_corrupt_rows: int = 0
+    total_items: int = 0
+    total_bytes: int = 0
+    request_items: int = 0
+    rum_items: int = 0
     oldest_at: str | None = None
     newest_at: str | None = None
+    category_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class QuarantineListResponse(BaseResponse):
-    files: list[QuarantinedFile] = Field(default_factory=list)
+    items: list[QuarantineEvidenceItem] = Field(default_factory=list)
     total: int = 0
-    summary: QuarantineSummary = Field(default_factory=QuarantineSummary)
+
+
+class StreamMetrics(BaseModel):
+    latest_log_at: str | None = None
+    total_rows: int | None = None
+    last_sync_at: str | None = None
 
 
 class SyncStatus(LogExtentsMixin):
@@ -249,6 +294,8 @@ class SyncStatus(LogExtentsMixin):
     duckdb_exists: bool | None = None
     active_run: dict[str, Any] | None = None
     ngwaf_workspace_id: str | None = None
+    rum: StreamMetrics | None = None
+    request: StreamMetrics | None = None
 
 
 class SyncStatusResponse(BaseResponse, SyncStatus):
@@ -364,10 +411,6 @@ class ProvisionService(BaseModel):
     provisioned: bool
 
 
-class ProvisionServicesResponse(RootModel[list[ProvisionService]]):
-    pass
-
-
 class LogAccountingBucket(BaseModel):
     ts: str
     fastly_requests: int
@@ -460,6 +503,7 @@ class UsageLoggingUpdateBody(BaseModel):
     cdn_egress_rate_per_gb: float | None = None
     storage_rate_per_gb_month: float | None = None
     min_billed_days: float | None = None
+    billing_zone: str | None = None
 
 
 # ── Wire-safe admin maintenance/config responses ───────────────────────────
@@ -472,11 +516,9 @@ class UsageLoggingUpdateBody(BaseModel):
 # Field lists derive from the producers, not from any frontend consumer.
 
 
-class _AdminMaintRead(BaseModel):
+class _AdminMaintRead(PassthroughModel):
     """Base for the maintenance read responses — passes undeclared keys
     through instead of stripping them."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class UsageLoggingConfigResponse(_AdminMaintRead):
@@ -492,6 +534,7 @@ class UsageLoggingConfigResponse(_AdminMaintRead):
     cdn_egress_rate_per_gb: int | float | None = None
     storage_rate_per_gb_month: int | float | None = None
     min_billed_days: int | float | None = None
+    billing_zone: str | None = None
     track_duckdb_httpfs: bool | None = None
 
 
@@ -504,6 +547,26 @@ class OptimizeNowResponse(_AdminMaintRead):
     eligible_partitions: int | None = None
     partition_errors: list[str] | None = None
     error: str | None = None
+
+
+class ExpireSnapshotsResponse(_AdminMaintRead):
+    """Outcome and counters from ``POST /admin/expire-snapshots/{service_id}``."""
+
+    status: str | None = None
+    service_id: str | None = None
+    summary: str | None = None
+    retention_deleted_rows: int | None = None
+    snapshots_expired: int | None = None
+    files_unlinked: int | None = None
+    error: str | None = None
+
+
+class SyncStartResponse(_AdminMaintRead):
+    """Outcome and run ID from ``POST /admin/sync/{service_id}``."""
+
+    ok: bool = True
+    message: str | None = None
+    run_id: int | str | None = None
 
 
 class BackfillBundleRollupsResponse(_AdminMaintRead):
@@ -533,6 +596,61 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     wellknown_bots: int | None = None
     overview: int | None = None
     overview_days: int | None = None
+    rum: int | None = None
+
+
+class ConsolidateRollupsResponse(_AdminMaintRead):
+    """Result from POST /admin/consolidate-rollups."""
+
+    service_id: str | None = None
+    files_before: int | None = None
+    files_after: int | None = None
+    files_deleted: int | None = None
+    hours_ip_bundled: int | None = None
+    days_compacted: int | None = None
+    days_bundled: int | None = None
+    cleaned_entries: int | None = None
+    duration_s: float | None = None
+
+
+class RollupCompactResponse(_AdminMaintRead):
+    """Result from POST /admin/rollups/compact/{service_id}."""
+
+    status: str | None = None
+    service_id: str | None = None
+    rebuilt: int | None = None
+    bundled: int | None = None
+    retired_files: int | None = None
+    retired_bytes: int | None = None
+    duration_s: float | None = None
+    summary: str | None = None
+    errors: list[str] | None = None
+
+
+class RollupHealResponse(_AdminMaintRead):
+    """Result from POST /admin/rollup-heal/{service_id}."""
+
+    status: str | None = None
+    service_id: str | None = None
+    missing: int | None = None
+    rebuilt_fields: int | None = None
+    bundled: int | None = None
+    stamped_empty: int | None = None
+    coverage_verified: bool | None = None
+    duration_s: float | None = None
+    summary: str | None = None
+    run_id: int | None = None
+    error_message: str | None = None
+
+
+class RollupStatusResponse(_AdminMaintRead):
+    """Rollup status from GET /admin/rollups/status."""
+
+    service_id: str | None = None
+    days_bundled: int | None = None
+    hour_bundles: int | None = None
+    latest_day_bundle: str | None = None
+    earliest_day_bundle: str | None = None
 
 
 class LocalCompactNowResponse(_AdminMaintRead):
@@ -551,6 +669,29 @@ class LocalCompactNowResponse(_AdminMaintRead):
     errors: list[str] | None = None
     duration_ms: int | None = None
     dry_run: bool | None = None
+
+
+class PartialHourMergeResponse(_AdminMaintRead):
+    """``merge_partial_hour`` result dict from ``POST /admin/partial-hour-merge``."""
+
+    service_id: str | None = None
+    hour: str | None = None
+    new_files: int | None = None
+    duration_ms: float | None = None
+    gc_hours_removed: int | None = None
+    status: str | None = None
+    error: str | None = None
+
+
+class PartialHourStatusResponse(_AdminMaintRead):
+    """Partial-hour rollup status from ``GET /admin/partial-hour-status``."""
+
+    service_id: str | None = None
+    hour: str | None = None
+    watermark: float | None = None
+    watermark_iso: str | None = None
+    file_exists: bool | None = None
+    total_rows: int | None = None
 
 
 class MetadataRetentionValues(_AdminMaintRead):

@@ -653,19 +653,6 @@ def test_query_table_function_blocked(con):
     assert exc.value.reason == "function_denylist:query"
 
 
-def test_has_limit_clause_strictly_outermost(con):
-    """Finding 011: Ensure LIMIT clauses inside subqueries are ignored for outer limit wrapping."""
-    from backend.utils.sql_validator import has_limit_clause
-
-    # Limit nested in subquery
-    nested_sql = "SELECT * FROM range(10) a CROSS JOIN range(10) b WHERE 1 IN (SELECT 1 LIMIT 1)"
-    assert not has_limit_clause(nested_sql, parser_con=con)
-
-    # Limit on top-level SELECT
-    outer_sql = "SELECT * FROM range(10) LIMIT 5"
-    assert has_limit_clause(outer_sql, parser_con=con)
-
-
 def test_replacement_scan_blocked_by_table_name_characters(con):
     """Finding 029: Ensure table names containing slashes, backslashes, or dots (file paths/replacement scans) are rejected."""
     sql_slash = "SELECT * FROM '/etc/passwd'"

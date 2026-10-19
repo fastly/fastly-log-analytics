@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Users } from 'lucide-react'
 import dynamic from 'next/dynamic'
@@ -15,6 +15,7 @@ import type { components } from '@/types/api.generated'
 
 import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
+import type { SessionsResponse } from '@/types/api'
 
 // SessionDetail is only rendered after a row click. Lazy-loading it
 // (with the DataTable + 7 sub-components it pulls in) keeps the
@@ -26,7 +27,6 @@ const SessionDetail = dynamic(
 )
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 // Lifted out of the ReportLayout render-prop so the (large) hook list —
 // useIsDataReady, useMemo, useQueryClient, useScoringLabels, useCallback,
@@ -75,6 +75,14 @@ function SessionsBody({
 }: SessionsBodyProps) {
   const isReady = useIsDataReady()
   const cmcdEnabled = useActiveServiceCmcdEnabled(activeServiceId)
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    return () => {
+      queryClient.cancelQueries({ queryKey: ['sessions'] })
+      queryClient.cancelQueries({ queryKey: ['scoring-labels'] })
+    }
+  }, [queryClient])
 
   // Mirror backend's 7-day guard client-side so the request never
   // fires on a too-wide range. Backend rejects with a 400 either
@@ -100,7 +108,7 @@ function SessionsBody({
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, streamingOnly, minReqs, min4xxPct],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST("/api/sessions", {
+      const { data, error } = await client.POST("/api/sessions", {
         signal,
         body: {
           start_time: startTime,
@@ -116,6 +124,7 @@ function SessionsBody({
           min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
         }
       })
+      if (error) throw error
       return data as SessionsResponse | undefined
     },
     enabled: isReady && !rangeExceedsSevenDays
@@ -158,7 +167,7 @@ function SessionsBody({
   const isLoadingInitial = isLoading || (isFetching && !data)
 
   return (
-    <>
+    <div data-testid="user-sessions-explorer" className="space-y-4">
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
         <UpdatingBadge />
       </div>
@@ -220,9 +229,10 @@ function SessionsBody({
         labelBySid={labelBySid}
         onFlagged={onFlagged}
       />
-    </>
+    </div>
   )
 }
+
 
 export default function SessionsPage() {
   const [selectedSession, setSelectedSession] = useState<SessionRow | null>(null)

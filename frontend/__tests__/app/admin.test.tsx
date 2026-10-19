@@ -24,10 +24,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { server } from '../../tests/msw/server'
 
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/admin'),
-  useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin'))
 
 
 import { getApiBase } from '@/lib/api'
@@ -35,7 +32,7 @@ import { getApiBase } from '@/lib/api'
 const API_BASE = getApiBase()
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: any) => ({
+  useVirtualizer: (options: { count?: number }) => ({
     getVirtualItems: () => {
       const count = options.count || 0
       return Array.from({ length: count }).map((_, i) => ({
@@ -50,7 +47,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
-  useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true } as never)
+  useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
 })
 
 test('ServicesTable renders services flowed through MSW + openapi-fetch', async () => {

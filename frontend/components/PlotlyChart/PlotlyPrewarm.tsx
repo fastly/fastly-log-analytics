@@ -2,6 +2,27 @@
 
 import React from 'react'
 import { PlotlyChart, preloadPlotlyChunk } from './PlotlyChart'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+
+// One invisible point; module-level so the chart's props keep a stable identity across renders.
+const PREWARM_DATA: PlotlyTrace[] = [
+  {
+    x: [0],
+    y: [0],
+    type: 'scatter',
+    mode: 'lines',
+  },
+]
+
+// Layout/config trivial — we only care about forcing init.
+const PREWARM_LAYOUT: PlotlyLayout = {
+  margin: { l: 0, r: 0, t: 0, b: 0 },
+  showlegend: false,
+  paper_bgcolor: 'transparent',
+  plot_bgcolor: 'transparent',
+  xaxis: { visible: false },
+  yaxis: { visible: false },
+}
 
 /**
  * Renders an invisible 1-point Plotly chart on app mount to force the
@@ -43,27 +64,9 @@ function PlotlyPrewarmImpl() {
     void preloadPlotlyChunk()
   }, [])
 
-  // Render once on mount; then never re-render (memoized + stable refs).
+  // Render once on mount; then never re-render (memoized + module-level props).
   // Wrapping in React.memo with no props is belt-and-suspenders so any
   // parent re-render does not re-trigger the prewarm.
-  const data = React.useRef([
-    {
-      x: [0],
-      y: [0],
-      type: 'scatter' as const,
-      mode: 'lines' as const,
-    },
-  ]).current
-
-  // Layout/config trivial — we only care about forcing init.
-  const layout = React.useRef({
-    margin: { l: 0, r: 0, t: 0, b: 0 },
-    showlegend: false,
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    xaxis: { visible: false },
-    yaxis: { visible: false },
-  }).current
 
   return (
     // IMPORTANT: PlotlyChart gates <Plot> rendering on an
@@ -84,7 +87,7 @@ function PlotlyPrewarmImpl() {
         pointerEvents: 'none',
       }}
     >
-      <PlotlyChart data={data} layout={layout} height={1} />
+      <PlotlyChart data={PREWARM_DATA} layout={PREWARM_LAYOUT} height={1} />
     </div>
   )
 }

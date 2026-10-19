@@ -9,22 +9,12 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount, formatBytes, formatCurrency } from '@/lib/format'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 
 type IOData = components['schemas']['IOMetrics']
 
-interface IOOpportunity {
-  url?: string
-  request_count?: number
-  total_bytes?: number
-  avg_kb?: number
-}
-
-interface IOFormatPair {
-  input_format?: string
-  output_format?: string
-  count?: number
-  avg_ratio?: number | null
-}
+type IOOpportunity = components['schemas']['IOOpportunityRow']
 
 const VOLUME_LAYOUT = {
   yaxis: { title: 'IO Transforms', ticksuffix: '' },
@@ -47,10 +37,10 @@ const DONUT_LAYOUT = {
 const FORMAT_COLORS: Record<string, string> = {
   webp: '#8b5cf6',
   avif: '#06b6d4',
-  jpeg: '#f59e0b',
-  png: '#10b981',
-  gif: '#ef4444',
-  jpegxl: '#3b82f6',
+  jpeg: CHART_COLORS.warning,
+  png: CHART_COLORS.success,
+  gif: CHART_COLORS.danger,
+  jpegxl: CHART_COLORS.info,
   svg: '#6366f1',
   mp4: '#ec4899',
 }
@@ -105,7 +95,7 @@ function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
 }
 
 function IOUpsellView({ data }: { data: IOData }) {
-  const opps = (data.optimization_opportunities ?? []) as IOOpportunity[]
+  const opps = data.optimization_opportunities ?? []
 
   return (
     <div className="space-y-6 pt-4">
@@ -182,7 +172,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         mode: 'lines',
         fill: 'tozeroy',
         name: 'Bandwidth Saved (bytes)',
-        line: { color: '#10b981' },
+        line: { color: CHART_COLORS.success },
       }]
     }
     return []
@@ -196,12 +186,12 @@ function IOEnabledView({ data }: { data: IOData }) {
         values: dist.map(d => d.count),
         type: 'pie',
         hole: 0.5,
-        marker: { colors: dist.map(d => FORMAT_COLORS[d.format] ?? '#94a3b8') },
+        marker: { colors: dist.map(d => FORMAT_COLORS[d.format] ?? CHART_COLORS.neutral) },
         textinfo: 'label+percent',
         hovertemplate: '%{label}: %{value:,} transforms (%{percent})<extra></extra>',
       }]
     }
-    const pairs = data.io_format_conversion_pairs as IOFormatPair[] | undefined
+    const pairs = data.io_format_conversion_pairs
     if (pairs?.length) {
       const counts: Record<string, number> = {}
       for (const p of pairs) {
@@ -214,7 +204,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         values: labels.map(f => counts[f]),
         type: 'pie',
         hole: 0.5,
-        marker: { colors: labels.map(f => FORMAT_COLORS[f] ?? '#94a3b8') },
+        marker: { colors: labels.map(f => FORMAT_COLORS[f] ?? CHART_COLORS.neutral) },
         textinfo: 'label+percent',
         hovertemplate: '%{label}: %{value:,} conversions (%{percent})<extra></extra>',
       }]
@@ -232,11 +222,11 @@ function IOEnabledView({ data }: { data: IOData }) {
       mode: 'lines',
       fill: 'tozeroy',
       name: 'Bandwidth Saved',
-      line: { color: '#10b981' },
+      line: { color: CHART_COLORS.success },
     }]
   }, [data])
 
-  const opps = (data.optimization_opportunities ?? []) as IOOpportunity[]
+  const opps = data.optimization_opportunities ?? []
 
   return (
     <div className="space-y-6 pt-4">
@@ -299,7 +289,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         </div>
       )}
 
-      {(data.io_format_conversion_pairs as IOFormatPair[] | undefined)?.length ? (
+      {data.io_format_conversion_pairs?.length ? (
         <AnalyticsCard
           title="Format Conversions"
           description="Input → output format pairs by volume"
@@ -315,7 +305,7 @@ function IOEnabledView({ data }: { data: IOData }) {
                 </tr>
               </thead>
               <tbody>
-                {(data.io_format_conversion_pairs as IOFormatPair[]).map((pair) => (
+                {(data.io_format_conversion_pairs ?? []).map((pair) => (
                   <tr key={`${pair.input_format}-${pair.output_format}`} className="border-b last:border-0">
                     <td className="py-2 pr-4 font-mono text-xs uppercase">{pair.input_format}</td>
                     <td className="py-2 pr-4 font-mono text-xs uppercase flex items-center gap-1">
@@ -348,9 +338,7 @@ export default function IOValueTab({ data, loading }: { data?: IOData | null; lo
     return (
       <div className="space-y-6 pt-4">
         <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
-          ))}
+          <SkeletonGrid count={4} height="6rem" />
         </div>
         <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
           <Skeleton className="h-64 rounded-xl" />

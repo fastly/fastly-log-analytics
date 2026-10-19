@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from backend.core import local_compaction as lc
+from tests._helpers.sources import make_source
 
 
 def _write_parquet(path: str, rows: int, ts_start: int = 0, rid_start: int | None = None) -> None:
@@ -38,27 +39,18 @@ def _write_parquet(path: str, rows: int, ts_start: int = 0, rid_start: int | Non
     pq.write_table(table, path, compression="zstd")
 
 
-def _make_source(tmp_path) -> dict:
-    """Build a source dict whose ``_cache_dir`` resolves under tmp_path.
+_NAME = "test-svc-local-compact"
 
-    ``_cache_dir`` derives the cache root from the source name; we make
-    the per-service dir under tmp_path and return a source name that
-    matches.
-    """
-    name = "test-svc-local-compact"
-    cache_root = tmp_path / "cache" / name
-    (cache_root / "data").mkdir(parents=True)
-    return {
-        "name": name,
-        "service_id": name,
-        "_test_cache_root": str(cache_root),
-    }
+
+def _local_compact_source(tmp_path) -> dict:
+    """Source whose ``_cache_dir`` resolves under tmp_path (``data/`` pre-created)."""
+    return make_source(tmp_path / "cache" / _NAME, _NAME, cache_key="_test_cache_root", mkdirs=("data",))
 
 
 @pytest.fixture
 def patched_cache_dir(tmp_path, monkeypatch):
     """Patch ``_cache_dir`` to point at a tmp directory for the test."""
-    src = _make_source(tmp_path)
+    src = _local_compact_source(tmp_path)
 
     def fake_cache_dir(source: dict) -> str:
         return source["_test_cache_root"]

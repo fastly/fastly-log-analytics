@@ -205,7 +205,7 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # phase names without secrets and is the next perf audit's
             # primary signal.
             stripped = False
-            for k in ("_debug_queries", "_debug_calls", "_debug_sqlite", "_is_cached"):
+            for k in ("_debug_queries", "_debug_calls", "_debug_sqlite", "_debug_postgres", "_is_cached"):
                 if k in parsed:
                     parsed.pop(k)
                     stripped = True
@@ -243,7 +243,9 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
 
             if inject_queries:
                 parsed["_debug_queries"] = get_queries()
-                parsed["_debug_sqlite"] = list(get_sqlite_queries())
+                pg_queries = list(get_sqlite_queries())
+                parsed["_debug_postgres"] = pg_queries
+                parsed["_debug_sqlite"] = pg_queries
             if inject_api_calls:
                 parsed["_debug_calls"] = get_tracked_calls()
 

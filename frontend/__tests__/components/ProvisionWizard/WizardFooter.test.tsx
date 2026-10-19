@@ -6,7 +6,7 @@ import type { WizardState } from "@/components/ProvisionWizard/useWizardState";
 
 // WizardFooter is a pure presentational component over a WizardState bag — it
 // only reads fields and invokes injected handlers, so a minimal mock cast via
-// `as unknown as WizardState` (not `as any`) covers every branch we exercise.
+// `as WizardState` (not `as any`) covers every branch we exercise.
 function makeState(overrides: Partial<WizardState> = {}): WizardState {
   return {
     step: "terraform",
@@ -35,7 +35,7 @@ function makeState(overrides: Partial<WizardState> = {}): WizardState {
     joinPhase: "form",
     stop: vi.fn(),
     ...overrides,
-  } as unknown as WizardState;
+  } as WizardState;
 }
 
 describe("WizardFooter — terraform (Terraform & VCL preview) step", () => {

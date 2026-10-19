@@ -9,20 +9,18 @@ from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend import config as svcconfig
+from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.core.share_db.validation import mask_ip
+from backend.models.common import BaseResponse, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesResponse,
-    SecurityProxiesRequest,
-    SecurityProxiesResponse,
-    SecurityTopBotsResponse,
+    SecurityBundleResponse,
 )
 from backend.repositories import security as repo
+from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.telemetry import track_query
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror SecurityAggregatesResponse fields one-to-one
@@ -42,6 +40,8 @@ SectionName = Literal[
     "ipv6_adoption",
     "proxy_dist",
     "conn_reuse_dist",
+    "proxies",
+    "top_bots",
 ]
 
 # Fingerprint cards share a single full-temp coverage scan
@@ -67,22 +67,13 @@ _expand_sections = make_section_expander(
 )
 
 
-class SecurityAggregatesRequest(FilteredRequest):
+class SecurityAggregatesRequest(RangeKeyedRequest):
     bucket_seconds: int = 300
     sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional) — see origin.py /
-    # backend/utils/time_window.py. When ``range_token`` is recognized the
-    # SERVER resolves the scan window from (token, anchor) and ignores
-    # FE-supplied start/end, then clamps to the invite ceiling (an analyst can't
-    # widen past their invite by picking "30d"). This endpoint has no response
-    # memo to stabilize — the token exists purely so the FE first-paint key is
-    # server-reproducible (origin SSR-seed contract). Absent/unknown token →
-    # legacy absolute-bounds path unchanged.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
+@router.post("/bundle", response_model=SecurityBundleResponse)
 @query_errors()
 def security_aggregates(
     req: SecurityAggregatesRequest,
@@ -92,13 +83,15 @@ def security_aggregates(
     # Keyed path: resolve the scan window server-side from (range_token, anchor),
     # ignoring FE-supplied absolute bounds; clamp AFTER resolve so the invite
     # ceiling is enforced regardless of token. Mirrors routers/origin.py.
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.security import security_aggregates as hs_aggregates
+
+        return hs_aggregates(high_scale_service, req, start_time, end_time)
     sections = _expand_sections(req.sections)
+    mask_ips = mask_ips_for(ctx.analyst_session)
     res = repo.get_security_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -107,6 +100,7 @@ def security_aggregates(
         filters=req.filters,
         bucket_seconds=req.bucket_seconds,
         sections=sections,
+        mask_ips=mask_ips,
     )
     # 30-s edge cache + 120-s stale-while-revalidate. Aggregates are
     # hourly-bucketed at minimum, so 30 s staleness is well inside
@@ -116,43 +110,25 @@ def security_aggregates(
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
-@router.post("/top-bots", response_model=SecurityTopBotsResponse)
+@router.get("/bundle", response_model=SecurityBundleResponse)
 @query_errors()
-def top_bots(
-    req: FilteredRequest,
+def security_bundle_get(
+    response: Response,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    range_token: str | None = None,
+    anchor: str | None = None,
+    bucket_seconds: int = 300,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    res = repo.get_top_bots(
-        con=ctx.con,
-        src=ctx.source,
+    req = SecurityAggregatesRequest(
         start_time=start_time,
         end_time=end_time,
-        filters=req.filters,
+        range_token=range_token,
+        anchor=anchor,
+        bucket_seconds=bucket_seconds,
     )
-    return SecurityTopBotsResponse.with_telemetry(**res)
-
-
-@router.post("/proxies", response_model=SecurityProxiesResponse)
-@query_errors()
-def get_proxies_data(
-    req: SecurityProxiesRequest,
-    ctx: RequestContext = Depends(build_request_context),
-):
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    res = repo.get_security_proxies(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-    )
-    return SecurityProxiesResponse.with_telemetry(**res)
+    return security_aggregates(req, response, ctx)
 
 
 @router.get("/proxies/export")
@@ -164,8 +140,14 @@ def export_proxies_csv(
     format: str = "fastly-acl",
     ctx: RequestContext = Depends(build_request_context),
 ):
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        raise ValueError("Exporting proxies is not yet supported in high-scale mode")
+
     # Enforce correct date-bounds tenancy
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
+
+    mask_ips = mask_ips_for(ctx.analyst_session)
 
     # Query repository
     res = repo.get_security_proxies(
@@ -174,6 +156,7 @@ def export_proxies_csv(
         start_time=resolved_start,
         end_time=resolved_end,
         filters=None,
+        mask_ips=mask_ips,
     )
 
     # Filter clients by risk threshold
@@ -187,10 +170,15 @@ def export_proxies_csv(
     seen_ips = set()
     unique_clients = []
     for c in filtered_clients:
-        ip = c.get("ip")
-        if ip and ip not in seen_ips:
+        raw_ip = c.get("ip")
+        if not raw_ip:
+            continue
+        ip = mask_ip(str(raw_ip)) if mask_ips else str(raw_ip)
+        if ip not in seen_ips:
             seen_ips.add(ip)
-            unique_clients.append(c)
+            item = dict(c)
+            item["ip"] = ip
+            unique_clients.append(item)
     filtered_clients = unique_clients
 
     # Create CSV memory buffer
@@ -244,6 +232,12 @@ def get_security_threat_intel(
     end_time: str | None = Query(default=None),
 ):
     """Correlate client TLS fingerprints with active WAF triggers and proxy flags."""
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.security import get_security_threat_intel as hs_threat_intel
+
+        return hs_threat_intel(high_scale_service, start_time, end_time)
+
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
 
     if not resolved_start:
@@ -254,56 +248,19 @@ def get_security_threat_intel(
     from backend.repositories._base import _safe_table
 
     table_name = _safe_table(ctx.source["name"])
-    time_filter = "WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
-    params = [resolved_start, resolved_end]
 
-    probe = ctx.con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-    cols = {d[0] for d in probe}
-
-    if "ja3" in cols:
-        fingerprint_col = "ja3"
-    elif "ja4" in cols:
-        fingerprint_col = "ja4"
-    else:
-        fingerprint_col = "CAST('Unknown' AS VARCHAR)"
-
-    proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
-    waf_conditions = []
-    if "waf_logged_rules" in cols:
-        waf_conditions.append("waf_logged_rules IS NOT NULL")
-    if "waf_blocked_rules" in cols:
-        waf_conditions.append("waf_blocked_rules IS NOT NULL")
-    waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
-    bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
-    country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
-
-    query = f"""
-        SELECT
-            {fingerprint_col} AS tls_fingerprint,
-            COUNT(*) AS requests,
-            mode({country_col}) AS top_country,
-            {waf_col} AS matched_waf_rules_count,
-            ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
-            MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
-        FROM {table_name}
-        {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
-        GROUP BY tls_fingerprint
-        ORDER BY requests DESC
-        LIMIT 50
-    """
-
-    data = []
-    with track_query(ctx.con, query, params, "threat_intel") as cursor:
-        for row in cursor.fetchall():
-            data.append(
-                ThreatIntelItem(
-                    tls_fingerprint=row[0],
-                    requests=row[1],
-                    top_country=row[2] or "Unknown",
-                    matched_waf_rules_count=row[3],
-                    bot_percentage=row[4] or 0.0,
-                    is_anonymized_proxy=bool(row[5]),
-                )
+    def _run_threat_intel(con) -> list[ThreatIntelItem]:
+        return [
+            ThreatIntelItem(
+                tls_fingerprint=row[0],
+                requests=row[1],
+                top_country=row[2] or "Unknown",
+                matched_waf_rules_count=row[3],
+                bot_percentage=row[4] or 0.0,
+                is_anonymized_proxy=bool(row[5]),
             )
+            for row in repo.get_threat_intel_rows(con, ctx.source, table_name, resolved_start, resolved_end)
+        ]
 
+    data = execute_with_stale_view_retry(ctx.con, ctx.source, _run_threat_intel)
     return ThreatIntelListResponse.with_telemetry(data=data)

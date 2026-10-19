@@ -7,7 +7,8 @@ import * as maplibregl from 'maplibre-gl'
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { Shield, Maximize2 } from 'lucide-react'
-import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { observeMapResize } from '@/components/Map/useMapResize'
 import { PopLabel } from '@/components/PopLabel'
 import {
   Dialog,
@@ -16,9 +17,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import type { ShieldingRowInput } from '@/app/network/shielding-rows'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
+import { keyByOccurrence } from '@/lib/utils'
 interface ShieldingMapProps {
-  rows: any[]
+  rows: ShieldingRowInput[]
   isLoading?: boolean
   edgeOnly?: boolean
   /** Backend computed the analysis but the handler errored (M2 sentinel). */
@@ -36,7 +41,7 @@ interface ShieldingMapProps {
 interface TooltipInfo {
   clientX: number
   clientY: number
-  props: Record<string, any>
+  props: Record<string, unknown>
 }
 
 /**
@@ -44,7 +49,7 @@ interface TooltipInfo {
  * Wrapping MapLibre `mousemove` handlers caps the per-frame re-render
  * cost to display refresh rate while preserving the latest position.
  */
-export function rafThrottle<TArgs extends any[]>(fn: (...args: TArgs) => void) {
+export function rafThrottle<TArgs extends unknown[]>(fn: (...args: TArgs) => void) {
   let queued = false
   let lastArgs: TArgs | null = null
   return (...args: TArgs) => {
@@ -104,14 +109,14 @@ export function greatCirclePoints(
   return pts
 }
 
-export function efficiencyColor(ratio: number | null): string {
+export function efficiencyColor(ratio: number | null | undefined): string {
   // A negative ratio (transit delta < 0 — possible on sparse routes or with
   // clock skew) is "no meaningful efficiency", NOT "excellent": treat it like
   // null/indigo rather than letting `ratio < 1.5` paint it green. (L5)
   if (ratio == null || ratio < 0) return '#6366f1'
   if (ratio < 1.5) return '#22c55e'
   if (ratio < 3.0) return '#eab308'
-  return '#ef4444'
+  return CHART_COLORS.danger
 }
 
 export function lineWidth(requests: number): number {
@@ -139,8 +144,8 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
       className="bg-popover text-popover-foreground border border-border rounded-lg shadow-xl px-3 py-2.5 font-sans min-w-[180px]"
     >
       <div className="font-semibold text-xs leading-tight">
-        <PopLabel code={props.edge_pop} /> <span className="text-muted-foreground">→</span>{' '}
-        <PopLabel code={props.shield_pop} className="text-purple-500" />
+        <PopLabel code={String(props.edge_pop ?? '')} /> <span className="text-muted-foreground">→</span>{' '}
+        <PopLabel code={String(props.shield_pop ?? '')} className="text-purple-500" />
       </div>
       <div className="mt-2 space-y-1">
         {/* These percentiles are the edge→shield transit delta (E→S), NOT a
@@ -148,7 +153,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
             so the two surfaces don't disagree. (L4) */}
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">Requests</span>
-          <span className="text-[11px] font-semibold tabular-nums">{Number(props.requests).toLocaleString()}</span>
+          <span className="text-[11px] font-semibold tabular-nums">{formatCount(Number(props.requests))}</span>
         </div>
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">P50 (E→S)</span>
@@ -165,7 +170,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
         {props.distance_km != null && (
           <div className="flex justify-between gap-4">
             <span className="text-[11px] text-muted-foreground">Distance</span>
-            <span className="text-[11px] font-semibold tabular-nums">{Number(props.distance_km).toLocaleString()}km</span>
+            <span className="text-[11px] font-semibold tabular-nums">{formatCount(Number(props.distance_km))}km</span>
           </div>
         )}
         {props.light_speed_rtt_ms != null && (
@@ -181,7 +186,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
               className="text-[11px] font-semibold tabular-nums"
               // Low-sample routes don't get an efficiency colour — the ratio is
               // noise below the flag floor, so render it neutral. (low-sample gating)
-              style={{ color: lowSample ? '#94a3b8' : efficiencyColor(Number(props.efficiency_ratio)) }}
+              style={{ color: lowSample ? CHART_COLORS.neutral : efficiencyColor(Number(props.efficiency_ratio)) }}
             >
               {Number(props.efficiency_ratio).toFixed(1)}× light speed
             </span>
@@ -213,7 +218,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
 
 // ── GeoJSON builders ──────────────────────────────────────────────────────────
 
-export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildArcFeatures(rows: readonly ShieldingRowInput[]): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
     if (
@@ -246,15 +251,15 @@ export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
         // grey arc instead of an efficiency colour so a quiet route can't read
         // as a red "problem". The route stays on the map for visibility; it
         // just isn't colour-graded or anomaly-flagged. (low-sample gating)
-        color: row.low_sample ? '#94a3b8' : efficiencyColor(row.efficiency_ratio),
-        line_width: lineWidth(row.requests),
+        color: row.low_sample ? CHART_COLORS.neutral : efficiencyColor(row.efficiency_ratio),
+        line_width: lineWidth(row.requests ?? 0),
       },
     })
   }
   return { type: 'FeatureCollection', features }
 }
 
-export function buildDotFeatures(rows: any[]): GeoJSON.FeatureCollection {
+export function buildDotFeatures(rows: readonly ShieldingRowInput[]): GeoJSON.FeatureCollection {
   const seen = new Set<string>()
   const features: GeoJSON.Feature[] = []
   for (const row of rows) {
@@ -292,10 +297,6 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const isDarkRef = useRef(false)
-  // rowsRef always holds the latest rows so the load callback never reads stale data
-  const rowsRef = useRef<any[]>(rows)
-  rowsRef.current = rows
-
   const [mapReady, setMapReady] = useState(false)
   const [tooltip, setTooltip] = useState<TooltipInfo | null>(null)
   // Fullscreen "expand" dialog — a bigger interactive globe of the same arcs.
@@ -324,31 +325,15 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
 
     if (!map.current) {
       try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.current = new maplibregl.Map({
-        container: mapContainer.current,
+      // Default to a 3D globe: edge→shield arcs are great-circle paths
+      // that wrap the planet, and on a flat Mercator map a long route
+      // reads as a misleading straight slash across the world. On a globe
+      // the same arc curves naturally over the surface. The GlobeControl
+      // below lets the operator flip back to flat Mercator at will.
+      map.current = createBaseMap(maplibregl, mapContainer.current, {
         renderWorldCopies: true,
-        preserveDrawingBuffer: true,
-        style: {
-          version: 8,
-          // Default to a 3D globe: edge→shield arcs are great-circle paths
-          // that wrap the planet, and on a flat Mercator map a long route
-          // reads as a misleading straight slash across the world. On a globe
-          // the same arc curves naturally over the surface. The GlobeControl
-          // below lets the operator flip back to flat Mercator at will.
-          projection: { type: 'globe' },
-          sources: {},
-          layers: [
-            {
-              id: 'background',
-              type: 'background',
-              paint: { 'background-color': 'transparent' }
-            }
-          ]
-        },
-        center: [0, 20],
         zoom: 1,
-        interactive: true,
+        globe: true,
         // The inline card sits mid-page, so a bare mousewheel would zoom the
         // map and swallow the page scroll. Cooperative gestures make a plain
         // wheel scroll the PAGE (with a brief "use ⌘/Ctrl + scroll to zoom"
@@ -356,9 +341,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         // buttons. In the fullscreen dialog there's nothing to scroll behind
         // it, so let a bare wheel zoom the globe directly.
         cooperativeGestures: !fillHeight,
-      } as any)
-
-      map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
+      })
       // Globe ⇄ Mercator toggle button (MapLibre v5 built-in), stacked under
       // the zoom/compass control in the same corner.
       map.current.addControl(new maplibregl.GlobeControl(), 'top-right')
@@ -366,10 +349,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
       map.current.on('load', () => {
         if (!map.current) return
 
-        if (mapContainer.current) {
-          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-            .forEach(el => el.setAttribute('tabindex', '-1'))
-        }
+        removeMapTabStops(mapContainer.current)
 
         map.current.addSource('arcs', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
         map.current.addSource('dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
@@ -414,7 +394,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           source: 'arcs',
           filter: ['==', ['get', 'anomaly_static'], true],
           paint: {
-            'line-color': '#ef4444',
+            'line-color': CHART_COLORS.danger,
             'line-width': ['+', ['get', 'line_width'], 1.5],
             'line-opacity': 0.95,
             'line-dasharray': [2, 2],
@@ -429,7 +409,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           filter: ['==', ['get', 'role'], 'edge'],
           paint: {
             'circle-radius': 5,
-            'circle-color': '#3b82f6',
+            'circle-color': CHART_COLORS.info,
             'circle-stroke-width': 1.5,
             'circle-stroke-color': isDarkRef.current ? '#18181b' : '#ffffff',
           }
@@ -453,12 +433,12 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         map.current.on('mouseenter', 'arc-lines', (e) => {
           if (!e.features?.length || !map.current) return
           map.current.getCanvas().style.cursor = 'pointer'
-          const props = e.features[0].properties as Record<string, any>
+          const props: Record<string, unknown> = e.features[0].properties ?? {}
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         })
         map.current.on('mousemove', 'arc-lines', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
           if (!e.features?.length) return
-          const props = e.features[0].properties as Record<string, any>
+          const props: Record<string, unknown> = e.features[0].properties ?? {}
           setTooltip({ clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY, props })
         }))
         map.current.on('mouseleave', 'arc-lines', () => {
@@ -473,21 +453,15 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         // table below still renders the data; show a placeholder instead of
         // throwing into the route error boundary.
         map.current = null
-        // Error-recovery path only: fires at most once and never on a normal
-        // render, so the "cascading renders" concern this rule guards against
-        // doesn't apply (same try/catch shape as ImpossibleDistanceModal).
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setMapError(true)
+        // Reported from a microtask: MapLibre's failure is an external-system event, not render state.
+        queueMicrotask(() => setMapError(true))
       }
     }
 
-    const resizeObserver = new ResizeObserver(() => {
-      map.current?.resize()
-    })
-    resizeObserver.observe(mapContainer.current)
+    const stopResizeObserver = observeMapResize(mapContainer.current, () => map.current)
 
     return () => {
-      resizeObserver.disconnect()
+      stopResizeObserver()
       map.current?.remove()
       map.current = null
       setMapReady(false)
@@ -586,7 +560,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
       return 'Shielding map showing edge-POP to shield-POP paths. No paths available.'
     }
     const topThree = sortedRows.slice(0, 3)
-      .map(r => `${r.edge_pop} to ${r.shield_pop} ${r.requests?.toLocaleString() ?? '0'} requests`)
+      .map(r => `${r.edge_pop} to ${r.shield_pop} ${formatCountMaybe(r.requests) ?? '0'} requests`)
       .join(', ')
     return `Shielding map of ${sortedRows.length} edge-to-shield paths. Top routes: ${topThree}.`
   }, [sortedRows])
@@ -694,15 +668,15 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           </tr>
         </thead>
         <tbody>
-          {a11yRows.map((r, i) => (
-            <tr key={`${r.edge_pop}-${r.shield_pop}-${i}`}>
+          {keyByOccurrence(a11yRows, (row) => `${row.edge_pop}-${row.shield_pop}`).map(({ key, item: r }) => (
+            <tr key={key}>
               <td><PopLabel code={r.edge_pop} /></td>
               <td><PopLabel code={r.shield_pop} /></td>
-              <td>{(r.requests ?? 0).toLocaleString()}{r.low_sample ? ' (low sample)' : ''}</td>
+              <td>{formatCount(r.requests ?? 0)}{r.low_sample ? ' (low sample)' : ''}</td>
               <td>{r.p50_ms != null ? r.p50_ms.toFixed(0) : 'n/a'}</td>
               <td>{r.p95_ms != null ? r.p95_ms.toFixed(0) : 'n/a'}</td>
               <td>{r.p99_ms != null ? r.p99_ms.toFixed(0) : 'n/a'}</td>
-              <td>{r.distance_km != null ? r.distance_km.toLocaleString() : 'n/a'}</td>
+              <td>{r.distance_km != null ? formatCount(r.distance_km) : 'n/a'}</td>
               <td>{r.light_speed_rtt_ms != null ? r.light_speed_rtt_ms.toFixed(1) : 'n/a'}</td>
               <td>{r.efficiency_ratio != null ? r.efficiency_ratio.toFixed(2) : 'n/a'}</td>
               <td>{r.anomaly_static ? 'yes' : 'no'}</td>

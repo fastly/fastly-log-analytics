@@ -5,6 +5,10 @@ import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { components } from "@/types/api.generated";
 
 export type ProvisionService = components["schemas"]["ProvisionService"];
+export type LakeInfo = components["schemas"]["ProvisionLakeInfoResponse"];
+export type LogFieldsCatalog = components["schemas"]["LogFieldsCatalogResponse"];
+type LogFieldsConfig = components["schemas"]["LogFieldsConfig"];
+type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
 
 export const WIZARD_DRAFT_VERSION = 1;
 
@@ -30,6 +34,9 @@ export type FosStatus = "idle" | "checking" | "success" | "error";
 export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error";
 
 export type JoinPhase = "form" | "connecting" | "importing" | "done";
+
+export const ANALYST_PATH_A_UNSUPPORTED_REASON =
+  "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
 
 export interface TokenInfo {
   id: string;
@@ -58,15 +65,18 @@ export interface ProvisionConfig {
   delete_after: boolean;
   commit_interval_mins: number;
   enable_cron_compact: boolean;
-  log_fields: any;
+  log_fields: LogFieldsConfig;
   ngwaf_workspace_id: string;
   cmcd_enabled: boolean;
   cmcd_mode: string;
   cmcd_version: number;
   logging_enabled: boolean;
   rum_enabled: boolean;
+  rum_log_period: number;
   log_retention_days: number;
   rum_retention_days: number;
+  cache_retention_days: number;
+  rollup_retention_months: number;
   rum_custom_condition: string;
   // Pinned Faro Web SDK version chosen in the RUM version picker
   // (StorageStep). null = unpinned — the backend serves whatever is
@@ -86,6 +96,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   edge_only: true,
   custom_condition: "",
   log_period: 60,
+  rum_log_period: 300,
   cdn_service_name: "",
   cdn_prefix: "",
   cdn_shield: "iad-va-us",
@@ -95,7 +106,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   delete_after: true,
   commit_interval_mins: 5,
   enable_cron_compact: true,
-  log_fields: { groups: [], field_overrides: {} } as any,
+  log_fields: { groups: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
   cmcd_mode: "query_string",
@@ -104,6 +115,8 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_enabled: false,
   log_retention_days: 30,
   rum_retention_days: 30,
+  cache_retention_days: 14,
+  rollup_retention_months: 12,
   rum_custom_condition: "",
   faro_version: null,
 };
@@ -214,6 +227,8 @@ export const PERIOD_LABELS: Record<string, string> = {
   "60": "1 minute",
   "120": "2 minutes",
   "300": "5 minutes",
+  "600": "10 minutes",
+  "900": "15 minutes",
 };
 
 export interface ProvisionWizardProps {
@@ -268,7 +283,9 @@ export interface WizardState {
   ngwafDebugRaw: string;
 
   // Analyst Flow
-  lakeInfo: any;
+  analystPathASupported: boolean;
+  analystPathAReason: string | null;
+  lakeInfo: LakeInfo | null;
   isAnalyzing: boolean;
   importMode: "all" | "range";
   setImportMode: (m: "all" | "range") => void;
@@ -295,7 +312,7 @@ export interface WizardState {
   setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
 
   // Catalog
-  catalog: any;
+  catalog: LogFieldsCatalog | undefined;
   isLoadingCatalog: boolean;
 
   // Field helpers
@@ -311,14 +328,14 @@ export interface WizardState {
   estimatedBytes: number;
 
   // Services list
-  servicesData: any;
+  servicesData: ProvisionService[] | undefined;
   servicesError: Error | null;
   isLoadingServices: boolean;
-  filteredServices: any[];
+  filteredServices: ProvisionService[];
 
   // Handlers
   handleTokenSubmit: () => Promise<void>;
-  validateMutation: ReturnType<typeof useMutation<any, any, string>>;
+  validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>;
   handleServiceSelect: (service: ProvisionService) => void;
   handleCheckFos: (vals?: {
     bucket?: string;

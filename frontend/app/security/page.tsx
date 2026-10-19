@@ -27,13 +27,10 @@ import SecurityClient from './_sections/SecurityClient'
 //                    silently replaces that wrong seed's data with no loading
 //                    state (keepPreviousData) — a visible wrong-service flash.
 //   - rangeToken   = '24h'  (no ?range= → filterStore.relativeRange null)
-//   - anchor       = quantizeAnchor(snapped-end ?? now) on the 60s grid — snaps to
-//                    bootstrap.log_extents when the service's latest log is >15min
-//                    stale (lib/log-extents-snap.ts, shared with FilterBar's
-//                    client-side autoSetRange decision); otherwise just `now`.
-//                    Divergence: the rare minute-boundary straddle, plus a rare
-//                    15-minute-staleness-boundary straddle — both self-heal via
-//                    one client refetch, never a leak/crash.
+//   - anchor       = quantizeAnchor(now) on the 60s grid (the stale-latest-log
+//                    snap to bootstrap.log_extents was removed). Divergence: the
+//                    rare minute-boundary straddle, which self-heals via one
+//                    client refetch, never a leak/crash.
 //   - filterPayload= {}      (no filters on a cold load)
 //   - bucketSeconds= 3600    (default 24h span → "1 hour" → INTERVAL_SECONDS)
 // React Query hashes keys structurally, so an equal {} match.
@@ -62,26 +59,23 @@ export default async function SecurityPage({
     firstParam(params.service) ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   return (
     <Suspense fallback={<SecurityLoading />}>
-      <SecurityPageContent serviceId={serviceId} logExtents={logExtents} />
+      <SecurityPageContent serviceId={serviceId} />
     </Suspense>
   )
 }
 
 async function SecurityPageContent({
   serviceId,
-  logExtents,
 }: {
   serviceId: string | undefined
-  logExtents: unknown
 }) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveSecurityDefaultKey + fetchSecurityServerSide both floor it).
   const now = new Date()
-  const seed = await fetchSecurityServerSide(serviceId, now, logExtents)
+  const seed = await fetchSecurityServerSide(serviceId, now)
 
   const dehydratedState = seed
     ? seedDehydratedState(

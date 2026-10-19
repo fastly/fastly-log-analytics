@@ -1,8 +1,8 @@
 .git
 .venv
-__pycache__
-*.pyc
-*.pyo
+**/__pycache__
+**/*.py[cod]
+*$py.class
 logs.duckdb
 cache/
 data/
@@ -11,18 +11,16 @@ node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
-frontend/types/api.generated.ts
-frontend/openapi.json
 .env
 .DS_Store
 *.duckdb*
 .claude/
 
 # Test / lint caches
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.coverage
 htmlcov/
 *.log
 
@@ -42,3 +40,5 @@ docs/
 # IDE
 .vscode/
 .idea/
+.env*
+frontend/.env*

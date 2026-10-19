@@ -14,7 +14,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import uuid
 from datetime import UTC, datetime, timedelta
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
@@ -22,7 +26,10 @@ from ._common import (
     _build_copy_query,
     _build_ip_spread_select_query,
     _build_virtual_field_copy_query,
+    _day_bundled_root,
+    _day_rollups_root,
     _get_fields,
+    _hour_bundled_root,
     _ip_spread_root,
     _is_safe_ident,
     _load_markers,
@@ -400,11 +407,31 @@ def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = N
     _save_markers(source, markers)
 
 
+def _bundle_metadata(path: str) -> pq.FileMetaData | None:
+    """Return readable metadata for a valid all-fields bundle."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        metadata = pq.read_metadata(path)
+    except (OSError, ValueError, pa.ArrowException):
+        return None
+    if not {"field", "value", "count"}.issubset(metadata.schema.names):
+        return None
+    return metadata
+
+
+def _bundle_has_rows(path: str) -> bool:
+    """Return whether an all-fields bundle is a non-empty data bundle."""
+    metadata = _bundle_metadata(path)
+    return metadata is not None and metadata.num_rows > 0
+
+
 def backfill_missing_hour_bundles(
     service_id: str,
     source: dict,
     lookback_days: int = 30,
-) -> dict[str, int]:
+    max_missing_hours: int | None = None,
+) -> dict[str, int | bool]:
     """Self-heal pass: find closed hours where the iceberg view has rows
     but no ``hour_bundled/`` file exists, then rebuild per-field rollups
     + bundle for those hours.
@@ -422,6 +449,12 @@ def backfill_missing_hour_bundles(
     and runs the rebuild via the same code path the cron tick uses. Safe
     to call on every daily compaction tick — idempotent (no-op when the
     bundle tree is complete).
+
+    ``max_missing_hours`` bounds the number of non-empty hours rebuilt in one
+    pass. This lets scheduled durable-serving catch-up make incremental
+    progress without allowing one large DuckDB operation to evict the serving
+    pod. Coverage remains unverified until a later pass confirms the complete
+    lookback.
 
     Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
     "bundled": B, "stamped_empty": E}`` so callers can log a concise
@@ -441,7 +474,9 @@ def backfill_missing_hour_bundles(
         try:
             for e in os.listdir(bundled_root):
                 if e.startswith("hour="):
-                    existing.add(e[len("hour=") :])
+                    hour = e[len("hour=") :]
+                    if _bundle_has_rows(os.path.join(bundled_root, e, "all_fields.parquet")):
+                        existing.add(hour)
         except OSError:
             pass
 
@@ -449,28 +484,54 @@ def backfill_missing_hour_bundles(
     end_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     start_dt = end_dt - timedelta(days=lookback_days)
 
+    def _coverage_complete() -> bool:
+        cur = start_dt
+        while cur < end_dt:
+            hour = cur.strftime("%Y-%m-%d-%H")
+            cur += timedelta(hours=1)
+            if hour >= active:
+                break
+            if _bundle_metadata(os.path.join(bundled_root, f"hour={hour}", "all_fields.parquet")) is None:
+                return False
+        return True
+
     # Discover hours with data via the iceberg view. We use the view (not
     # the per-service .duckdb file directly) so this runs concurrently
     # with uvicorn's RW connection on that file — backed by a fresh
     # in-memory DuckDB connection that holds no persistent state.
     con = _ddb.connect(":memory:")
+    con.execute("SET TimeZone='UTC'")
     from backend.core.duckdb import _configure_fos
 
     _configure_fos(con, source)
     try:
         update_iceberg_view(con, source)
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(source):
+            lake_row = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
+            if lake_row is None:
+                logger.warning(
+                    "[rollups] %s: backfill_missing_hour_bundles could not attach DuckLake catalog",
+                    service_id,
+                )
+                return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         # The view's actual SQL identifier is set by update_iceberg_view
         # — query through ``information_schema`` to find it rather than
         # guess (the name is derived from source["name"]/svc_name, not
         # source["service_id"]).
+        from backend.core.duckdb import _safe_table_name
+
+        view_name = _safe_table_name(source.get("name") or service_id)
         view_row = con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'logs_%' LIMIT 1"
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+            [view_name],
         ).fetchone()
         if view_row is None:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         view_name = view_row[0]
         if not _is_safe_ident(view_name):
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         try:
             rows = con.execute(
                 f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS h, COUNT(*) AS n "
@@ -480,9 +541,13 @@ def backfill_missing_hour_bundles(
             ).fetchall()
         except _ddb.Error as e:
             logger.warning("[rollups] %s: backfill_missing_hour_bundles view query failed: %s", service_id, e)
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
 
         missing = sorted(h for h, _ in rows if h < active and h not in existing)
+        if max_missing_hours is not None:
+            if max_missing_hours < 1:
+                raise ValueError("max_missing_hours must be positive")
+            missing = missing[:max_missing_hours]
 
         # Closed hours with genuinely ZERO rows can never acquire coverage
         # through the data-driven writers (the HAVING n > 0 above never
@@ -500,8 +565,13 @@ def backfill_missing_hour_bundles(
             empty_hours.append(h)
 
         if not missing and not empty_hours:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
-
+            return {
+                "missing": 0,
+                "rebuilt_fields": 0,
+                "bundled": 0,
+                "stamped_empty": 0,
+                "coverage_verified": _coverage_complete(),
+            }
         if missing:
             logger.info(
                 "[rollups] %s: backfill_missing_hour_bundles found %d hour(s) missing bundles: %s",
@@ -521,7 +591,13 @@ def backfill_missing_hour_bundles(
 
     stamped = stamp_empty_hour_sentinels(service_id, source, empty_hours)
     if not missing:
-        return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": stamped}
+        return {
+            "missing": 0,
+            "rebuilt_fields": 0,
+            "bundled": 0,
+            "stamped_empty": stamped,
+            "coverage_verified": _coverage_complete(),
+        }
 
     recompute_touched_hours(service_id, source, set(missing))
 
@@ -536,7 +612,7 @@ def backfill_missing_hour_bundles(
         try:
             for entry in os.listdir(bundled_root):
                 if entry.startswith("hour=") and entry[len("hour=") :] in missing_set:
-                    if os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet")):
+                    if _bundle_metadata(os.path.join(bundled_root, entry, "all_fields.parquet")) is not None:
                         bundled_now += 1
         except OSError:
             pass
@@ -546,6 +622,7 @@ def backfill_missing_hour_bundles(
         "rebuilt_fields": len(_get_fields(source)),
         "bundled": bundled_now,
         "stamped_empty": stamped,
+        "coverage_verified": _coverage_complete(),
     }
 
 
@@ -624,42 +701,149 @@ def backfill_missing_hour_ip_spread(
     return {"missing": len(missing), "rebuilt": len(missing)}
 
 
-def cleanup_old_rollups(service_id: str, source: dict, max_age_days: int) -> int:
-    """Delete per-hour rollup directories older than ``max_age_days``.
+def cleanup_old_rollups(
+    service_id: str,
+    source: dict,
+    max_age_days: int,
+    *,
+    hour_bundle_max_age_days: int | None = None,
+) -> int:
+    """Delete per-hour and per-day rollup directories older than retention limits.
 
     ``max_age_days <= 0`` disables cleanup (keep everything). Returns the
-    number of hour-dirs deleted. Safe to call concurrently with the
-    writers because we only ever delete hours STRICTLY older than the
-    cutoff — current and just-written hours are never candidates.
+    number of directories deleted. Safe to call concurrently with the
+    writers because we only ever delete hours/days STRICTLY older than the
+    cutoff — current and just-written hours/days are never candidates.
     """
     if max_age_days <= 0:
         return 0
-    rollup_root = _rollups_root(source)
-    if not os.path.isdir(rollup_root):
-        return 0
 
     cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).strftime("%Y-%m-%d-%H")
+    day_cutoff = cutoff[:10]
+    if hour_bundle_max_age_days and hour_bundle_max_age_days > 0:
+        hour_cutoff = (datetime.now(UTC) - timedelta(days=hour_bundle_max_age_days)).strftime("%Y-%m-%d-%H")
+    else:
+        hour_cutoff = cutoff
+
     deleted = 0
-    try:
-        for field_entry in os.listdir(rollup_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(rollup_root, field_entry)
-            for hour_entry in os.listdir(field_dir):
+
+    # 1. rollups/hour/field=*/hour=*
+    rollup_root = _rollups_root(source)
+    if os.path.isdir(rollup_root):
+        try:
+            for field_entry in os.listdir(rollup_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(rollup_root, field_entry)
+                try:
+                    for hour_entry in os.listdir(field_dir):
+                        if not hour_entry.startswith("hour="):
+                            continue
+                        hour = hour_entry[len("hour=") :]
+                        # String compare works because fixed-width YYYY-MM-DD-HH sorts lexicographically
+                        if hour < hour_cutoff:
+                            hour_dir = os.path.join(field_dir, hour_entry)
+                            try:
+                                shutil.rmtree(hour_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (hour): %s", service_id, e)
+
+    # 2. rollups/hour_ip_spread/field=*/hour=*
+    ip_spread_root = _ip_spread_root(source)
+    if os.path.isdir(ip_spread_root):
+        try:
+            for field_entry in os.listdir(ip_spread_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(ip_spread_root, field_entry)
+                try:
+                    for hour_entry in os.listdir(field_dir):
+                        if not hour_entry.startswith("hour="):
+                            continue
+                        hour = hour_entry[len("hour=") :]
+                        if hour < hour_cutoff:
+                            hour_dir = os.path.join(field_dir, hour_entry)
+                            try:
+                                shutil.rmtree(hour_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (ip_spread): %s", service_id, e)
+
+    # 3. rollups/day_bundled/day=*
+    day_bundled_root = _day_bundled_root(source)
+    if os.path.isdir(day_bundled_root):
+        try:
+            for day_entry in os.listdir(day_bundled_root):
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if day < day_cutoff:
+                    day_dir = os.path.join(day_bundled_root, day_entry)
+                    try:
+                        shutil.rmtree(day_dir)
+                        deleted += 1
+                    except OSError as e:
+                        logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day_bundled): %s", service_id, e)
+
+    # 4. rollups/day/field=*/day=* (per-field day files redundant when day_bundled exists)
+    day_root = _day_rollups_root(source)
+    if os.path.isdir(day_root):
+        try:
+            for field_entry in os.listdir(day_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(day_root, field_entry)
+                try:
+                    for day_entry in os.listdir(field_dir):
+                        if not day_entry.startswith("day="):
+                            continue
+                        day = day_entry[len("day=") :]
+                        day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
+                        has_day_bundle = os.path.isfile(day_bundle_file)
+                        if has_day_bundle or day < day_cutoff:
+                            day_dir = os.path.join(field_dir, day_entry)
+                            try:
+                                shutil.rmtree(day_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day): %s", service_id, e)
+
+    # 5. rollups/hour_bundled/hour=*
+    hour_bundled_root = _hour_bundled_root(source)
+    if os.path.isdir(hour_bundled_root):
+        try:
+            for hour_entry in os.listdir(hour_bundled_root):
                 if not hour_entry.startswith("hour="):
                     continue
                 hour = hour_entry[len("hour=") :]
-                # String compare works because the format is fixed-width
-                # YYYY-MM-DD-HH which sorts lexicographically by time.
-                if hour < cutoff:
-                    hour_dir = os.path.join(field_dir, hour_entry)
+                day = hour[:10]
+                day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
+                has_day_bundle = os.path.isfile(day_bundle_file)
+                if (has_day_bundle and hour < hour_cutoff) or hour < cutoff:
+                    hour_dir = os.path.join(hour_bundled_root, hour_entry)
                     try:
                         shutil.rmtree(hour_dir)
                         deleted += 1
                     except OSError as e:
                         logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
-    except OSError as e:
-        logger.warning("[rollups] cleanup walk failed for %s: %s", service_id, e)
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (hour_bundled): %s", service_id, e)
+
     return deleted
 
 
@@ -676,9 +860,8 @@ def _run_per_field_copy(
     PARTITION_BY (field, hour), then publishing each hour-dir under the
     per-service iceberg lock.
     """
-    import duckdb
-
     from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
 
     cache_root = _cache_dir(source)
@@ -708,7 +891,7 @@ def _run_per_field_copy(
             elif field not in cols:
                 continue
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
 
@@ -721,8 +904,8 @@ def _run_per_field_copy(
                 "(FORMAT PARQUET, PARTITION_BY (field, hour), OVERWRITE_OR_IGNORE, COMPRESSION ZSTD)"
             )
             try:
-                con.execute(query)
-            except duckdb.Error as e:
+                execute_with_stale_view_retry(con, source, lambda c: c.execute(query))
+            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
                 logger.warning("[rollups] %s: COPY failed for field=%s: %s", service_id, field, e)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue
@@ -762,11 +945,11 @@ def _run_ip_spread_per_field(
     on one field logs + continues so the rest of the fields still
     publish on the same cron tick.
     """
-    import duckdb
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
     from backend.utils.hll import HyperLogLog
 
@@ -809,8 +992,15 @@ def _run_ip_spread_per_field(
                 # eager path is the right pick. ``fetch_arrow_table``
                 # is the legacy alias of the same call and emits a
                 # DeprecationWarning under DuckDB 1.5+.
-                arrow_table = con.execute(select_sql).to_arrow_table()
-            except duckdb.Error as e:
+                #
+                # Routed through the stale-view self-heal (Trap #35) so a
+                # cold-start DuckLake detach race (``schema "lake" does
+                # not exist``) re-attaches + retries instead of dropping
+                # the field — same hop the describe path already takes.
+                arrow_table = execute_with_stale_view_retry(
+                    con, source, lambda c: c.execute(select_sql).to_arrow_table()
+                )
+            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
                 logger.warning(
                     "[rollups] %s: ip_spread SELECT failed for field=%s: %s",
                     service_id,
@@ -850,7 +1040,7 @@ def _run_ip_spread_per_field(
                 }
             )
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
             try:

@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { components } from '@/types/api.generated'
 import {
   Dialog,
   DialogContent,
@@ -25,13 +24,12 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
+import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
 // (e.g. ProvisionWizard imports it from this path).
 export { CollapsibleGroup }
 
-type ServiceConfig = components['schemas']['ServiceConfig']
-type LogFieldsConfig = components['schemas']['LogFieldsConfig']
 
 interface LogSettingsModalProps {
   service: ServiceConfig | null
@@ -102,7 +100,15 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
     }
   })
 
-  useEffect(() => {
+  // Load the saved settings into the form whenever the server data or the open state changes
+  // (adjusted during render; the conditions are read as of that change, as the effect did).
+  const [syncedFrom, setSyncedFrom] = useState<{
+    lfResponse: typeof lfResponse
+    loggingSettings: typeof loggingSettings
+    open: boolean
+  }>({ lfResponse: undefined, loggingSettings: undefined, open: false })
+  if (syncedFrom.lfResponse !== lfResponse || syncedFrom.loggingSettings !== loggingSettings || syncedFrom.open !== open) {
+    setSyncedFrom({ lfResponse, loggingSettings, open })
     if (open && status === 'idle' && !fieldsMutation.isPending && !fieldsMutation.isSuccess) {
       if (lfResponse?.log_fields) {
         setConfig({
@@ -120,7 +126,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setCmcdVersion(loggingSettings.cmcd?.version ?? 1)
       }
     }
-  }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
+  }
 
   // Reset state only when opening the modal freshly
   useEffect(() => {
@@ -139,8 +145,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         let changed = true
         while (changed) {
            changed = false;
-           (catalog?.groups || []).forEach((g: { id: string; requires?: string }) => {
-             if (nextGroups.has(g.id) && g.requires && !nextGroups.has(g.requires)) {
+           (catalog?.groups || []).forEach((g) => {
+             if (g.id != null && nextGroups.has(g.id) && g.requires && !nextGroups.has(g.requires)) {
                nextGroups.add(g.requires)
                changed = true
              }
@@ -187,7 +193,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       if (allActive) {
         const otherActivePresetsGroups = new Set<string>()
         if (catalog?.presets) {
-          Object.entries(catalog.presets).forEach(([key, preset]: [string, any]) => {
+          Object.entries(catalog.presets).forEach(([key, preset]) => {
              if (preset.groups.length !== presetGroups.length || !preset.groups.every((g: string) => presetGroups.includes(g))) {
                if (isPresetActive(preset.groups)) {
                  preset.groups.forEach((g: string) => otherActivePresetsGroups.add(g))
@@ -199,8 +205,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         presetGroups.forEach(g => {
           if (!otherActivePresetsGroups.has(g)) {
             nextGroups.delete(g);
-            (catalog?.groups || []).forEach((cg: any) => {
-               if (cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
+            (catalog?.groups || []).forEach((cg) => {
+               if (cg.id != null && cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
                  nextGroups.delete(cg.id)
                }
             })
@@ -212,8 +218,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         let changed = true
         while (changed) {
            changed = false;
-           (catalog?.groups || []).forEach((cg: any) => {
-             if (nextGroups.has(cg.id) && cg.requires && !nextGroups.has(cg.requires)) {
+           (catalog?.groups || []).forEach((cg) => {
+             if (cg.id != null && nextGroups.has(cg.id) && cg.requires && !nextGroups.has(cg.requires)) {
                nextGroups.add(cg.requires)
                changed = true
              }

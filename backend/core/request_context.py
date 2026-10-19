@@ -33,8 +33,10 @@ insights/views/bootstrap, then defer admin/provision/share to Phase 5.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import Depends, HTTPException, Request
 
@@ -44,7 +46,19 @@ from backend.deps import _ConnectionHolder, _resolve_source_or_400, get_service_
 if TYPE_CHECKING:
     import duckdb
 
+    from backend.high_scale.registry import HighScaleService
     from backend.utils.remote_access import TimeBounds
+
+logger = logging.getLogger(__name__)
+
+
+class RangeWindowRequest(Protocol):
+    """Structural type for request bodies that carry a (relative or absolute) window."""
+
+    range_token: str | None
+    anchor: str | None
+    start_time: str | None
+    end_time: str | None
 
 
 @dataclass(slots=True)
@@ -57,7 +71,6 @@ class RequestContext:
 
     service_id: str
     source: dict
-    con: duckdb.DuckDBPyConnection
     telemetry: RequestTelemetry
     analyst_session: object | None = None
     read_only: bool = True
@@ -67,6 +80,66 @@ class RequestContext:
     # only for RequestContexts built outside the dependency (e.g. tests),
     # where ``clamp`` falls back to an open window.
     time_bounds: TimeBounds | None = None
+    _holder: _ConnectionHolder | None = field(default=None, repr=False, compare=False)
+    _con_override: duckdb.DuckDBPyConnection | None = field(default=None, repr=False)
+
+    @property
+    def con(self) -> duckdb.DuckDBPyConnection:
+        """Lazy-loaded DuckDB connection. Acquired on first access so high-scale
+        ClickHouse queries don't check out DuckDB pool slots and saturate them."""
+        if self._con_override is not None:
+            return self._con_override
+        if self._holder is not None:
+            if self._holder.con is None:
+                return self._holder.__enter__()
+            return self._holder.con
+        raise RuntimeError("RequestContext has no connection")
+
+    async def prewarm_con(self) -> None:
+        """Acquire ``self.con`` in a worker thread so the loop never blocks.
+
+        The first ``con`` access does a BLOCKING pool checkout; evaluating it
+        as an argument inside an ``async def`` handler runs it ON the event
+        loop (GCE 2026-10-02 wedge). The await is cancellation-guarded: a
+        bare cancelled ``to_thread`` leaves the checkout running detached, so
+        the request-context ``finally`` races it and strands a pool slot.
+        """
+        task = asyncio.create_task(asyncio.to_thread(lambda: self.con))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    @property
+    def high_scale(self) -> HighScaleService | None:
+        """The high-scale (ClickHouse) service registered for this request's service, if any.
+
+        The registry import is deferred so handlers on the standard DuckDB path never load
+        the ClickHouse stack; each handler still lazily imports its own ``hs_*`` function.
+        """
+        from backend.high_scale.registry import get_high_scale_service_registry
+
+        return get_high_scale_service_registry().resolve(self.service_id)
+
+    def resolve_window(self, req: RangeWindowRequest) -> tuple[str | None, str | None]:
+        """Resolve a request's scan window, then clamp it to the invite ceiling.
+
+        Keyed path: a recognized ``range_token`` makes the SERVER resolve the
+        window from (token, anchor), ignoring FE-supplied absolute bounds so a
+        crafted body can't widen the scan. Legacy path clamps the supplied
+        ``start_time``/``end_time``. The clamp always runs AFTER the resolve so
+        it is the single enforcement point: an analyst can't widen past their
+        invite by picking ``"30d"``.
+        """
+        from backend import config as svcconfig
+        from backend.utils.time_window import is_valid_range_token, resolve_window
+
+        if is_valid_range_token(req.range_token):
+            earliest_log_at = svcconfig.get_status(self.source["name"]).get("earliest_log_at")
+            resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
+            return self.clamp(resolved_start, resolved_end)
+        return self.clamp(req.start_time, req.end_time)
 
     def clamp(self, start: str | None, end: str | None) -> tuple[str | None, str | None]:
         """Clamp a request's start/end against this request's analyst window.
@@ -80,11 +153,6 @@ class RequestContext:
 
         tb = self.time_bounds if self.time_bounds is not None else TimeBounds()
         return clamp_or_400(tb, start, end, analyst_session=self.analyst_session)
-
-    # The connection holder is kept on the context so the dependency
-    # generator can hand it back to the pool on request end. Not part
-    # of the public surface; routes should never touch it.
-    _holder: _ConnectionHolder | None = field(default=None, repr=False, compare=False)
 
 
 def _enforce_service_access(
@@ -150,9 +218,18 @@ def build_request_context(
 
     # Build the RequestTelemetry root span. Cheap when the SDK is not
     # initialised (test mode); ~100ns when it is.
+    #
+    # Use the matched route TEMPLATE, not request.url.path — several routes
+    # embed service_id in the path (e.g. /api/services/{service_id}/scoring/
+    # dashboard), and the template is what keeps span-name cardinality
+    # bounded when a span-metrics processor (e.g. Tempo's) turns span names
+    # into per-route RED metrics. Depends() runs after routing, so the match
+    # is always present outside of 404s.
+    route = request.scope.get("route")
+    route_template = getattr(route, "path", None) or request.url.path
     telemetry = RequestTelemetry(
         request_method=request.method,
-        request_path=request.url.path,
+        request_path=route_template,
     )
     telemetry.start_request()
 
@@ -163,28 +240,33 @@ def build_request_context(
     from backend.utils.remote_access import get_analyst_time_bounds
 
     time_bounds = get_analyst_time_bounds(request)
+    ctx = RequestContext(
+        service_id=resolved_sid,
+        source=source,
+        telemetry=telemetry,
+        analyst_session=analyst_session,
+        read_only=True,
+        time_bounds=time_bounds,
+        _holder=holder,
+    )
+    # Park the context on request.state so downstream non-route
+    # code (middleware, error handlers) can read it.
+    request.state.ctx = ctx
+    import sys
+
     try:
-        with holder as con:
-            ctx = RequestContext(
-                service_id=resolved_sid,
-                source=source,
-                con=con,
-                telemetry=telemetry,
-                analyst_session=analyst_session,
-                read_only=True,
-                time_bounds=time_bounds,
-                _holder=holder,
-            )
-            # Park the context on request.state so downstream non-route
-            # code (middleware, error handlers) can read it.
-            request.state.ctx = ctx
-            try:
-                yield ctx
-            finally:
-                telemetry.end_request()
+        yield ctx
     except HTTPException:
         telemetry.end_request(status_code=400)
         raise
+    finally:
+        import sys
+
+        try:
+            holder.__exit__(*sys.exc_info())
+        except Exception:
+            logger.debug("build_request_context: holder.__exit__ failed (ignored)", exc_info=True)
+        telemetry.end_request()
     # Note on Live Query Monitor attribution: the attribution ContextVar is
     # set/restored by ``telemetry_middleware`` in backend/main.py, NOT here.
     # FastAPI runs sync deps and the route handler in separate

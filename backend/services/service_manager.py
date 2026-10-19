@@ -138,6 +138,9 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
     configs = svcconfig.list_configs()
     name_map = svcconfig.refresh_all_service_names(configs)
 
+    hs_enabled = os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    hs_service_ids = {s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip()}
+
     result = []
     for cfg in configs:
         sid = cfg.get("service_id", "")
@@ -156,12 +159,24 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
         cron_stats = cached_status.get("cron_stats", {})
         log_row_count = cached_status.get("local_rows", 0)
 
+        rum_val = cfg.get("rum")
+        rum_dict: dict[str, Any] = rum_val if isinstance(rum_val, dict) else {}
+        rum_lp = rum_dict.get("log_period")
+        if rum_lp is None:
+            rum_lp = cfg.get("rum_log_period")
+        if rum_lp is not None:
+            try:
+                rum_lp = int(rum_lp)
+            except (ValueError, TypeError):
+                rum_lp = None
+
         result.append(
             {
                 "service_id": sid,
                 "name": name,
                 "access_level": cfg.get("access_level", "read_write"),
                 "storage_mode": cfg.get("storage_mode", "cloud"),
+                "is_high_scale": hs_enabled and (not hs_service_ids or sid in hs_service_ids),
                 "log_period": cfg.get("log_period", 60),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),
@@ -172,6 +187,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "cache_file_count": cache_file_count,
                 "log_row_count": log_row_count,
                 "is_active": sid == active_service_id,
+                "analyst_path_a_supported": not svcconfig.is_high_scale_mode(src_dict),
                 "cron_stats": cron_stats,
                 "status": cached_status,
                 "cron_sync": prov.get(
@@ -192,7 +208,9 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 ),
                 "ngwaf_workspace_id": cfg.get("ngwaf_workspace_id"),
                 "logging_enabled": cfg.get("logging_enabled", True),
-                "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
+                "rum_enabled": svcconfig.is_rum_enabled(cfg),
+                "rum": cfg.get("rum"),
+                "rum_log_period": rum_lp,
                 "cmcd_enabled": bool((cfg.get("cmcd") or {}).get("enabled")),
             }
         )

@@ -27,6 +27,7 @@ import { SaveViewDialog } from './SaveViewDialog'
 import { ViewSelector } from './ViewSelector'
 
 import { useShallow } from 'zustand/react/shallow'
+import { useMounted } from '@/hooks/useMounted'
 
 // First-element of every React Query key whose results depend on the
 // global start/end time range. Used by the active-pill loading dot's
@@ -42,7 +43,7 @@ const TIME_BOUND_QUERY_KEYS = new Set([
 
 export const FilterBar = React.memo(function FilterBar() {
   const pathname = usePathname()
-  const [mounted, setMounted] = React.useState(false)
+  const mounted = useMounted()
   // Selector form so unrelated serviceStore mutations (setServices,
   // setInitialized) don't trigger FilterBar re-renders.
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -121,10 +122,6 @@ export const FilterBar = React.memo(function FilterBar() {
       }
     })
   }, [compareMode, toggleCompareMode])
-
-  React.useEffect(() => {
-    setMounted(true)
-  }, [])
 
   function fmtBotId(id: string): string {
     return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -269,7 +266,7 @@ export const FilterBar = React.memo(function FilterBar() {
   // URL-hydrated filter pills / compare row — stay gated on `mounted` so they
   // appear only after hydration, within already-reserved fixed-height boxes.
   return (
-    <div className="flex flex-col gap-1.5 px-4 py-2 border-b bg-background sticky top-0 z-10 shrink-0">
+    <div data-testid="filter-bar" className="flex flex-col gap-1.5 px-4 py-2 border-b bg-background sticky top-0 z-10 shrink-0">
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-0.5 border rounded-md p-0.5 bg-muted/20 h-10 sm:h-8">
           {quickPresets.map((preset) => {

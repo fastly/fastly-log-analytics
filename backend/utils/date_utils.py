@@ -15,6 +15,65 @@ def parse_iso_utc(s: str | None) -> datetime | None:
             return None
 
 
+def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime] | None:
+    """Parse a ``(start, end)`` ISO pair to UTC datetimes, or ``None`` when either is missing/unparseable
+    or the window is empty/inverted (``end <= start``)."""
+    st = parse_iso_utc(start)
+    et = parse_iso_utc(end)
+    if st is None or et is None or et <= st:
+        return None
+    return st, et
+
+
+def parse_hour_key_strict(s: str) -> datetime:
+    """Parse a ``YYYY-MM-DD-HH`` partition key to a tz-aware UTC datetime.
+
+    Raises ``ValueError`` on malformed input (same contract as the raw
+    ``datetime.strptime`` it replaces).
+    """
+    return datetime.strptime(s, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+
+def parse_hour_key(s: str) -> datetime | None:
+    """Like :func:`parse_hour_key_strict` but returns ``None`` when malformed."""
+    try:
+        return parse_hour_key_strict(s)
+    except ValueError:
+        return None
+
+
+def parse_day_key_strict(s: str) -> datetime:
+    """Parse a ``YYYY-MM-DD`` partition key to midnight UTC (raises ``ValueError``)."""
+    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+
+
+def parse_day_key(s: str) -> datetime | None:
+    """Like :func:`parse_day_key_strict` but returns ``None`` when malformed."""
+    try:
+        return parse_day_key_strict(s)
+    except ValueError:
+        return None
+
+
+def floor_to_hour(dt: datetime) -> datetime:
+    """Truncate to the top of the hour, preserving tzinfo."""
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def floor_to_day(dt: datetime) -> datetime:
+    """Truncate to midnight, preserving tzinfo."""
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def ensure_utc(dt: datetime) -> datetime:
+    """Return ``dt`` as an aware UTC datetime.
+
+    Naive values are treated as UTC (DuckDB TIMESTAMP is naive-UTC); aware
+    values are converted with ``astimezone`` so the instant is preserved.
+    """
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
 def iso_z(dt: datetime) -> str:
     """Format a datetime to ISO 8601 with a Z suffix."""
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -56,7 +115,16 @@ def safe_iso(dt) -> str | None:
         if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
             s += "Z"
         return s
-    return str(dt)
+    s = str(dt).strip()
+    if not s:
+        return None
+    if " " in s:
+        s = s.replace(" ", "T")
+        if not s.endswith("Z") and "+" not in s:
+            s += "Z"
+    elif "T" in s and not s.endswith("Z") and "+" not in s:
+        s += "Z"
+    return s
 
 
 def parse_window_str_to_dt(s: str) -> datetime:

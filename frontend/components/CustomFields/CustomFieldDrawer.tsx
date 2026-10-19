@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useDebounce } from '@/hooks/useDebounce'
+import { oneOf } from '@/lib/narrow'
 import {
   Dialog,
   DialogContent,
@@ -33,7 +34,12 @@ interface CustomFieldDrawerProps {
   onSave: () => void
 }
 
-const DEFAULT_FIELD: Omit<CustomField, "created_at" | "updated_at"> = {
+type FormState = Omit<CustomField, "created_at" | "updated_at">
+
+const DUCKDB_TYPES: readonly CustomField['duckdb_type'][] = ['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']
+const VALUE_TYPES: readonly CustomField['value_type'][] = ['string', 'numeric', 'boolean', 'ip', 'url']
+
+const DEFAULT_FIELD: FormState = {
   name: "",
   label: "",
   description: "",
@@ -52,7 +58,7 @@ const DEFAULT_FIELD: Omit<CustomField, "created_at" | "updated_at"> = {
 
 export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave }: CustomFieldDrawerProps) {
   const isEditing = !!field
-  const [formData, setFormData] = useState<Omit<CustomField, "created_at" | "updated_at">>(DEFAULT_FIELD)
+  const [formData, setFormData] = useState<FormState>(DEFAULT_FIELD)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [lintResult, setLintResult] = useState<VclLintResult | null>(null)
   const [isLinting, setIsLinting] = useState(false)
@@ -78,7 +84,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
       try {
         const result = await customFieldsApi.validateCustomVcl(serviceId, {
           vcl_log_expression: debouncedVcl,
-          collection_stage: debouncedStage as any
+          collection_stage: debouncedStage
         })
         if (active) {
           setLintResult(result)
@@ -112,23 +118,21 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (isEditing) {
-        return customFieldsApi.updateCustomField(serviceId, field!.name, formData as any)
+        return customFieldsApi.updateCustomField(serviceId, field!.name, formData)
       } else {
         return customFieldsApi.createCustomField(serviceId, formData)
       }
     },
     onSuccess: () => onSave(),
-    onError: (error: any) => setValidationError(error.message || "Failed to save field")
+    onError: (error: Error) => setValidationError(error.message || "Failed to save field")
   })
 
-  // Reset form when the drawer opens or the edited field changes. The deps
-  // intentionally exclude `saveMutation` — TanStack Query's mutation object
-  // is recreated on every render, so listing it would re-fire this effect on
-  // every keystroke and clobber the user's in-progress edits. We only want
-  // to reset on the open/field transition; `saveMutation.reset()` is safe to
-  // call against the current ref each time.
-
-  useEffect(() => {
+  // Reset the form when the drawer opens or the edited field changes (adjusted during render
+  // against what was last seen). The mutation's own state is reset in the effect below — it is
+  // external to this component, so it cannot be derived.
+  const [seenDrawer, setSeenDrawer] = useState<{ open: boolean; field: typeof field }>({ open: false, field: null })
+  if (seenDrawer.open !== open || seenDrawer.field !== field) {
+    setSeenDrawer({ open, field })
     if (open) {
       setFormData(field ? {
         ...field,
@@ -137,15 +141,20 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
       setValidationError(null)
       setLintResult(null)
       setLintFetchError(null)
-      saveMutation.reset()
     }
+  }
+
+  // The deps intentionally exclude `saveMutation` — TanStack Query's mutation object is
+  // recreated on every render, so listing it would re-fire this effect on every keystroke.
+  useEffect(() => {
+    if (open) saveMutation.reset()
   }, [open, field])
 
-  const handleChange = (key: keyof CustomField, value: any) => {
+  const handleChange = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setFormData(prev => {
       const next = { ...prev, [key]: value };
       // Auto-slug label to name if not editing
-      if (!isEditing && key === 'label') {
+      if (!isEditing && key === 'label' && typeof value === 'string') {
         next.name = value
           .toLowerCase()
           .replace(/[^a-z0-9_]/g, '_')
@@ -348,7 +357,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
              <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
                  <div className="space-y-2">
                      <LabelWithInfo labelClassName="text-xs" info="The underlying DuckDB column type. VARCHAR is safest for strings, while numeric types (BIGINT, DOUBLE) save space and enable mathematical operations." label="Data Type (DuckDB)" />
-                     <Select value={formData.duckdb_type} onValueChange={v => handleChange('duckdb_type', v)}>
+                     <Select value={formData.duckdb_type} onValueChange={v => { const t = oneOf(DUCKDB_TYPES, v); if (t) handleChange('duckdb_type', t) }}>
                         <SelectTrigger className="h-8 text-xs">
                             <SelectValue />
                         </SelectTrigger>
@@ -363,7 +372,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
                  </div>
                  <div className="space-y-2">
                      <LabelWithInfo labelClassName="text-xs" info="Determines how values are formatted and filtered in the UI. For example, 'IP Address' enables CIDR range filtering." label="Value Type (UI Handling)" />
-                     <Select value={formData.value_type} onValueChange={v => handleChange('value_type', v)}>
+                     <Select value={formData.value_type} onValueChange={v => { const t = oneOf(VALUE_TYPES, v); if (t) handleChange('value_type', t) }}>
                         <SelectTrigger className="h-8 text-xs">
                             <SelectValue />
                         </SelectTrigger>

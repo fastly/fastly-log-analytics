@@ -14,8 +14,9 @@
  * exercises browser-only `URL.createObjectURL` plumbing not present in
  * jsdom. The other 5 exports are covered.
  */
+import { without } from '@/__tests__/helpers/partial'
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 
 import {
   buildHandleModalClose,
@@ -72,7 +73,7 @@ describe('runFetchTerraformPreview', () => {
   ): Parameters<typeof runFetchTerraformPreview>[0] {
     return {
       token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc' } as never,
+      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
       config: FULL_CONFIG,
       setIsFetchingTerraform: vi.fn(),
       setTerraformFiles: vi.fn(),
@@ -187,7 +188,7 @@ describe('buildHandleModalClose', () => {
     })
     const deps = makeDeps({
       status: 'done',
-      selectedService: { id: 'svc-new', name: 'new' } as never,
+      selectedService: { id: 'svc-new', name: 'new', provisioned: false },
     })
     buildHandleModalClose(deps)(false)
     expect(deps.onOpenChange).toHaveBeenCalledWith(false)
@@ -218,7 +219,7 @@ describe('runDeploy', () => {
   function makeArgs(overrides: Partial<Parameters<typeof runDeploy>[0]> = {}) {
     return {
       token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc' } as never,
+      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
       config: FULL_CONFIG,
       setIsDeploying: vi.fn(),
       start: vi.fn(),
@@ -284,7 +285,7 @@ describe('runDeploy', () => {
     const args = makeArgs({
       config: {
         ...FULL_CONFIG,
-        log_fields: { groups: ['core', 'http'] } as never,
+        log_fields: { groups: ['core', 'http'] },
       },
     })
     runDeploy(args)
@@ -294,7 +295,7 @@ describe('runDeploy', () => {
 
   it('passes log_fields=null when missing', () => {
     const args = makeArgs({
-      config: { ...FULL_CONFIG, log_fields: undefined as unknown as never },
+      config: without(FULL_CONFIG, 'log_fields') as typeof FULL_CONFIG,
     })
     runDeploy(args)
     const [, body] = (args.start as ReturnType<typeof vi.fn>).mock.calls[0]
@@ -306,6 +307,7 @@ describe('runJoin', () => {
   function makeArgs(overrides: Partial<Parameters<typeof runJoin>[0]> = {}) {
     return {
       config: FULL_CONFIG,
+      analystPathASupported: true,
       syncIntervalMins: '15',
       syncEnabled: true,
       icebergMetadataLocation: 's3://b/meta.json',
@@ -326,6 +328,16 @@ describe('runJoin', () => {
     })
     runJoin(args)
     expect(args.setIsDeploying).not.toHaveBeenCalled()
+    expect(args.start).not.toHaveBeenCalled()
+  })
+
+  it('skips unsupported independent analyst joins before starting SSE', () => {
+    const args = makeArgs({ analystPathASupported: false })
+    runJoin(args)
+    expect(args.setIsDeploying).not.toHaveBeenCalled()
+    expect(args.setJoinPhase).not.toHaveBeenCalled()
+    expect(args.setStep).not.toHaveBeenCalled()
+    expect(args.reset).not.toHaveBeenCalled()
     expect(args.start).not.toHaveBeenCalled()
   })
 
@@ -375,8 +387,8 @@ describe('runAdminIngest', () => {
   function makeArgs(overrides: Partial<Parameters<typeof runAdminIngest>[0]> = {}) {
     return {
       token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc' } as never,
-      selectedCdnService: { id: 'cdn-1', name: 'cdn' } as never,
+      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
+      selectedCdnService: { id: 'cdn-1', name: 'cdn', provisioned: false },
       config: FULL_CONFIG,
       services: [{ id: 'svc-other', name: 'other', accessLevel: 'read_write' as const }],
       setIsDeploying: vi.fn(),

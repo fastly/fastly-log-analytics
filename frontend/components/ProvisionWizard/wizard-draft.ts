@@ -13,7 +13,7 @@ export const WIZARD_DRAFT_KEY = "provision-wizard-draft-v1";
 const SECRET_KEYS = ["fos_access_key", "fos_secret_key", "cdn_secret"] as const;
 
 export function stripSecretsFromConfig(config: ProvisionConfig): PersistedConfig {
-  const out: any = { ...config };
+  const out: Partial<ProvisionConfig> = { ...config };
   for (const key of SECRET_KEYS) {
     delete out[key];
   }

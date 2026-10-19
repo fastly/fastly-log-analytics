@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import threading
 import time
 import urllib.parse
@@ -23,6 +24,8 @@ from backend.repositories._sql.insights import (
 )
 
 from .registry import registry
+
+logger = logging.getLogger(__name__)
 
 # ── Caches ────────────────────────────────────────────────────────────────────
 
@@ -63,7 +66,7 @@ def _execute_on_cursor(
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
     with debug_lock:
-        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
+        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms, "engine": "DuckDB"})
     return res
 
 
@@ -505,6 +508,7 @@ def get_insights(
     mask_ips: bool = False,
     clamp_cache_key: str | None = None,
     force_refresh: bool = False,
+    max_workers: int = 4,
 ) -> dict:
     """Compute the insight cards for ``src`` over the window/baseline ranges.
 
@@ -635,7 +639,7 @@ def get_insights(
             db_iceberg.update_iceberg_view(con, src, force=True)
             actual_cols = runner.get_schema_cols()
         except Exception:
-            pass
+            logger.debug("get_insights: runner.get_schema_cols failed (ignored)", exc_info=True)
         if not actual_cols:
             return empty_resp
 
@@ -655,7 +659,7 @@ def get_insights(
     # visibility AND in-memory storage. The scratch is unique per request
     # so two concurrent requests on the same pool connection don't collide.
     scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
-    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias}")
+    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias} (READ_ONLY FALSE)")
     scratch_attached = True
     temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
 
@@ -825,10 +829,9 @@ def get_insights(
         # connection pattern the per-insight dispatch below already uses
         # safely: DuckDB releases the GIL during query execution, and cursors
         # on the same parent connection are thread-safe to use concurrently
-        # from different threads. With ``DUCKDB_POOL_CONN_THREADS=1`` (each
-        # pool connection single-threaded — see backend/core/duckdb_pool.py)
-        # up to 4 concurrent cursors here exactly saturates the 4-core prod
-        # VM with no oversubscription. The WAF task is the only WRITE (a
+        # from different threads. DuckDB's thread pool is instance-global
+        # (``DUCKDB_THREADS``), so these cursors share it rather than each
+        # spawning their own. The WAF task is the only WRITE (a
         # CREATE TABLE into the scratch ``:memory:`` DB) among the three
         # read-only aggregate SELECTs; it writes a brand-new, uniquely-named
         # catalog object that none of the three reads touch, so there's no
@@ -946,7 +949,10 @@ def get_insights(
                 )
                 return {}
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="insights-coalesce") as _coalesce_pool:
+        max_coalesce_workers = max(1, min(max_workers, 4))
+        with ThreadPoolExecutor(
+            max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
+        ) as _coalesce_pool:
             _fut_waf = _coalesce_pool.submit(_task_waf)
             _fut_city = _coalesce_pool.submit(_task_city)
             _fut_url = _coalesce_pool.submit(_task_url)
@@ -1136,8 +1142,8 @@ def get_insights(
         # and leaves headroom for the main-thread Python work that runs
         # around the SQL.
         if tasks:
-            max_workers = min(4, len(tasks))
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="insights") as pool:
+            pool_workers = max(1, min(max_workers, len(tasks)))
+            with ThreadPoolExecutor(max_workers=pool_workers, thread_name_prefix="insights") as pool:
                 for res in pool.map(_safe_run, tasks):
                     if res:
                         insights_list.append(res)
@@ -1169,7 +1175,7 @@ def get_insights(
             try:
                 runner.con.execute(f"DETACH {scratch_alias}")
             except Exception:
-                pass
+                logger.debug("get_insights: runner.con.execute failed (ignored)", exc_info=True)
 
 
 def get_cache_collapse_detail(

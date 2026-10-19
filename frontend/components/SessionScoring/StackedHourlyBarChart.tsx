@@ -5,6 +5,7 @@ import * as React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { denseTimeGrid } from '@/lib/chart-helpers'
+import type { PlotlyTrace } from '@/types/plotly'
 
 interface HourlyRow {
   hour: string
@@ -52,7 +53,7 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
   helpContent,
   helpTitle,
 }: Props<R>) {
-  const traces = React.useMemo(() => {
+  const traces = React.useMemo((): PlotlyTrace[] => {
     const presentHours = Array.from(new Set(rows.map((r) => r.hour))).sort()
     // Rows are always hour-bucketed (backend `date_trunc('hour')`). Re-index
     // onto a contiguous hourly grid so a low-traffic window renders even-width
@@ -92,7 +93,7 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
       helpTitle={helpTitle}
     >
       <PlotlyChart
-        data={traces as any[]}
+        data={traces}
         layout={{
           barmode: 'stack',
           showlegend: true,

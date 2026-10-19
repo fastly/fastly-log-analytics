@@ -49,13 +49,72 @@ class AlertListResponse(BaseResponse):
     evaluated_at: str
 
 
+class AlertMutationData(BaseModel):
+    id: str
+    status: str = "success"
+    service_id: str | None = None
+
+
 class AlertResponse(BaseResponse):
-    data: dict
+    data: AlertMutationData | dict
+
+
+class AlertPreviewData(BaseModel):
+    times: list[str]
+    values: list[float]
+    type: Literal["absolute", "relative", "anomaly_zscore"] = "absolute"
+    hist_values: list[float] | None = None
+    threshold_values: list[float] | None = None
 
 
 class AlertPreviewResponse(BaseResponse):
-    data: dict | None = None
+    data: AlertPreviewData | None = None
     error: str | None = None
+
+
+class AlertEvaluateRequest(BaseModel):
+    service_id: str | None = None
+    alert_id: str | None = None
+
+
+class AlertEvaluateResultItem(BaseModel):
+    id: str
+    name: str
+    metric: str
+    triggered: bool
+    last_triggered_at: str | None = None
+
+
+class AlertEvaluateData(BaseModel):
+    service_id: str
+    evaluated: int
+    triggered: int
+    results: list[AlertEvaluateResultItem]
+    evaluated_at: str
+
+
+class AlertEvaluateResponse(BaseResponse):
+    data: AlertEvaluateData
+
+
+class AlertTestWebhookRequest(BaseModel):
+    service_id: str | None = None
+    webhook_url: str | None = None
+    channel_type: Literal["webhook", "slack", "pagerduty"] = "webhook"
+    dry_run: bool = False
+
+
+class AlertTestWebhookData(BaseModel):
+    alert_id: str
+    service_id: str
+    status: Literal["sent", "validated", "failed"]
+    targets_tested: int
+    channel_type: str = "webhook"
+    detail: str | None = None
+
+
+class AlertTestWebhookResponse(BaseResponse):
+    data: AlertTestWebhookData
 
 
 class _ToggleBody(BaseModel):

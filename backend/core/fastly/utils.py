@@ -29,7 +29,7 @@ def region_endpoint(region: str) -> str:
 def parse_period(s: str) -> int:
     """Parse '60', '1 minute', '5m', '5 minutes' → integer seconds."""
     s = s.strip().lower()
-    m = re.match(r"^(\d+)\s*(m(?:in(?:utes?)?)?)?$", s)
+    m = re.fullmatch(r"(\d+)\s*(m(?:in(?:utes?)?)?)?", s)
     if m:
         val = int(m.group(1))
         return val * 60 if m.group(2) else val

@@ -29,7 +29,7 @@ Single test: `uv run pytest tests/path/to/test_file.py::test_name -v`
 
 ## Architecture
 
-FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust Compute@Edge scorer in `compute/scorer/`. Data plane: Fastly logs land in FOS (Fastly Object Storage), the backend ingests .gz files into DuckDB via Iceberg-like local tables with parquet storage, pre-computed rollups for performance, and per-service SQLite metadata DBs for state tracking. The frontend talks to the backend API; types are generated from the OpenAPI spec.
+FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust Compute@Edge scorer in `compute/scorer/`. Data plane: Fastly logs land in FOS (Fastly Object Storage), the backend ingests .gz files into DuckDB via DuckLake tables with parquet storage, pre-computed rollups for performance, and PostgreSQL 16 for unified operational metadata, state tracking, and DuckLake catalogs (ADR-22). The frontend talks to the backend API; types are generated from the OpenAPI spec.
 
 Major feature areas: interactive analytics (dashboard, origin, security, network, performance), Insights (45 anomaly detections), Control Room (real-time RT API at 1 s cadence), Streaming (CMCD analytics), Service Summary (Fastly value executive view), Session Scoring (Rust/Wasm edge scorer), live analyst sharing with OAuth/OIDC, and ingest error quarantine.
 
@@ -71,7 +71,7 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Type generation: `npm run gen:types` from OpenAPI spec (`frontend/openapi.json` -> `frontend/types/api.generated.ts`)
 - UI primitives: ReportLayout/ReportShell for page structure, AnalyticsCard for cards, PlotlyChart + ChartA11yTable for charts
 - Design tokens: OKLCH in `globals.css`
-- ESLint ceiling ratchet (832) — drive DOWN, never raise
+- ESLint ceiling ratchet (804) — drive DOWN, never raise
 - `SERVICELESS_PATH_PREFIXES` in api-client: routes that work without an active service
 
 ### Scorer (Rust/Python parity)
@@ -80,7 +80,7 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Changes to scoring logic require updating both sides + cross-language fixtures
 
 ### CI ratchets
-- ESLint ceiling: 832 (check_eslint_count.sh) — drive down
+- ESLint ceiling: 804 (check_eslint_count.sh) — drive down
 - Security regression floor: 206 — never lower
 - Backend coverage floor: 86%
 - Frontend coverage floors: defined in Makefile `test-frontend-ci` target
@@ -95,13 +95,31 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 
 
 ### Deployment
-- Single GCE VM: Docker Compose + Caddy reverse proxy
+- **Deployment & Verification Script:** `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, run only AFTER you have committed and pushed (`git push origin HEAD`). It never auto-commits or auto-pushes. This is a **local-only script that is not in the public repo** (gitignored); a fresh clone will not have it. Full rules: [AGENTS.md, Canonical Multi-Tier Deployment Mandate](AGENTS.md#canonical-multi-tier-deployment-mandate-never-deploy-or-test-by-hand).
+- **Supported path:** single GCE VM, Docker Compose + Caddy reverse proxy
 - Prod binds 127.0.0.1; Caddy:80 is sole ingress (stamps X-Proxied-By-Caddy)
 - Admin access via SSH tunnel to :3001; analyst access via `/share-login`
 - Deploy: `gcloud compute ssh <INSTANCE> --zone=<ZONE> --command="~/restart.sh"`
 - Verify on dev (ports 13002/18002) before GCE deploy
 - `local-docs/` and `pending-docs/` never reach `main`; `docs/` is PUBLIC
 - Repo is PUBLIC — never commit GCE/bucket/service-ID strings; use `infra-leak-sweep` skill
+- **Experimental Kubernetes chart:** `deploy/chart/fastly-log-analytics/` (Helm).
+  Two topologies via `config.deploymentMode`: `standard` (default, no external datastores) or
+  `high_scale` (dedicated worker pods, requires ClickHouse + Postgres).
+  See the chart's own [README](deploy/chart/fastly-log-analytics/README.md).
+  - **The serving tier does not scale in either topology.** The backend Deployment is pinned to
+    `replicas: 1` with no HPA — the per-service `.duckdb` file takes a process-exclusive lock, so a
+    second backend pod 503s every request. Only ingest (`workers.replicaCount` / KEDA) scales.
+    See [docs/adr/18-serving-tier-single-pod.md](docs/adr/18-serving-tier-single-pod.md) before touching
+    `replicaCount`, chart autoscaling, or anything implying the backend is horizontally scalable.
+  - PVC is ReadWriteOnce — every pod mounting it (including workers) is pinned to one node. Disabling
+    persistence swaps it for `emptyDir` and loses the service registry (`/app/configs`) on every restart.
+  - Misconfiguration (celery mode missing its Postgres/broker DSNs) fails at `helm template`/install time
+    via `templates/validate.yaml`, not as a CrashLoop — pinned by `tests/chart/test_helm.py`.
+  - **Admin access is two `kubectl port-forward`s, not an SSH tunnel** — port-forwarding straight to the
+    backend is admin by default, but browsing the UI via the frontend needs `config.localAdminCidrs` set
+    to the cluster's pod CIDR or SSR-to-backend calls classify as remote/analyst. See the chart README's
+    [Admin access](deploy/chart/fastly-log-analytics/README.md#admin-access) section.
 
 ### Pre-merge / PR readiness
 - **`local-docs/` and `pending-docs/` must be deleted before squash-merging.** They are working notes,

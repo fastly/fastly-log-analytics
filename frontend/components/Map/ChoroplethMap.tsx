@@ -8,9 +8,9 @@ import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer } from '@/components/Map/baseLayers'
-import { formatCompactCount, resolveCountryName } from '@/lib/format'
-
+import { useMapResize } from '@/components/Map/useMapResize'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
+import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
 const alpha3ToAlpha2: Record<string, string> = {}
 Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
   alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()
@@ -77,34 +77,15 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
     if (!map.current) {
       try {
-      map.current = new maplibregl.Map({
-        container: mapContainer.current,
+      map.current = createBaseMap(maplibregl, mapContainer.current, {
         renderWorldCopies: false,
-        preserveDrawingBuffer: true,
-        style: {
-          version: 8,
-          sources: {},
-          layers: [
-            {
-              id: 'background',
-              type: 'background',
-              paint: { 'background-color': 'transparent' }
-            }
-          ]
-        },
-        center: [0, 20],
         zoom: 0.5,
-        dragRotate: false,
-        touchZoomRotate: false,
+        lockRotation: true,
+        showCompass: false,
         // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
         // ⌘/Ctrl + wheel (or the +/- buttons) zooms the map. (cooperative gestures)
         cooperativeGestures: true,
-      } as maplibregl.MapOptions)
-
-      map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
-      if (typeof window !== 'undefined') {
-        (window as unknown as { map: maplibregl.Map }).map = map.current;
-      }
+      })
 
       requestAnimationFrame(() => {
         map.current?.resize();
@@ -113,10 +94,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current.on('load', () => {
         if (!map.current) return
 
-        if (mapContainer.current) {
-          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-            .forEach(el => el.setAttribute('tabindex', '-1'))
-        }
+        removeMapTabStops(mapContainer.current)
 
         addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
 
@@ -219,18 +197,16 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       }
 
       const max = Math.max(...data.map(d => d.count))
-      const matchExpression: unknown[] = ['match', ['get', 'name']]
-
-      data.forEach(d => {
+      const [first, ...others] = data.map((d): [string, string] => {
         const intensity = 0.2 + (d.count / max) * 0.8
         const englishName = resolveCountryName(d.country)
-        const countryName = NORMALIZE_COUNTRY[englishName] || englishName
-        matchExpression.push(countryName)
-        matchExpression.push(`rgba(59, 130, 246, ${intensity})`)
+        return [NORMALIZE_COUNTRY[englishName] || englishName, `rgba(59, 130, 246, ${intensity})`]
       })
 
-      matchExpression.push(countryFill(theme === 'dark'))
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression as unknown as maplibregl.ExpressionSpecification)
+      const matchExpression: maplibregl.ExpressionSpecification = [
+        'match', ['get', 'name'], first[0], first[1], ...others.flat(), countryFill(theme === 'dark'),
+      ]
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression)
       map.current.resize()
     }
 
@@ -326,24 +302,17 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
     }
   }
 
-  useEffect(() => {
-    // MapLibre's containerSize is captured at construction time and isn't
-    // re-measured automatically when the parent layout changes (a flex
-    // child grown by sibling content, a card collapsing/expanding, etc.).
-    // ResizeObserver wakes us up on any container size change and calls
-    // map.resize() so the canvas re-sizes immediately instead of waiting
-    // for a window resize or a forced re-mount.
-    if (!mapContainer.current) return
-    const el = mapContainer.current
-    const ro = new ResizeObserver(() => map.current?.resize())
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
+  useMapResize(map, mapContainer)
 
   return (
     <div
       className={`relative min-h-[300px] w-full h-full rounded-lg overflow-hidden bg-background ${className}`}
-      role="img"
+      // role="group" (not "img"): the wrapper holds the interactive MapLibre
+      // controls + the sr-only data table below, so it can't be an "img"
+      // (axe: nested-interactive — an img must not contain focusable
+      // descendants). group is a structural role that legitimately groups
+      // interactive content under the aria-label.
+      role="group"
       aria-label={ariaLabel}
     >
       {mapError ? (
@@ -375,7 +344,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             <tr key={d.country}>
               <td>{i + 1}</td>
               <td>{resolveCountryName(d.country)}</td>
-              <td>{d.count.toLocaleString()}</td>
+              <td>{formatCount(d.count)}</td>
             </tr>
           ))}
         </tbody>
@@ -409,6 +378,14 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
               aria-label="Countries by request count — use arrow keys to navigate, Enter to filter"
               aria-activedescendant={`choropleth-country-option-${activeIndex}`}
               onKeyDown={handlePickerKeyDown}
+              onClick={(e) => {
+                // One delegated handler for the options (keyboard activation lives in onKeyDown above).
+                const option = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]')
+                const country = option?.dataset.country
+                if (country === undefined) return
+                onCountryClickRef.current?.(country)
+                closePicker()
+              }}
               className="mt-1 max-h-72 w-64 overflow-y-auto bg-popover/95 backdrop-blur-sm border rounded-md shadow-lg text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {tableRows.map((d, i) => {
@@ -419,11 +396,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
                     id={`choropleth-country-option-${i}`}
                     role="option"
                     aria-selected={isActive}
+                    data-country={d.country}
                     onMouseEnter={() => setActiveIndex(i)}
-                    onClick={() => {
-                      onCountryClickRef.current?.(d.country)
-                      closePicker()
-                    }}
                     className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer ${isActive ? 'bg-accent text-accent-foreground' : ''}`}
                   >
                     <span className="truncate">
@@ -431,7 +405,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
                       {resolveCountryName(d.country)}
                     </span>
                     <span className="text-muted-foreground tabular-nums">
-                      {d.count.toLocaleString()}
+                      {formatCount(d.count)}
                     </span>
                   </li>
                 )
@@ -451,7 +425,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
           }}
         >
           <div className="font-semibold text-foreground">{tooltip.name}</div>
-          <div className="text-muted-foreground">{tooltip.count.toLocaleString()} requests</div>
+          <div className="text-muted-foreground">{formatCount(tooltip.count)} requests</div>
         </div>
       )}
 

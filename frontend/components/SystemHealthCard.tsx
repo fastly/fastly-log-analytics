@@ -5,9 +5,11 @@ import { useQuery } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/components/Sparkline'
+import { ELAPSED_AGE_COMPACT, formatElapsed } from '@/lib/format'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { queryKeys } from '@/lib/query-keys'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
@@ -52,10 +54,7 @@ type Tone = 'default' | 'warn' | 'crit' | 'unknown'
 
 /** Compact "time ago" for an age in seconds: 45s / 12m / 3.4h / 6.2d. */
 function fmtAgeS(seconds: number): string {
-  if (seconds < 90) return `${Math.round(seconds)}s`
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`
-  if (seconds < 172800) return `${(seconds / 3600).toFixed(1)}h`
-  return `${(seconds / 86400).toFixed(1)}d`
+  return formatElapsed(seconds, ELAPSED_AGE_COMPACT)
 }
 
 function Stat({ label, value, sub, tone = 'default', trend, trendDomain, formatTrendValue }: {
@@ -116,7 +115,7 @@ export function SystemHealthCard() {
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
-    queryKey: ['admin', 'health-snapshot'],
+    queryKey: queryKeys.admin.healthSnapshot(),
     queryFn: async () => {
       const { data } = await client.GET('/api/admin/health-snapshot')
       return data as HealthSnapshot
@@ -130,7 +129,7 @@ export function SystemHealthCard() {
   // so a 1h window gives ~60 points per series. SSE pushes via
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
-    queryKey: ['admin', 'metric-history-batch', '1h'],
+    queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async () => {
       const { data } = await client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } })
       return data as TrendBatch
@@ -246,6 +245,18 @@ export function SystemHealthCard() {
     poolMaxP95 > 50 || poolRejects > 0 ? 'warn' :
     'default'
 
+  const celery = snap.celery ?? null
+  const queueDepth = celery?.queue_depth ?? null
+  const activeWorkers = celery?.active_workers ?? null
+  const brokerReachable = celery?.broker_reachable ?? true
+
+  const celeryTone: Tone =
+    celery == null ? 'unknown' :
+    !brokerReachable ? 'crit' :
+    queueDepth != null && queueDepth > 500 ? 'crit' :
+    queueDepth != null && queueDepth > 50 ? 'warn' :
+    'default'
+
   return (
     <AnalyticsCard
       title="System Health"
@@ -291,6 +302,14 @@ export function SystemHealthCard() {
           trendDomain={[0, 100]}
           formatTrendValue={(v) => `${v.toFixed(1)}%`}
         />
+        {celery != null && (
+          <Stat
+            label="Celery Queue"
+            value={!brokerReachable ? 'OFFLINE' : queueDepth == null ? '–' : `${queueDepth}`}
+            sub={!brokerReachable ? 'Broker Unreachable' : `${activeWorkers} Active Worker(s)`}
+            tone={celeryTone}
+          />
+        )}
         <Stat
           label="Cache files"
           value={totalFiles}
@@ -300,7 +319,7 @@ export function SystemHealthCard() {
         <Stat
           label="Active queries"
           value={inFlight.length}
-          sub={inFlight.length > 0 ? inFlight.slice(0, 2).map(r => r.task).join(', ') : 'idle'}
+          sub={inFlight.length > 0 ? `${inFlight.length} tasks running` : 'idle'}
           trend={series['active_query_count']}
           formatTrendValue={(v) => v.toFixed(0)}
         />

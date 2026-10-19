@@ -3,50 +3,35 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.deps import get_service_id
+from backend.deps import ServiceId, get_service_id
 from backend.models.dashboard import QueryRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.query import PresetQuery, QueryResponse, QuerySchemaResponse
 from backend.repositories import query as repo
 from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
+from backend.utils.error_redaction import redact_error_text
 from backend.utils.router_utils import make_error
 
 logger = logging.getLogger(__name__)
 
 
-# DuckDB exception strings frequently interpolate absolute file paths
-# ("Cannot open file '/srv/...'", "No such file or directory: '/var/...'").
-# Strip them before echoing so the wire payload doesn't leak server-side
-# directory layout while still preserving the SQL diagnostic text
-# (Parser / Binder / Catalog Errors) the admin needs to fix their query.
-#
-# Conservative anchored prefix list: ONLY matches when the leading slash
-# is preceded by a non-alphanumeric character (whitespace, quote, line
-# start) AND the path root is one of the deploy-relevant Unix prefixes.
-# Avoids stripping URL paths that happen to look like server paths
-# ("https://example.com/var/foo" — the /var here is NOT a leak), column
-# references in SQL ("/api/foo"), or qualified names. If a deployment
-# uses a non-standard data root, append it here rather than reverting
-# to the over-broad ``/[A-Za-z0-9_./-]+`` pattern.
-# NB: ``app`` is the prod container WORKDIR (backend/Dockerfile → /app), so the
-# real data root is /app/data/services/<sid>/... — without ``app`` here those
-# absolute paths reach the analyst un-redacted in the query_failed envelope.
-_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app)\b(?:/[A-Za-z0-9_./-]*)?")
+# DuckDB exception strings interpolate absolute file paths and SQL excerpts; every analyst-visible error
+# body goes through backend.utils.error_redaction.redact_error_text (path strip + cid-salt scrub).
 
 
 def _redact_paths(msg: str) -> str:
-    return _ABS_PATH_RE.sub("<path>", msg)
+    return redact_error_text(msg)
 
 
 router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.post("/query")
+@router.post("/query", response_model=QueryResponse, response_model_exclude_unset=True)
 def query_endpoint(
     req: QueryRequest,
     ctx: RequestContext = Depends(build_request_context),
@@ -77,6 +62,27 @@ def query_endpoint(
     # analyst names the output columns here, so key-name masking is bypassable
     # — the repo masks any cell that parses as an IP.
     mask_ips = mask_ips_for(analyst_session)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.query import query_endpoint as hs_query
+
+        try:
+            return hs_query(
+                high_scale_service,
+                req,
+                start_time,
+                end_time,
+                mask_ips,
+                session_id=audit_session_id,
+            )
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("query_failed", _redact_paths(str(e))),
+            )
 
     # Two-layer retry. The PermissionError → 403 path stays inline (it
     # short-circuits both retry classes — there's no point rebinding the
@@ -126,7 +132,9 @@ def query_endpoint(
                     try:
                         return execute_with_stale_view_retry(con, rum_source, _run_rum, table_name=req.dataset)
                     except PermissionError as e:
-                        raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+                        raise HTTPException(
+                            status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e)))
+                        )
                     except Exception as e:
                         msg = str(e)
                         if attempt == 1 and "Cannot open file" in msg:
@@ -164,7 +172,7 @@ def query_endpoint(
             except PermissionError as e:
                 # SQL validator gate — message is controlled ("operation X not
                 # permitted on table Y") so it's safe to echo for the admin.
-                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
             except Exception as e:
                 msg = str(e)
                 if attempt == 1 and "Cannot open file" in msg:
@@ -178,7 +186,56 @@ def query_endpoint(
                 )
 
 
-@router.get("/presets")
+_FALLBACK_SCHEMA_COLUMNS: list[dict[str, str]] = [
+    {"column": "timestamp", "type": "TIMESTAMPTZ"},
+    {"column": "ip", "type": "VARCHAR"},
+    {"column": "url", "type": "VARCHAR"},
+    {"column": "host", "type": "VARCHAR"},
+    {"column": "method", "type": "VARCHAR"},
+    {"column": "status", "type": "INTEGER"},
+    {"column": "cache", "type": "VARCHAR"},
+    {"column": "country", "type": "VARCHAR"},
+    {"column": "pop", "type": "VARCHAR"},
+    {"column": "asn", "type": "INTEGER"},
+    {"column": "ua", "type": "VARCHAR"},
+]
+
+
+@router.get("/query/schema/{service_id}", response_model=QuerySchemaResponse)
+def query_schema_endpoint(
+    service_id: ServiceId,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    """Reflect schema columns and types for the active service."""
+    del service_id
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    name = ctx.source["name"]
+    status = svcconfig.get_status(name) or {}
+    schema = status.get("schema")
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if not schema and high_scale_service is None:
+        try:
+            schema = _db.get_schema(ctx.con, ctx.source)
+        except Exception as exc:
+            logger.debug("[query_schema] live schema fetch failed for %s: %s", name, exc)
+            schema = []
+
+    if not schema:
+        schema = list(_FALLBACK_SCHEMA_COLUMNS)
+
+    return {
+        "source": name,
+        "schema": schema,
+        "debug_queries": [],
+        "debug_calls": [],
+    }
+
+
+@router.get("/presets", response_model=list[PresetQuery], response_model_exclude_unset=True)
 def presets_endpoint(service_id: str | None = Depends(get_service_id)):
     from backend.core import duckdb as _db
 

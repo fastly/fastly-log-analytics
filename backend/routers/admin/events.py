@@ -50,7 +50,8 @@ from backend.cron_runs_publisher import publisher as cron_runs_publisher
 from backend.deps import get_service_id
 from backend.sync_status_publisher import publisher as sync_status_publisher
 from backend.system_metrics_sampler import sample_system_metrics_cached
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
+from backend.utils.router_utils import make_error
+from backend.utils.sse import sse_response
 from backend.utils.sse_subscription import iter_with_disconnect_ping
 
 from ._router import router
@@ -60,10 +61,11 @@ logger = logging.getLogger(__name__)
 
 # Channels a single admin connection may request. All admin-only — the
 # analyst-safe log-extents projection keeps its own dedicated endpoint.
-_ADMIN_EVENT_CHANNELS = frozenset({"sync-status", "cron-runs", "system-metrics", "share"})
+_ADMIN_EVENT_CHANNELS = frozenset({"sync-status", "cron-runs", "system-metrics", "share", "celery-status"})
 
 _METRICS_SAMPLE_INTERVAL_SECONDS = 10.0
 _SHARE_SAMPLE_INTERVAL_SECONDS = 10.0
+_CELERY_SAMPLE_INTERVAL_SECONDS = 5.0
 
 # Fan-in buffer across all channels. Bounded + drop-oldest so a bursty
 # channel can't grow memory without bound; 16 is comfortably above the
@@ -129,6 +131,29 @@ async def _system_metrics_feeder(q: asyncio.Queue, service_id: str | None) -> No
             last_payload = payload
 
 
+async def _celery_status_feeder(q: asyncio.Queue) -> None:
+    from backend.celery_status_sampler import sample_celery_status_cached
+
+    # Initial sample inside try: a broker hiccup at connect must not kill the
+    # feeder task for the life of the SSE connection.
+    last_payload = None
+    try:
+        last_payload = await sample_celery_status_cached()
+        _offer(q, {"channel": "celery-status", "data": last_payload})
+    except Exception:
+        logger.exception("celery-status initial sample failed; will retry next tick")
+    while True:
+        await asyncio.sleep(_CELERY_SAMPLE_INTERVAL_SECONDS)
+        try:
+            payload = await sample_celery_status_cached()
+        except Exception:
+            logger.exception("celery-status sample failed; will retry next tick")
+            continue
+        if payload != last_payload:
+            _offer(q, {"channel": "celery-status", "data": payload})
+            last_payload = payload
+
+
 async def _share_feeder(q: asyncio.Queue) -> None:
     # Global-admin (no service scope). The payload is pure in-memory
     # tunnel-manager getters (microseconds), so per-connection sampling is
@@ -191,6 +216,8 @@ async def admin_events_stream(
             feeders.append(asyncio.ensure_future(_system_metrics_feeder(out_q, service_id)))
         if "share" in wanted:
             feeders.append(asyncio.ensure_future(_share_feeder(out_q)))
+        if "celery-status" in wanted:
+            feeders.append(asyncio.ensure_future(_celery_status_feeder(out_q)))
         if service_id:
             if "sync-status" in wanted:
                 feeders.append(asyncio.ensure_future(_sync_status_feeder(out_q, service_id)))
@@ -209,4 +236,4 @@ async def admin_events_stream(
                 t.cancel()
             await asyncio.gather(*feeders, return_exceptions=True)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())

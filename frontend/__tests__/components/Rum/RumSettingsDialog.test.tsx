@@ -4,6 +4,8 @@
  * RumSettingsDialog — version-selection + RUM capture toggles,
  * and optional SSE-streamed upgrade on version change.
  */
+import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/jsdom-shims'
 import * as React from 'react'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -11,15 +13,9 @@ import userEvent from '@testing-library/user-event'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
 
 beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver
-  window.HTMLElement.prototype.hasPointerCapture = vi.fn() as never
-  window.HTMLElement.prototype.releasePointerCapture = vi.fn() as never
-  window.HTMLElement.prototype.scrollIntoView = vi.fn() as never
-  window.Element.prototype.getAnimations = vi.fn(() => []) as never
+  stubResizeObserver()
+  stubPointerCaptureAndScroll()
+  stubGetAnimations()
 })
 
 const mockStart = vi.fn()
@@ -48,7 +44,7 @@ vi.mock('@/hooks/useSSE', () => ({
 const mockAdminFetch = vi.fn()
 
 vi.mock('@/lib/api', () => ({
-  adminFetch: (...args: any[]) => mockAdminFetch(...args),
+  adminFetch: (...args: unknown[]) => mockAdminFetch(...args),
 }))
 
 vi.mock('@tanstack/react-query', () => ({

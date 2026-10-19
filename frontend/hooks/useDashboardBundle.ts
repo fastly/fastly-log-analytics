@@ -5,7 +5,10 @@ import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
 import { resolveRangeWire } from '@/lib/range-wire'
+import { keepPreviousWithinService } from '@/lib/query-placeholder'
 import type { FiltersPayload } from '@/types/filters'
+import type { ChartMetric } from '@/types/api'
+import type { components } from '@/types/api.generated'
 
 /**
  * Composite dashboard fetch — /api/dashboard/bundle returns the two
@@ -45,7 +48,7 @@ import type { FiltersPayload } from '@/types/filters'
  * contract that other dedicated hooks rely on would need a wider
  * migration.
  */
-export type DashboardSection = 'core' | 'topten' | 'bots'
+export type DashboardSection = NonNullable<components['schemas']['AggregatesRequest']['sections']>[number]
 
 export interface DashboardBundleArgs {
   // startTime/endTime drive the stale-view extents heuristic + the chart's
@@ -93,7 +96,7 @@ export function useDashboardBundle({
   return useQuery({
     queryKey: bundleKey,
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST('/api/dashboard/bundle', {
+      const { data, error } = await client.POST('/api/dashboard/bundle', {
         signal,
         body: {
           // Token mode → {range_token, anchor} + display bounds (server
@@ -101,13 +104,14 @@ export function useDashboardBundle({
           // only matter if the token isn't recognized — see lib/range-wire.ts).
           // Custom mode → {start_time, end_time} only.
           filters: filterPayload,
-          chart_metric: metric as any,
+          chart_metric: metric as ChartMetric,
           chart_interval: interval,
           fields: fields,
           sections: sections,
           ...rangeBody,
         },
       })
+      if (error) throw error
       const body = data
       if (body?.aggregates) {
         // Stale-view guard: throws if the response is the empty-schema
@@ -126,19 +130,8 @@ export function useDashboardBundle({
       return body
     },
     enabled,
-    placeholderData: (previousData, previousQuery) => {
-      if (!previousQuery) return undefined
-      if (
-        Array.isArray(bundleKey) &&
-        Array.isArray(previousQuery.queryKey) &&
-        bundleKey.length > 2 &&
-        previousQuery.queryKey.length > 2 &&
-        bundleKey[2] !== previousQuery.queryKey[2]
-      ) {
-        return undefined
-      }
-      return previousData
-    },
+    placeholderData: keepPreviousWithinService(bundleKey),
     ...STALE_VIEW_RETRY_OPTIONS,
+    refetchIntervalInBackground: false,
   })
 }

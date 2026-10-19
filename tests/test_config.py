@@ -46,9 +46,11 @@ def _isolate_config_dirs(tmp_path, monkeypatch):
     # Clear the in-memory caches between tests
     svcconfig._name_cache.clear()
     svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
     yield
     svcconfig._name_cache.clear()
     svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
 
 
 def _cfg(**overrides) -> dict:
@@ -295,6 +297,43 @@ def test_list_service_ids_returns_empty_on_missing_dir():
     assert svcconfig.list_service_ids() == []
 
 
+def test_list_service_ids_caches_glob_until_dir_changes(monkeypatch):
+    """The hot per-request path (telemetry_middleware →
+    get_active_service_id → list_service_ids) must not re-glob the configs
+    dir on every call — a synchronous glob on the event loop stalls under
+    shared-host disk contention. Revalidation is by directory mtime, so a
+    save/delete is still reflected immediately."""
+    from pathlib import Path
+
+    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
+
+    real_glob = Path.glob
+    calls = {"n": 0}
+
+    def counting_glob(self, pattern, *a, **k):
+        if pattern == "*.json" and self == svcconfig.CONFIGS_DIR:
+            calls["n"] += 1
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    assert svcconfig.list_service_ids() == ["alpha"]
+    first = calls["n"]
+    assert first >= 1
+    # Repeated calls with an unchanged dir must NOT re-glob.
+    for _ in range(5):
+        svcconfig.list_service_ids()
+    assert calls["n"] == first
+
+    # A newly saved config appears immediately (dir mtime bump + invalidation).
+    svcconfig.save_config("beta", _cfg(service_id="beta"))
+    assert svcconfig.list_service_ids() == ["alpha", "beta"]
+
+    # A deleted config disappears immediately.
+    svcconfig.delete_config("alpha")
+    assert svcconfig.list_service_ids() == ["beta"]
+
+
 def test_list_configs_skips_unparseable_files():
     """If one config file is corrupt JSON the others must still load.
     Pinned because a single bad write should not brick the bootstrap
@@ -362,6 +401,11 @@ def test_config_to_source_falls_back_to_native_endpoint_without_cdn():
     assert src["endpoint"] == "us-east-1.object.fastlystorage.app"
 
 
+def test_config_to_source_uses_fixed_v3_raw_root():
+    src = svcconfig.config_to_source(_cfg(fos_prefix="customer-prefix"))
+    assert src["prefix"] == ""
+
+
 def test_config_to_source_native_endpoint_derives_from_region_when_missing():
     """If ``fos_endpoint`` is absent the helper synthesises it from
     region. Pinned because a typo here would silently point boto3 at
@@ -403,11 +447,15 @@ def test_config_to_source_defaults_access_level_to_read_write():
 
 def test_config_to_source_includes_rum_fields():
     """Verify config_to_source maps rum_enabled and rum config blocks."""
-    # Test with rum_enabled on root
+    # rum.enabled wins over the legacy root flag (the scheduler's precedence; see is_rum_enabled)
     cfg = _cfg(rum_enabled=True, rum={"enabled": False})
     src = svcconfig.config_to_source(cfg)
-    assert src["rum_enabled"] is True
+    assert src["rum_enabled"] is False
     assert src["rum"] == {"enabled": False}
+
+    # Root flag applies when the sub-dictionary has no opinion
+    cfg_root = _cfg(rum_enabled=True)
+    assert svcconfig.config_to_source(cfg_root)["rum_enabled"] is True
 
     # Test with rum enabled on sub-dictionary
     cfg2 = _cfg(rum_enabled=False, rum={"enabled": True})
@@ -608,6 +656,15 @@ def test_get_fastly_api_key_falls_back_to_active_service():
 
 def test_get_fastly_api_key_returns_empty_string_when_unconfigured():
     assert svcconfig.get_fastly_api_key("nonexistent") == ""
+
+
+def test_save_config_handles_read_only_filesystem():
+    """When /app/configs is on a read-only filesystem (e.g. mounted Secret),
+    save_config logs a warning instead of raising an unhandled OSError."""
+    with patch("backend.config._atomic_write_json", side_effect=OSError(30, "Read-only file system")):
+        # Should not raise
+        svcconfig.save_config("svc-ro", _cfg(service_id="svc-ro"))
+
     assert svcconfig.get_fastly_api_key(None) == ""  # no configs at all
 
 
@@ -748,3 +805,244 @@ def test_ensure_dirs_is_idempotent():
     """Repeated calls (every save_config does one) must not raise."""
     svcconfig._ensure_dirs()
     svcconfig._ensure_dirs()  # again — must not raise
+
+
+@pytest.fixture
+def clickhouse_env(monkeypatch):
+    import os
+
+    for name in os.environ:
+        if name.startswith("CLICKHOUSE_"):
+            monkeypatch.delenv(name)
+    for key, value in {
+        "ENABLED": "true",
+        "HOST": "localhost",
+        "DATABASE": "analytics",
+        "USER": "default",
+        "SECURE": "false",
+    }.items():
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+
+
+def test_clickhouse_disabled_by_default(clickhouse_env, monkeypatch):
+    monkeypatch.delenv("CLICKHOUSE_ENABLED")
+    monkeypatch.setenv("CLICKHOUSE_QUERY_TIMEOUT_S", "not-a-timeout")
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", " FALSE "])
+def test_clickhouse_disabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
+def test_clickhouse_enabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.host == "localhost"
+    assert settings.port == 8123
+    assert settings.password == ""
+    assert settings.connect_timeout_s > 0
+    assert settings.query_timeout_s > 0
+
+
+@pytest.mark.parametrize("key", ["ENABLED", "SECURE"])
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_clickhouse_invalid_boolean(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["HOST", "DATABASE", "USER"])
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_clickhouse_incomplete_config(clickhouse_env, monkeypatch, key, value):
+    if value is None:
+        monkeypatch.delenv(f"CLICKHOUSE_{key}")
+    else:
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["CONNECT_TIMEOUT_S", "QUERY_TIMEOUT_S", "INSERT_TIMEOUT_S", "POOL_TIMEOUT_S"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1", "999999", "bad", ""])
+def test_clickhouse_bounded_timeouts(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("PORT", "0"),
+        ("PORT", "65536"),
+        ("PORT", "1.5"),
+        ("PORT", "bad"),
+        ("POOL_MAX_SIZE", "0"),
+        ("POOL_MAX_SIZE", "65"),
+    ],
+)
+def test_clickhouse_bounded_integers(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("HOST", "http://user:secret@localhost"),
+        ("HOST", "localhost/path"),
+        ("HOST", "localhost?password=secret"),
+        ("DATABASE", "logs; DROP DATABASE logs"),
+        ("DATABASE", "db.table"),
+        ("USER", "user\nX-Header: secret"),
+    ],
+)
+def test_clickhouse_rejects_unsafe_settings(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}") as error:
+        svcconfig.load_clickhouse_config()
+    assert value not in str(error.value)
+
+
+def test_clickhouse_remote_requires_password_and_defaults_to_tls(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_HOST", "clickhouse.example.com")
+    monkeypatch.delenv("CLICKHOUSE_SECURE")
+    with pytest.raises(ValueError, match="CLICKHOUSE_PASSWORD"):
+        svcconfig.load_clickhouse_config()
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "FAKE_PASSWORD")
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.secure is True
+    assert settings.port == 8443
+    assert "FAKE_PASSWORD" not in repr(settings)
+
+
+# ── high_scale_shared_source_enabled / resolve_raw_delete_after ─────────────
+#
+# The contract: a service's raw request/RUM stream may be shared with an
+# out-of-band high-scale consumer (provisioning.cron_sync.high_scale_shared_
+# source). While that's set, every legacy raw-deletion path — standard
+# sync's delete_after, celery-mode finalize_committed_raw, RUM cleanup, and
+# the ingested_files dedup-gate safety check — must stand down regardless of
+# its own delete_after setting, because raw-deletion authority for that
+# stream belongs to the high-scale archive deletion controller. This is the
+# fix for legacy cleanup racing a concurrent high-scale worker and deleting
+# raw objects it hasn't archived/published yet.
+
+
+def test_high_scale_shared_source_enabled_defaults_false():
+    assert svcconfig.high_scale_shared_source_enabled(None) is False
+    assert svcconfig.high_scale_shared_source_enabled({}) is False
+    assert svcconfig.high_scale_shared_source_enabled({"provisioning": {"cron_sync": {}}}) is False
+
+
+def test_high_scale_shared_source_enabled_reads_the_configured_flag():
+    cfg = {"provisioning": {"cron_sync": {"high_scale_shared_source": True}}}
+    assert svcconfig.high_scale_shared_source_enabled(cfg) is True
+
+
+def test_resolve_raw_delete_after_defaults_true_when_unconfigured():
+    assert svcconfig.resolve_raw_delete_after(None) is True
+    assert svcconfig.resolve_raw_delete_after({}) is True
+
+
+def test_resolve_raw_delete_after_honors_configured_delete_after():
+    cfg = {"provisioning": {"cron_sync": {"delete_after": False}}}
+    assert svcconfig.resolve_raw_delete_after(cfg) is False
+
+
+def test_resolve_raw_delete_after_honors_explicit_requested_override():
+    cfg = {"provisioning": {"cron_sync": {"delete_after": True}}}
+    assert svcconfig.resolve_raw_delete_after(cfg, requested=False) is False
+    assert svcconfig.resolve_raw_delete_after({}, requested=True) is True
+
+
+def test_resolve_raw_delete_after_forces_false_for_a_high_scale_shared_source():
+    """The core regression case: delete_after=True and an explicit True
+    override must both lose to a high-scale shared source."""
+    cfg = {
+        "provisioning": {
+            "cron_sync": {"delete_after": True, "high_scale_shared_source": True},
+        }
+    }
+    assert svcconfig.resolve_raw_delete_after(cfg) is False
+    assert svcconfig.resolve_raw_delete_after(cfg, requested=True) is False
+
+
+# ── snapshot / restore + concurrent read-modify-write ───────────────────────
+
+
+def test_snapshot_then_restore_puts_back_snapshot_content_and_drops_cache():
+    svcconfig.save_config("svc-1", _cfg())
+    snap = svcconfig.snapshot_config("svc-1")
+    assert snap is not None
+
+    svcconfig.mutate_config("svc-1", lambda c: c.update(name="changed"))
+    assert svcconfig.load_config("svc-1")["name"] == "changed"
+
+    svcconfig.restore_config("svc-1", snap)
+
+    assert json.loads(svcconfig.config_path("svc-1").read_text()) == json.loads(snap)
+    assert svcconfig.load_config("svc-1")["name"] == "My Service"
+
+
+def test_restore_keeps_a_cid_salt_minted_after_a_saltless_snapshot():
+    svcconfig.config_path("svc-1").parent.mkdir(parents=True, exist_ok=True)
+    svcconfig.config_path("svc-1").write_text(json.dumps({"service_id": "svc-1"}))
+    snap = svcconfig.snapshot_config("svc-1")
+
+    svcconfig.mutate_config("svc-1", lambda c: c.update(touched=True))
+    minted = svcconfig.load_config("svc-1")["rum"]["cid_salt"]
+    assert minted
+
+    svcconfig.restore_config("svc-1", snap)
+
+    restored = svcconfig.load_config("svc-1")
+    assert "touched" not in restored
+    assert restored["rum"]["cid_salt"] == minted
+
+
+def test_restore_never_undoes_a_cid_salt_rotation():
+    svcconfig.save_config("svc-1", _cfg())
+    snap = svcconfig.snapshot_config("svc-1")
+    old_salt = json.loads(snap)["rum"]["cid_salt"]
+
+    svcconfig.mutate_config("svc-1", lambda c: c["rum"].update(cid_salt="rotated-salt"), allow_cid_salt_change=True)
+
+    svcconfig.restore_config("svc-1", snap)
+
+    assert svcconfig.load_config("svc-1")["rum"]["cid_salt"] == "rotated-salt" != old_salt
+
+
+def test_snapshot_of_missing_config_is_none_and_restore_removes_a_later_file():
+    assert svcconfig.snapshot_config("svc-1") is None
+    svcconfig.save_config("svc-1", _cfg())
+
+    svcconfig.restore_config("svc-1", None)
+
+    assert svcconfig.load_config("svc-1") is None
+
+
+def test_concurrent_mutate_config_writers_do_not_lose_each_others_keys():
+    import threading
+
+    svcconfig.save_config("svc-1", _cfg())
+    rounds = 25
+
+    def writer(prefix: str) -> None:
+        for i in range(rounds):
+            svcconfig.mutate_config("svc-1", lambda c, i=i: c.__setitem__(f"{prefix}{i}", i))
+
+    threads = [threading.Thread(target=writer, args=(p,)) for p in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = svcconfig.load_config("svc-1")
+    for prefix in ("a", "b"):
+        assert all(final[f"{prefix}{i}"] == i for i in range(rounds))

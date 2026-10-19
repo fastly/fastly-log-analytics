@@ -8,14 +8,15 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 
+from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.dashboard import (
+from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.insights import (
     CacheCollapseDetailRequest,
     CacheCollapseDetailResponse,
     InsightsRequest,
     InsightsResponse,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import insights as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.remote_access import analyst_clamp_cache_key
@@ -80,20 +81,32 @@ async def insights_endpoint(
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.insights import insights_endpoint as hs_insights
+
+        return await asyncio.to_thread(hs_insights, high_scale_service, req, clamp_start, clamp_end)
+
+    await ctx.prewarm_con()
+    force_refresh = req.force_refresh if ctx.analyst_session is None else False
     sem = _get_insights_sem(ctx.service_id)
     async with sem:
-        return await asyncio.to_thread(
-            repo.get_insights,
-            con=ctx.con,
-            src=ctx.source,
-            window_hours=req.window_size_hrs,
-            baseline_hours=req.baseline_hours,
-            service_id=ctx.service_id,
-            clamp_start=clamp_start,
-            clamp_end=clamp_end,
-            mask_ips=mask_ips,
-            clamp_cache_key=clamp_cache_key,
-        )
+
+        def _run_insights(con):
+            return repo.get_insights(
+                con=con,
+                src=ctx.source,
+                window_hours=req.window_size_hrs,
+                baseline_hours=req.baseline_hours,
+                service_id=ctx.service_id,
+                clamp_start=clamp_start,
+                clamp_end=clamp_end,
+                mask_ips=mask_ips,
+                clamp_cache_key=clamp_cache_key,
+                force_refresh=force_refresh,
+            )
+
+        return await asyncio.to_thread(execute_with_stale_view_retry, ctx.con, ctx.source, _run_insights)
 
 
 @router.post("/insights/cache-collapse-detail", response_model=CacheCollapseDetailResponse)
@@ -103,13 +116,23 @@ def cache_collapse_detail_endpoint(
     ctx: RequestContext = Depends(build_request_context),
 ):
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
-    return repo.get_cache_collapse_detail(
-        con=ctx.con,
-        src=ctx.source,
-        url=req.url,
-        window_hours=req.window_size_hrs,
-        baseline_hours=req.baseline_hours,
-        clamp_start=clamp_start,
-        clamp_end=clamp_end,
-        mask_ips=mask_ips,
-    )
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.insights import cache_collapse_detail_endpoint as hs_detail
+
+        return hs_detail(high_scale_service, req, clamp_start, clamp_end)
+
+    def _run_detail(con):
+        return repo.get_cache_collapse_detail(
+            con=con,
+            src=ctx.source,
+            url=req.url,
+            window_hours=req.window_size_hrs,
+            baseline_hours=req.baseline_hours,
+            clamp_start=clamp_start,
+            clamp_end=clamp_end,
+            mask_ips=mask_ips,
+        )
+
+    return execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)

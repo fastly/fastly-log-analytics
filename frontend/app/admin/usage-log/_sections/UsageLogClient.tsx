@@ -15,7 +15,7 @@ import { useRouter } from 'next/navigation'
 import { buildServiceHref } from '@/lib/navigation'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 import {
   Dialog,
   DialogContent,
@@ -34,15 +34,23 @@ import { LogAccountingPanel } from './UsageChart'
 import { buildUsageLogColumns } from './UsageTable'
 import { UsageLogFilters } from './Filters'
 
-export default function UsageLogClient() {
+interface UsageLogClientProps {
+  initialServiceId?: string
+  initialNowMs?: number
+}
+
+export default function UsageLogClient({ initialServiceId, initialNowMs }: UsageLogClientProps = {}) {
   const router = useRouter()
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const storeActiveServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = storeActiveServiceId ?? initialServiceId ?? null
   const { full } = useDateFormat()
-  // SSR-safe: `now` below is seeded from `new Date()`, which differs between
-  // the server render and the client's hydration render (they straddle a
-  // minute boundary), so the export href's start/end window diverges and
-  // throws a React hydration mismatch on /admin/usage-log. Gate the href on
-  // mount so the server HTML never carries the time-derived URL.
+  // SSR-safe: `now` below is seeded from `initialNowMs` passed by the RSC
+  // shell (page.tsx). When not provided, it falls back to `new Date()`.
+  // Pinning `initialNowMs` ensures the server render and the client's
+  // hydration render compute the exact same minute-floored query window,
+  // preventing React hydration mismatches (#418) when navigating across
+  // a minute boundary. Gate the export href on mount so the server HTML
+  // never carries an unsynchronized time-derived URL.
   const mounted = useMounted()
 
   const [preset, setPreset] = useState<number>(24)
@@ -52,7 +60,7 @@ export default function UsageLogClient() {
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purging, setPurging] = useState(false)
 
-  const [now, setNow] = useState(() => new Date())
+  const [now, setNow] = useState(() => (initialNowMs ? new Date(initialNowMs) : new Date()))
   useEffect(() => {
     // Gate the 30s tick on tab visibility so a backgrounded admin tab
     // doesn't keep rotating `now` and refetching ~MB of usage_log every
@@ -122,7 +130,7 @@ export default function UsageLogClient() {
     queryKey: ['usage-log', 'head', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
     queryFn: async ({ signal }) => {
       const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 50 } as any },
+        params: { query: { ...baseQuery, page_size: 50 } },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
@@ -137,7 +145,7 @@ export default function UsageLogClient() {
     queryKey: ['usage-log', 'full', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
     queryFn: async ({ signal }) => {
       const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 500 } as any },
+        params: { query: { ...baseQuery, page_size: 500 } },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
@@ -169,7 +177,7 @@ export default function UsageLogClient() {
     setPurging(true)
     try {
       await client.DELETE('/api/admin/usage-log', {
-        params: { query: { service_id: activeServiceId || '' } as any },
+        params: { query: { service_id: activeServiceId || '' } },
       })
       setPurgeOpen(false)
       refetch()
@@ -197,7 +205,7 @@ export default function UsageLogClient() {
           .map(([op, count]) => (
             <div key={op} className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
               <span className="truncate mr-2">{op}</span>
-              <span className="font-mono">{count.toLocaleString()}</span>
+              <span className="font-mono">{formatCount(count)}</span>
             </div>
           ))}
       </div>
@@ -287,7 +295,7 @@ export default function UsageLogClient() {
                 <div className="mt-1.5 pt-1.5 border-t border-border/50 space-y-0.5">
                   <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
                     <span className="truncate mr-2">Requests</span>
-                    <span className="font-mono">{agg.total_cdn_downloads.toLocaleString()}</span>
+                    <span className="font-mono">{formatCount(agg.total_cdn_downloads)}</span>
                   </div>
                 </div>
               )}

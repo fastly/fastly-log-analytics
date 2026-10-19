@@ -9,28 +9,39 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { ComponentProps } from 'react'
 import React from 'react'
+import { partial } from '../../helpers/partial'
+import type { PlotlyChart } from '@/components/PlotlyChart'
 
-const plotlyMock = vi.fn((_props: any) => <div data-testid="plotly-chart" />)
+type PlotlyMockProps = ComponentProps<typeof PlotlyChart>
+const plotlyMock = vi.fn<(props: PlotlyMockProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
+type TableRow = { ip?: string }
+type ColumnVisibilityMockProps = {
+  columns: Array<{ id: string; label: string }>
+  onChange?: (id: string, visible: boolean) => void
+}
+type FilterValueCellMockProps = { display?: React.ReactNode; filters?: Array<{ value?: React.ReactNode }> }
 vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: any) => plotlyMock(props),
+  PlotlyChart: (props: PlotlyMockProps) => plotlyMock(props),
 }))
 
-const dataTableMock = vi.fn((_props: any) => null)
+type DataTableMockProps = { data?: TableRow[]; emptyMessage?: string }
+const dataTableMock = vi.fn<(props: DataTableMockProps) => null>(() => null)
 vi.mock('@/components/DataTable', () => ({
-  DataTable: (props: any) => {
+  DataTable: (props: DataTableMockProps) => {
     dataTableMock(props)
     return (
       <div data-testid={`data-table-${props.data?.length ?? 0}`}>
         {props.data?.length === 0
           ? <span data-testid="empty">{props.emptyMessage}</span>
-          : props.data?.map((row: any, i: number) => (
-              <div key={i} data-testid="row">{row.ip}</div>
+          : props.data?.map((row) => (
+              <div key={row.ip} data-testid="row">{row.ip}</div>
             ))}
       </div>
     )
   },
-  ColumnVisibilityDropdown: (props: any) => (
+  ColumnVisibilityDropdown: (props: ColumnVisibilityMockProps) => (
     <button
       type="button"
       data-testid="col-vis"
@@ -42,7 +53,7 @@ vi.mock('@/components/DataTable', () => ({
 }))
 
 vi.mock('@/components/FilterValueCell', () => ({
-  FilterValueCell: (props: any) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
+  FilterValueCell: (props: FilterValueCellMockProps) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
 }))
 
 // useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
@@ -60,6 +71,8 @@ vi.mock('@/hooks/useActiveLogFields', () => ({
 }))
 
 import { HeaderAnomaliesSection } from '@/app/security/_sections/HeaderAnomaliesSection'
+
+type HeaderData = NonNullable<React.ComponentProps<typeof HeaderAnomaliesSection>['data']>
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof HeaderAnomaliesSection>> = {}) {
   return {
@@ -84,14 +97,21 @@ describe('HeaderAnomaliesSection', () => {
 
   it('shows loading skeleton overlay across both cards when isLoading', () => {
     render(<HeaderAnomaliesSection {...baseProps({ isLoading: true })} />)
-    expect(screen.getAllByText(/loading data/i).length).toBe(2)
+    expect(screen.getByText('Loading request header size distribution...')).toBeInTheDocument()
+    expect(screen.getByText('Loading oversized request headers...')).toBeInTheDocument()
+  })
+
+  it('enforces zero-CLS layout reservations on all cards', () => {
+    const { container } = render(<HeaderAnomaliesSection {...baseProps()} />)
+    const containedElements = container.querySelectorAll('.\\\[contain-intrinsic-size\\:360px\\\], .\\\[contain-intrinsic-size\\:300px\\\]')
+    expect(containedElements.length).toBe(2)
   })
 
   it('renders the not-enabled "Requires Group A" copy when req_header_bytes is inactive', () => {
     render(
       <HeaderAnomaliesSection
         {...baseProps({
-          data: { req_size_dist: [], top_ips_header: [] } as any,
+          data: partial<HeaderData>({ req_size_dist: [], top_ips_header: [] }),
         })}
       />
     )
@@ -115,7 +135,7 @@ describe('HeaderAnomaliesSection', () => {
     render(
       <HeaderAnomaliesSection
         {...baseProps({
-          data: { req_size_dist: [], top_ips_header: [] } as any,
+          data: partial<HeaderData>({ req_size_dist: [], top_ips_header: [] }),
         })}
       />
     )
@@ -129,7 +149,7 @@ describe('HeaderAnomaliesSection', () => {
     render(
       <HeaderAnomaliesSection
         {...baseProps({
-          data: {
+          data: partial<HeaderData>({
             req_size_dist: [
               { bucket: '0-512', count: 100 },
               { bucket: '512-1k', count: 80 },
@@ -139,7 +159,7 @@ describe('HeaderAnomaliesSection', () => {
               { ip: '203.0.113.5', max_header: 16384 },
               { ip: '198.51.100.7', max_header: 12000 },
             ],
-          } as any,
+          }),
         })}
       />
     )
@@ -147,9 +167,9 @@ describe('HeaderAnomaliesSection', () => {
     // Plotly receives a single bar trace with x = buckets, y = counts.
     expect(plotlyMock).toHaveBeenCalledTimes(1)
     const trace = plotlyMock.mock.calls[0]![0].data[0]
-    expect(trace.type).toBe('bar')
-    expect(trace.x).toEqual(['0-512', '512-1k', '8k+'])
-    expect(trace.y).toEqual([100, 80, 5])
+    expect(trace?.type).toBe('bar')
+    expect(trace?.x).toEqual(['0-512', '512-1k', '8k+'])
+    expect(trace?.y).toEqual([100, 80, 5])
 
     // DataTable receives two rows.
     expect(dataTableMock).toHaveBeenCalledTimes(1)
@@ -165,7 +185,7 @@ describe('HeaderAnomaliesSection', () => {
     render(
       <HeaderAnomaliesSection
         {...baseProps({
-          data: { req_size_dist: [], top_ips_header: [] } as any,
+          data: partial<HeaderData>({ req_size_dist: [], top_ips_header: [] }),
           onTopIpVisChange,
         })}
       />

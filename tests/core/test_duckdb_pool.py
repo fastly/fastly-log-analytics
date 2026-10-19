@@ -321,7 +321,7 @@ def test_pool_enabled_default_and_override(monkeypatch):
 
 
 def test_pool_max_size_parses_and_falls_back(monkeypatch):
-    """_pool_max_size returns max(1, int(env)) and falls back to 8 on garbage."""
+    """_pool_max_size returns max(1, int(env)) and falls back to 12 on garbage."""
     from backend.core.duckdb_pool import _pool_max_size
 
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "16")
@@ -329,7 +329,7 @@ def test_pool_max_size_parses_and_falls_back(monkeypatch):
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "0")
     assert _pool_max_size() == 1  # clamped to >= 1
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "not-an-int")
-    assert _pool_max_size() == 8  # fallback default
+    assert _pool_max_size() == 12  # fallback default
 
 
 def test_pool_conn_memory_limit_passthrough(monkeypatch):
@@ -340,20 +340,6 @@ def test_pool_conn_memory_limit_passthrough(monkeypatch):
     assert _pool_conn_memory_limit() is None
     monkeypatch.setenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "256MB")
     assert _pool_conn_memory_limit() == "256MB"
-
-
-def test_pool_conn_threads_parsing(monkeypatch):
-    """_pool_conn_threads parses int env or returns 1 on absent/garbage."""
-    from backend.core.duckdb_pool import _pool_conn_threads
-
-    monkeypatch.delenv("DUCKDB_POOL_CONN_THREADS", raising=False)
-    assert _pool_conn_threads() == 1  # default: 1 thread per conn
-    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "4")
-    assert _pool_conn_threads() == 4
-    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "0")
-    assert _pool_conn_threads() == 1  # clamped to >= 1
-    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "garbage")
-    assert _pool_conn_threads() == 1  # fallback to default
 
 
 def test_pool_sweep_enabled_default_and_truthy(monkeypatch):
@@ -579,12 +565,10 @@ def test_checkout_connection_passes_skip_view_update_through(monkeypatch):
 # ── fresh-build path: mem_limit + threads applied ───────────────────────────
 
 
-def test_fresh_build_applies_memory_limit_and_threads(monkeypatch):
+def test_fresh_build_applies_memory_limit(monkeypatch):
     """When the idle queue is empty and capacity is available, acquire()
-    builds via get_connection and applies the optional SET memory_limit
-    and SET threads pragmas."""
+    builds via get_connection and applies the optional SET memory_limit."""
     monkeypatch.setenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "512MB")
-    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "2")
     pool = _Pool(service_key="test_fresh", max_size=2)
 
     mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
@@ -596,19 +580,17 @@ def test_fresh_build_applies_memory_limit_and_threads(monkeypatch):
         result = pool.acquire(src={"name": "test_fresh"}, max_wait=0.5)
 
     assert result is mock_conn
-    # Both pragmas applied
+    # Resource limits applied before the connection enters the pool.
     executed = [c.args[0] for c in mock_conn.execute.call_args_list]
     assert any("memory_limit" in s and "512MB" in s for s in executed)
-    assert any("threads" in s and "2" in s for s in executed)
     assert pool._in_use == 1
     assert pool._created_total == 1
 
 
 def test_fresh_build_swallows_pragma_errors(monkeypatch):
-    """SET memory_limit / SET threads failures are logged-and-swallowed —
+    """SET memory_limit failures are logged-and-swallowed —
     a slightly mis-applied pragma must not block a checkout."""
     monkeypatch.setenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "invalid-unit")
-    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "99")
     pool = _Pool(service_key="test_fresh_err", max_size=1)
 
     mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
@@ -1259,7 +1241,6 @@ def test_pool_recovers_after_forced_discard():
         # circuit them so the test doesn't depend on a real DuckDB session.
         patch("backend.core.duckdb_pool._set_conn_state"),
         patch("backend.core.duckdb_pool._pool_conn_memory_limit", return_value=None),
-        patch("backend.core.duckdb_pool._pool_conn_threads", return_value=None),
     ):
         got = pool.acquire(src={"name": "test_recover_after_discard", "bucket": "b"}, max_wait=0.5)
 

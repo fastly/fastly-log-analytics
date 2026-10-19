@@ -1,0 +1,359 @@
+"""Postgres metadata schema: the DDL, and the boot-time "ensure" that applies it.
+
+``backend.core.metadata.base`` wires ``_init_schema`` as the *SQLite*
+pool's ``schema_fn``, so a SQLite metadata store creates itself on first
+use and a Postgres one never did. Skipping ``scripts/setup_pg_schema.py``
+therefore produced a stack that booted clean and then failed every
+metadata query with ``relation "cron_runs" does not exist``.
+:func:`ensure_pg_schema` closes that gap: it runs once per process at
+startup (API lifespan and Celery worker init) and is a cheap no-op when
+``METADATA_DSN`` is unset.
+
+The DDL lives here rather than in the script so both entry points share
+one definition — ``scripts/setup_pg_schema.py`` is still the explicit ops
+command and still exits nonzero on a real failure.
+
+Concurrency: several pods can boot at once, and concurrent
+``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT EXISTS`` can still
+collide on the shared catalog (``duplicate_table`` / ``duplicate_object``
+/ a ``pg_type`` unique violation) rather than being silently skipped.
+Those specific SQLSTATEs mean "another pod won the race", which is
+success; everything else is a genuine error and propagates. The pool runs
+``autocommit=True``, so a failed statement does not poison the rest.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import threading
+
+from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
+from backend.high_scale.postgres_control import SCHEMA_DDL as HIGH_SCALE_CONTROL_DDL
+
+logger = logging.getLogger(__name__)
+
+# slow_queries is created by a SQLite migration, not _SCHEMA, so it needs an
+# explicit PG definition. CREATE IF NOT EXISTS — never DROP: re-running setup
+# against a populated database must be non-destructive.
+# started_at_utc/ended_at_utc/duration_ms/peak_memory_mb are DOUBLE
+# PRECISION, not Postgres's REAL (a narrower 4-byte float4 than SQLite's
+# always-8-byte REAL) — a naive REAL here silently truncates unix-epoch
+# timestamps past float4's ~7 significant digits. See ``_to_postgres``'s
+# REAL -> DOUBLE PRECISION rewrite for the full rationale; this DDL is
+# hand-written (not run through that translator) so it needs the same fix
+# spelled out directly.
+_SLOW_QUERIES_DDL = """
+CREATE TABLE IF NOT EXISTS slow_queries (
+    id SERIAL PRIMARY KEY,
+    query_id INTEGER NOT NULL,
+    db_type TEXT NOT NULL,
+    service_id TEXT,
+    started_at_utc DOUBLE PRECISION NOT NULL,
+    ended_at_utc DOUBLE PRECISION NOT NULL,
+    duration_ms DOUBLE PRECISION NOT NULL,
+    outcome TEXT NOT NULL,
+    sql_preview TEXT NOT NULL,
+    sql_full TEXT,
+    sql_len INTEGER NOT NULL,
+    attr_kind TEXT NOT NULL,
+    attr_label TEXT NOT NULL,
+    attr_principal_id TEXT,
+    attr_caller_qualname TEXT NOT NULL,
+    attr_caller_file TEXT NOT NULL,
+    attr_request_path TEXT,
+    attr_request_id TEXT,
+    attr_cron_job TEXT,
+    attr_cron_run_id TEXT,
+    attr_pool_slot TEXT,
+    error_type TEXT,
+    error_message TEXT,
+    peak_memory_mb DOUBLE PRECISION
+)
+"""
+
+_SLOW_QUERIES_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_slow_queries_service_started_dur ON slow_queries (service_id, started_at_utc, duration_ms)",
+    "CREATE INDEX IF NOT EXISTS idx_slow_queries_service_duration ON slow_queries (service_id, duration_ms DESC, started_at_utc DESC)",
+)
+
+
+# committed_buffers is created by SQLite migration 004, not _SCHEMA, so the
+# Postgres path never had it — while pg_connection._IGNORE_TABLES already
+# rewrites its INSERT OR IGNORE, i.e. the dialect seam was built assuming the
+# table exists. Without this DDL, Postgres metadata mode loses the durable
+# buffer-commit checkpoint that exists to stop a crash between
+# table.append() and tombstone_buffer_files() re-appending the same rows
+# (~2x row duplication for the affected hour). CREATE IF NOT EXISTS — never
+# DROP.
+#
+# NOTE: no service_id column, mirroring SQLite. Migration 015 added
+# service_id to cron_runs and local_compacted_files ONLY, and
+# filter_uncommitted_buffers() queries this table with no service_id
+# predicate, so under one shared database this table is cross-tenant by
+# basename. Safe only because buffer basenames are uuid-derived. See ADR-18.
+_COMMITTED_BUFFERS_DDL = """
+CREATE TABLE IF NOT EXISTS committed_buffers (
+    buffer_filename TEXT PRIMARY KEY,
+    committed_at TEXT NOT NULL DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+)
+"""
+
+_METRIC_SNAPSHOTS_DDL = """
+CREATE TABLE IF NOT EXISTS metric_snapshots (
+    ts          TEXT NOT NULL,
+    metric      TEXT NOT NULL,
+    service_id  TEXT NOT NULL DEFAULT '',
+    task        TEXT NOT NULL DEFAULT '',
+    value       DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (metric, service_id, task, ts)
+)
+"""
+
+_METRIC_SNAPSHOTS_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_metric_lookup ON metric_snapshots (metric, ts)",)
+
+_SEED_INITIAL_TOS_DDL = """
+INSERT INTO share_tos_versions (version, text, published_at)
+VALUES (
+    'v1',
+    'I acknowledge that I am viewing third-party operational log data, that my access is logged, and that I will not retain, redistribute, or use this data outside the scope of my engagement.',
+    to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+)
+ON CONFLICT (version) DO NOTHING
+"""
+
+_NGWAF_BOTS_DDL = """
+CREATE TABLE IF NOT EXISTS ngwaf_bots (
+    waf_req_id         TEXT PRIMARY KEY,
+    bot_name           TEXT,
+    category           TEXT,
+    wellknown_bot_id   TEXT,
+    wellknown_bot_name TEXT,
+    synced_at          TEXT
+)
+"""
+
+_NGWAF_SYNC_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS ngwaf_sync_state (
+    workspace_id          TEXT PRIMARY KEY,
+    last_timestamp_synced TEXT
+)
+"""
+
+_RDNS_DDL = """
+CREATE TABLE IF NOT EXISTS rdns (
+    ip              TEXT PRIMARY KEY,
+    hostname        TEXT,
+    status          TEXT,
+    fcrdns_verified INTEGER DEFAULT 0,
+    looked_up_at    TEXT
+)
+"""
+
+_RDNS_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at)
+"""
+
+# Existing Postgres installations were bootstrapped before the distributed
+# ledger columns landed in the shared SQLite schema. ``CREATE TABLE IF NOT
+# EXISTS`` does not evolve those installations, so keep additive, rerunnable
+# upgrades here rather than requiring a destructive rebuild.
+_INGEST_LEDGER_ALTERS = (
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS lease_generation BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS published_at DOUBLE PRECISION",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS error_kind TEXT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS next_attempt_at DOUBLE PRECISION",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS originating_task TEXT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS originating_run_id BIGINT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS raw_delete_claim_token TEXT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS raw_delete_claimed_at DOUBLE PRECISION",
+    "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_claimed_scan ON ingest_ledger(service_id, status, claimed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_commit_scan "
+    "ON ingest_ledger(service_id, status, committed_at, raw_deleted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_raw_delete_scan "
+    "ON ingest_ledger(service_id, status, published_at, committed_at, raw_deleted_at, raw_delete_claimed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_retry_scan ON ingest_ledger(service_id, status, next_attempt_at)",
+)
+_INGEST_LEDGER_INDEX_NAMES = (
+    "idx_ingest_ledger_claimed_scan",
+    "idx_ingest_ledger_commit_scan",
+    "idx_ingest_ledger_raw_delete_scan",
+    "idx_ingest_ledger_retry_scan",
+)
+
+# ``reason_counts`` (JSON dict mapping corruption reason -> count per file)
+# was added to ``quarantined_files`` by SQLite migration 008
+# (``sqlite_migrations._migration_008_quarantined_reason_counts``), after
+# ``_SCHEMA``'s own ``quarantined_files`` CREATE TABLE was last edited — so
+# it never made it into the base schema definition itself, only into the
+# ALTER TABLE that migration runs (SQLite-only; Postgres bootstrap goes
+# through this module, never through ``sqlite_migrations``). Same additive,
+# rerunnable pattern as ``_INGEST_LEDGER_ALTERS`` above.
+_QUARANTINED_FILES_ALTERS = ("ALTER TABLE quarantined_files ADD COLUMN IF NOT EXISTS reason_counts TEXT DEFAULT '{}'",)
+_CRON_RUNS_ALTERS = ("ALTER TABLE cron_runs ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",)
+
+# ``bytes``/``count`` are declared INTEGER in the shared SQLite schema, which
+# ``_to_postgres`` leaves as int4 (max 2,147,483,647 ≈ 2.1 GB). SQLite INTEGER
+# is dynamically 64-bit so it never overflows there, but on Postgres a busy
+# service blows past int4 in a single hour: ``usage_log_hourly_summary.bytes``
+# is a running SUM per (service, hour, op_class, op_type), and per-row
+# ``usage_log.bytes`` doubles for CDN shield-miss egress. The overflow raises
+# ``integer out of range`` inside ``log_usage_calls``' broad except, silently
+# dropping every usage row for the rest of that hour. Widen to BIGINT.
+# ``ALTER COLUMN ... TYPE BIGINT`` is idempotent (a no-op on an already-bigint
+# column), matching the additive, rerunnable pattern of the ALTERs above.
+_USAGE_LOG_WIDEN_ALTERS = (
+    "ALTER TABLE usage_log ALTER COLUMN bytes TYPE BIGINT",
+    "ALTER TABLE usage_log ALTER COLUMN count TYPE BIGINT",
+    "ALTER TABLE usage_log_hourly_summary ALTER COLUMN bytes TYPE BIGINT",
+    "ALTER TABLE usage_log_hourly_summary ALTER COLUMN count TYPE BIGINT",
+)
+
+# SQLSTATEs that mean "a concurrently-booting pod created this first".
+# 42P07 duplicate_table (covers indexes too), 42710 duplicate_object,
+# 23505 unique_violation (the pg_type/pg_class catalog race).
+_RACE_SQLSTATES = frozenset({"42P07", "42710", "23505"})
+
+_ensured = False
+_ensure_lock = threading.Lock()
+
+
+def _to_postgres(sql: str) -> str:
+    """Rewrite a SQLite DDL statement into Postgres dialect."""
+    pg_sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    pg_sql = pg_sql.replace("INTEGER PRIMARY KEY", "SERIAL PRIMARY KEY")
+    pg_sql = pg_sql.replace("SERIAL PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    # SQLite's REAL is always 8-byte IEEE double precision. Postgres's REAL
+    # is a DISTINCT, narrower 4-byte float4 (~6-7 significant decimal
+    # digits) — naively passing "REAL" through silently truncates every
+    # unix-epoch timestamp column that uses it (job_runs.heartbeat_at,
+    # ingest_ledger.claimed_at/committed_at/published_at/next_attempt_at,
+    # slow_queries' *_utc columns, etc.), which lose sub-second precision
+    # once epoch seconds exceed float4's mantissa — silent data corruption,
+    # not a raised error. DOUBLE PRECISION is Postgres's true 8-byte
+    # equivalent. Word-boundaried so it doesn't touch a column literally
+    # named e.g. "real_ip" or similar.
+    pg_sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", pg_sql)
+    pg_sql = pg_sql.replace(
+        "DEFAULT (datetime('now'))",
+        "DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))",
+    )
+    pg_sql = pg_sql.replace(
+        "DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        "DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))",
+    )
+    # Drop SQLite's STRICT table qualifier.
+    pg_sql = pg_sql.replace(", STRICT", "")
+    pg_sql = pg_sql.replace(" STRICT", "")
+    return pg_sql
+
+
+def pg_schema_statements() -> list[str]:
+    """Every DDL statement the Postgres metadata store needs, in order."""
+    from backend.core.metadata.base import _SCHEMA
+    from backend.core.metadata.usage_log_db import _SCHEMA as _USAGE_SCHEMA
+    from backend.core.share_db.schema import _SCHEMA as _SHARE_DB_SCHEMA
+
+    statements = [_to_postgres(sql) for sql in _SCHEMA + _USAGE_SCHEMA + _SHARE_DB_SCHEMA]
+    statements = [
+        statement
+        for statement in statements
+        if not any(f"CREATE INDEX IF NOT EXISTS {name}" in statement for name in _INGEST_LEDGER_INDEX_NAMES)
+    ]
+    # SQLite triggers (usage_log rollup maintenance) don't translate to PG
+    # and the PG write path maintains the rollup itself.
+    statements = [s for s in statements if not s.strip().startswith("CREATE TRIGGER")]
+    statements.append(_SLOW_QUERIES_DDL)
+    statements.extend(_SLOW_QUERIES_INDEX_DDL)
+    statements.append(_COMMITTED_BUFFERS_DDL)
+    statements.append(_METRIC_SNAPSHOTS_DDL)
+    statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
+    statements.extend(_INGEST_LEDGER_ALTERS)
+    statements.extend(_QUARANTINED_FILES_ALTERS)
+    statements.extend(_CRON_RUNS_ALTERS)
+    statements.extend(_USAGE_LOG_WIDEN_ALTERS)
+    statements.extend(CLICKHOUSE_CONTROL_DDL)
+    statements.append(HIGH_SCALE_CONTROL_DDL)
+    statements.append(_SEED_INITIAL_TOS_DDL)
+    statements.append(_NGWAF_BOTS_DDL)
+    statements.append(_NGWAF_SYNC_STATE_DDL)
+    statements.append(_RDNS_DDL)
+    statements.append(_RDNS_INDEX_DDL)
+    return statements
+
+
+def _is_concurrent_create(exc: Exception) -> bool:
+    return getattr(exc, "sqlstate", None) in _RACE_SQLSTATES
+
+
+def apply_pg_schema(cur) -> tuple[int, int]:
+    """Apply the schema through ``cur``. Returns ``(applied, raced)``.
+
+    Statements that lost a race against a concurrently-booting pod are
+    counted in ``raced`` and skipped; every other failure raises with the
+    offending statement attached so the caller can print it.
+    """
+    applied = 0
+    raced = 0
+    for pg_sql in pg_schema_statements():
+        try:
+            cur.execute(pg_sql)
+            applied += 1
+        except Exception as e:
+            if _is_concurrent_create(e):
+                raced += 1
+                continue
+            raise RuntimeError(
+                f"failed to apply schema statement:\n{pg_sql.strip()}\n-> {type(e).__name__}: {e}"
+            ) from e
+    return applied, raced
+
+
+def ensure_pg_schema(*, force: bool = False) -> bool:
+    """Idempotently create the Postgres metadata schema. Once per process.
+
+    Returns True when the DDL was applied on this call, False when it was
+    skipped (no ``METADATA_DSN``, or already ensured in this process).
+    Failures are logged at CRITICAL and swallowed: crash-looping a pod on
+    a transient Postgres blip during boot is worse than booting degraded,
+    and ``_ensured`` is only latched on success so a later caller retries.
+    """
+    global _ensured
+
+    from backend.core.metadata import pg_connection
+
+    if not pg_connection.is_postgres():
+        return False
+    if _ensured and not force:
+        return False
+
+    with _ensure_lock:
+        if _ensured and not force:
+            return False
+        try:
+            pool = pg_connection.get_pg_pool()
+            with pool.connection() as conn, conn.cursor() as cur:
+                applied, raced = apply_pg_schema(cur)
+        except Exception as e:
+            logger.critical(
+                "[metadata] Postgres schema bootstrap FAILED — metadata queries will fail until this is "
+                "resolved. Fix the database and restart, or run `uv run python scripts/setup_pg_schema.py`. "
+                "Cause: %s",
+                e,
+            )
+            return False
+        _ensured = True
+
+    logger.info(
+        "[metadata] Postgres metadata schema ensured (%d statements applied, %d already created by another pod).",
+        applied,
+        raced,
+    )
+    return True
+
+
+def reset_ensure_flag_for_tests() -> None:
+    """Drop the once-per-process latch so a test can exercise the boot path."""
+    global _ensured
+    _ensured = False

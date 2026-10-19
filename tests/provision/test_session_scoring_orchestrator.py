@@ -6,7 +6,7 @@ happy-path Fastly call order, the rollback shape, and the per-tenant matrix
 resolution. This file fills the remaining 40% — the lighter-weight
 re-publish helpers (``update_recv_exclusion_regex``,
 ``update_enforce_status_code``), the request-secret self-heal branch on
-re-enable, backend drift / DELETE / 404-tolerance helpers, status_cb
+re-enable, backend DELETE / 404-tolerance helpers, status_cb
 fan-out, and the disable_scoring failure-mid-VCL rollback.
 
 All Fastly traffic is mocked via the same pattern the sibling suite uses:
@@ -25,7 +25,6 @@ import pytest
 
 from backend.provision import session_scoring_orchestrator as sso
 from backend.provision.session_scoring_vcl import (
-    SCORING_BACKEND_API_NAME,
     SCORING_RECV_NAME,
 )
 
@@ -34,6 +33,15 @@ SCORE_SVC = "ScoringSvcZ"
 TOKEN = "FAKE_TOKEN"
 KEYS_STORE = "KEYS_STORE_ID"
 CFG_STORE = "CFG_STORE_ID"
+
+
+@pytest.fixture(autouse=True)
+def _no_local_config_writes():
+    """Activation metadata is persisted through the locked ``mutate_config`` helper; these tests
+    drive the orchestrator with mocked Fastly responses (non-JSON draft versions) and have no
+    service config on disk, so isolate that persistence step."""
+    with patch("backend.provision.declarative.reconciler._update_local_config"):
+        yield
 
 
 def _scoring_meta(*, with_secret: bool = True) -> dict:
@@ -48,90 +56,6 @@ def _scoring_meta(*, with_secret: bool = True) -> dict:
     if with_secret:
         meta["request_secret"] = "secret_" + "y" * 56
     return meta
-
-
-# ── _add_scoring_backend: drift detection + PUT-update path ─────────────────
-
-
-def test_add_scoring_backend_no_op_when_matching_settings_present():
-    """A backend that already exists with the right shape should be left
-    untouched (no PUT) — this is the idempotent re-run case."""
-    domain = "fos-x-session-scorer.edgecompute.app"
-    existing = {
-        "name": SCORING_BACKEND_API_NAME,
-        "address": domain,
-        "port": 443,
-        "use_ssl": True,
-        "ssl_cert_hostname": domain,
-        "ssl_sni_hostname": domain,
-        "override_host": domain,
-        "ssl_check_cert": False,
-        "auto_loadbalance": False,
-        # Must match the orchestrator's current payload (first_byte lowered
-        # 200→100 on 2026-06-22) or the drift check below sees a diff and PUTs.
-        "connect_timeout": 100,
-        "first_byte_timeout": 100,
-        "between_bytes_timeout": 200,
-    }
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if method == "GET" and path.endswith("/backend"):
-            return [existing]
-        return {}
-
-    fastly_mock = MagicMock(side_effect=side_effect)
-    with patch.object(sso, "fastly", fastly_mock):
-        sso._add_scoring_backend(LOG_SVC, 50, domain, TOKEN)
-
-    methods = [c.args[0] for c in fastly_mock.call_args_list]
-    assert "POST" not in methods
-    assert "PUT" not in methods
-
-
-def test_add_scoring_backend_updates_on_drift():
-    """When the stored backend has stale settings (e.g. old timeouts) we
-    PUT-update it rather than no-op or POST a duplicate."""
-    domain = "fos-x-session-scorer.edgecompute.app"
-    drifted = {
-        "name": SCORING_BACKEND_API_NAME,
-        "address": domain,
-        "connect_timeout": 5000,  # differs from the 100 in code → drift
-        "first_byte_timeout": 5000,
-        "between_bytes_timeout": 5000,
-    }
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if method == "GET" and path.endswith("/backend"):
-            return [drifted]
-        return {}
-
-    fastly_mock = MagicMock(side_effect=side_effect)
-    with patch.object(sso, "fastly", fastly_mock):
-        sso._add_scoring_backend(LOG_SVC, 50, domain, TOKEN)
-
-    puts = [c for c in fastly_mock.call_args_list if c.args[0] == "PUT"]
-    assert len(puts) == 1
-    assert puts[0].args[1].endswith(f"/backend/{SCORING_BACKEND_API_NAME}")
-    # POST path must NOT have fired — that'd 409 against the existing entry.
-    assert not any(c.args[0] == "POST" for c in fastly_mock.call_args_list)
-
-
-def test_add_scoring_backend_swallows_runtime_error_on_probe():
-    """If the GET /backend probe blows up (transient API hiccup), fall
-    through to the POST path rather than crashing the whole enable."""
-    domain = "fos-x-session-scorer.edgecompute.app"
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if method == "GET" and path.endswith("/backend"):
-            raise RuntimeError("transient 500 from Fastly")
-        return {"ok": True}
-
-    fastly_mock = MagicMock(side_effect=side_effect)
-    with patch.object(sso, "fastly", fastly_mock):
-        sso._add_scoring_backend(LOG_SVC, 50, domain, TOKEN)
-
-    # POST fired — the probe failure shouldn't block the create.
-    assert any(c.args[0] == "POST" and c.args[1].endswith("/backend") for c in fastly_mock.call_args_list)
 
 
 # ── _remove_scoring_backend / _remove_scoring_snippets: 404 tolerance ─────

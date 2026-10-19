@@ -250,6 +250,33 @@ export function StorageStep({ s }: { s: WizardState }) {
                   />
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-6 pt-1">
+                <div className="space-y-1.5">
+                  <LabelWithInfo
+                    label="RUM Log Period"
+                    info="How often Fastly will flush RUM beacon logs to your bucket. 5 minutes is recommended for balanced latency and storage efficiency."
+                  />
+                  <Select
+                    value={String(config.rum_log_period || 300)}
+                    onValueChange={(v) =>
+                      setConfig({ ...config, rum_log_period: Number(v) || 300 })
+                    }
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue>
+                        {(val) => PERIOD_LABELS[String(val)] || val}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="10">10 seconds (Ultra-Fast / High-Load)</SelectItem>
+                      <SelectItem value="60">1 minute (Fastest)</SelectItem>
+                      <SelectItem value="300">5 minutes (Recommended)</SelectItem>
+                      <SelectItem value="600">10 minutes</SelectItem>
+                      <SelectItem value="900">15 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -562,6 +589,36 @@ export function StorageStep({ s }: { s: WizardState }) {
               )}
             </div>
 
+            {config.rum_enabled && config.logging_enabled !== false && (
+              <div className="grid grid-cols-2 gap-6 pt-1">
+                <div className="space-y-1.5">
+                  <LabelWithInfo
+                    label="RUM Log Period"
+                    info="Fastly edge rotation period for RUM beacons. Ingestion polls at a derived frequency (e.g. 5m flush polls every 150s). You can configure a longer period than request logs to batch beacons and optimize file writes."
+                  />
+                  <Select
+                    value={String(config.rum_log_period || 300)}
+                    onValueChange={(v) =>
+                      setConfig({ ...config, rum_log_period: Number(v) || 300 })
+                    }
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue>
+                        {(val) => PERIOD_LABELS[String(val)] || val}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="10" className="text-xs">10 seconds (Ultra-Fast / High-Load)</SelectItem>
+                      <SelectItem value="60" className="text-xs">1 minute (Fastest)</SelectItem>
+                      <SelectItem value="300" className="text-xs">5 minutes (Recommended)</SelectItem>
+                      <SelectItem value="600" className="text-xs">10 minutes</SelectItem>
+                      <SelectItem value="900" className="text-xs">15 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
+
             {config.rum_enabled && s.selectedService?.id && (
               <div className="pt-1">
                 <RumVersionPicker
@@ -590,6 +647,75 @@ export function StorageStep({ s }: { s: WizardState }) {
                 />
               </div>
             )}
+          </div>
+
+          {/* Section: Local Cache Retention Policies */}
+          <div
+            className={cn(
+              "p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity",
+              !config.enable_cron_sync && "opacity-30 pointer-events-none",
+            )}
+          >
+            <div>
+              <LabelWithInfo
+                label="Local Dashboard Cache Retention"
+                info="Control how long data is stored on this server's local NVMe disk for instantaneous dashboard querying. Data older than this is seamlessly queried directly from S3 (slower, but saves local disk space)."
+              />
+              <p className="text-[10px] text-muted-foreground leading-relaxed">
+                Configure local hot-cache windows. Rollups are tiny and should be kept long-term; raw logs are huge and can be evicted early. If your local disk gets &gt;85% full, the oldest cache is automatically evicted regardless of these settings to prevent disk exhaustion.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  label="Local Raw Log Cache"
+                  info="How many days of raw logs to keep on the local NVMe disk. Older logs are automatically queried directly from S3 Object Storage."
+                />
+                <Select
+                  value={String(config.cache_retention_days)}
+                  onValueChange={(v) =>
+                    setConfig({ ...config, cache_retention_days: Number(v) })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RETENTION_OPTIONS.map((o) => (
+                      <SelectItem key={o.value} value={o.value} className="text-xs">
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  label="Local Rollups & Metrics"
+                  info="How many MONTHS of pre-aggregated time-series rollups to keep locally. These are very small and allow instant loading of 90-day dashboard charts."
+                />
+                <Select
+                  value={String(config.rollup_retention_months)}
+                  onValueChange={(v) =>
+                    setConfig({ ...config, rollup_retention_months: Number(v) })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1" className="text-xs">1 month</SelectItem>
+                    <SelectItem value="3" className="text-xs">3 months</SelectItem>
+                    <SelectItem value="6" className="text-xs">6 months</SelectItem>
+                    <SelectItem value="12" className="text-xs">12 months</SelectItem>
+                    <SelectItem value="24" className="text-xs">24 months</SelectItem>
+                    <SelectItem value="0" className="text-xs">Forever</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           </div>
 
           <div

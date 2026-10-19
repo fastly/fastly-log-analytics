@@ -16,11 +16,9 @@ import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
 import { server } from '../../../tests/msw/server'
-import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel'
 
-const API_BASE = getApiBase()
 const SVC = 'svc-rum-panel'
 
 function renderPanel() {
@@ -53,7 +51,7 @@ afterEach(() => {
 
 describe('RumStatusPanel', () => {
   beforeEach(() => {
-    useServiceStore.setState({ activeServiceId: null, services: [], isInitialized: false } as never)
+    useServiceStore.setState({ activeServiceId: null, services: [], isInitialized: false })
   })
 
   it('analyst + RUM not enabled: shows the empty state, not Enable/Disable controls', async () => {
@@ -61,7 +59,7 @@ describe('RumStatusPanel', () => {
       activeServiceId: SVC,
       services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_only' }],
       isInitialized: true,
-    } as never)
+    })
     mockRumStatus(false)
 
     renderPanel()
@@ -76,7 +74,7 @@ describe('RumStatusPanel', () => {
       activeServiceId: SVC,
       services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
       isInitialized: true,
-    } as never)
+    })
     mockRumStatus(false)
 
     renderPanel()

@@ -101,7 +101,7 @@ describe('groupInsightsBySection', () => {
     expect(groups.map((g) => g.section.key)).toEqual(['edge', 'network', 'traffic'])
     const net = groups.find((g) => g.section.key === 'network')!
     expect(net.cards.map((c) => c.id)).toEqual(['2'])
-    expect(net.section.label).toBe('Network Path')
+    expect(net.section.label).toBe('Network & Routing Path')
   })
 
   it('buckets unknown / missing categories into the Other section, ordered last', () => {

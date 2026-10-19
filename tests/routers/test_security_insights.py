@@ -72,7 +72,7 @@ def test_insights_analyst_passes_clamped_window(client, in_memory_duckdb, test_s
     # build_request_context resolves from get_analyst_time_bounds in prod).
     app.dependency_overrides[build_request_context] = override_request_context(
         source=test_service_source,
-        con=in_memory_duckdb,
+        _con_override=in_memory_duckdb,
         session=session,
         path="/api/insights",
         time_bounds=TimeBounds(start=start, end=end),

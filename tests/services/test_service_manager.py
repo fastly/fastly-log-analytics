@@ -233,9 +233,11 @@ def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
     walk_count = {"n": 0}
     real_walk = sm._walk_dir_stats
 
+    walk_blocker = threading.Event()
+
     def _slow_walk(p):
         walk_count["n"] += 1
-        time.sleep(0.1)  # large enough that 10 threads pile up before the first finishes
+        walk_blocker.wait(timeout=5.0)  # Wait until all threads have made their call
         return real_walk(p)
 
     monkeypatch.setattr(sm, "_walk_dir_stats", _slow_walk)
@@ -243,7 +245,10 @@ def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
     results = []
     results_lock = threading.Lock()
 
+    call_barrier = threading.Barrier(11)  # 10 threads + main thread
+
     def _call():
+        call_barrier.wait(timeout=5.0)
         r = sm._get_dir_stats(path)
         with results_lock:
             results.append(r)
@@ -251,6 +256,16 @@ def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
     threads = [threading.Thread(target=_call) for _ in range(10)]
     for t in threads:
         t.start()
+
+    # Wait for all threads to be ready to call
+    call_barrier.wait(timeout=5.0)
+
+    # Give them a tiny bit of time to actually make the call and get the placeholder
+    time.sleep(0.1)
+
+    # Unblock the background walk
+    walk_blocker.set()
+
     for t in threads:
         t.join()
 

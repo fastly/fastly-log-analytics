@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.routers.services import core as services_core
+from tests._helpers.config_fakes import mutate_via_save
 
 client = TestClient(app)
 
@@ -138,15 +139,16 @@ def test_update_logging_settings_passes_custom_condition(
     mock_update.side_effect = fake_generator
 
     # Security: route moved from GET → POST/PATCH. Tests use POST.
-    response = client.post(
-        "/api/services/test-service/logging-settings/update",
-        params={
-            "period": 120,
-            "sample_rate": 25,
-            "edge_only": True,
-            "custom_condition": 'req.http.x-test == "1"',
-        },
-    )
+    with patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save_config)):
+        response = client.post(
+            "/api/services/test-service/logging-settings/update",
+            params={
+                "period": 120,
+                "sample_rate": 25,
+                "edge_only": True,
+                "custom_condition": 'req.http.x-test == "1"',
+            },
+        )
 
     assert response.status_code == 200
 
@@ -189,7 +191,6 @@ def test_update_pre_warms_cache_on_changed_with_format(
         params={
             "period": 120,
             "sample_rate": 25,
-            "prefix": "newpfx",
             "edge_only": True,
             "custom_condition": 'req.http.x == "1"',
             "update_format": True,
@@ -201,7 +202,7 @@ def test_update_pre_warms_cache_on_changed_with_format(
     assert cached is not None, "cache must be pre-warmed, not popped"
     assert cached["period"] == 120
     assert cached["sample_rate"] == 25
-    assert cached["prefix"] == "newpfx"
+    assert cached["prefix"] == ""
     assert cached["edge_only"] is True
     assert cached["custom_condition"] == 'req.http.x == "1"'
     assert cached["format_match"] is True

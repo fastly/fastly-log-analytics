@@ -15,6 +15,7 @@ from backend import config as svcconfig
 from backend.core import metadata as metadata_db
 from backend.core.metrics import get_metric_sql
 from backend.models.alerts import Alert
+from backend.repositories._base import QueryRunner
 from backend.repositories._sql import alerts as SQL
 from backend.utils.telemetry import track_query
 
@@ -98,7 +99,7 @@ def evaluate_alert(
 
         from datetime import datetime, timedelta
 
-        from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import ensure_utc, parse_iso_utc
 
         now_utc = datetime.now(UTC)
 
@@ -107,10 +108,10 @@ def evaluate_alert(
         if isinstance(max_ts_dt, str):
             max_ts_dt = parse_iso_utc(max_ts_dt)
         if hasattr(max_ts_dt, "tzinfo") and max_ts_dt.tzinfo is None:
-            max_ts_dt = max_ts_dt.replace(tzinfo=UTC)
+            max_ts_dt = ensure_utc(max_ts_dt)
 
         if hasattr(max_ts, "replace"):
-            max_ts_aware = max_ts.replace(tzinfo=UTC) if max_ts.tzinfo is None else max_ts
+            max_ts_aware = ensure_utc(max_ts)
             if (now_utc - max_ts_aware) > timedelta(minutes=30):
                 return False, None, None, None
 
@@ -121,8 +122,7 @@ def evaluate_alert(
 
         # Safely query table columns to check for dt/timestamp_hour partition columns existence
         try:
-            probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-            existing_cols = {d[0] for d in probe}
+            existing_cols = set(QueryRunner(con, src).get_schema_cols())
         except Exception:
             existing_cols = set()
 
@@ -289,11 +289,10 @@ def evaluate_alert(
     if triggered:
         if alert.get("last_triggered_at"):
             try:
-                from backend.utils.date_utils import parse_iso_utc
+                from backend.utils.date_utils import ensure_utc, parse_iso_utc
 
                 last = parse_iso_utc(alert["last_triggered_at"]) or datetime.fromtimestamp(0, tz=UTC)
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
+                last = ensure_utc(last)
                 if now_utc - last < timedelta(hours=1):
                     return False, None, None, None
             except ValueError:
@@ -332,3 +331,164 @@ def evaluate_alert(
         return True, alert.get("webhook_url"), webhook_payload, max_ts_str
 
     return False, None, None, None
+
+
+def preview_alert_series(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    table_name: str,
+    alert: Alert,
+    lookback_hours: int,
+    *,
+    has_status_data,
+) -> dict:
+    """Time series (plus baseline / comparison overlays) behind ``POST /api/alerts/preview``.
+
+    ``has_status_data`` is a zero-arg callable consulted only when the first query is empty:
+    if the status cache reports ingested data the cached view must be stale, so ONE rebuild
+    is forced and the series re-run (a genuinely empty service never triggers it).
+    ``table_name`` is the caller's ``_safe_table_name`` result. Raises on query failure; the router converts that into the response's ``error`` field.
+    """
+    import datetime
+    import logging
+
+    from backend.repositories._base import safe_iso
+    from backend.utils.telemetry import track_query
+
+    metric = alert.metric
+    window = alert.window_min
+    eval_type = getattr(alert, "evaluation_type", "absolute")
+    eval_scope = getattr(alert, "evaluation_scope", "all")
+    comp_period = getattr(alert, "comparison_period_min", None)
+    status_codes = getattr(alert, "status_codes", None)
+
+    lookback_mins = lookback_hours * 60
+    if eval_type in ("relative_increase", "relative_decrease") and comp_period:
+        lookback_mins = max(lookback_mins, comp_period + window + 60)
+
+    if lookback_mins <= 180:
+        group_sql = "time_bucket(INTERVAL '1 minute', timestamp)"
+    elif lookback_mins <= 1440:
+        group_sql = "time_bucket(INTERVAL '15 minutes', timestamp)"
+    else:
+        group_sql = "time_bucket(INTERVAL '1 hour', timestamp)"
+
+    agg_sql = get_metric_sql(metric, status_codes)
+
+    scope_filter = ""
+    if eval_scope == "edge":
+        scope_filter = " AND edge = true"
+    elif eval_scope == "origin":
+        scope_filter = " AND edge = false"
+
+    q = SQL.PREVIEW_SERIES.format(
+        group_sql=group_sql,
+        agg_sql=agg_sql,
+        table=table_name,
+        lookback_mins=lookback_mins,
+        scope_filter=scope_filter,
+    )
+
+    with track_query(con, q, [], "alerts_preview") as cursor:
+        rows = cursor.fetchall()
+
+    # View-lag self-heal: the window is anchored to ``(SELECT max(timestamp) FROM table)``,
+    # which is NULL when the cached Iceberg view SQL lags a fresh ingest (e.g. a single
+    # buffered log before the next sync/commit cron rebuild; dev runs no crons). That yields
+    # 0 preview rows even though the data exists. If the preview is empty BUT the per-service
+    # status cache reports data, the view MUST be stale — force ONE rebuild (local boolean,
+    # no retry storm) and re-run. A genuinely empty service won't have a status-cache row
+    # count, so this won't fire there.
+    if not rows and has_status_data():
+        with track_query(con, SQL.PREVIEW_ANY_ROW.format(table=table_name), [], "alerts_preview_check") as cursor:
+            has_any = cursor.fetchone()
+        if not has_any:
+            from backend.repositories._base import force_rebuild_view
+
+            force_rebuild_view(con, src)
+            with track_query(con, q, [], "alerts_preview") as cursor:
+                rows = cursor.fetchall()
+
+    times = [safe_iso(r[0]) for r in rows]
+    values = [float(r[1] or 0) for r in rows]
+
+    res: dict = {
+        "times": times,
+        "values": values,
+        "type": "anomaly_zscore" if eval_type == "anomaly_zscore" else "absolute",
+    }
+
+    if eval_type == "anomaly_zscore":
+        days = getattr(alert, "baseline_period_days", 7) or 7
+        zscore_thresh = getattr(alert, "zscore_threshold", 3.0) or 3.0
+
+        try:
+            existing_cols = set(QueryRunner(con, src).get_schema_cols())
+        except Exception:
+            existing_cols = set()
+
+        baseline_start_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{days} days'"
+        baseline_end_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '1 hours'"
+
+        baseline_where = f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} {scope_filter}"
+
+        try:
+            with track_query(con, SQL.PREVIEW_MAX_TS.format(table=table_name), [], "alerts_preview_max_ts") as cursor:
+                max_ts_row = cursor.fetchone()
+                max_ts_dt = max_ts_row[0] if max_ts_row else None
+        except Exception:
+            max_ts_dt = None
+
+        if max_ts_dt:
+            st_dt = max_ts_dt - datetime.timedelta(days=days)
+            st_utc = st_dt.astimezone(datetime.UTC)
+            if "dt" in existing_cols:
+                baseline_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+
+        q_baseline = SQL.PREVIEW_BASELINE.format(agg_sql=agg_sql, table=table_name, baseline_where=baseline_where)
+
+        try:
+            with track_query(con, q_baseline, [], "alerts_preview_baseline") as cursor:
+                baseline_rows = cursor.fetchall()
+            baseline_map = {int(r[0]): (float(r[1] or 0), float(r[2] or 0)) for r in baseline_rows}
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Baseline fetch failed: {e}")
+            baseline_map = {}
+
+        baseline_means = []
+        baseline_thresholds = []
+
+        for r in rows:
+            dt = r[0]
+            hr = dt.hour if (dt and hasattr(dt, "hour")) else 0
+            mean_val, stddev_val = baseline_map.get(hr, (0.0, 0.0))
+            stddev_val = stddev_val or 0.0001
+
+            baseline_means.append(mean_val)
+            baseline_thresholds.append(mean_val + zscore_thresh * stddev_val)
+
+        res["hist_values"] = baseline_means
+        res["threshold_values"] = baseline_thresholds
+
+    if eval_type in ("relative_increase", "relative_decrease") and comp_period:
+        res["type"] = "relative"
+        q_hist = SQL.PREVIEW_HISTORY.format(
+            group_sql=group_sql,
+            agg_sql=agg_sql,
+            table=table_name,
+            start_minutes=lookback_mins + comp_period,
+            comp_period=comp_period,
+            scope_filter=scope_filter,
+        )
+        with track_query(con, q_hist, [], "alerts_preview") as cursor:
+            hist_rows = cursor.fetchall()
+
+        hist_map = {}
+        for r in hist_rows:
+            if r[0]:
+                shifted = r[0] + datetime.timedelta(minutes=comp_period)
+                hist_map[shifted.isoformat()] = float(r[1] or 0)
+
+        res["hist_values"] = [hist_map.get(t, 0) for t in times]
+
+    return res

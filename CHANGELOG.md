@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.0.0-beta4] - 2026-10-19
+
+### Fixed
+
+- **Raw logs showed the previous service's rows after a service switch** — the explorer kept the last result set as placeholder data across services; placeholders are now kept only within the same service.
+- **Synthesized live-stream event ids could be reversed to the client IP** — events without a native id got an unkeyed hash that included the raw client address; the id is now a keyed HMAC, stable within a session.
+- **Concurrent service-config edits could overwrite each other** — config read-modify-write paths now run under the per-service config lock, and a config rollback can no longer undo a cid-salt rotation.
+- **Missing `service_id` returned 422 on some routes** — every route now returns 400 `service_id_required`.
+- **Background Postgres queries could be cut off at shutdown** — draining connections now leaves a connection with a statement in flight to its owning thread.
+- **Insights prewarm competed with ingest** — the prewarmer now yields to in-flight request and RUM ingest for the same service while the cached result is still fresh.
+
+- **Standard-mode RUM ingestion unified with request ingestion** — `rum_sync` previously listed the full `raw/rum/` prefix on every tick, never deleted raw objects inline, used a divergent parser that silently dropped unparseable timestamps, lacked a time budget, and left `ingested_files` untrimmed. Standard RUM now shares discovery (incremental minute-prefixes via `rum_minute_list_prefix`), inline raw deletion (`_delete_objects_robust_with_failures` under `resolve_raw_delete_after`), Trap #41 time budgeting (`max_seconds`), parser and exact-byte quarantine (`_parse_rum_beacon_file`, `_quarantine_rum_corrupt_lines`), and durable row bookkeeping. Re-enabled RUM `ingested_files` trimming in `metadata_cleanup` using a window strictly larger than raw retention (`log_retention_days + 1`).
+- **Daily metadata cleanup re-ingested RUM beacons as duplicates** — `metadata_cleanup` trimmed RUM `ingested_files` rows after 1 day, but RUM raw objects are kept far longer and `rum_sync` lists `raw/rum/` in full, so every aged-out beacon file was ingested again (about 50k files in one run, which also tripped the 300 s cron watchdog). RUM dedup rows are no longer trimmed.
+- **Dashboard traffic delayed request ingest by 20–30 s** — `log_discovery` used the active-request start gate, so any in-flight API request (including the dashboard's own polling) made a tick return silently and wait a full interval. Back-to-back skips pushed Remote Standard lag past 30 s. The freshness-critical tick now always runs; in-flight requests still get priority mid-tick through `yield_to_api`.
+- **Filter-suggestion refresh held back the newest request rows** — once a minute the request-discovery tick rebuilt filter suggestions (about 5 s on Remote Standard) before publishing the header status, so the rows that tick ingested appeared that much later. Status now publishes first.
+- **Usage-log bookkeeping ran on every request-discovery tick** — the ~3 s backfill, reconciliation, and retention purge sat between one tick's last ingest pass and the next tick's first, adding to Remote Standard request lag. It now runs once per 60 s heavy-refresh window.
+- **Usage-log backfill delayed the next FOS poll by ~5 s** — every `log_discovery` tick loaded every historical `fastly.edge` URL from `usage_log` (~450k on long-lived services) to find the last hour's unbackfilled files. The lookup now queries only those files' URLs.
+- **Adaptive polling hid ingested rows for up to 20 s** — `log_discovery` re-polls FOS up to twice within a tick, but only published the view and header extents after the last pass. Each follow-up pass now publishes the previous pass's rows first.
+- **Post-ingest view refresh stalled behind DuckLake commits** — every buffer commit and table optimize paginated through all legacy Iceberg `metadata.json` objects in FOS while holding the per-service lock (30 s+ on services with long Iceberg history), so the dashboard view kept serving stale buffer paths. DuckLake writes no Iceberg metadata, so both calls are removed.
+- **Standard-mode request lag exceeded one minute** — `log_discovery` ran hourly rollup recomputes inline (90–170 s on a busy service), so most ticks were skipped. Rollups now run on a per-service single-flight background worker that coalesces queued hours.
+- **High-scale request lag reached minutes under load** — the isolated high-scale worker processed each page's source objects serially at about 3 s per object. Objects in a page now run concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4).
+- **DuckDB scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking DuckDB's worker relaunch against an in-flight DuckLake scan. Threads are now set once from `DUCKDB_THREADS`; `DUCKDB_POOL_CONN_THREADS` is removed.
+- **Dashboard failed with `schema "lake" does not exist`** — returning a pooled connection detached `lake` from the shared per-service DuckDB instance, evicting it from sibling requests still mid-query. Pool release no longer detaches.
+- **High-scale source cursor stalled under multiple worker replicas** — every replica lists the same page, and a claim lost to a sibling counted as a failure, which blocked cursor advancement. Contended claims now count as duplicates; expired sibling leases are still recovered independently.
+- **High-scale deletion sweeps stalled ingest for minutes** — each worker ran its raw-source deletion sweep inline after every page, and each deletion re-verifies the archive in FOS (about 1 s), so a 100-object sweep blocked ingest for over a minute. Sweeps now run on a background thread that never overlaps itself.
+
+### Breaking
+
+- **Removed `DEPLOYMENT_MODE=high_throughput`** — The intermediate Celery ledger mode has been completely removed in favor of `DEPLOYMENT_MODE=standard` (sync DuckDB + DuckLake) and `DEPLOYMENT_MODE=high_scale` (ClickHouse and dedicated micro-batching workers). Setting `DEPLOYMENT_MODE=high_throughput` is explicitly rejected at boot and Helm template time.
+- The legacy `GET /api/admin/quarantine/export` and
+  `GET /api/admin/quarantine/{quarantine_id}/download` endpoints were removed.
+  Quarantine now exposes paginated per-item evidence and exact-byte downloads
+  through `GET /api/admin/quarantine` and
+  `GET /api/admin/quarantine/download/{item_id}`.
+
+## 3.0.0-beta1 - 2026-09-02
+
+Scalable ingest architecture. The commit-path storage engine, the ingest data
+plane, and the metadata backend were all replaced to allow ingestion to scale
+horizontally across many worker processes.
+
+**Read before upgrading:** [ADR-14](docs/adr/14-ducklake-replacement.md)
+(DuckLake), [ADR-15](docs/adr/15-multi-writer-topology.md) (multi-writer
+topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
+[ADR-18](docs/adr/18-serving-tier-single-pod.md) (what does *not* scale yet).
+
+### Added
+
+- **DuckLake commit path** — DuckDB's DuckLake extension replaces Apache Iceberg/pyiceberg as the catalog and write path. The catalog is a local `.ducklake` file for single-node deployments or a Postgres DSN for multi-writer ones; committed parquet lands in Fastly Object Storage for cloud-backed sources.
+- **Distributed ingest (`DEPLOYMENT_MODE=high_throughput`)** — discovery and conversion fan out across Celery workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
+- **Batched commits** — a batch of objects costs one catalog transaction rather than one per file, keeping catalog snapshots proportional to batches instead of to file count. Tunable via `LEDGER_CONVERT_BATCH_SIZE` (default 50).
+- **Postgres metadata backend** — `METADATA_DSN` switches cron state, the ingest ledger, and ingested-file manifests from per-node SQLite to a shared Postgres database, which is what allows more than one ingest process to coordinate. Cron leases are acquired atomically via a partial unique index so two processes can never run the same job.
+- **RUM beacon ingest on the ledger** — client vitals and client errors ingest through the same ledger/worker path, writing both tables in one transaction.
+- **Observability** — OTLP metrics and traces export, per-route span names, and a local Grafana/Prometheus/Tempo stack for the multi-node topology.
+- **Deployment** — a multi-node Docker Compose topology and a Helm chart.
+
+### Changed
+
+- **Scheduled jobs are split by write target.** Jobs that only touch the ledger and object storage run on Celery workers via RedBeat; jobs that read or write node-local state stay on each node's in-process scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
+- Retention deletion, snapshot expiry, table info, and the snapshot calendar all read and write DuckLake rather than the previous catalog.
+
+### Breaking
+
+- **`DEPLOYMENT_MODE=high_throughput` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
+- `POST /api/security/top-bots` and `POST /api/security/proxies` were removed in favor of `POST /api/security/aggregates`.
+- Deployments that set `DUCKLAKE_CATALOG` empty while running `DEPLOYMENT_MODE=high_throughput` will not start until it is configured. The Helm chart now defaults to `config.deploymentMode: standard` (installable with no `--set` flags) and rejects a high-throughput install that is missing the Postgres DSNs or the broker at `helm template` time.
+
+### Upgrading from 2.x
+
+Upgrading is code-and-restart: the app migrates itself.
+
+- **The Postgres metadata schema is created at startup** when `METADATA_DSN` is set — by the backend lifespan and by each Celery worker, idempotently and safe against several pods booting at once. `scripts/setup_pg_schema.py` still works and remains the explicit ops command for provisioning a database ahead of a deploy.
+- **Pre-3.0 log history is adopted into DuckLake on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred. Progress and outcome appear as `ducklake_adopt` rows in `cron_runs` (Cron UI). A failure is recorded there and never blocks startup; retry with `POST /api/admin/ducklake/migrate`, which also serves as the manual trigger.
+
+### Known limitations
+
+- **Only the ingest tier scales horizontally.** The tier that serves API requests remains single-node: the per-service DuckDB file is process-exclusive, and several scheduled jobs write node-local output under a cross-node lease. The Helm chart pins the backend to one replica for this reason. See [ADR-18](docs/adr/18-serving-tier-single-pod.md).
+- **Analyst "independent instance" (Path A) is unsupported against a DuckLake-backed service.** The previous catalog could be reconstructed from object-storage contents alone, which is what let an analyst run a self-sufficient copy with only read-only bucket credentials; a DuckLake catalog cannot. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md).
+- Under a shared catalog, snapshot retention and file cleanup are catalog-global rather than per-service, so one service's retention window applies to every service sharing that catalog.
+
 ## [2.4.1] - 2026-08-25
 
 ### Added
@@ -1474,6 +1556,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[3.0.0-beta4]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0-beta4
 [2.3.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.3.0
 [2.2.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.2
 [2.2.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.1

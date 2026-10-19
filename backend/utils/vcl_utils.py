@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import tempfile
 
+from backend.utils.vcl_safety import validate_log_format_macro
+
 
 def _run_falco_lint(
     falco_bin: str,
@@ -96,8 +98,11 @@ def log_format_to_vcl_log(raw: str) -> str:
             # opens a new attacker-controlled subroutine. Legitimate
             # heredoc patterns like `strftime(\{"format"\}, ...)` use
             # `\{` / `\}` escapes and pass cleanly.
-            if ";" in part or "/*" in part or "//" in part or re.search(r"(?<!\\)[{}]", part):
-                raise ValueError("VCL macro contains invalid characters (;, /*, //, unescaped {, unescaped })")
+            # Reject macro content that could inject VCL structure (;, /*,
+            # //, unescaped { / }). Delegated to the unified safety module
+            # (see audit finding 008); VclSafetyError subclasses ValueError
+            # so existing handlers keep catching it.
+            validate_log_format_macro(part)
             var = part.replace("\\{", "{").replace("\\}", "}").strip().replace('\\"', '"')
             vcl_parts.append(var)
 

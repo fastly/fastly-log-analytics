@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from backend.config import get_fastly_api_key
+from backend.core.fastly.mock_fixtures import api_key_or_mock
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -113,6 +112,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
+        "billing_zone": str(global_rates.get("billing_zone", "MBZ200")),
         "rum_beacons_per_day": 0,
     }
 
@@ -159,7 +159,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                 structural = 2 + len(enabled_codes) * 5
                 result["estimated_bytes_per_line"] = structural + field_bytes
             except Exception:
-                pass
+                logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
             try:
                 from backend.provision import parse_period
 
@@ -167,9 +167,9 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                 period_secs = period_val if isinstance(period_val, int) else parse_period(str(period_val))
                 result["log_period_seconds"] = period_secs
             except Exception:
-                pass
+                logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     try:
         cached_status = svcconfig.get_status(source["name"])
@@ -188,9 +188,9 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                     l_dt = parse_iso_utc(latest) or _now
                     result["data_days"] = max(1, (l_dt - e_dt).days + 1)
                 except Exception:
-                    pass
+                    logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     # Empirical node count analysis — SQLite-only, doesn't need a DuckDB hop.
     try:
@@ -200,31 +200,20 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         if avg:
             result["avg_nodes_per_flush"] = round(float(avg))
     except Exception:
-        pass
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
     # Extract historical RUM beacons per day for prefill.
     try:
-        from backend.core.metadata import get_con
-
-        db = get_con(source["name"])
-        cur = db.execute(
-            """
-            SELECT AVG(daily_beacons) FROM (
-                SELECT SUM(row_count) as daily_beacons
-                FROM ingested_files
-                WHERE source_name = ?
-                  AND table_name IN ('client_vitals', 'client_errors')
-                GROUP BY file_date
-            )
-            """,
-            (source["name"],),
-        )
-        val = cur.fetchone()[0]
-        result["rum_beacons_per_day"] = round(float(val)) if val is not None else 0
-    except Exception:
-        pass
+        val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
+        result["rum_beacons_per_day"] = round(val) if val is not None else 0
+    except Exception as e:
+        logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
 
     return result, prov
+
+
+def _api_key(service_id: str) -> str:
+    return api_key_or_mock(get_fastly_api_key(service_id))
 
 
 @router.get("/prefill/rates", response_model=PrefillRatesResponse)
@@ -263,7 +252,7 @@ async def prefill(source: dict = Depends(get_source)):
     }
 
     # Pull real traffic numbers and live logging config from Fastly Stats API.
-    api_key = get_fastly_api_key(source["service_id"])
+    api_key = _api_key(source["service_id"])
     if api_key:
         from backend.core.fastly.client import fastly
         from backend.core.fastly.service import find_condition, get_active_version
@@ -319,7 +308,7 @@ async def prefill(source: dict = Depends(get_source)):
                         if "req.restarts == 0" in stmt:
                             updates["edge_only"] = True
             except Exception:
-                pass
+                logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
             return updates
 
         async def _fetch_stats() -> dict | None:
@@ -361,7 +350,7 @@ async def prefill(source: dict = Depends(get_source)):
                 result["requests_per_day"] = round(sum(daily_reqs[d] for d in avg_days) / len(avg_days))
                 result["edge_requests_per_day"] = round(sum(daily_edge[d] for d in avg_days) / len(avg_days))
         except Exception:
-            pass
+            logger.debug("prefill: step failed (ignored)", exc_info=True)
 
     # Skip the DuckDB hop entirely when the cached config status already
     # carries edge_ratio (steady state — the sync cron keeps it fresh).
@@ -395,7 +384,7 @@ async def prefill(source: dict = Depends(get_source)):
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
         except Exception:
-            pass
+            logger.debug("prefill: step failed (ignored)", exc_info=True)
 
     # ``avg_nodes_per_flush`` already populated by _compute_prefill_rates above.
     return PrefillResponse.with_telemetry(debug_queries=debug_queries, section_timings=section_timings, **result)
@@ -484,7 +473,7 @@ def usage_current_storage(
                     iceberg_files = iceberg_info.get("data_files", 0)
                     iceberg_info_success = True
             except Exception:
-                pass
+                logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
         if not iceberg_info_success:
             try:
@@ -508,7 +497,7 @@ def usage_current_storage(
 
             quarantine_bytes = get_quarantine_storage_total(src["name"])
         except Exception:
-            pass
+            logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
 
         # Calculate RUM storage separately from regular logs
         rum_bytes = 0
@@ -516,13 +505,13 @@ def usage_current_storage(
             s3 = _get_fos_client(src)
             bucket = src["bucket"]
             prefix = src.get("prefix", "").strip("/")
-            rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
+            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
             paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
                 for obj in page.get("Contents", []):
                     rum_bytes += obj.get("Size", 0)
         except Exception:
-            pass
+            logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
         regular_log_bytes = total_bytes - rum_bytes
 
@@ -580,7 +569,7 @@ def usage_operations(
     clamped_from_sub_hour = requested_by != by
 
     src = source
-    api_key = get_fastly_api_key(src["logging_service_id"])
+    api_key = _api_key(src["logging_service_id"])
     if not api_key:
         raise HTTPException(status_code=403, detail={"error": "Fastly API key is not configured."})
 
@@ -663,7 +652,7 @@ def usage_bandwidth(
 ):
 
     src = source
-    api_key = get_fastly_api_key(src["logging_service_id"])
+    api_key = _api_key(src["logging_service_id"])
     if not api_key:
         raise HTTPException(status_code=403, detail={"error": "Fastly API key is not configured."})
 
@@ -732,7 +721,7 @@ def usage_log_activity(
     res = repo.get_log_activity(source, start_str, end_str, by)
 
     # Fetch Fastly API stats for the logging service to compare generated vs processed
-    api_key = get_fastly_api_key(source.get("logging_service_id", ""))
+    api_key = _api_key(source.get("logging_service_id", ""))
     logging_svc = source.get("logging_service_id", "").strip()
 
     if api_key and logging_svc and by in ("minute", "hour", "day"):
@@ -789,7 +778,7 @@ def usage_log_activity(
             res["total_fastly_log_records"] = total_log_records
 
         except Exception:
-            pass
+            logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
 
     return UsageLogActivityResponse.with_telemetry(**res)
 
@@ -803,7 +792,7 @@ def usage_rum_breakdown(
     source: dict = Depends(get_source),
 ):
     """Calculate RUM beacon volume and estimated FOS Class A operations cost."""
-    from backend.core.metadata import get_con
+    from backend.core import metadata as metadata_db
 
     requested_by = by
     if by not in ("hour", "day"):
@@ -833,28 +822,9 @@ def usage_rum_breakdown(
 
     # Query RUM beacon count by date from metadata DB using the new DuckDB/Iceberg ingestion tracking
     try:
-        db = get_con(service_id)
         start_date = start_str.split("T")[0]
         end_date = end_str.split("T")[0]
-        cur = db.execute(
-            """
-            SELECT
-                file_date as date,
-                SUM(row_count) as beacon_count
-            FROM ingested_files
-            WHERE source_name = ?
-              AND table_name IN ('client_vitals', 'client_errors')
-              AND file_date >= ? AND file_date < ?
-            GROUP BY file_date
-            ORDER BY date
-            """,
-            (service_id, start_date, end_date),
-        )
-        rows = cur.fetchall()
-        beacons_by_date: dict[str, int] = {}
-        for row in rows:
-            if row["date"]:
-                beacons_by_date[str(row["date"])] = row["beacon_count"]
+        beacons_by_date: dict[str, int] = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
     except Exception:
         beacons_by_date = {}
 

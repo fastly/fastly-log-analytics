@@ -8,6 +8,7 @@ import tenacity
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.fastly.com"
+RT_BASE = "https://rt.fastly.com"
 
 _RETRYABLE_HTTP_CODES = (429, 500, 502, 503, 504)
 
@@ -18,7 +19,7 @@ def _is_retryable_fastly_error(exc: BaseException) -> bool:
     return isinstance(exc, (urllib.error.URLError, ConnectionError, TimeoutError))
 
 
-def _request(method, path, *, data, headers, expect_empty, max_retries, timeout):
+def _request(method, path, *, data, headers, expect_empty, max_retries, timeout, base=API_BASE):
     """Shared transport for ``fastly()`` and ``fastly_raw()``.
 
     Owns the telemetry acquisition + dispatch, the tenacity retry loop, the
@@ -27,6 +28,13 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout)
     construction (JSON sets Content-Type only when a body is present; raw
     always sets the caller-supplied type), and default timeout — they build
     ``headers`` + ``data`` themselves and delegate the wire call here.
+
+    Retry policy is method-blind by design: POST/PUT/DELETE are retried on
+    429/5xx and on timeouts/connection errors just like GET. Known risk: if
+    Fastly accepted a non-idempotent POST (create service/version/domain/backend)
+    but the response was lost, the retry can create a duplicate or surface a
+    spurious 409 after the first attempt actually succeeded. Kept as-is
+    deliberately; callers that create resources must tolerate that.
     """
     try:
         from backend.utils.telemetry import tracked_call
@@ -36,7 +44,7 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout)
         telemetry_context = None
 
     def _do_call():
-        url = API_BASE + path
+        url = base + path
 
         try:
             # wait_exponential + wait_random_exponential composes as
@@ -133,4 +141,26 @@ def fastly_raw(
         expect_empty=expect_empty,
         max_retries=max_retries,
         timeout=timeout,
+    )
+
+
+def fastly_rt(path, *, token, max_retries=0, timeout=10):
+    """GET from the real-time analytics host (``rt.fastly.com``) and return parsed JSON.
+
+    Same transport, telemetry and mock-mode shape as ``fastly()``; only the base host differs.
+    """
+    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
+
+    if is_mock_mode():
+        return mock_response("GET", path, None)
+
+    return _request(
+        "GET",
+        path,
+        data=None,
+        headers={"Fastly-Key": token, "Accept": "application/json"},
+        expect_empty=False,
+        max_retries=max_retries,
+        timeout=timeout,
+        base=RT_BASE,
     )

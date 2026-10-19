@@ -30,6 +30,8 @@ import { CardGrid } from './CardGrid'
 import { buildTrafficData, buildChartLayout } from './chartHelpers'
 import { buildTrafficDataAsync } from '@/lib/workers/buildTrafficData'
 import { COLLAPSED_SECTIONS_KEY } from './categories'
+import { useLocalStorageString } from '@/hooks/useLocalStorageString'
+import type { PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 import type { DashboardBodyProps } from './types'
 
 // P-4 slice 3: mirror the section-selector pattern used by /security and
@@ -37,10 +39,6 @@ import type { DashboardBodyProps } from './types'
 // is constant — declaring it explicitly is what lets the backend know to
 // keep emitting every block (and what positions us to drop sections per
 // feature flag without an API change).
-//
-// MUST stay in lockstep with DASHBOARD_SSR_SECTIONS in lib/ssr/dashboard.ts —
-// the section list is part of the SSR-seed bundle key, so a divergence here
-// would miss the dehydrated cache and double-fetch on first paint.
 const DASHBOARD_SECTIONS: DashboardSection[] = ['core', 'topten', 'bots']
 
 // ── DashboardBody ──────────────────────────────────────────────────────────────
@@ -90,48 +88,45 @@ function DashboardBody({
   const [metric, setMetric] = React.useState("requests")
   const router = useRouter()
 
-  const [hiddenCategories, setHiddenCategories] = React.useState<Set<string>>(new Set())
+  // Hidden legend categories are scoped to the metric they were hidden under: switching metric
+  // drops them (derived, so no reset effect), and toggling re-scopes the set to the current one.
+  const [hiddenState, setHiddenState] = React.useState<{ metric: string; set: ReadonlySet<string> }>(
+    () => ({ metric: 'requests', set: new Set() }),
+  )
+  const hiddenCategories = React.useMemo<ReadonlySet<string>>(
+    () => (hiddenState.metric === metric ? hiddenState.set : new Set<string>()),
+    [hiddenState, metric],
+  )
 
   const toggleCategory = React.useCallback((cat: string) => {
-    setHiddenCategories(prev => {
-      const next = new Set(prev)
+    setHiddenState((prev) => {
+      const next = new Set(prev.metric === metric ? prev.set : [])
       if (next.has(cat)) next.delete(cat)
       else next.add(cat)
-      return next
+      return { metric, set: next }
     })
-  }, [])
+  }, [metric])
 
   // Collapsed-section state, persisted to localStorage so user's choices stick
   // across reloads. SSR-safe: start EMPTY so the server and the first client
   // render agree (reading localStorage in the initializer diverged the first
   // client render from the server for any user who had collapsed a section →
   // React #418). The persisted set is loaded right after mount.
-  const [collapsedSections, setCollapsedSections] = React.useState<Set<string>>(new Set())
-  React.useEffect(() => {
+  const [collapsedRaw, writeCollapsedRaw] = useLocalStorageString(COLLAPSED_SECTIONS_KEY)
+  const collapsedSections = React.useMemo<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem(COLLAPSED_SECTIONS_KEY)
-      if (raw) setCollapsedSections(new Set<string>(JSON.parse(raw)))
+      return collapsedRaw ? new Set<string>(JSON.parse(collapsedRaw)) : new Set<string>()
     } catch {
-      /* ignore malformed / unavailable storage */
+      return new Set<string>()
     }
-  }, [])
+  }, [collapsedRaw])
 
   const toggleSectionCollapsed = React.useCallback((id: string) => {
-    setCollapsedSections(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      try {
-        localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...next]))
-      } catch { /* ignore quota / private-mode errors */ }
-      return next
-    })
-  }, [])
-
-  // Clear hidden categories when metric changes to avoid confusing states
-  React.useEffect(() => {
-    setHiddenCategories(new Set())
-  }, [metric])
+    const next = new Set(collapsedSections)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    writeCollapsedRaw(JSON.stringify([...next]))
+  }, [collapsedSections, writeCollapsedRaw])
 
   const isReady = useIsDataReady()
 
@@ -142,12 +137,10 @@ function DashboardBody({
   // staleTime gotcha that would otherwise make a second useQuery
   // refetch on mount despite the cache being warm — turning what
   // should be a one-request page back into a two-request page. It is
-  // also what makes the SSR seed (lib/ssr/dashboard.ts) paint the whole
-  // page from cache: the seeded bundle key carries top_bots too, so the
-  // bots cards no longer fire their own request on cold load.
-  //
-  // Keyed on (rangeToken, anchor) — server-reproducible — so the SSR seed
-  // key byte-matches this query's first-paint key.
+  // also what lets the whole page paint from one cached bundle: the bundle
+  // carries top_bots too, so the bots cards don't fire their own request.
+  // The dashboard is NOT SSR-seeded (app/dashboard/page.tsx is a plain
+  // client wrapper); the bundle is fetched client-side on mount.
   //
   // Compare-mode keeps its own dedicated /api/dashboard/aggregates
   // call below — it only fires when the user explicitly enables
@@ -173,8 +166,9 @@ function DashboardBody({
   // failure: no scary red banner, and keep the chart/cards on their
   // loading skeleton instead of flashing "No data available".
   const isStalePreparing = bundleQuery.isError && isStaleDashboardViewError(bundleQuery.error)
-  const isLoadingAggs = bundleQuery.isLoading || isStalePreparing
-  const isFetchingAggs = bundleQuery.isFetching
+  const hasDashboardData = Boolean(aggregates)
+  const isLoadingAggs = bundleQuery.isLoading || (isStalePreparing && !hasDashboardData)
+  const isFetchingAggs = bundleQuery.isFetching && !isStalePreparing
 
   const { data: compareAggregates, error: compareError, refetch: refetchCompare } = useQuery({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
@@ -200,10 +194,9 @@ function DashboardBody({
 
   // top_bots rides in the composite bundle response (one round-trip) and is
   // read directly off bundleQuery.data — same pattern as aggregates above — so
-  // the SSR-seeded bundle paints the bots cards from cache with NO separate
-  // fetch. (/api/security/top-bots has no keyed path, so a dedicated query keyed
+  // the cached bundle paints the bots cards with NO separate fetch. (/api/security/top-bots has no keyed path, so a dedicated query keyed
   // on the server-reproducible token isn't available; reading off the bundle is
-  // both the single-fetch win and the SSR-seed-compatible path. Error/retry fall
+  // the single-fetch win. Error/retry fall
   // back to the bundle's own state, identical to how aggregates errors surface.)
   const topBotsData = bundleQuery.data?.top_bots
   const topBotsError = bundleQuery.error
@@ -231,6 +224,7 @@ function DashboardBody({
       compareMode,
       compareStartTime,
       startTime,
+      endTime,
       trend,
       timezone,
       metric,
@@ -238,37 +232,33 @@ function DashboardBody({
       hiddenCategories,
       catalog,
     }),
-    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
+    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
 
-  const [trafficData, setTrafficData] = React.useState<any[]>(() => buildTrafficData(trafficParams))
-  // True while the worker round-trip for the current trafficParams is in
-  // flight. TrafficChart uses this to keep the skeleton up instead of
-  // flashing "No data available" when the bundle has arrived but the
-  // transform hasn't produced traces yet.
-  const [transformPending, setTransformPending] = React.useState(true)
+  // The traces last produced for a given params object. While the worker round-trip for the
+  // CURRENT trafficParams is in flight, `transformed.params !== trafficParams` — that is the
+  // pending signal TrafficChart uses to keep the skeleton up instead of flashing "No data
+  // available" before the transform has actually produced traces.
+  const [transformed, setTransformed] = React.useState<{ params: typeof trafficParams; traces: PlotlyTrace[] }>(
+    () => ({ params: trafficParams, traces: buildTrafficData(trafficParams) }),
+  )
+  const trafficData = transformed.traces
+  const transformPending = transformed.params !== trafficParams
 
   React.useEffect(() => {
     let cancelled = false
-    setTransformPending(true)
     buildTrafficDataAsync(trafficParams)
       .then((traces) => {
         // Avoid landing a stale result after a fast user filter
         // change: only commit if this effect's params are still the
         // active ones.
-        if (!cancelled) {
-          setTrafficData(traces)
-          setTransformPending(false)
-        }
+        if (!cancelled) setTransformed({ params: trafficParams, traces })
       })
       .catch(() => {
         // Async failure path falls back to sync (matches the
         // worker-construction fallback inside buildTrafficDataAsync
         // for the case where the promise rejected for a real reason).
-        if (!cancelled) {
-          setTrafficData(buildTrafficData(trafficParams))
-          setTransformPending(false)
-        }
+        if (!cancelled) setTransformed({ params: trafficParams, traces: buildTrafficData(trafficParams) })
       })
     return () => {
       cancelled = true
@@ -294,12 +284,17 @@ function DashboardBody({
     })
   }, [addFilter])
 
-  const handleChartRelayout = React.useCallback((event: any) => {
+  const handleChartRelayout = React.useCallback((event: PlotlyRelayoutEvent) => {
     // Skip non-range events (autorange toggle, spike config, etc.)
-    if (event?.['xaxis.autorange'] === true || event?.['xaxis.showspikes'] !== undefined) return
+    if (event['xaxis.autorange'] === true || event['xaxis.showspikes'] !== undefined) return
 
-    const x0 = event?.['xaxis.range[0]'] ?? event?.['xaxis.range']?.[0]
-    const x1 = event?.['xaxis.range[1]'] ?? event?.['xaxis.range']?.[1]
+    const nested = Array.isArray(event['xaxis.range']) ? event['xaxis.range'] : []
+    const bound = (flat: unknown, fallback: unknown): string | number | undefined => {
+      const v = flat ?? fallback
+      return typeof v === 'string' || typeof v === 'number' ? v : undefined
+    }
+    const x0 = bound(event['xaxis.range[0]'], nested[0])
+    const x1 = bound(event['xaxis.range[1]'], nested[1])
 
     if (x0 === undefined || x1 === undefined) return
 
@@ -329,7 +324,7 @@ function DashboardBody({
   }, [addFilter])
 
   const visibleCardList = React.useMemo(
-    () => allCards.filter((c: any) => visibleCards.has(c.id)),
+    () => allCards.filter((c) => visibleCards.has(c.id)),
     [allCards, visibleCards]
   )
 
@@ -470,8 +465,8 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
 
   const { visibleCards, toggleCard, showAll, reset: resetCards } = useCardVisibility(
     'dashboard_cards',
-    allCards.map((c: any) => c.id),
-    allCards.filter((c: any) => c.inActiveFormat).map((c: any) => c.id),
+    allCards.map((c) => c.id),
+    allCards.filter((c) => c.inActiveFormat).map((c) => c.id),
   )
 
   // Time-range wire inputs (lib/range-wire.ts; resolved inside useDashboardBundle
@@ -497,7 +492,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
   // the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 
@@ -509,7 +504,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
       defaultInterval="1 hour"
       headerActions={
         <DashboardHeader
-          visibleCardsCount={visibleCards.size}
+          visibleCardsCount={allCards.filter(c => visibleCards.has(c.id)).length}
           allCards={allCards}
           visibleCards={visibleCards}
           onToggleCard={toggleCard}

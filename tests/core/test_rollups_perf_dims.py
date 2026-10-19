@@ -18,13 +18,20 @@ compactor) in structure.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
+from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -35,16 +42,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
     con.execute(f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, ttl BIGINT)")
     for r in rows:
         con.execute(f"INSERT INTO {table} VALUES (?, ?)", [r["timestamp"], r.get("ttl")])
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
 
 
 def _build_patches(cache_root, table: str, con_factory):
@@ -86,18 +83,6 @@ def _write_hour_all_fields(cache_root: str, hour: str) -> None:
         pa.table({"field": pa.array(["x"]), "value": pa.array(["y"]), "count": pa.array([1], type=pa.int64())}),
         os.path.join(d, "all_fields.parquet"),
     )
-
-
-def _three_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=3)).strftime("%Y-%m-%d")
-
-
-def _two_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=2)).strftime("%Y-%m-%d")
-
-
-def _yesterday_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ── Writer: happy path + schema + exact aggregates ───────────────────────────

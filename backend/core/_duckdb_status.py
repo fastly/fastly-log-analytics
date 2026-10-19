@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,6 +32,7 @@ import duckdb
 
 from backend import config as svcconfig
 from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__.replace("_duckdb_status", "duckdb"))
 
@@ -98,6 +100,101 @@ def __getattr__(name: str):
         # Re-read in case main-module rebound it after our top-level capture.
         return _db_main.STORAGE_MODE
     raise AttributeError(name)
+
+
+# In-memory cache for DuckLake committed table stats:
+# (source_name, lake_table) -> (snapshot_id, count, min_timestamp, max_timestamp)
+_ducklake_stats_cache: dict[tuple[str, str], tuple[int, int, Any, Any]] = {}
+_ducklake_stats_cache_lock = threading.Lock()
+
+
+def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
+    """Clear DuckLake table stats cache for a source or globally."""
+    with _ducklake_stats_cache_lock:
+        if source_key is None:
+            _ducklake_stats_cache.clear()
+        else:
+            for k in list(_ducklake_stats_cache.keys()):
+                if k[0] == source_key:
+                    _ducklake_stats_cache.pop(k, None)
+
+
+def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
+    """Count/min/max read STRAIGHT from the committed DuckLake table plus the
+    live buffer parquet, bypassing a possibly-poisoned per-connection baked
+    iceberg view.
+
+    Committed DuckLake stats are cached in memory keyed by snapshot ID, avoiding
+    repeated WAN S3 scans on every sync tick while preserving full consistency.
+
+    Returns ``(count, min_ts, max_ts)`` or ``None`` when nothing is readable.
+    """
+    counts: list[int] = []
+    mins: list[Any] = []
+    maxs: list[Any] = []
+    src_name = src.get("name", "default")
+    try:
+        from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
+
+        lake_table = ducklake_table_name(src)
+        exists = con.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+            [lake_table],
+        ).fetchone()
+        if exists:
+            snap_id = ducklake_current_snapshot_id(con)
+            cached = None
+            if snap_id is not None:
+                with _ducklake_stats_cache_lock:
+                    cached = _ducklake_stats_cache.get((src_name, lake_table))
+
+            if cached is not None and cached[0] == snap_id:
+                lake_count, lake_min, lake_max = cached[1], cached[2], cached[3]
+            else:
+                row = con.execute(
+                    f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
+                ).fetchone()
+                lake_count = (row[0] or 0) if row else 0
+                lake_min = row[1] if row else None
+                lake_max = row[2] if row else None
+                if snap_id is not None:
+                    with _ducklake_stats_cache_lock:
+                        _ducklake_stats_cache[(src_name, lake_table)] = (snap_id, lake_count, lake_min, lake_max)
+
+            if lake_count > 0:
+                counts.append(lake_count)
+                if lake_min is not None:
+                    mins.append(lake_min)
+                if lake_max is not None:
+                    maxs.append(lake_max)
+    except Exception as e:
+        logger.debug("[sync-status] direct lake stats unavailable: %s", e)
+    try:
+        from backend.core import iceberg as _ice
+        from backend.utils.sql_validator import escape_sql_literal as _esl
+
+        buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
+        if buf_paths:
+            paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
+            row = con.execute(
+                "SELECT count(*), min(timestamp), max(timestamp) "
+                f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
+            ).fetchone()
+            if row:
+                b_cnt = row[0] or 0
+                if b_cnt > 0:
+                    counts.append(b_cnt)
+                if row[1] is not None:
+                    mins.append(row[1])
+                if row[2] is not None:
+                    maxs.append(row[2])
+    except Exception as e:
+        logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
+
+    total = sum(counts)
+    if total <= 0:
+        return None
+    return (total, min(mins) if mins else None, max(maxs) if maxs else None)
 
 
 def get_sync_status(
@@ -206,7 +303,26 @@ def get_sync_status(
         # query + fingerprint stat).
         stats = None
         data_fp = _data_stats_fingerprint(src)
+        lake_table: str | None = None
+        if data_fp is None:
+            try:
+                from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
+
+                lt = ducklake_table_name(src)
+                exists = con.execute(
+                    "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                    [lt],
+                ).fetchone()
+                if exists and exists[0]:
+                    snap_id = ducklake_current_snapshot_id(con)
+                    if snap_id is not None:
+                        data_fp = ("ducklake", snap_id)
+                        lake_table = lt
+            except Exception:
+                logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
+
         cache_key = src["name"]
+        direct_stats = None
         if data_fp is not None:
             try:
                 with _db_main._data_stats_cache_lock:
@@ -214,14 +330,19 @@ def get_sync_status(
                 if cached is not None and cached[0] == data_fp:
                     d_count, d_min, d_max = cached[1], cached[2], cached[3]
                 else:
-                    from backend.utils.sql_validator import escape_sql_literal
+                    if lake_table is not None:
+                        d_row = con.execute(
+                            f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
+                        ).fetchone()
+                    else:
+                        from backend.utils.sql_validator import escape_sql_literal
 
-                    data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
-                    safe_glob = escape_sql_literal(data_glob)
-                    d_row = con.execute(
-                        "SELECT count(*), min(timestamp), max(timestamp) "
-                        f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
-                    ).fetchone()
+                        data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
+                        safe_glob = escape_sql_literal(data_glob)
+                        d_row = con.execute(
+                            "SELECT count(*), min(timestamp), max(timestamp) "
+                            f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
+                        ).fetchone()
                     d_count = (d_row[0] or 0) if d_row else 0
                     d_min = d_row[1] if d_row else None
                     d_max = d_row[2] if d_row else None
@@ -252,6 +373,8 @@ def get_sync_status(
                     min(mins) if mins else None,
                     max(maxs) if maxs else None,
                 )
+                if lake_table is not None and stats[0] > 0:
+                    direct_stats = stats
             except Exception as split_err:
                 # Bust the data cache so we don't pin a half-built result.
                 with _db_main._data_stats_cache_lock:
@@ -289,18 +412,50 @@ def get_sync_status(
                 local_rows = view_rows
                 earliest_log_at = stats[1]
                 latest_log_at = stats[2]
+                # A skip_view_update status connection can hold a stale-but-
+                # NON-EMPTY baked view (or a retention-trimmed local data
+                # mirror) whose max(timestamp) lags the committed lake — the
+                # GCE header flap that read an 11-day-old latest while the lake
+                # committed fresh rows every few minutes (trap #33/#35). The
+                # empty-view self-heal below never fires here because view_rows
+                # > 0. The committed DuckLake table is the latest snapshot by
+                # construction, so reconcile the extents against it: never
+                # report a latest older, or an earliest newer, than it holds.
+                # Timestamp-only — the view's non-zero count stays the row
+                # source of truth, and the lake min/max are catalog-stat reads
+                # (no parquet-footer scan), so the split-stats fast path's
+                # perf win is preserved.
+                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
+                if direct is not None:
+                    d_earliest, d_latest = direct[1], direct[2]
+                    if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
+                        latest_log_at = d_latest
+                    if d_earliest is not None and (earliest_log_at is None or d_earliest < earliest_log_at):
+                        earliest_log_at = d_earliest
             else:
                 # Transient empty view (catalog mid-rebuild / "WHERE false").
-                # The metadata rollup is a poor proxy for queryable rows — it's
-                # the retention-trimmed ingested_files sum (≈1 day), not the
-                # parquet lake — so prefer the last-known-good persisted
-                # local_rows from the previous successful poll (the real
-                # parquet count). The badge "sticks" at the true value until
-                # the view recovers instead of flapping to a wrong number.
-                # Fall back to the metadata sum only when there is no prior
-                # value (first-ever poll for this service).
-                prior_rows = (cached_status or {}).get("local_rows") or 0
-                local_rows = prior_rows if prior_rows > 0 else local_rows_ingested
+                # Before preserving a possibly-ancient prior, read the
+                # authoritative committed DuckLake table (+ live buffer)
+                # DIRECTLY — it is the latest snapshot by construction and
+                # bypasses a poisoned per-connection baked view. Without this,
+                # a skip_view_update status connection holding an empty view
+                # persists a stale latest_log_at forever (the GCE header flap
+                # that read Sept-22 while the lake was fresh — trap #33/#35).
+                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
+                if direct is not None:
+                    local_rows = direct[0]
+                    earliest_log_at = direct[1]
+                    latest_log_at = direct[2]
+                else:
+                    # The metadata rollup is a poor proxy for queryable rows —
+                    # it's the retention-trimmed ingested_files sum (≈1 day),
+                    # not the parquet lake — so prefer the last-known-good
+                    # persisted local_rows from the previous successful poll
+                    # (the real parquet count). The badge "sticks" at the true
+                    # value until the view recovers instead of flapping. Fall
+                    # back to the metadata sum only on a first-ever poll.
+                    prior_rows = (cached_status or {}).get("local_rows") or 0
+                    local_rows = prior_rows if prior_rows > 0 else local_rows_ingested
     except Exception as e:
         if (
             "No files found" in str(e)
@@ -364,34 +519,26 @@ def get_sync_status(
             .replace("+00:00", "Z")
         )
 
-        busy_row = con.execute(
-            """
-            SELECT count(*) FROM _cron_run_log
-            WHERE status = 'running' AND started_at > ?
-        """,
-            [time_cutoff],
-        ).fetchone()
-        busy = (busy_row[0] > 0) if busy_row else False
+        from backend.core.metadata.cron_log import latest_cron_per_task
 
-        for row in con.execute(
-            """
-            SELECT task, started_at, duration_s, status, error_message, summary
-            FROM (
-                SELECT task, started_at, duration_s, status, error_message, summary,
-                       ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC) AS rn
-                FROM _cron_run_log
-                WHERE task IN ('sync', 'commit')
-            )
-            WHERE rn = 1
-            """,
-        ).fetchall():
-            cron_stats[row[0]] = {
-                "last_run": _safe_iso(row[1]),
-                "duration_s": row[2],
-                "status": row[3],
-                "error_message": row[4],
-                "summary": row[5],
+        service_id = str(src.get("name") or src.get("service_id") or "")
+        crons = latest_cron_per_task(service_id)
+
+        busy = False
+        for t, data in crons.items():
+            st = data.get("started_at")
+            if data.get("status") == "running" and st and str(st) > time_cutoff:
+                busy = True
+
+            # Format to what UI expects
+            cron_stats[t] = {
+                "last_run": _safe_iso(data.get("started_at")),
+                "duration_s": data.get("duration_s"),
+                "status": data.get("status"),
+                "error_message": data.get("error_message"),
+                "summary": data.get("summary"),
             }
+
     except Exception:
         busy = False
         cron_stats = {}
@@ -437,6 +584,13 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         return
 
     source = svcconfig.config_to_source(src)
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        logger.info("[refresh_status] %s: high-scale service uses ClickHouse status", service_id)
+        return
+
+    durable_serving = svcconfig.is_durable_serving_mode(source)
     # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
     buf_bytes = None
     try:
@@ -446,19 +600,24 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         if _os.path.isdir(buf_dir):
             buf_bytes = sum(_os.path.getsize(_os.path.join(r, f)) for r, _, files in _os.walk(buf_dir) for f in files)
     except Exception:
-        pass
+        logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
+    cached_status = src.get("status") or {}
     iceberg_bytes = None
     iceberg_files = None
-    try:
-        from backend.core import iceberg as _db_iceberg
+    if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
+        iceberg_bytes = cached_status.get("iceberg_bytes")
+        iceberg_files = cached_status.get("iceberg_files")
+    else:
+        try:
+            from backend.core import iceberg as _db_iceberg
 
-        info = _db_iceberg.get_table_info(source)
-        if not info.get("error"):
-            iceberg_bytes = int(info.get("size_bytes", 0) or 0)
-            iceberg_files = int(info.get("data_files", 0) or 0)
-    except Exception:
-        pass
+            info = _db_iceberg.get_table_info(source)
+            if not info.get("error"):
+                iceberg_bytes = int(info.get("size_bytes", 0) or 0)
+                iceberg_files = int(info.get("data_files", 0) or 0)
+        except Exception:
+            logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
     con = None
     try:
@@ -469,10 +628,14 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         #   - on RO, CREATE OR REPLACE VIEW would fail silently anyway
         #   - if the cached view is stale, get_sync_status' retry path busts
         #     the view cache so the NEXT writer connection rebuilds clean
-        con = get_connection(source, skip_view_update=True, read_only=True)
+        con = get_connection(source, skip_view_update=not durable_serving, read_only=True)
         # skip_fos=False so we do the full Parquet scan for accurate row counts
         # and timestamps. force=True bypasses any stale config-file cache.
-        status = get_sync_status(con, source, skip_fos=False, force=True)
+        # Durable request metrics must never pass through the local-file
+        # estimates / stale-count fallback in get_sync_status. Keep this
+        # heavy refresh for RUM, schema and suggestions; the shared seam below
+        # owns all durable request fields and serializes with the observer.
+        status = {} if durable_serving else get_sync_status(con, source, skip_fos=False, force=True)
 
         if buf_bytes is not None:
             status["buffer_size_bytes"] = buf_bytes
@@ -487,14 +650,17 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         # populated; the SELECT only fires when this cache miss. Cheap to
         # compute here (one COUNT … FILTER over the active hour) since we
         # already hold the read-only connection.
-        try:
-            from backend.repositories import usage as _usage_repo
+        if not include_top_values and "edge_ratio" in cached_status:
+            status["edge_ratio"] = cached_status.get("edge_ratio")
+        else:
+            try:
+                from backend.repositories import usage as _usage_repo
 
-            ratio, _ = _usage_repo.get_edge_ratio(con, source)
-            if ratio is not None:
-                status["edge_ratio"] = ratio
-        except Exception:
-            pass
+                ratio, _ = _usage_repo.get_edge_ratio(con, source)
+                if ratio is not None:
+                    status["edge_ratio"] = ratio
+            except Exception:
+                logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
         # Schema (SUMMARIZE over the iceberg view) costs ~800 ms because
         # update_iceberg_view runs post-ingest on every tick and clears the
@@ -521,63 +687,49 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
             cron_data = latest_cron_per_task(service_id)
             rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
-            request_last_sync = cron_data.get("sync", {}).get("started_at")
+            request_last_sync = cron_data.get("log_discovery", {}).get("started_at") or cron_data.get("sync", {}).get(
+                "started_at"
+            )
         except Exception:
-            pass
+            logger.debug("refresh_config_status: cron_data.get failed (ignored)", exc_info=True)
 
-        # RUM metrics from DuckDB RUM views
-        rum_enabled = bool(source.get("rum_enabled", False) or (source.get("rum") or {}).get("enabled", False))
+        # RUM freshness/count is persisted by the rum_commit cron (which already
+        # attaches the RUM lake + scans it during the aggregate recompute). We
+        # read it from the status doc here instead of opening a NESTED RUM
+        # connection + live DuckLake scan on the request-ingest cron critical
+        # path — that nested scan could wedge log_discovery when the RUM catalog
+        # transiently stalled (GCE Remote-Standard freeze; AGENTS.md Trap #39).
+        # RUM data only becomes queryable after a rum_commit, so a value
+        # persisted at commit time is as fresh as the data itself.
+        rum_enabled = svcconfig.is_rum_enabled(source)
         if rum_enabled:
             try:
-                import datetime
-
-                from backend.core.duckdb import rum_source_for
-                from backend.core.iceberg import execute_with_stale_view_retry
-                from backend.deps import _ConnectionHolder
-
-                rum_source = rum_source_for(source)
-                with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-
-                    def _query_rum_bootstrap(con):
-                        distinct_id = (
-                            "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
-                        )
-                        cnt = (
-                            con.execute(
-                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
-                            ).fetchone()[0]
-                            or 0
-                        )
-                        l_row = con.execute(
-                            "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
-                        ).fetchone()
-                        l_ts = l_row[0] if l_row else None
-                        return cnt, l_ts
-
-                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, _query_rum_bootstrap)
-
-                if rum_count > 0:
-                    rum_total = rum_count
-                    if rum_last_dt:
-                        if isinstance(rum_last_dt, datetime.datetime):
-                            rum_latest = rum_last_dt.isoformat()
-                        else:
-                            rum_latest = str(rum_last_dt)
+                persisted_rum = (src.get("status") or {}).get("rum") or {}
+                rum_total = persisted_rum.get("total_rows", 0) or 0
+                rum_latest = persisted_rum.get("latest_log_at")
+                if persisted_rum.get("last_sync_at"):
+                    rum_last_sync = persisted_rum.get("last_sync_at")
             except Exception:
-                pass
+                logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
         status["rum"] = {
             "latest_log_at": rum_latest,
             "total_rows": rum_total,
             "last_sync_at": rum_last_sync,
         }
-        status["request"] = {
-            "latest_log_at": request_latest,
-            "total_rows": request_total,
-            "last_sync_at": request_last_sync,
-        }
+        if not durable_serving:
+            status["request"] = {
+                "latest_log_at": request_latest,
+                "total_rows": request_total,
+                "last_sync_at": request_last_sync,
+            }
 
-        svcconfig.update_status(service_id, status)
+        if durable_serving:
+            from backend.core.request_metrics import refresh_durable_request_metrics
+
+            refresh_durable_request_metrics(source, extra_status=status)
+        else:
+            svcconfig.update_status(service_id, status)
 
         # Also update the top values cache for fast filter suggestions
         if include_top_values:
@@ -613,6 +765,15 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     # non-None fingerprint) without touching DuckDB.
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
     data_fp = _data_stats_fingerprint(source)
+    if data_fp is None:
+        try:
+            from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+            snap_id = ducklake_current_snapshot_id(con)
+            if snap_id is not None:
+                data_fp = ("ducklake", snap_id)
+        except Exception:
+            logger.debug("update_top_values: step failed (ignored)", exc_info=True)
     if data_fp is not None and os.path.exists(cached_top_values_path):
         with _db_main._top_values_cache_lock:
             prior_fp = _db_main._top_values_cache.get(service_id)
@@ -738,7 +899,8 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         try:
             con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
         except Exception:
-            pass
+            if log_once_per("update_top_values: DROP TABLE failed (ignored)", 60):
+                logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
 
     if top_values:
         cache_dir = _cache_dir(source)
@@ -752,6 +914,15 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         # fingerprint would let a commit that landed mid-sample lock the
         # cache to a stale value. _data_stats_fingerprint is ~0.5 ms.
         post_fp = _data_stats_fingerprint(source)
+        if post_fp is None:
+            try:
+                from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+                snap_id = ducklake_current_snapshot_id(con)
+                if snap_id is not None:
+                    post_fp = ("ducklake", snap_id)
+            except Exception:
+                logger.debug("update_top_values: step failed (ignored)", exc_info=True)
         if post_fp is not None:
             with _db_main._top_values_cache_lock:
                 _db_main._top_values_cache[service_id] = post_fp
@@ -932,7 +1103,8 @@ def get_schema(
             "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
             [table_name],
         ).fetchone()
-        assert row is not None
+        if row is None:
+            raise RuntimeError("row is unexpectedly None")
         table_exists = row[0] > 0
         if not table_exists:
             return []
@@ -941,6 +1113,8 @@ def get_schema(
             # SRE-22: Instant catalog schema reflection via DESCRIBE bypasses heavy data scans
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": r[0], "type": r[1]} for r in result]
+            if len(schema) == 1 and schema[0]["name"] == "timestamp":
+                schema = []
             _schema_cache[cache_key] = (now, schema)
             return schema
 
@@ -966,6 +1140,9 @@ def get_schema(
                     "count": count,
                 }
             )
+
+        if len(schema) == 1 and schema[0]["name"] == "timestamp":
+            schema = []
 
         _schema_cache[cache_key] = (now, schema)
         return schema
@@ -1033,7 +1210,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             try:
                 metadata_db.upsert_asn_names(service_id, resolved)
             except Exception:
-                pass
+                logger.warning("get_asn_names: metadata_db.upsert_asn_names failed (ignored)", exc_info=True)
 
     result = {**cached, **resolved}
     for asn in need:
@@ -1208,11 +1385,10 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         return 0
 
     try:
-        import json
-        import urllib.request
         from datetime import UTC, datetime, timedelta
 
         from backend.core import metadata as metadata_db
+        from backend.core.fastly.client import fastly
 
         # Hourly gate — Fastly's hourly /stats/aggregate snaps to the wall
         # clock so re-pulling more than once per hour is pure waste, and the
@@ -1233,12 +1409,9 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         from_ts = int((now - timedelta(hours=hours_back)).timestamp())
         to_ts = int((now + timedelta(hours=1)).timestamp())
 
-        req = urllib.request.Request(
-            f"https://api.fastly.com/stats/aggregate?by=hour&from={from_ts}&to={to_ts}",
-            headers={"Fastly-Key": api_key, "Accept": "application/json"},
+        payload = fastly(
+            "GET", f"/stats/aggregate?by=hour&from={from_ts}&to={to_ts}", token=api_key, max_retries=0, timeout=30
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = json.loads(resp.read().decode())
 
         records = payload.get("data", []) or []
         hourly: list[dict] = []

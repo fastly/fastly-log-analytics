@@ -11,12 +11,14 @@ real credentials, a database file, or network access.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.main import app
+from tests._helpers.config_fakes import mutate_via_save
+from tests._helpers.sse import parse_sse_events as _parse_sse_events
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -63,7 +65,7 @@ def test_credentials_access_key_saves_to_config():
 
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.core.duckdb._get_fos_client") as mock_fos,
     ):
         mock_fos.return_value.list_objects_v2.return_value = {"Contents": []}
@@ -134,17 +136,6 @@ def test_credentials_fos_validation_failure_returns_400():
 # ---------------------------------------------------------------------------
 
 
-def _parse_sse_events(text: str) -> list[dict]:
-    events = []
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            try:
-                events.append(json.loads(line[6:]))
-            except json.JSONDecodeError:
-                pass
-    return events
-
-
 def test_cron_settings_saves_enabled_flag():
     saved = {}
 
@@ -155,7 +146,7 @@ def test_cron_settings_saves_enabled_flag():
 
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision._sync_crontab"),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -179,7 +170,7 @@ def test_cron_settings_saves_interval_mins():
 
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision._sync_crontab"),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -215,7 +206,7 @@ def test_cron_settings_only_saves_allowed_keys():
 
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision._sync_crontab"),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -242,7 +233,7 @@ def test_log_fields_saves_to_config():
 
     with (
         patch("backend.config.load_config", return_value=_cfg(log_fields=_BASE_LF)),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.core.metadata.record_audit"),
         patch("backend.state_sync.export_admin_state"),
     ):
@@ -258,7 +249,7 @@ def test_log_fields_saves_to_config():
 
 
 def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
-    """REGRESSION: 2026-08-12 SE-demo incident — CMCD's 14 ``cmcd_*`` fields are
+    """REGRESSION: 2026-08-12 production incident — CMCD's 14 ``cmcd_*`` fields are
     system-managed and hidden from the user-editable list by
     ``_is_system_field``, so the UI always POSTs a ``custom_fields`` that omits
     them. The pre-existing merge guard only fired when the incoming list was
@@ -278,7 +269,7 @@ def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
             "backend.config.load_config",
             return_value=_cfg(log_fields=_BASE_LF, cmcd={"enabled": True, "mode": "query_string", "version": 1}),
         ),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update(cfg)),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, cfg: saved.update(cfg))),
         patch("backend.core.metadata.record_audit"),
         patch("backend.state_sync.export_admin_state"),
     ):
@@ -309,7 +300,7 @@ def test_log_fields_set_strips_cmcd_fields_when_cmcd_disabled():
 
     with (
         patch("backend.config.load_config", return_value=_cfg(log_fields=_BASE_LF)),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update(cfg)),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, cfg: saved.update(cfg))),
         patch("backend.core.metadata.record_audit"),
         patch("backend.state_sync.export_admin_state"),
     ):
@@ -345,7 +336,7 @@ def test_log_fields_no_changes_detected():
 
     with (
         patch("backend.config.load_config", return_value=_cfg(log_fields=stored_lf)),
-        patch("backend.config.save_config", side_effect=lambda s, c: saved_calls.append(c)),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda s, c: saved_calls.append(c))),
     ):
         response = _client().post(
             "/api/services/svc1/log-fields",
@@ -396,7 +387,7 @@ def test_time_range_delete_clears_provisioning_entry():
 
     with (
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.core.metadata.record_audit"),
     ):
         response = _client().delete("/api/services/svc1/time-range")
@@ -475,7 +466,7 @@ def test_custom_field_create_saves_to_config():
 
     with (
         patch("backend.config.load_config", return_value=cfg_with_lf),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         response = _client().post(
@@ -507,7 +498,7 @@ def test_custom_field_delete_removes_field():
 
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
     ):
         response = _client().delete("/api/services/svc1/custom-fields/cf_env")
 
@@ -538,7 +529,7 @@ def test_custom_field_patch_updates_label():
 
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         response = _client().patch(
@@ -609,7 +600,7 @@ def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
 
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
         patch("backend.core.iceberg._get_catalog", return_value=catalog),
@@ -656,7 +647,7 @@ def test_custom_field_patch_allows_type_change_before_iceberg_write():
 
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
         patch("backend.core.iceberg._get_catalog", return_value=catalog),
@@ -711,7 +702,7 @@ def test_credentials_api_token_rotation_creates_new_fos_key_and_saves():
 
     with (
         patch("backend.config.load_config", return_value=starting_cfg),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
     ):
         resp = _client().patch(
@@ -780,7 +771,7 @@ def test_credentials_api_token_skips_delete_when_old_key_same_as_new():
 
     with (
         patch("backend.config.load_config", return_value=starting_cfg),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
     ):
         _client().patch(
@@ -865,7 +856,7 @@ def test_ngwaf_sync_start_cron_run_raises_yields_error_event():
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("already running")),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
 

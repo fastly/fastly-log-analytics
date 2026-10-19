@@ -1,12 +1,10 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import { FilterValueCell, buildDashboardFilterUrl } from '@/components/FilterValueCell'
 import { useFilterStore } from '@/stores/filterStore'
 
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/origin'),
-}))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/origin'))
 
 // useMaskIps reads the bootstrap query cache via useQueryClient; mock it so
 // these tests don't need a QueryClientProvider. Default off (admin / no
@@ -91,6 +89,15 @@ describe('FilterValueCell', () => {
     fireEvent.click(screen.getByText(/Filter origin page/i))
     expect(addFilterSpy).toHaveBeenCalledWith('city', 'London', 'include')
     expect(addFilterSpy).toHaveBeenCalledWith('country', 'GB', 'include')
+  })
+
+  it('"Copy value" writes the first filter value to the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<FilterValueCell filters={[{ column: 'city', value: 'London' }]} display="London" />)
+    fireEvent.click(screen.getByRole('button', { name: /Filter actions for London/i }))
+    fireEvent.click(screen.getByText(/Copy value/i))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('London'))
   })
 
   it('hides "Open in dashboard" when already on /dashboard', () => {

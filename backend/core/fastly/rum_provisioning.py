@@ -57,7 +57,7 @@ def validate_rum_custom_condition(condition: str) -> str | None:
     ALL RUM logging with no error anywhere. Valid VCL, so Fastly's own
     ``validate`` call passes it happily.
 
-    The SE-demo service ran with ``req.url.path !~ "^/api/"`` — the no-op form,
+    A production service ran with ``req.url.path !~ "^/api/"`` — the no-op form,
     copied from what the settings dialog used to suggest as an example.
 
     Operators reaching for this almost always want to exclude beacons by PAGE
@@ -117,36 +117,58 @@ def generate_rum_vcl(logging_service_id: str, faro_version: str | None = None) -
     }
 
 
+def generate_rum_recv_parts() -> tuple[str, str]:
+    """Return the beacon field extraction and response blocks separately.
+
+    Consolidated VCL must run extraction before the generic log capture, then
+    terminate the beacon request after capture has promoted those fields.
+    """
+    return _generate_beacon_field_extraction_vcl(), _generate_beacon_response_vcl()
+
+
 def _generate_recv_vcl() -> str:
     """Recv stage: handle RUM beacons."""
-    return """# Edge-only (first hop, no restarts) block for RUM
+    return (
+        """# Edge-only (first hop, no restarts) block for RUM
 if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
     # Handle RUM beacon POST to /rum-beacon
     if (req.url.path == "/rum-beacon") {
-        # Extract the essential fields from querystring:
-        # - cid: session ID from rum_cid cookie (set in deliver)
-        # - req: per-request ID (minted in recv)
-        # - raw query: complete set of event_N_* params, parsed during ingest
-        set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");
-        set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");
-        if (req.http.x-fos-edge-data:fastly_req_id == "") {
-            set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;
-        }
-        set req.http.x-fos-edge-data:rum_raw_query = req.url;
-        set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");
-        set req.http.x-fos-edge-data:rum_metric_value = querystring.get(req.url, "rum_metric_value");
-        set req.http.x-fos-edge-data:rum_metric_rating = querystring.get(req.url, "rum_metric_rating");
-        set req.http.x-fos-edge-data:rum_pathname = querystring.get(req.url, "rum_pathname");
-        set req.http.x-fos-edge-data:rum_error_message = querystring.get(req.url, "rum_error_message");
-        set req.http.x-fos-edge-data:rum_body = req.body;
-
-        # Mark beacon to skip S3 logging (already logged separately to metadata DB)
-        set req.http.x-skip-rum-logging = "1";
-
-        # Synthetic 204 response (no origin round-trip needed)
-        error 611 "No Content";
+"""
+        + _generate_beacon_field_extraction_vcl()
+        + """
+"""
+        + _generate_beacon_response_vcl()
+        + """
     }
 }"""
+    )
+
+
+def _generate_beacon_field_extraction_vcl() -> str:
+    """Populate RUM headers before the generic capture block runs."""
+    return """# Extract RUM fields before generic log capture promotes them.
+set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");
+set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");
+if (req.http.x-fos-edge-data:fastly_req_id == "") {
+    set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;
+}
+set req.http.x-fos-edge-data:rum_raw_query = req.url;
+set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");
+set req.http.x-fos-edge-data:rum_metric_value = querystring.get(req.url, "rum_metric_value");
+set req.http.x-fos-edge-data:rum_metric_rating = querystring.get(req.url, "rum_metric_rating");
+set req.http.x-fos-edge-data:rum_pathname = querystring.get(req.url, "rum_pathname");
+set req.http.x-fos-edge-data:rum_error_message = querystring.get(req.url, "rum_error_message");
+set req.http.x-fos-edge-data:rum_error_file = querystring.get(req.url, "rum_error_file");
+set req.http.x-fos-edge-data:rum_body = req.body;"""
+
+
+def _generate_beacon_response_vcl() -> str:
+    """Mark and terminate a RUM beacon after its fields were captured."""
+    return """# Mark beacon to skip S3 logging (already logged separately to metadata DB)
+set req.http.x-skip-rum-logging = "1";
+
+# Synthetic 204 response (no origin round-trip needed)
+error 611 "No Content";"""
 
 
 def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str | None = None) -> str:
@@ -395,6 +417,9 @@ if (obj.status == 611) {
     set obj.status = 204;
     set obj.response = "No Content";
     set obj.http.Cache-Control = "no-cache, no-store, must-revalidate";
+    set obj.http.Access-Control-Allow-Origin = "*";
+    set obj.http.Access-Control-Allow-Methods = "POST, OPTIONS";
+    set obj.http.Access-Control-Allow-Headers = "Content-Type";
     synthetic "";
     return (deliver);
 }"""

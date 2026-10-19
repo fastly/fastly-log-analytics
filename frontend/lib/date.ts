@@ -119,6 +119,23 @@ export function getTimezoneAbbr(date: Date, tz: string) {
 }
 
 /**
+ * Locale date-time string in the viewer's local timezone — byte-identical to
+ * ``new Date(value).toLocaleString()`` (and to ``value.toLocaleString()`` for
+ * a ``Date``), including the "Invalid Date" output for unparseable input.
+ *
+ * Centralized so analytics UI can't drift back into inline
+ * ``.toLocaleString()`` on dates (enforced by the ESLint ban in analytics
+ * dirs). Pass ``Intl.DateTimeFormatOptions`` to control the rendered parts.
+ */
+export function formatLocalDateTime(
+  value: string | number | Date,
+  options?: Intl.DateTimeFormatOptions,
+): string {
+  const d = value instanceof Date ? value : new Date(value)
+  return d.toLocaleString(undefined, options)
+}
+
+/**
  * Format a duration in seconds as the largest single unit (e.g. "5s",
  * "10m", "5h", "3d"). Negative or zero values return
  * "any second" — used by countdown timers (next-run badges) that hit
@@ -182,4 +199,21 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
   } catch {
     return iso
   }
+}
+
+/** Map-bucket label ("Jun 15, 3:30:45 PM") in ``tz``; naive ISO strings are read as UTC, unparseable input is returned as-is. */
+export function formatBucket(iso: string, tz: string): string {
+  if (!iso) return ''
+  const utc = /[Z+\-]\d*$/.test(iso) ? iso : iso + 'Z'
+  const d = new Date(utc)
+  if (isNaN(d.getTime())) return iso
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(d)
 }

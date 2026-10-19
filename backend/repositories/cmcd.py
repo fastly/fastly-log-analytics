@@ -11,20 +11,19 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
+    ResponseMemo,
     bucket_time_to_minute,
-    cache_get,
-    cache_put,
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import BoundedTTLCache
 
 # CMCD fields that must exist in the schema for any section to return data.
 _CMCD_REQUIRED_COL = "cmcd_sid"
 
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 128
-_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE)
+_response_cache = _memo.cache
 
 
 def _response_cache_key(
@@ -99,7 +98,7 @@ def get_cmcd_aggregates(
         sections=sections,
         mask_ips=mask_ips,
     )
-    cached = cache_get(_response_cache, cache_key)
+    cached = _memo.get(cache_key)
     if cached is not None:
         return {**cached, "section_timings": section_timings, **runner.telemetry()}
 
@@ -554,7 +553,7 @@ def get_cmcd_aggregates(
             timer.mark("session_duration_dist", _t)
 
     results["section_timings"] = section_timings
-    cache_put(_response_cache, cache_key, results, strip=("section_timings",))
+    _memo.put(cache_key, results, strip=("section_timings",))
     return results
 
 

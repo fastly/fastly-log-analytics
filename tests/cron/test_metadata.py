@@ -2,10 +2,9 @@
 
 Pins ``_run_metadata_sync`` — the read-only-services-friendly job that
 refreshes the Iceberg catalog from the cloud, syncs new data files, and
-rebuilds the DuckDB view. The job is decorated by ``@cron_task`` (no
-wrapped exposure here — the function isn't decorated), so we call it
-directly. Tests stub the heavy iceberg + DB operations and pin the
-wrapper's status / error / skip behaviour.
+rebuilds the DuckDB view. The core helper is also called by the decorated
+post-commit dispatcher; tests call the core helper directly to isolate its
+status, error, and skip behavior.
 
 Other functions in this module (``_run_ngwaf_bot_sync``,
 ``_run_bot_data_refresh``, ``_run_rdns_enrichment``,
@@ -20,7 +19,84 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import metadata
+from tests._helpers.config_fakes import mutate_via_save
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
+
+def test_post_commit_metadata_sync_dispatch_coalesces_overlapping_requests(monkeypatch):
+    dispatched_threads = []
+    calls = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs):
+            self.target = target
+            self.args = args
+            dispatched_threads.append(self)
+
+        def start(self):
+            return None
+
+    def fake_sync(service_id: str) -> None:
+        calls.append(service_id)
+        if len(calls) == 1:
+            metadata.dispatch_post_commit_metadata_sync(service_id)
+
+    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(metadata, "_run_post_commit_metadata_sync", fake_sync)
+
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+
+    assert len(dispatched_threads) == 1
+    assert calls == []
+    dispatched_threads[0].target(*dispatched_threads[0].args)
+
+    assert calls == ["svc-1", "svc-1"]
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_post_commit_metadata_sync_worker_clears_state_after_failure(monkeypatch):
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        metadata,
+        "_run_post_commit_metadata_sync",
+        MagicMock(side_effect=RuntimeError("unexpected failure")),
+    )
+
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+    metadata._post_commit_metadata_sync_worker("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_post_commit_metadata_sync_dispatch_clears_state_if_thread_start_fails(monkeypatch):
+    class FailedThread:
+        def __init__(self, *, target, args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(metadata.threading, "Thread", FailedThread)
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        metadata.dispatch_post_commit_metadata_sync("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
 
 
 @pytest.fixture
@@ -33,7 +109,7 @@ def stub_load_config(monkeypatch):
     load = MagicMock(return_value=cfg)
     save = MagicMock()
     monkeypatch.setattr("backend.config.load_config", load)
-    monkeypatch.setattr("backend.config.save_config", save)
+    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(save))
     return {"load": load, "save": save, "cfg": cfg}
 
 
@@ -102,7 +178,7 @@ def test_returns_when_source_missing(monkeypatch, stub_load_config):
 
 
 def test_skips_when_start_cron_run_raises(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
-    stub_cron_envelope["start"].side_effect = RuntimeError("already running")
+    stub_cron_envelope["start"].side_effect = CronLeaseHeldError("already running")
     init = MagicMock()
     monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", init)
 
@@ -218,7 +294,7 @@ def test_manual_sync_all_clears_pinned_time_range(monkeypatch, stub_load_config,
 
     metadata._run_metadata_sync("svc-1", run_id=999)
 
-    # save_config was called and the time_range key was dropped.
+    # mutate_config was called and the time_range key was dropped.
     save = stub_load_config["save"]
     save.assert_called()
     saved_cfg = save.call_args[0][1]
@@ -271,4 +347,164 @@ def test_admin_state_import_failure_does_not_break_run(monkeypatch, stub_load_co
     metadata._run_metadata_sync("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
-    assert args[3] == "success"
+    assert args[3] == "warning"
+
+
+def test_metadata_cleanup_defers_when_active_requests_present(monkeypatch, stub_source):
+    """When active queries are running on the dashboard, metadata_cleanup must defer to avoid SQLite lock contention."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=True))
+    start_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
+
+    _run_metadata_cleanup("svc-1")
+
+    start_cron.assert_not_called()
+
+
+def test_metadata_cleanup_happy_path_emits_progress_and_finalizes(monkeypatch, stub_source, stub_load_config):
+    """Happy path: cleans up tables, emits progress, logs success with rows trimmed, and finalizes duration."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=123))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+
+    cleanup_mock = MagicMock(
+        return_value={
+            "deleted": {"usage_log": 50, "ingested_files": 100, "cron_runs": 20},
+            "vacuumed": True,
+            "duration_s": 0.45,
+        }
+    )
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", cleanup_mock)
+    monkeypatch.setattr("backend.core.metric_snapshots.purge_old", MagicMock())
+
+    start_prog = MagicMock()
+    end_prog = MagicMock()
+    log_prog = MagicMock()
+    finalize_dur = MagicMock()
+    monkeypatch.setattr("backend.cron_progress.start_progress", start_prog)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", log_prog)
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
+
+    _run_metadata_cleanup("svc-1")
+
+    start_prog.assert_called_once_with(123, service_id="svc-1", task="metadata_cleanup")
+    cleanup_mock.assert_called_once()
+    assert log_cron.call_count == 1
+    call_args = log_cron.call_args
+    assert call_args[0][1] == "metadata_cleanup"
+    assert call_args[0][3] == "success"
+    assert call_args[1]["rows_ingested"] == 170
+    assert "Trimmed 170 rows" in call_args[1]["summary"]
+    assert "VACUUM=yes" in call_args[1]["summary"]
+
+    end_prog.assert_called_once_with(123)
+    finalize_dur.assert_called_once()
+
+
+def test_metadata_cleanup_handles_failure_and_finalizes_duration(monkeypatch, stub_source, stub_load_config):
+    """When cleanup_metadata raises, error is logged and finalize_cron_duration is guaranteed in finally."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=456))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", MagicMock(side_effect=RuntimeError("db locked")))
+
+    end_prog = MagicMock()
+    finalize_dur = MagicMock()
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
+
+    _run_metadata_cleanup("svc-1")
+
+    assert log_cron.call_count == 1
+    call_args = log_cron.call_args
+    assert call_args[0][1] == "metadata_cleanup"
+    assert call_args[0][3] == "error"
+    assert "db locked" in call_args[1]["summary"]
+
+    end_prog.assert_called_once_with(456)
+    finalize_dur.assert_called_once()
+
+
+def test_lifecycle_rows_have_no_log_output_and_one_terminal_row(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.init_iceberg_table",
+        MagicMock(side_effect=ValueError("Table foo.bar not found in catalog")),
+    )
+
+    metadata._run_metadata_sync("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[1] == "metadata_sync"
+    assert kwargs["run_id"] == 77
+    assert kwargs["log_output"] is None
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_failure_row_summary_and_single_end_progress(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
+    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", MagicMock(side_effect=RuntimeError("catalog down")))
+
+    metadata._run_metadata_sync("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Metadata sync failed"
+    assert kwargs["error_message"] == "catalog down"
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_metadata_cleanup_lease_held_skips_without_row(monkeypatch, stub_source, stub_load_config):
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(side_effect=CronLeaseHeldError("held")))
+    log_cron = MagicMock()
+    cleanup = MagicMock()
+    end_prog = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", cleanup)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+
+    _run_metadata_cleanup("svc-1")
+
+    log_cron.assert_not_called()
+    cleanup.assert_not_called()
+    end_prog.assert_not_called()
+
+
+def test_metadata_cleanup_error_row_shape(monkeypatch, stub_source, stub_load_config):
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=456))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", MagicMock(side_effect=RuntimeError("db locked")))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
+
+    _run_metadata_cleanup("svc-1")
+
+    log_cron.assert_called_once()
+    _, kwargs = log_cron.call_args
+    assert kwargs["summary"] == "cleanup failed: db locked"
+    assert kwargs["error_message"] == "db locked"
+    assert kwargs["run_id"] == 456
+    assert kwargs["log_output"] is None

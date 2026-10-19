@@ -21,13 +21,13 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import React, { useRef } from 'react'
+import { useRef, useState } from 'react'
+import type * as maplibregl from 'maplibre-gl'
 
 import {
   mapInstances,
   maplibreMockFactory,
   installMaplibreSideEffects,
-  type MockMapInstance,
 } from '../../../helpers/maplibre-mock'
 
 vi.mock('maplibre-gl', () => maplibreMockFactory())
@@ -37,7 +37,14 @@ installMaplibreSideEffects()
 // ---------------------------------------------------------------------------
 // (A) Pure helpers
 
-import { formatBucket, getScoreColor, useMapInit, useMapData } from '@/components/Map/NetworkMap/MapLayer'
+import {
+  formatBucket,
+  getScoreColor,
+  useMapInit,
+  useMapData,
+  type NetworkMapData,
+} from '@/components/Map/NetworkMap/MapLayer'
+import type { CityTooltipData, TooltipInfo } from '@/components/Map/NetworkMap/OverlayLayer'
 
 describe('formatBucket', () => {
   it('returns an empty string for empty input', () => {
@@ -179,18 +186,16 @@ describe('getScoreColor', () => {
  */
 function useMapInitHarness(opts: {
   isDark: boolean
-  setTooltip?: (t: any) => void
+  setTooltip?: (t: TooltipInfo | null) => void
 }) {
   const containerEl = document.createElement('div')
   const mapContainer = useRef<HTMLDivElement | null>(containerEl)
-  const map = useRef<any>(null)
   const isDarkRef = useRef(opts.isDark)
-  const dmaDataRef = useRef<Record<number, any>>({})
+  const dmaDataRef = useRef<Record<number, CityTooltipData>>({})
   const setTooltip = opts.setTooltip ?? (() => {})
 
-  useMapInit({
+  const map = useMapInit({
     mapContainer,
-    map,
     isDark: opts.isDark,
     isDarkRef,
     dmaDataRef,
@@ -213,7 +218,7 @@ describe('useMapInit', () => {
     expect(inst.options).toMatchObject({
       renderWorldCopies: false,
       zoom: 1,
-      interactive: true,
+      cooperativeGestures: true,
     })
   })
 
@@ -228,7 +233,7 @@ describe('useMapInit', () => {
     // base style's countries layer (no explicit GeoJSON source needed);
     // only the two app-specific overlay sources remain.
     expect(Object.keys(inst.sources).sort()).toEqual(['dma', 'heatmap'])
-    const layerIds = inst.layers.map((l: any) => l.id)
+    const layerIds = inst.layers.map((l: { id?: string }) => l.id)
     expect(layerIds).toEqual(expect.arrayContaining(['countries', 'dma-fill', 'city-scatter']))
   })
 
@@ -263,28 +268,34 @@ describe('useMapInit', () => {
  * `isStyleLoaded() === true`). Stuffs a single city payload through the
  * hook so we can confirm it doesn't throw on the happy path.
  */
+function asMaplibreMap(candidate: object): maplibregl.Map {
+  if (!('getLayer' in candidate && 'getSource' in candidate && 'addSource' in candidate)) {
+    throw new Error('maplibre mock is missing the Map surface useMapData relies on')
+  }
+  return candidate as maplibregl.Map
+}
+
 function useMapDataHarness(opts: {
-  data: any
+  data: NetworkMapData | null
   bucketIdx?: number
   metric?: string
   isDark?: boolean
 }) {
-  const map = useRef<any>(null)
-  const dmaDataRef = useRef<Record<number, any>>({})
-  const setTooltip = vi.fn()
-
   // Synthesize a fully-loaded MockMap so useMapData has something to drive.
   // We don't go through useMapInit here because useMapData runs in its own
-  // useEffect with `[bucketIdx, data, metric, isDark]` deps.
-  if (!map.current) {
-    // Pull the mocked Map constructor out of the mocked module by going
-    // through maplibreMockFactory directly — avoids the async load timing
-    // dance for these data-only assertions.
+  // useEffect with `[bucketIdx, data, metric, isDark]` deps. The lazy state
+  // initializer builds it once, straight from the mock factory, avoiding the
+  // async load timing dance for these data-only assertions.
+  const [loadedMap] = useState(() => {
     const mod = maplibreMockFactory()
-    map.current = new (mod.default.Map as any)({ container: document.createElement('div') })
-    map.current.addSource('heatmap', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-    map.current.addLayer({ id: 'countries', type: 'fill', source: 'heatmap' })
-  }
+    const mock = new mod.default.Map({ container: document.createElement('div') })
+    mock.addSource('heatmap', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    mock.addLayer({ id: 'countries', type: 'fill', source: 'heatmap' })
+    return asMaplibreMap(mock)
+  })
+  const map = useRef<maplibregl.Map | null>(loadedMap)
+  const dmaDataRef = useRef<Record<number, CityTooltipData>>({})
+  const setTooltip = vi.fn<(t: TooltipInfo | null) => void>()
 
   useMapData({
     map,
@@ -318,6 +329,8 @@ describe('useMapData', () => {
       ],
       map_buckets: [
         {
+          bucket_idx: 0,
+          bucket: '2026-06-15T12:00:00Z',
           cities: [
             // DMA city — has metro_code, should land in dmaDataRef.
             {
@@ -361,6 +374,8 @@ describe('useMapData', () => {
       cities: [{ name: 'Boston', lat: 42.36, lon: -71.06 }],
       map_buckets: [
         {
+          bucket_idx: 0,
+          bucket: '2026-06-15T12:00:00Z',
           cities: [
             { city_idx: 0, country: 'US', metro_code: 506, health_score: 95, reqs: 1 },
           ],

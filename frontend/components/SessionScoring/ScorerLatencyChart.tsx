@@ -14,6 +14,7 @@ import {
   usToMs,
   type LatencyRow,
 } from '@/components/SessionScoring/useScorerTimeseries'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface ScorerLatencyChartProps {
   serviceId: string
@@ -32,10 +33,10 @@ const LATENCY_SERIES: {
   dash?: 'dot' | 'dash'
 }[] = [
   { name: 'p50 rtt', get: (r) => r.rtt_p50_us, color: '#60a5fa' },
-  { name: 'p95 rtt', get: (r) => r.rtt_p95_us, color: '#3b82f6' },
+  { name: 'p95 rtt', get: (r) => r.rtt_p95_us, color: CHART_COLORS.info },
   { name: 'p99 rtt', get: (r) => r.rtt_p99_us, color: '#1d4ed8' },
   { name: 'p50 exec', get: (r) => r.exec_p50_us, color: '#34d399', dash: 'dot' },
-  { name: 'p95 exec', get: (r) => r.exec_p95_us, color: '#10b981', dash: 'dot' },
+  { name: 'p95 exec', get: (r) => r.exec_p95_us, color: CHART_COLORS.success, dash: 'dot' },
 ]
 
 /**

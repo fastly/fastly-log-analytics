@@ -11,12 +11,13 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from tests._helpers.locks import noop_lock as _noop_lock
 
 
 def _write_per_field_day(cache_root: str, field: str, day: str, rows: list[tuple[str, int]]) -> str:
@@ -33,11 +34,6 @@ def _write_per_field_day(cache_root: str, field: str, day: str, rows: list[tuple
     p = os.path.join(d, f"compacted_{uuid.uuid4().hex[:8]}.parquet")
     pq.write_table(table, p)
     return p
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
 
 
 def _past_day(days_ago: int) -> str:
@@ -275,3 +271,67 @@ def test_backfill_day_bundles_all_present_returns_zero(tmp_path):
         ),
     ):
         assert day_bundles.backfill_day_bundles("svc", src) == 0
+
+
+def test_link_day_bundle_alias_hardlinks_and_leaves_no_tmp(tmp_path) -> None:
+    from backend.core.rollups.day_bundles import _link_day_bundle_alias
+
+    d = tmp_path / "alias"
+    d.mkdir()
+    src = d / "src.parquet"
+    dst = d / "dst.parquet"
+    src.write_bytes(b"new")
+    dst.write_bytes(b"old")
+
+    _link_day_bundle_alias(str(src), str(dst))
+
+    assert os.path.samefile(src, dst)
+    assert dst.read_bytes() == b"new"
+    assert sorted(p.name for p in d.iterdir()) == ["dst.parquet", "src.parquet"]
+
+
+def test_link_day_bundle_alias_never_removes_existing_dst_on_failure(tmp_path) -> None:
+    from backend.core.rollups.day_bundles import _link_day_bundle_alias
+
+    d = tmp_path / "alias"
+    d.mkdir()
+    src = d / "src.parquet"
+    dst = d / "dst.parquet"
+    src.write_bytes(b"new")
+    dst.write_bytes(b"old")
+
+    with (
+        patch("backend.core.rollups.day_bundles.os.link", side_effect=OSError("no link")),
+        patch("backend.core.rollups.day_bundles.shutil.copyfile", side_effect=OSError("no copy")),
+    ):
+        _link_day_bundle_alias(str(src), str(dst))
+
+    assert dst.read_bytes() == b"old"
+    assert sorted(p.name for p in d.iterdir()) == ["dst.parquet", "src.parquet"]
+
+
+def test_link_day_bundle_alias_copy_fallback_is_atomic_replace(tmp_path) -> None:
+    from backend.core.rollups.day_bundles import _link_day_bundle_alias
+
+    d = tmp_path / "alias"
+    d.mkdir()
+    src = d / "src.parquet"
+    dst = d / "dst.parquet"
+    src.write_bytes(b"new")
+    dst.write_bytes(b"old")
+    seen_during_copy: list[bool] = []
+    real_copy = __import__("shutil").copyfile
+
+    def spy_copy(s, d):
+        seen_during_copy.append(dst.exists())
+        return real_copy(s, d)
+
+    with (
+        patch("backend.core.rollups.day_bundles.os.link", side_effect=OSError("no link")),
+        patch("backend.core.rollups.day_bundles.shutil.copyfile", side_effect=spy_copy),
+    ):
+        _link_day_bundle_alias(str(src), str(dst))
+
+    assert seen_during_copy == [True]
+    assert dst.read_bytes() == b"new"
+    assert sorted(p.name for p in d.iterdir()) == ["dst.parquet", "src.parquet"]

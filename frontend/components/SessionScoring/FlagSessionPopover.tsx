@@ -8,17 +8,20 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
 
-export type LabelValue = 'good' | 'bad' | 'neutral'
+import type { LabelValue } from '@/hooks/useScoringLabels'
+
+export type { LabelValue }
 
 interface FlagSessionPopoverProps {
   serviceId: string
-  sid: string
+  // ``null`` for a cookieless request — the popover renders disabled.
+  sid: string | null
   // Optional metadata captured at flag time — denormalized into the label
   // row so the Labels tab can show "what this session looked like" without
   // re-querying the logs.
-  sampleIp?: string
-  sampleUa?: string
-  sampleUrl?: string
+  sampleIp?: string | null
+  sampleUa?: string | null
+  sampleUrl?: string | null
   // Currently-applied label (from the labels API). Undefined means we
   // don't know / haven't checked.
   currentLabel?: LabelValue | null
@@ -67,24 +70,26 @@ export function FlagSessionPopover({
   const disabled = !sid
 
   const submit = async (label: LabelValue) => {
+    if (!sid) return
     setBusy(label)
     setError('')
     try {
-      await client.POST('/api/services/{service_id}/scoring/labels' as any, {
+      await client.POST('/api/services/{service_id}/scoring/labels', {
         params: { path: { service_id: serviceId } },
         body: {
           sid,
           label,
           notes,
-          sample_ip: sampleIp,
-          sample_ua: sampleUa,
-          sample_url: sampleUrl,
+          flagged_by: 'admin',
+          sample_ip: sampleIp ?? '',
+          sample_ua: sampleUa ?? '',
+          sample_url: sampleUrl ?? '',
         },
-      } as any)
+      })
       setOpen(false)
       setNotes('')
       onFlagged?.()
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to save label')
     } finally {
       setBusy(null)
@@ -96,12 +101,12 @@ export function FlagSessionPopover({
     setClearing(true)
     setError('')
     try {
-      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: currentLabelId } },
-      } as any)
+      })
       setOpen(false)
       onFlagged?.()
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to clear label')
     } finally {
       setClearing(false)

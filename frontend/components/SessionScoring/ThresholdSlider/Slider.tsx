@@ -5,21 +5,17 @@ import { Check, Loader2, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
+import type { components } from '@/types/api'
 
-interface StatusCodeMeta {
-  current: number | null
-  default: number
-  effective: number
-  min: number
-  max: number
-  is_default: boolean
-}
+type StatusCodeMeta = components['schemas']['ScoringEnforceStatusCodeState']
+type CommittedThreshold = components['schemas']['ScoringThresholdState']
+type EnforceThreshold = components['schemas']['ScoringEnforceThresholdResponse']
 
 interface ThresholdSliderControlsProps {
   thresholdRaw: number
   onThresholdRawChange: (value: number) => void
-  committed: { threshold: number | null; set_at: string | null; enforced: boolean } | undefined
-  enforce: { threshold: number | null; enforced: boolean } | undefined
+  committed: CommittedThreshold | undefined
+  enforce: EnforceThreshold | undefined
   statusCode: StatusCodeMeta | undefined
   effectiveStatusCode: number
   isAlreadyCommitted: boolean

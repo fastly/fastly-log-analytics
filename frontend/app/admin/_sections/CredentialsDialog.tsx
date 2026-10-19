@@ -1,7 +1,6 @@
 'use client'
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import type { components } from '@/types/api.generated'
 import { client } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -14,8 +13,8 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface Props {
   service: ServiceConfig | null
@@ -24,26 +23,23 @@ interface Props {
   initialMode: 'token' | 'manual'
 }
 
-export function CredentialsDialog({ service, onClose, initialMode }: Props) {
+/** Keyed so opening a different service (or mode) starts from fresh form state. */
+export function CredentialsDialog(props: Props) {
+  return <CredentialsDialogBody key={`${props.service?.service_id ?? ''}|${props.initialMode}`} {...props} />
+}
+
+function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
   const [credMode, setCredMode] = useState<'token' | 'manual'>(initialMode)
   const [credApiToken, setCredApiToken] = useState('')
   const [credAccessKey, setCredAccessKey] = useState('')
   const [credSecretKey, setCredSecretKey] = useState('')
 
-  // Reset local state whenever a new service is opened.
-  React.useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setCredMode(initialMode)
-    setCredApiToken('')
-    setCredAccessKey('')
-    setCredSecretKey('')
-  }, [service?.service_id, initialMode])
-
   const credentialsMutation = useMutation({
     mutationFn: async ({ service_id, payload }: { service_id: string; payload: { api_token: string } | { access_key: string; secret_key: string } }) => {
       const { data } = await client.PATCH("/api/services/{service_id}/credentials", {
         params: { path: { service_id } },
-        body: payload as any
+        // The body model defaults each field to ""; the generated type marks them all required.
+        body: { api_token: '', access_key: '', secret_key: '', ...payload }
       })
       return data
     },
@@ -138,7 +134,7 @@ export function CredentialsDialog({ service, onClose, initialMode }: Props) {
 
           {credentialsMutation.isError && (
             <p className="text-sm text-destructive">
-              {(credentialsMutation.error as any)?.message ?? 'Failed to update credentials.'}
+              {credentialsMutation.error?.message ?? 'Failed to update credentials.'}
             </p>
           )}
         </div>

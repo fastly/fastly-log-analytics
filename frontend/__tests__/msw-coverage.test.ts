@@ -58,8 +58,25 @@ const ALLOWED_GAPS = new Set<string>([
   'PATCH /api/services/:service_id/custom-fields/:field_name',
   'DELETE /api/cron-runs/:log_id',
   'POST /api/assets/aggregates',
+  'GET /api/assets/aggregates',
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
+
+  // High-Scale request-facts aliases of POST /api/high-scale/services/:service_id/request-facts
+  // (which has a handler); the page hook only calls the service-scoped path.
+  'GET /api/high-scale/request-facts',
+  'POST /api/high-scale/request-facts',
+
+  // Live Log Streaming SSE endpoints — MSW does not model SSE; the page test
+  // injects its own EventSource shim.
+  'GET /api/stream/:service_id',
+  'GET /api/services/:service_id/stream',
+
+  // Raw Logs aliases of POST /api/logs/query (which has a handler); the
+  // explorer only calls /query. Covered by backend router tests.
+  'POST /api/logs',
+  'GET /api/logs',
+  'GET /api/logs/:service_id',
 
   // Newly introduced endpoints covered by Playwright E2E
   'GET /api/network/pop-health',
@@ -77,6 +94,24 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/usage/log-activity',
   'GET /api/usage/rum-breakdown',
   'GET /api/admin/compaction-stats',
+  // Backend-only maintenance endpoints for manually compacting rollups and
+  // merging partial-hour data; no frontend client calls these routes.
+  'POST /api/admin/consolidate-rollups',
+  'POST /api/admin/compact/:service_id',
+  'GET /api/admin/compaction-status/:service_id',
+  'GET /api/admin/compaction-status',
+  'POST /api/admin/rollups/compact/:service_id',
+  'POST /api/admin/rollups/compact',
+  'POST /api/admin/rollups/heal/:service_id',
+  'POST /api/admin/rollups/heal',
+  'POST /api/admin/rollup-heal/:service_id',
+  'POST /api/admin/rollup-heal',
+  'GET /api/admin/rollups/status/:service_id',
+  'GET /api/admin/rollups/status',
+  'POST /api/admin/partial-hour-merge/:service_id',
+  'POST /api/admin/partial-hour-merge',
+  'GET /api/admin/partial-hour-status/:service_id',
+  'GET /api/admin/partial-hour-status',
   'GET /api/admin/metric-history',
   'GET /api/admin/iceberg-tree',
   'GET /api/admin/usage-log/export',
@@ -97,6 +132,16 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/reset-rum',
   'POST /api/provision/teardown',
   'PATCH /api/provision/services/:service_id/ngwaf-workspace',
+  // Admin manual-cron trigger endpoints — covered by backend contract tests and Playwright E2E.
+  'POST /api/admin/expire-snapshots/:service_id',
+  'POST /api/admin/metadata-cleanup/:service_id',
+  'POST /api/admin/sync/:service_id',
+  'POST /api/admin/full-sweep/:service_id',
+  'POST /api/admin/gap-heal/:service_id',
+  'POST /api/admin/ledger/sweep/:service_id',
+  'GET /api/admin/ledger/quarantine',
+  'POST /api/admin/rum/sync/:service_id',
+  'POST /api/admin/rum/discovery/:service_id',
 
   // Session-scoring sub-endpoints — the page hits the two composite
   // endpoints (scoring/analytics, scoring/config) which ARE in
@@ -184,6 +229,7 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/realtime-stream',
   'GET /api/services/:service_id/log-field-audit',
   'POST /api/services/:service_id/control-room/correlate',
+  'GET /api/services/:service_id/control-room/error-stream',
 
   // Debug + analyst-share — analyst tests use per-spec handlers,
   // debug/state is admin-only triage.

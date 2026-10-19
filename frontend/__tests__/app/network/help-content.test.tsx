@@ -4,11 +4,9 @@ import React from 'react'
 
 // SHIELDING_COLUMNS renders FilterValueCell, which reads next/navigation's
 // usePathname and the filterStore. Stub both so column cells render in isolation.
-vi.mock('next/navigation', () => ({
-  usePathname: vi.fn(() => '/network'),
-}))
+vi.mock('next/navigation', async () => (await import('../../helpers/page-smoke')).navigationModuleMock('/network'))
 vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn((selector?: (s: any) => any) => {
+  useFilterStore: vi.fn((selector?: (s: object) => unknown) => {
     const state = { filters: [], addFilter: vi.fn(), removeFilter: vi.fn(), clearFilters: vi.fn() }
     return selector ? selector(state) : state
   }),
@@ -47,53 +45,54 @@ describe('HealthBadge', () => {
 describe('SHIELDING_COLUMNS', () => {
   // The columns are plain config objects (no react-table runtime needed).
   // Call each `cell` factory directly with a minimal info-shape mock.
-  const makeInfo = (value: any, original: any = {}) => ({ getValue: () => value, row: { original } })
+  const makeInfo = (value: unknown, original: Record<string, unknown> = {}) => ({ getValue: () => value, row: { original } })
   const colById = (id: string) => SHIELDING_COLUMNS.find((c) => c.id === id)!
+  const cellOf = (id: string) => colById(id).cell as (info: ReturnType<typeof makeInfo>) => React.ReactNode
 
   test('every column exposes id + accessorKey + meta.label + header + cell', () => {
     expect(SHIELDING_COLUMNS.length).toBeGreaterThanOrEqual(8)
     for (const col of SHIELDING_COLUMNS) {
       expect(col.id).toBeTruthy()
-      expect(col.accessorKey).toBe(col.id)
-      expect((col.meta as any).label).toBeTruthy()
+      expect((col as { accessorKey?: string }).accessorKey).toBe(col.id)
+      expect((col.meta as { label?: string } | undefined)?.label).toBeTruthy()
       expect(typeof col.header).toBe('function')
       expect(typeof col.cell).toBe('function')
     }
   })
 
   test('edge_pop cell renders value + destructive class when anomaly_static', () => {
-    const { container } = render(<>{colById('edge_pop').cell(makeInfo('SFO', { anomaly_static: true }))}</>)
+    const { container } = render(<>{cellOf('edge_pop')(makeInfo('SFO', { anomaly_static: true }))}</>)
     expect(container.textContent).toMatch(/SFO/)
     expect(container.querySelector('[class*="text-destructive"]')).not.toBeNull()
   })
 
   test('requests cell uses locale separators; p50/p95/p99 use fixed-point ms', () => {
-    const reqs = render(<>{colById('requests').cell(makeInfo(1234567))}</>)
+    const reqs = render(<>{cellOf('requests')(makeInfo(1234567))}</>)
     expect(reqs.container.textContent).toMatch(/1[.,]234[.,]567/)
     reqs.unmount()
     for (const id of ['p50_ms', 'p95_ms', 'p99_ms'] as const) {
-      const r = render(<>{colById(id).cell(makeInfo(12.345))}</>)
+      const r = render(<>{cellOf(id)(makeInfo(12.345))}</>)
       expect(r.container.textContent).toMatch(/12\.3ms/)
       r.unmount()
     }
   })
 
   test('light_speed_rtt_ms: em-dash when null, fixed-point ms when present', () => {
-    const a = render(<>{colById('light_speed_rtt_ms').cell(makeInfo(null))}</>)
+    const a = render(<>{cellOf('light_speed_rtt_ms')(makeInfo(null))}</>)
     expect(a.container.textContent).toMatch(/—/); a.unmount()
-    const b = render(<>{colById('light_speed_rtt_ms').cell(makeInfo(4.2))}</>)
+    const b = render(<>{cellOf('light_speed_rtt_ms')(makeInfo(4.2))}</>)
     expect(b.container.textContent).toMatch(/4\.2ms/); b.unmount()
   })
 
   test('efficiency_ratio: null → em-dash; <1.5 → green; 1.5-3 → yellow; ≥3 → destructive', () => {
-    const col = colById('efficiency_ratio')
-    const nul = render(<>{col.cell(makeInfo(null))}</>)
+    const cell = cellOf('efficiency_ratio')
+    const nul = render(<>{cell(makeInfo(null))}</>)
     expect(nul.container.textContent).toMatch(/—/); nul.unmount()
-    const lo = render(<>{col.cell(makeInfo(1.2))}</>)
+    const lo = render(<>{cell(makeInfo(1.2))}</>)
     expect(lo.container.querySelector('[class*="text-green"]')).not.toBeNull(); lo.unmount()
-    const mid = render(<>{col.cell(makeInfo(2.4))}</>)
+    const mid = render(<>{cell(makeInfo(2.4))}</>)
     expect(mid.container.querySelector('[class*="text-yellow"]')).not.toBeNull(); mid.unmount()
-    const hi = render(<>{col.cell(makeInfo(5.0))}</>)
+    const hi = render(<>{cell(makeInfo(5.0))}</>)
     expect(hi.container.querySelector('[class*="text-destructive"]')).not.toBeNull(); hi.unmount()
   })
 })

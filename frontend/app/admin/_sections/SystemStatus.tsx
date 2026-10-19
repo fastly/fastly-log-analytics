@@ -13,6 +13,7 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
 import { useNowMs } from '@/hooks/useNowSeconds'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
+import type { components } from '@/types/api.generated'
 
 function NextRunCountdown({ when }: { when: string | null | undefined }) {
   const nowMs = useNowMs()
@@ -20,7 +21,7 @@ function NextRunCountdown({ when }: { when: string | null | undefined }) {
   return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
 }
 
-function SystemJobBox({ job }: { job: any }) {
+function SystemJobBox({ job }: { job: components['schemas']['SystemJobStatus'] }) {
   const { timeAgo, full, abbr } = useDateFormat()
 
   const lastRunText = job.last_run_at ? timeAgo(job.last_run_at) : 'Never'
@@ -86,7 +87,7 @@ export function SystemJobsStrip() {
     queryKey: ['system-jobs'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/system-jobs", { signal })
-      return data as any
+      return data
     },
     staleTime: 30_000,
     refetchInterval: 5 * 60_000,
@@ -100,7 +101,7 @@ export function SystemJobsStrip() {
       <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Background Jobs</Label>
       <div className="flex flex-wrap gap-2">
         {ready ? (
-          (systemJobsData.jobs ?? []).map((job: any) => (
+          systemJobsData.jobs.map((job) => (
             <SystemJobBox key={job.id} job={job} />
           ))
         ) : (

@@ -140,19 +140,28 @@ type InteractiveProps = {
 function InteractiveSparkline({ width, height, stroke, pts, polylinePoints, formatValue, label }: InteractiveProps) {
   const svgRef = React.useRef<SVGSVGElement>(null)
   const cachedRectRef = React.useRef<DOMRect | null>(null)
-  const [hoverIdx, setHoverIdx] = React.useState<number | null>(null)
   const fmt = useDateFormat()
 
   // Reset hover when the upstream data changes. Polling on /admin/trends
   // returns same-length rolling windows (60s cadence) — checking length
   // alone misses the case where the underlying ts/value tuples shift by
   // one. Bracket the array by first + last ts so any cross-tick refetch
-  // clears the stale index without churn on identical refetches.
+  // clears the stale index without churn on identical refetches. The hovered
+  // index is stored with the data key it was set under, so a stale one simply
+  // stops matching (derived — no reset effect).
   const firstTs = pts[0]?.raw.ts
   const lastTs = pts[pts.length - 1]?.raw.ts
-  React.useEffect(() => {
-    setHoverIdx(null)
-  }, [pts.length, firstTs, lastTs])
+  const hoverKey = `${pts.length}|${firstTs}|${lastTs}`
+  const [hover, setHover] = React.useState<{ key: string; idx: number | null }>({ key: hoverKey, idx: null })
+  const hoverIdx = hover.key === hoverKey ? hover.idx : null
+  const setHoverIdx = React.useCallback(
+    (update: number | null | ((prev: number | null) => number | null)) =>
+      setHover((h) => {
+        const prev = h.key === hoverKey ? h.idx : null
+        return { key: hoverKey, idx: typeof update === 'function' ? update(prev) : update }
+      }),
+    [hoverKey],
+  )
 
   // Invalidate the cached SVG bounding box on window resize so a card
   // that's resized (e.g. the user opens DevTools, rotates a tablet, or

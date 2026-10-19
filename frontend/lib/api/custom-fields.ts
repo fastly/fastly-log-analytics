@@ -18,7 +18,7 @@ export const customFieldsApi = {
   createCustomField: async (service_id: string, field: Omit<CustomField, "created_at" | "updated_at">) => {
     const { data, error } = await client.POST("/api/services/{service_id}/custom-fields", {
       params: { path: { service_id } },
-      body: field as any
+      body: field
     })
     if (error) throw new Error(extractApiError(error) || "Failed to create custom field");
     return data
@@ -27,7 +27,7 @@ export const customFieldsApi = {
   updateCustomField: async (service_id: string, field_name: string, updates: CustomFieldUpdate) => {
     const { data, error } = await client.PATCH("/api/services/{service_id}/custom-fields/{field_name}", {
       params: { path: { service_id, field_name } },
-      body: updates as any
+      body: updates
     })
     if (error) throw new Error(extractApiError(error) || "Failed to update custom field");
     return data
@@ -63,10 +63,10 @@ export const customFieldsApi = {
     return response.blob();
   },
 
-  importCustomFields: async (service_id: string, fields: any[]) => {
+  importCustomFields: async (service_id: string, fields: components["schemas"]["CustomFieldsImportBody"]["custom_fields"]) => {
     const { data, error } = await client.POST("/api/services/{service_id}/custom-fields/import", {
       params: { path: { service_id } },
-      body: { custom_fields: fields } as any
+      body: { custom_fields: fields }
     });
     if (error) throw new Error(extractApiError(error) || "Failed to import custom fields");
     return data;

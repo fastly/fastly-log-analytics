@@ -11,13 +11,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { queryKeys } from '@/lib/query-keys'
 
 export function DiagnosticsPanel() {
   const queryClient = useQueryClient()
 
   // 1. Fetch current debug visibility settings from the backend
   const { data: settings, isLoading: isSettingsLoading } = useQuery({
-    queryKey: ['admin', 'debug-settings'],
+    queryKey: queryKeys.admin.debugSettings(),
     queryFn: async () => {
       const { data, error } = await client.GET('/api/admin/debug-settings')
       if (error) throw new Error(extractApiError(error) || 'Failed to fetch debug settings')
@@ -36,7 +37,7 @@ export function DiagnosticsPanel() {
     },
     onSuccess: () => {
       // Invalidate both settings and bootstrap queries so the application re-syncs state
-      queryClient.invalidateQueries({ queryKey: ['admin', 'debug-settings'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.debugSettings() })
       queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
       queryClient.invalidateQueries()
     },

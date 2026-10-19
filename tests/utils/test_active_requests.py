@@ -321,21 +321,18 @@ def test_yield_caps_at_max_wait_secs_under_sustained_load():
         decrement_active_requests()
 
 
-def test_yield_polls_at_configured_interval(monkeypatch):
+def test_yield_polls_at_configured_interval():
     """Verify the helper actually polls — i.e. uses small sleeps in a loop
     so an early drain is observed promptly, rather than one big sleep that
     blocks past the drain moment."""
     increment_active_requests()
     sleep_calls: list[float] = []
-    real_sleep = time.sleep
 
     def _tracking_sleep(secs: float) -> None:
         sleep_calls.append(secs)
-        real_sleep(secs)
 
-    monkeypatch.setattr(active_requests.time, "sleep", _tracking_sleep)
     try:
-        yield_to_api(max_wait_secs=0.2, poll_interval=0.05)
+        yield_to_api(max_wait_secs=0.2, poll_interval=0.05, sleep_fn=_tracking_sleep)
     finally:
         decrement_active_requests()
 

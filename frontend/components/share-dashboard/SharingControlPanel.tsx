@@ -11,7 +11,8 @@ import { client, extractApiError } from '@/lib/api'
 import { useSearchParams } from 'next/navigation'
 
 import { useShareMutation } from './useShareMutation'
-import { formatUptime, type ShareStatus } from './utils'
+import { type ShareStatus } from './utils'
+import { formatDuration } from '@/lib/date'
 
 interface SharingControlPanelProps {
   status: ShareStatus | null
@@ -37,23 +38,20 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   // (slightly later) first client render → React #418. This gates the two
   // live counters below — telemetry uptime and the rate-limit lockout
   // countdown — so server HTML and first client render agree; the live values
-  // fill in right after mount. Sibling to formatStamp's fix in ./utils.ts.
+  // fill in right after mount. Sibling to formatDeterministicUTC's fix in lib/date.ts.
   const mounted = useMounted()
   const [mode, setMode] = React.useState<SharingMode>('hostname')
-  const [hostnameValue, setHostnameValue] = React.useState('')
+  const [hostnameDraft, setHostnameValue] = React.useState('')
   const [ipValue, setIpValue] = React.useState('')
 
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
   const activeService = React.useMemo(() => {
-    return status?.services?.find((s: any) => s.service_id === activeServiceId)
+    return status?.services?.find((s) => s.service_id === activeServiceId)
   }, [status?.services, activeServiceId])
 
-  React.useEffect(() => {
-    if (activeService?.sharing_domain && !hostnameValue) {
-      setHostnameValue(activeService.sharing_domain)
-    }
-  }, [activeService, hostnameValue])
+  // An empty field shows the service's saved sharing domain (derived, not copied into state).
+  const hostnameValue = hostnameDraft || activeService?.sharing_domain || ''
   // Editable copy of the global concurrent-analyst cap. `capDraft` is null
   // while the input mirrors the server value; once the admin types it holds
   // their edit. Deriving the displayed value during render (rather than syncing
@@ -84,20 +82,20 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
       return
     }
     return run(() =>
-      client.POST('/api/admin/share/start' as any, {
+      client.POST('/api/admin/share/start', {
         body: {
           public_endpoint: publicEndpoint,
           forward_port: 3000,
         },
-      } as any),
+      }),
     )
   }
 
-  const handleStop = () => run(() => client.POST('/api/admin/share/stop' as any, {} as any))
+  const handleStop = () => run(() => client.POST('/api/admin/share/stop', {}))
 
   const handlePanic = () => {
     if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops sharing.')) return
-    run(() => client.POST('/api/admin/share/panic' as any, {} as any))
+    run(() => client.POST('/api/admin/share/panic', {}))
   }
 
   const handlePreviewInNewTab = () => {
@@ -114,13 +112,13 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     }
     setCapBusy(true)
     try {
-      await client.PATCH('/api/admin/share/settings' as any, {
+      await client.PATCH('/api/admin/share/settings', {
         body: { max_concurrent_analyst_sessions: n },
-      } as any)
+      })
       await onRefresh()
       // Drop back to mirroring the (now-updated) server value.
       setCapDraft(null)
-    } catch (e: any) {
+    } catch (e) {
       onError(extractApiError(e))
     } finally {
       setCapBusy(false)
@@ -206,7 +204,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             {/* Live seconds counter — placeholder until mounted (see #418 note above). */}
             Uptime:{' '}
             <span className="font-mono">
-              {mounted ? formatUptime(status.telemetry.current_uptime_s) : '—'}
+              {mounted ? formatDuration(status.telemetry.current_uptime_s) : '—'}
             </span>
           </span>
           <span>

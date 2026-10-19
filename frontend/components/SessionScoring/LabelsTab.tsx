@@ -76,13 +76,13 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     setBusyId(row.id)
     setError('')
     try {
-      await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+      await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: row.id } },
         body: { label: editLabel, notes: editNotes },
-      } as any)
+      })
       setEditingId(null)
       qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
-    } catch (e: any) {
+    } catch (e) {
       setError(extractApiError(e) || 'Failed to update label')
     } finally {
       setBusyId(null)
@@ -101,11 +101,11 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     const timer = setTimeout(async () => {
       pendingTimersRef.current.delete(id)
       try {
-        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
           params: { path: { service_id: serviceId, label_id: id } },
-        } as any)
+        })
         qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
-      } catch (e: any) {
+      } catch (e) {
         setPendingDeleteIds((prev) => {
           const next = new Set(prev)
           next.delete(id)
@@ -207,8 +207,8 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
                   />
                 </TableCell>
                 <TableCell>{labelBadge(r.label)}</TableCell>
-                <TableCell className="text-xs max-w-[260px] truncate" title={r.notes}>{r.notes || '—'}</TableCell>
-                <TableCell className="hidden lg:table-cell text-xs max-w-[260px] truncate" title={r.sample_url}>{r.sample_url || '—'}</TableCell>
+                <TableCell className="text-xs max-w-[260px] truncate" title={r.notes ?? undefined}>{r.notes || '—'}</TableCell>
+                <TableCell className="hidden lg:table-cell text-xs max-w-[260px] truncate" title={r.sample_url ?? undefined}>{r.sample_url || '—'}</TableCell>
                 <TableCell className="hidden xl:table-cell text-xs font-mono">{r.sample_ip || '—'}</TableCell>
                 <TableCell className="text-xs whitespace-nowrap"><DateTimeCell iso={r.updated_at} /></TableCell>
                 <TableCell className="text-right">

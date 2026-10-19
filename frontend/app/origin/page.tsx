@@ -38,12 +38,10 @@ import OriginClient from './_sections/OriginClient'
 //                       seed's data with no loading state (keepPreviousData)
 //                       — a visible wrong-service data flash.
 //   - rangeToken      = '24h'  (no ?range= → filterStore.relativeRange is null)
-//   - anchor          = quantizeAnchor(snapped-end ?? now) on the 60s grid — snaps
-//                       to bootstrap.log_extents when the service's latest log is
-//                       >15min stale (lib/log-extents-snap.ts); otherwise `now`.
-//                       Divergence: the rare minute-boundary straddle, plus a rare
-//                       15-minute-staleness-boundary straddle — both self-heal via
-//                       one client refetch, never a leak/crash.
+//   - anchor          = quantizeAnchor(now) on the 60s grid (the stale-latest-log
+//                       snap to bootstrap.log_extents was removed). Divergence: the
+//                       rare minute-boundary straddle, which self-heals via one
+//                       client refetch, never a leak/crash.
 //   - filterPayload   = {}      (no filters on a cold load)
 //   - bucketMinutes   = 60      (the default 24h display span → "1 hour")
 //   - originMetric    = 'ttfb', originPercentile = 'p95'  (useState defaults)
@@ -75,26 +73,23 @@ export default async function OriginPage({
     firstParam(params.service) ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   return (
     <Suspense fallback={<OriginLoading />}>
-      <OriginPageContent serviceId={serviceId} logExtents={logExtents} />
+      <OriginPageContent serviceId={serviceId} />
     </Suspense>
   )
 }
 
 async function OriginPageContent({
   serviceId,
-  logExtents,
 }: {
   serviceId: string | undefined
-  logExtents: unknown
 }) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveOriginDefaultKey + fetchOriginServerSide both floor it).
   const now = new Date()
-  const seed = await fetchOriginServerSide(serviceId, now, logExtents)
+  const seed = await fetchOriginServerSide(serviceId, now)
 
   // Seed under the EXACT client first-paint key. seedDehydratedState returns
   // null when seed is null, so a failed prefetch degrades to the client fetch.

@@ -36,20 +36,15 @@ Harness notes
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 
 import duckdb
 import pytest
 
 from backend.repositories._base import QueryRunner
+from tests._helpers.locks import noop_lock as _noop_lock
 
 # ── Harness ────────────────────────────────────────────────────────────────
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
 
 
 class _NonClosing:
@@ -140,24 +135,6 @@ def _live_requests(con, start: datetime, end: datetime, table: str = "logs") -> 
         f"SELECT COUNT(*) FROM {table} WHERE timestamp >= ? AND timestamp < ?",
         [start, end],
     ).fetchone()[0]
-
-
-# Deterministic "now" for the active-hour seam tests: hour 12 (so "today" has a
-# closed hour to merge — kills the UTC-hour-00 skip) and minute 10 (so a 20-min
-# active window ends at :30, comfortably inside the hour — kills the latent
-# hour-rollover flake). The date is arbitrary; the in-memory harness has no
-# real-time dependency (bundles live in tmp; queries use seeded timestamps).
-_FROZEN_NOW = "2026-06-15 12:10:00+00:00"
-
-
-@pytest.fixture
-def frozen_clock():
-    """Freeze ``datetime.now`` (incl. the reader's function-local import) at
-    :data:`_FROZEN_NOW` so the closed/active-hour seam is deterministic."""
-    import time_machine
-
-    with time_machine.travel(_FROZEN_NOW, tick=False) as traveller:
-        yield traveller
 
 
 # ── time_series: requests, closed-window agreement ──────────────────────────

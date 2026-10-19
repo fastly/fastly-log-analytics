@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -143,6 +144,89 @@ def test_unknown_tab_404(admin_client):
     )
     assert resp.status_code == 404
     assert resp.json()["detail"]["error"] == "unknown_tab"
+
+
+def test_error_stream_route_is_registered():
+    """The request-level error feed is part of the public OpenAPI surface."""
+    path = "/api/services/{service_id}/control-room/error-stream"
+    assert path in app.openapi()["paths"]
+
+
+def test_recent_standard_errors_maps_rows(monkeypatch):
+    import backend.routers.control_room as control_room
+
+    class _Result:
+        def fetchall(self):
+            return [
+                (
+                    "event-1",
+                    datetime(2026, 7, 7, tzinfo=UTC),
+                    "404",
+                    "/missing",
+                    "DEN",
+                    "192.0.2.10",
+                )
+            ]
+
+    class _Connection:
+        def execute(self, query, params=None):
+            assert "FROM logs_test_service" in query
+            return _Result()
+
+        def close(self):
+            pass
+
+    import backend.core.duckdb as duckdb
+
+    monkeypatch.setattr(duckdb, "get_connection", lambda **kwargs: _Connection())
+    source = {"service_id": MOCK_SERVICE_ID}
+    events = control_room._recent_standard_errors(source, "test-service")
+    assert events == [
+        {
+            "event_id": "event-1",
+            "timestamp": "2026-07-07T00:00:00+00:00",
+            "status": 404,
+            "url": "/missing",
+            "pop": "DEN",
+            "client_ip": "192.0.2.10",
+        }
+    ]
+
+
+def test_recent_high_scale_errors_maps_rows():
+    import backend.routers.control_room as control_room
+
+    class _Client:
+        def execute(self, query, params):
+            assert "request_facts" in query
+            assert params == {"service_id": MOCK_SERVICE_ID}
+            return [
+                {
+                    "event_id": "event-2",
+                    "timestamp": datetime(2026, 7, 7, tzinfo=UTC),
+                    "status": 503,
+                    "url": "/upstream",
+                    "pop": "IAD",
+                    "client_ip": "198.51.100.7",
+                }
+            ]
+
+    service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=_Client())
+    events = control_room._recent_high_scale_errors(service)
+    assert events[0]["status"] == 503
+    assert events[0]["client_ip"] == "198.51.100.7"
+
+
+def test_error_events_mask_only_client_ip(monkeypatch):
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(control_room, "mask_ips_for", lambda session: True)
+    monkeypatch.setattr(control_room, "mask_ip", lambda value: "masked")
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=object()))
+    event = {"event_id": "event-1", "client_ip": "192.0.2.10", "url": "/x"}
+    assert control_room._mask_error_events([event], request) == [
+        {"event_id": "event-1", "client_ip": "masked", "url": "/x"}
+    ]
 
 
 # ── Mutation tests (admin → 501) ─────────────────────────────────────────────
@@ -353,6 +437,62 @@ def test_openapi_has_control_room_endpoints():
     assert "/api/services/{service_id}/control-room/mitigations" in paths
 
 
+def test_realtime_seed_without_credentials_skips_network(monkeypatch):
+    """No Fastly credentials configured -> _fetch_seed_ticks must never hit rt.fastly.com."""
+    import backend.config as backend_config
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(backend_config, "get_fastly_api_key", lambda service_id: None)
+    monkeypatch.setattr(backend_config, "get_fastly_logging_service_id", lambda service_id: None)
+
+    def _fail_get(*args, **kwargs):
+        raise AssertionError("seed fetch with no credentials attempted network I/O")
+
+    monkeypatch.setattr("requests.get", _fail_get)
+    monkeypatch.setattr("backend.core.fastly.client.fastly_rt", _fail_get)
+
+    ticks = control_room._fetch_seed_ticks(MOCK_SERVICE_ID, count=5)
+
+    assert ticks == []
+
+
+def test_fetch_seed_ticks_goes_through_fastly_rt_client(monkeypatch):
+    """The RT seed fetch rides core/fastly/client.fastly_rt with the stored token and channel path."""
+    import backend.config as backend_config
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(backend_config, "get_fastly_api_key", lambda service_id: "tok")
+    monkeypatch.setattr(backend_config, "get_fastly_service_id", lambda service_id: "cdn123")
+    calls = []
+
+    def _fake_rt(path, *, token, **kwargs):
+        calls.append((path, token))
+        return {"Timestamp": 1000, "Data": [{"aggregated": {}}]}
+
+    monkeypatch.setattr("backend.core.fastly.client.fastly_rt", _fake_rt)
+    monkeypatch.setattr("backend.core.realtime.transform.transform_single_second", lambda point, ts: {"ts": ts})
+
+    ticks = control_room._fetch_seed_ticks(MOCK_SERVICE_ID, count=5)
+
+    assert calls == [("/v1/channel/cdn123/ts/h?limit=120", "tok")]
+    assert len(ticks) == 1
+
+
+def test_fetch_seed_ticks_returns_empty_when_rt_fetch_fails(monkeypatch):
+    import backend.config as backend_config
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(backend_config, "get_fastly_api_key", lambda service_id: "tok")
+    monkeypatch.setattr(backend_config, "get_fastly_service_id", lambda service_id: "cdn123")
+
+    def _boom(path, *, token, **kwargs):
+        raise RuntimeError("HTTP 500 GET /v1/channel/cdn123/ts/h")
+
+    monkeypatch.setattr("backend.core.fastly.client.fastly_rt", _boom)
+
+    assert control_room._fetch_seed_ticks(MOCK_SERVICE_ID, count=5) == []
+
+
 # ── Seed, Correlate, & Wizard endpoints ──────────────────────────────────
 
 
@@ -416,6 +556,75 @@ def test_correlate_success(admin_client, monkeypatch):
     assert data["dimension"] == "status"
     assert data["top"] == [{"value": "200", "count": 100}]
     assert "freshness" in data
+
+
+@pytest.mark.asyncio
+async def test_correlate_masks_client_ips_for_analyst(monkeypatch):
+    """Control Room correlator must not expose raw client IPs to Path B."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    import backend.routers.control_room as cr_mod
+
+    mock_con = MagicMock()
+    mock_con.execute().fetchall.return_value = [("203.0.113.45", 7)]
+    mock_con.execute().fetchone.return_value = (datetime.now(UTC),)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": "svc"})
+    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda source, read_only: mock_con)
+
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=SimpleNamespace(pii_policy={"mask_ips": True})))
+    response = await cr_mod.control_room_correlate(
+        cr_mod.CorrelateRequest(dimension="ip"),
+        MOCK_SERVICE_ID,
+        request,
+        None,
+        SimpleNamespace(resolve=lambda service_id: None),
+    )
+
+    assert response["top"] == [{"value": "203.0.113.xxx", "count": 7}]
+
+
+@pytest.mark.asyncio
+async def test_correlate_uses_high_scale_aggregate_path():
+    """High-Scale Control Room correlation reads the distributed aggregate."""
+    from datetime import UTC, datetime
+
+    import backend.routers.control_room as cr_mod
+    from backend.high_scale.archive_models import ServingWatermark
+
+    watermark = ServingWatermark(
+        service_id=MOCK_SERVICE_ID,
+        domain="request",
+        owner_epoch=1,
+        coverage_start=datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+        coverage_end=datetime(2026, 8, 19, 12, 5, tzinfo=UTC),
+        last_accepted_cursor=None,
+        last_archived_event_id=None,
+        last_visible_event_id=None,
+        exact=True,
+    )
+
+    class Client:
+        def execute(self, sql, params=None):
+            if "AS total_count" in sql:
+                return [{"total_count": 12}]
+            return [{"value": "500", "aggregate_count": 12}]
+
+    service = SimpleNamespace(
+        client=Client(),
+        watermark_for=lambda domain: watermark,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=None))
+    response = await cr_mod.control_room_correlate(
+        cr_mod.CorrelateRequest(dimension="status"),
+        MOCK_SERVICE_ID,
+        request,
+        None,
+        SimpleNamespace(resolve=lambda service_id: service),
+    )
+
+    assert response["top"] == [{"value": "500", "count": 12}]
+    assert response["freshness"]["latest_log_at"] == "2026-08-19T12:05:00+00:00"
 
 
 def test_correlate_unknown_service_source_404(admin_client, monkeypatch):

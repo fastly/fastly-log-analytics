@@ -1,18 +1,30 @@
-"""Tests for backend/utils/ngwaf_bot_cache.py — SQLite bot cache."""
+"""Tests for backend/utils/ngwaf_bot_cache.py — NGWAF bot cache on PostgreSQL."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 
-from backend.utils.ngwaf_bot_cache import cleanup_old_bots, get_last_timestamp, upsert_bots
+from backend.core.metadata import pg_connection
+from backend.utils.ngwaf_bot_cache import (
+    cleanup_old_bots,
+    ensure_schema,
+    get_cache_stats,
+    get_last_timestamp,
+    upsert_bots,
+)
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path):
-    """Redirect all cache operations to a temp directory for each test."""
-    with patch("backend.utils.ngwaf_bot_cache._db_path", return_value=tmp_path / "ngwaf_bot_cache.db"):
-        yield
+def isolated_db():
+    """Wipe the cache tables before each test."""
+    con = pg_connection.get_pg_thread_connection()
+    try:
+        con.execute("DELETE FROM ngwaf_bots")
+        con.execute("DELETE FROM ngwaf_sync_state")
+        con.commit()
+    except Exception:
+        con.rollback()
+    yield
 
 
 # ── get_last_timestamp ────────────────────────────────────────────────────────
@@ -103,57 +115,47 @@ def test_upsert_bots_stores_wellknown_null_correctly():
 # ── cleanup_old_bots ──────────────────────────────────────────────────────────
 
 
-def test_cleanup_old_bots_removes_old_rows(tmp_path):
+def test_cleanup_old_bots_removes_old_rows():
     """Rows with synced_at older than retention_days must be deleted."""
-    import sqlite3
+    upsert_bots(
+        [
+            {
+                "waf_req_id": "old-req",
+                "bot_name": "OldBot",
+                "category": None,
+                "wellknown_bot_id": None,
+                "wellknown_bot_name": None,
+            }
+        ],
+        "ws1",
+        latest_timestamp="2026-04-01T00:00:00Z",
+    )
 
-    db_path = tmp_path / "ngwaf_bot_cache.db"
+    old_ts = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    con = pg_connection.get_pg_thread_connection()
+    con.execute("UPDATE ngwaf_bots SET synced_at = ? WHERE waf_req_id = 'old-req'", (old_ts,))
+    con.commit()
 
-    with patch("backend.utils.ngwaf_bot_cache._db_path", return_value=db_path):
-        # Insert a record, then manually backdated synced_at to 40 days ago
-        upsert_bots(
-            [
-                {
-                    "waf_req_id": "old-req",
-                    "bot_name": "OldBot",
-                    "category": None,
-                    "wellknown_bot_id": None,
-                    "wellknown_bot_name": None,
-                }
-            ],
-            "ws1",
-            latest_timestamp="2026-04-01T00:00:00Z",
-        )
-
-        old_ts = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        con = sqlite3.connect(str(db_path))
-        con.execute("UPDATE ngwaf_bots SET synced_at = ? WHERE waf_req_id = 'old-req'", (old_ts,))
-        con.commit()
-        con.close()
-
-        deleted = cleanup_old_bots(retention_days=30)
-        assert deleted == 1
+    deleted = cleanup_old_bots(retention_days=30)
+    assert deleted == 1
 
 
-def test_cleanup_old_bots_keeps_recent_rows(tmp_path):
-    db_path = tmp_path / "ngwaf_bot_cache.db"
-
-    with patch("backend.utils.ngwaf_bot_cache._db_path", return_value=db_path):
-        upsert_bots(
-            [
-                {
-                    "waf_req_id": "new-req",
-                    "bot_name": "NewBot",
-                    "category": None,
-                    "wellknown_bot_id": None,
-                    "wellknown_bot_name": None,
-                }
-            ],
-            "ws1",
-            latest_timestamp="2026-05-07T00:00:00Z",
-        )
-        deleted = cleanup_old_bots(retention_days=30)
-        assert deleted == 0
+def test_cleanup_old_bots_keeps_recent_rows():
+    upsert_bots(
+        [
+            {
+                "waf_req_id": "new-req",
+                "bot_name": "NewBot",
+                "category": None,
+                "wellknown_bot_id": None,
+                "wellknown_bot_name": None,
+            }
+        ],
+        "ws1",
+        latest_timestamp="2026-05-07T00:00:00Z",
+    )
+    deleted = cleanup_old_bots(retention_days=30)
+    assert deleted == 0
 
 
 def test_cleanup_old_bots_returns_zero_on_empty_table():
@@ -161,66 +163,14 @@ def test_cleanup_old_bots_returns_zero_on_empty_table():
     assert deleted == 0
 
 
-# ── ensure_schema (regression) ────────────────────────────────────────────────
-#
-# Regression for the "stuck in zero-byte" bug: oldest_unenriched_timestamp
-# attaches the cache file in DuckDB and joins ngwaf_bots — if the file exists
-# but the schema has never been created (e.g. someone deleted the file and a
-# 0-byte stub got recreated by a downstream caller), the JOIN throws, the
-# planner returns None, the cron exits, and ngwaf_bots is never written.
-# ensure_schema() breaks the cycle by creating the tables eagerly.
-
-
-def test_ensure_schema_creates_tables_when_file_missing(tmp_path):
-    import sqlite3
-
-    from backend.utils import ngwaf_bot_cache as _cache
-
-    db_path = tmp_path / "fresh.db"
-    with patch("backend.utils.ngwaf_bot_cache._db_path", return_value=db_path):
-        assert not db_path.exists()
-        _cache.ensure_schema()
-        assert db_path.exists()
-        con = sqlite3.connect(str(db_path))
-        try:
-            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        finally:
-            con.close()
-    assert tables >= {"ngwaf_bots", "ngwaf_sync_state"}
-
-
-def test_ensure_schema_recovers_zero_byte_file(tmp_path):
-    """The exact failure mode the cron got stuck on."""
-    import sqlite3
-
-    from backend.utils import ngwaf_bot_cache as _cache
-
-    db_path = tmp_path / "stub.db"
-    db_path.touch()  # 0-byte file
-    assert db_path.stat().st_size == 0
-    with patch("backend.utils.ngwaf_bot_cache._db_path", return_value=db_path):
-        _cache.ensure_schema()
-    assert db_path.stat().st_size > 0
-    con = sqlite3.connect(str(db_path))
-    try:
-        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    finally:
-        con.close()
-    assert "ngwaf_bots" in tables
-
-
-def test_ensure_schema_does_not_clobber_existing_data():
-    upsert_bots([{"waf_req_id": "keep-me", "bot_name": "KeepBot"}], "ws1", latest_timestamp="2026-05-15T00:00:00Z")
-    from backend.utils.ngwaf_bot_cache import ensure_schema, get_db_path
-
+def test_ensure_schema_and_get_cache_stats():
     ensure_schema()
-    ensure_schema()
-
-    import sqlite3
-
-    con = sqlite3.connect(get_db_path())
-    try:
-        rows = con.execute("SELECT waf_req_id, bot_name FROM ngwaf_bots").fetchall()
-    finally:
-        con.close()
-    assert ("keep-me", "KeepBot") in rows
+    upsert_bots(
+        [{"waf_req_id": "stat-bot-1", "bot_name": "Googlebot"}],
+        "ws-stats",
+        latest_timestamp="2026-05-15T00:00:00Z",
+    )
+    stats = get_cache_stats()
+    assert stats["total_cached_bots"] == 1
+    assert "ws-stats" in stats["workspaces"]
+    assert stats["top_bots"].get("Googlebot") == 1

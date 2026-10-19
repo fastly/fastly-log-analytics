@@ -14,6 +14,7 @@ from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, e
 from backend.repositories._sql import sessions as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.pagination import calc_offset
+from backend.utils.sql_validator import escape_sql_literal
 
 
 def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tuple[list[str], bool] | None:
@@ -183,7 +184,7 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
             op = "NOT IN" if mode == "exclude" else "IN"
             parts.append(f'"asn" {op} ({in_list})')
         else:  # country: VARCHAR
-            country_literals = ", ".join("'" + str(v).replace("'", "''") + "'" for v in values)
+            country_literals = ", ".join("'" + escape_sql_literal(str(v)) + "'" for v in values)
             op = "NOT IN" if mode == "exclude" else "IN"
             parts.append(f'"country" {op} ({country_literals})')
     if not parts:
@@ -274,7 +275,7 @@ def _get_sessions_from_rollup(
         # may infer naive on re-read depending on the parquet metadata.
         # The downstream sessions logic only cares about first_ts/last_ts
         # ordering, so neither timezone interpretation breaks correctness.
-        paths_sql = ", ".join("'" + p.replace("'", "''") + "'" for p in rollup_paths)
+        paths_sql = ", ".join("'" + escape_sql_literal(p) + "'" for p in rollup_paths)
         union_parts.append(
             f"SELECT bucket, ip, ja4, first_ts, last_ts, req_count, country, asn, "
             f"reqs_4xx, reqs_5xx, total_bytes, rtt_sum, rtt_count, edge_count, shield_count, "

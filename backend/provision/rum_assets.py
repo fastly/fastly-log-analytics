@@ -35,6 +35,14 @@ _S3_LIST_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 _NO_EXPECTATION = object()
 
 
+class _FaroPinChanged(Exception):
+    """The persisted Faro pin no longer matches the version this sync started from."""
+
+    def __init__(self, found: object) -> None:
+        super().__init__(f"faro pin is now {found!r}")
+        self.found = found
+
+
 def _faro_fos_key(version: str) -> str:
     return f"{FARO_KEY_PREFIX}{version}{FARO_KEY_SUFFIX}"
 
@@ -69,7 +77,8 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
     if not all([access_key, secret_key, bucket]) or not stored_hash:
         return False
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
     fos_host = region_endpoint(region)
@@ -91,8 +100,12 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
             return False
         etag = response.headers.get("ETag", "").strip('"')
         return etag == stored_hash
-    except Exception:
-        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
+    except Exception as e:
+        logger.warning(
+            "Faro FOS integrity HEAD check failed, treating as needs-restore: %s: %s",
+            type(e).__name__,
+            e,
+        )
         return False
 
 
@@ -483,7 +496,8 @@ def upload_rum_tracker_js(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = "rum/rum-tracker.js"
     fos_host = region_endpoint(region)
@@ -629,7 +643,8 @@ def delete_rum_tracker_js(
         warn(f"Service {service_id} missing FOS credentials — skipping JS cleanup")
         return
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Deleting RUM tracker JS from FOS bucket {bucket}")
     if status_cb:
@@ -740,7 +755,8 @@ async def download_and_upload_faro(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Downloading Faro Web SDK v{version}")
     if status_cb:
@@ -807,12 +823,24 @@ async def download_and_upload_faro(
     # above may have taken long enough for a concurrent, explicit pin change
     # to land. See the expected_current_version note in this function's
     # docstring.
-    fresh_cfg = svcconfig.load_config(service_id) or cfg
-    rum_cfg = dict(fresh_cfg.get("rum") or {})
-    if expected_current_version is not _NO_EXPECTATION and rum_cfg.get("faro_version") != expected_current_version:
+    def _commit_pin(target_cfg: dict) -> None:
+        rum_cfg = dict(target_cfg.get("rum") or {})
+        if expected_current_version is not _NO_EXPECTATION and rum_cfg.get("faro_version") != expected_current_version:
+            raise _FaroPinChanged(rum_cfg.get("faro_version"))
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = content_hash
+        rum_cfg["faro_fos_etag_md5"] = etag_md5
+        target_cfg["rum"] = rum_cfg
+
+    try:
+        # Compare-and-set under the config lock: the pin check and the write see the same config.
+        if svcconfig.mutate_config(service_id, _commit_pin) is None:
+            # The service was deleted mid-sync; recreating its config from the stale copy would resurrect it.
+            warn(f"Service {service_id} no longer has a config; Faro v{version} uploaded but pin not persisted")
+    except _FaroPinChanged as changed:
         warn(
             f"Faro pin for {service_id} changed concurrently while syncing v{version} "
-            f"(expected {expected_current_version!r}, found {rum_cfg.get('faro_version')!r}); "
+            f"(expected {expected_current_version!r}, found {changed.found!r}); "
             "bundle bytes uploaded to their own FOS key but config left untouched"
         )
         if status_cb:
@@ -825,12 +853,6 @@ async def download_and_upload_faro(
             "fos_key": f"s3://{bucket}/{fos_key}",
             "config_updated": False,
         }
-
-    rum_cfg["faro_version"] = version
-    rum_cfg["faro_content_hash"] = content_hash
-    rum_cfg["faro_fos_etag_md5"] = etag_md5
-    fresh_cfg["rum"] = rum_cfg
-    svcconfig.save_config(service_id, fresh_cfg)
 
     return {
         "version": version,
@@ -888,7 +910,8 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
         if not all([access_key, secret_key, bucket]):
             return
 
-        assert access_key is not None and secret_key is not None
+        if access_key is None or secret_key is None:
+            raise RuntimeError("access_key / secret_key is unexpectedly None")
 
         keep_version = (cfg.get("rum") or {}).get("faro_version") if keep_current else None
         keep_key = _faro_fos_key(keep_version) if keep_version else None

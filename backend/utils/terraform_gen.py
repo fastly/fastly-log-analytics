@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.config import is_rum_enabled
 from backend.core.fastly.utils import load_vcl
 from backend.provision.declarative.generators import (
     desired_backends,
@@ -99,6 +100,11 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         period = int(cfg.get("log_period", 3600))
     except (TypeError, ValueError):
         period = 3600
+    try:
+        rum_period_val = cfg.get("rum_log_period") or (cfg.get("rum") or {}).get("log_period")
+        rum_period = int(rum_period_val) if rum_period_val is not None else None
+    except (TypeError, ValueError):
+        rum_period = None
     cdn_service_name = cfg.get("cdn_service_name", "Fastly Log Analysis CDN Proxy")
     cdn_prefix = cfg.get("cdn_prefix", bucket)
     cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"
@@ -122,12 +128,13 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     fs_cfg = {
         "service_id": service_id,
         "log_period": period,
+        "rum_log_period": rum_period,
         "sample_rate": sample_rate,
         "edge_only": edge_only,
         "custom_condition": custom_condition,
         "fos_prefix": prefix,
         "logging_enabled": bool(cfg.get("logging_enabled", True)),
-        "rum_enabled": bool(cfg.get("rum_enabled", False)),
+        "rum_enabled": is_rum_enabled(cfg),
         "cmcd": {
             "enabled": bool(cmcd_cfg.get("enabled", False)),
             "mode": cmcd_cfg.get("mode", "query_string"),

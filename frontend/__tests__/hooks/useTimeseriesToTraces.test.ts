@@ -16,7 +16,7 @@
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
+import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/hooks/useTimeseriesToTraces'
 
 const SAMPLE_DATA = [
   { time: '2026-05-18T20:00:00Z', p50: 30, p95: 80 },
@@ -103,14 +103,10 @@ describe('useTimeseriesToTraces', () => {
   })
 
   it('handles ts alias (some endpoints emit ts instead of time)', () => {
-    // The TimeseriesDataPoint type requires `time`, but the hook also
-    // accepts `ts` at runtime. We cast as `any` because we're
-    // intentionally testing the looser runtime contract.
-    const dataWithTs = [
+    const dataWithTs: Array<TimeseriesDataPoint & { p50: number }> = [
       { ts: '2026-05-18T20:00:00Z', p50: 30 },
       { ts: '2026-05-18T20:01:00Z', p50: 28 },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ] as any
+    ]
     const { result } = renderHook(() =>
       useTimeseriesToTraces(dataWithTs, [{ key: 'p50', name: 'P50', color: '#000' }])
     )
@@ -127,7 +123,7 @@ describe('useTimeseriesToTraces', () => {
       { time: '2026-05-18T20:02:00Z', p50: null },
     ]
     const { result } = renderHook(() =>
-      useTimeseriesToTraces(sparse as never, [{ key: 'p50', name: 'P50', color: '#000' }])
+      useTimeseriesToTraces(sparse, [{ key: 'p50', name: 'P50', color: '#000' }])
     )
 
     const y = (result.current[0] as { y: number[] }).y

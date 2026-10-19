@@ -26,6 +26,38 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+def test_load_httpfs_prefers_cached_extension_without_installing():
+    import backend.core.duckdb as db_mod
+
+    con = MagicMock()
+    db_mod._httpfs_installed = False
+
+    db_mod._load_httpfs(con)
+
+    con.execute.assert_called_once_with("LOAD httpfs;")
+    assert db_mod._httpfs_installed is True
+
+
+def test_load_httpfs_installs_when_cached_extension_is_missing():
+    import duckdb
+
+    import backend.core.duckdb as db_mod
+
+    con = MagicMock()
+    con.execute.side_effect = [duckdb.IOException("missing extension"), None, None]
+    db_mod._httpfs_installed = False
+
+    db_mod._load_httpfs(con)
+
+    assert [call.args[0] for call in con.execute.call_args_list] == [
+        "LOAD httpfs;",
+        "INSTALL httpfs;",
+        "LOAD httpfs;",
+    ]
+    assert db_mod._httpfs_installed is True
+
+
 # ── _safe_iso (datetime → ISO-Z) ─────────────────────────────────────────
 
 
@@ -196,7 +228,7 @@ def test_fos_glob_with_prefix_includes_prefix_path():
     from backend.core.duckdb import _fos_glob
 
     src = {"bucket": "b", "prefix": "my-org"}
-    assert _fos_glob(src) == "s3://b/my-org/raw/**/*.gz"
+    assert _fos_glob(src) == "s3://b/my-org/raw/request/**/*.gz"
 
 
 def test_fos_glob_without_prefix_drops_to_bucket_root():
@@ -205,7 +237,7 @@ def test_fos_glob_without_prefix_drops_to_bucket_root():
     double the trailing slash."""
     from backend.core.duckdb import _fos_glob
 
-    assert _fos_glob({"bucket": "b", "prefix": ""}) == "s3://b/raw/**/*.gz"
+    assert _fos_glob({"bucket": "b", "prefix": ""}) == "s3://b/raw/request/**/*.gz"
 
 
 def test_fos_glob_strips_leading_and_trailing_slashes_in_prefix():
@@ -214,7 +246,7 @@ def test_fos_glob_strips_leading_and_trailing_slashes_in_prefix():
     strip would render ``s3://b//my-prefix//raw/...``."""
     from backend.core.duckdb import _fos_glob
 
-    assert _fos_glob({"bucket": "b", "prefix": "/my-prefix/"}) == "s3://b/my-prefix/raw/**/*.gz"
+    assert _fos_glob({"bucket": "b", "prefix": "/my-prefix/"}) == "s3://b/my-prefix/raw/request/**/*.gz"
 
 
 # ── _cache_dir (local cache for source) ─────────────────────────────────
@@ -610,12 +642,18 @@ def test_execute_query_with_retry_raises_immediately_on_non_transient_error():
 def test_execute_query_with_retry_retries_on_transient_then_succeeds():
     """A transient `io error` followed by success → return the
     successful result. Pinned because losing the retry would surface
-    every momentary S3 hiccup as a failed dashboard render."""
+    every momentary S3 hiccup as a failed dashboard render.
+
+    Transient DuckDB failures surface as ``duckdb.IOException`` (and
+    kin), never ``RuntimeError`` — the latter is reserved for the
+    translated auth-failure, which is intentionally non-retryable."""
+    import duckdb
+
     from backend.core.duckdb import _execute_query_with_retry
 
     fake_con = MagicMock()
     fake_con.execute.side_effect = [
-        RuntimeError("IO Error: timeout"),
+        duckdb.IOException("IO Error: timeout"),
         "success",
     ]
 
@@ -629,13 +667,15 @@ def test_execute_query_with_retry_gives_up_after_max_retries():
     """After max_retries+1 attempts, the original exception is
     re-raised. Pinned because losing the bound would loop forever
     on permanent network failures."""
+    import duckdb
+
     from backend.core.duckdb import _execute_query_with_retry
 
     fake_con = MagicMock()
-    fake_con.execute.side_effect = RuntimeError("connection refused")
+    fake_con.execute.side_effect = duckdb.IOException("connection refused")
 
     with patch("time.sleep"):
-        with pytest.raises(RuntimeError, match="connection refused"):
+        with pytest.raises(duckdb.IOException, match="connection refused"):
             _execute_query_with_retry(fake_con, "SELECT 1", max_retries=2)
     # max_retries=2 → 3 total attempts (0, 1, 2)
     assert fake_con.execute.call_count == 3

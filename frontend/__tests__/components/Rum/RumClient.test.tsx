@@ -99,7 +99,7 @@ describe('RumClient — Faro version card placement', () => {
       activeServiceId: SVC,
       services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
       isInitialized: true,
-    } as never)
+    })
     mockRumEndpoints()
 
     renderClient()
@@ -119,7 +119,7 @@ describe('RumClient — Faro version card placement', () => {
       activeServiceId: SVC,
       services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_only' }],
       isInitialized: true,
-    } as never)
+    })
     let versionsCalled = false
     mockRumEndpoints({
       versionsHandler: () => {
@@ -146,7 +146,7 @@ describe('RumClient — Faro version card placement', () => {
       activeServiceId: SVC,
       services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
       isInitialized: true,
-    } as never)
+    })
     mockRumEndpoints({
       versionsHandler: () => HttpResponse.json({ error: 'faro_registry_unavailable' }, { status: 503 }),
     })

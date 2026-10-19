@@ -1,17 +1,20 @@
 import React from 'react'
 import { Scale, Shield } from 'lucide-react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
+import { formatCountMaybe } from '@/lib/format'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import type { PlotlyTrace } from '@/types/plotly'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
+type TopIpHeader = components['schemas']['TopIpHeaderRow']
 
 type Props = {
   data: SecurityData | undefined
@@ -37,29 +40,29 @@ export function HeaderAnomaliesSection({
   // Distinguish "field group not enabled" from "enabled but no data yet" so a
   // low-traffic/fresh service doesn't read as misconfigured.
   const { isFieldActive } = useActiveLogFields()
-  const headerSizeData = React.useMemo(() => {
+  const headerSizeData = React.useMemo((): PlotlyTrace[] => {
     const req_size_dist = data?.req_size_dist
     if (!req_size_dist?.length) return []
     return [{
-      x: req_size_dist.map((d: any) => d.bucket),
-      y: req_size_dist.map((d: any) => d.count),
+      x: req_size_dist.map((d) => d.bucket ?? d.label ?? null),
+      y: req_size_dist.map((d) => d.count),
       type: 'bar',
       marker: { color: '#ec4899' }
     }]
   }, [data])
 
-  const topIpHeaderColumns = [
+  const topIpHeaderColumns: ColumnDef<TopIpHeader>[] = [
     {
       accessorKey: 'ip',
       header: 'IP Address',
-      cell: (info: any) => (
+      cell: ({ row }) => (
         <FilterValueCell
-          filters={[{ column: 'client_ip', value: info.getValue() }]}
+          filters={[{ column: 'client_ip', value: row.original.ip ?? '' }]}
           className="font-mono text-xs"
         />
       )
     },
-    { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: ({ row }) => formatCountMaybe(row.original.max_header) ?? '—' },
   ]
 
   return (
@@ -69,8 +72,9 @@ export function HeaderAnomaliesSection({
         icon={<Scale className="h-4 w-4" />}
         isLoading={isLoading}
         isFetching={isFetching}
+        loadingMessage="Loading request header size distribution..."
         error={error as AnalyticsCardError | null}
-        className="h-[360px]"
+        className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
         contentClassName="p-2"
         helpTitle={SECURITY_INFO.req_size.title}
         helpContent={SECURITY_INFO.req_size.body}
@@ -79,7 +83,7 @@ export function HeaderAnomaliesSection({
           <ChartEmptyState requires={isFieldActive('req_header_bytes') ? undefined : "Request Identity (Group A) fields to be enabled in Fastly logging."} />
         ) : (
           <PlotlyChart
-            data={headerSizeData as any[]}
+            data={headerSizeData}
             layout={{ yaxis: { title: 'Count' } }}
             height="100%"
           />
@@ -98,8 +102,9 @@ export function HeaderAnomaliesSection({
         }
         isLoading={isLoading}
         isFetching={isFetching}
+        loadingMessage="Loading oversized request headers..."
         error={error as AnalyticsCardError | null}
-        className="min-h-[300px]"
+        className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
         contentClassName="p-0"
         helpTitle={SECURITY_INFO.top_ips_header.title}
         helpContent={SECURITY_INFO.top_ips_header.body}

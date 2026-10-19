@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.models.services import CronSettingsPartial
+from tests._helpers.config_fakes import mutate_via_save
 
 
 def _post(body: dict, stored_cron_sync: dict) -> dict:
@@ -39,7 +40,7 @@ def _post(body: dict, stored_cron_sync: dict) -> dict:
 
     with (
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, c: saved.update(c)),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, c: saved.update(c))),
         patch("backend.provision._sync_crontab"),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -55,6 +56,26 @@ def test_interval_seconds_is_modelled():
     assert "interval_seconds" in CronSettingsPartial.model_fields
     parsed = CronSettingsPartial(**json.loads('{"interval_seconds": 90}'))
     assert parsed.interval_seconds == 90
+
+
+def test_polling_mode_is_modelled_and_persisted():
+    parsed = CronSettingsPartial(**json.loads('{"polling_mode": "adaptive"}'))
+    assert parsed.polling_mode == "adaptive"
+
+    out = _post({"cron_sync": {"polling_mode": "adaptive"}}, {"enabled": True})
+
+    assert out["polling_mode"] == "adaptive"
+
+
+def test_polling_mode_rejects_unknown_values():
+    from pydantic import ValidationError
+
+    try:
+        CronSettingsPartial(**json.loads('{"polling_mode": "continuous"}'))
+    except ValidationError as exc:
+        assert "polling_mode" in str(exc)
+    else:
+        raise AssertionError("unsupported polling mode was accepted")
 
 
 def test_interval_seconds_is_persisted():

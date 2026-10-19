@@ -19,9 +19,10 @@
  */
 
 import * as React from 'react'
+import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminFetch } from '@/lib/api'
-import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
+import { adminJson, adminJsonResult } from '@/lib/api'
+import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
@@ -31,6 +32,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page-header'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { extractApiError } from '@/lib/api'
 
@@ -54,9 +56,12 @@ import type {
   CompletedRow,
   DbFilter,
   MonitorConfig,
+  SlowQueriesResult,
   SnapshotResponse,
   ViewMode,
 } from './_types'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 
@@ -116,11 +121,9 @@ export default function QueryMonitorPage() {
   )
 
   const { data: cfg } = useQuery<MonitorConfig>({
-    queryKey: ['admin', 'query-monitor', 'config'],
+    queryKey: queryKeys.admin.queryMonitorConfig(),
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/app-config/query-monitor', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/app-config/query-monitor', '/api/admin/app-config/query-monitor', { signal })
     },
     staleTime: 60_000,
   })
@@ -144,20 +147,28 @@ export default function QueryMonitorPage() {
 
   // Incremental ``since_seq`` polling — the backend returns the full active
   // list every poll (so a long-running query never disappears) but only
-  // streams completed rows newer than ``lastSeqRef``. We accumulate the
-  // delta into ``completedBuffer`` (capped at 500 rows, FIFO eviction by
-  // query_id) so steady-state wire bytes drop from ~320 MB/min to ~2 MB/min
-  // on a busy admin tab. Three reset paths keep the buffer honest:
+  // streams completed rows newer than ``lastSeqRef``. The queryFn accumulates
+  // the delta into ``completedRef`` (capped at 500 rows, FIFO eviction by
+  // query_id) and returns the merged snapshot, so steady-state wire bytes drop
+  // from ~320 MB/min to ~2 MB/min on a busy admin tab. Two reset paths keep the
+  // buffer honest (an effect flags ``resetPendingRef`` and invalidates; the next
+  // fetch starts from scratch):
   //   1. viewMode toggle (live↔all↔past) — completed-list shape changes
   //   2. tab-visibility hidden→visible — operator returning from another tab
-  //   3. (implicit) pause→resume — the existing Resume click already invalidates
+  //   (pause→resume already invalidates on the Resume click)
   const COMPLETED_BUFFER_CAP = 500
   const lastSeqRef = React.useRef(0)
-  const [completedBuffer, setCompletedBuffer] = React.useState<Map<number, CompletedRow>>(() => new Map())
+  const completedRef = React.useRef<Map<number, CompletedRow>>(new Map())
+  const resetPendingRef = React.useRef(false)
 
   const snapshotQuery = useQuery<SnapshotResponse>({
-    queryKey: ['admin', 'query-monitor', 'snapshot', includeCompleted],
+    queryKey: queryKeys.admin.queryMonitorSnapshot(includeCompleted),
     queryFn: async ({ signal }) => {
+      if (resetPendingRef.current) {
+        resetPendingRef.current = false
+        lastSeqRef.current = 0
+        completedRef.current = new Map()
+      }
       const params = new URLSearchParams()
       if (includeCompleted) params.set('include_completed', 'true')
       if (lastSeqRef.current > 0) {
@@ -171,9 +182,26 @@ export default function QueryMonitorPage() {
         params.set('cold_limit', '50')
       }
       const qs = params.toString()
-      const r = await adminFetch(`/api/admin/queries${qs ? '?' + qs : ''}`, { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      const delta = await adminJson<'/api/admin/queries', SnapshotResponse>(
+        '/api/admin/queries',
+        `/api/admin/queries${qs ? '?' + qs : ''}`,
+        { signal },
+      )
+      if (delta.last_seq > lastSeqRef.current) {
+        lastSeqRef.current = delta.last_seq
+      }
+      const buffer = completedRef.current
+      for (const row of delta.completed ?? []) {
+        buffer.set(row.query_id, row)
+      }
+      // FIFO eviction by query_id (lowest id = oldest insert). For a
+      // 500-row cap and ~1-2 new completions per tick, this runs rarely.
+      if (buffer.size > COMPLETED_BUFFER_CAP) {
+        const sortedIds = [...buffer.keys()].sort((a, b) => a - b)
+        const toRemove = sortedIds.length - COMPLETED_BUFFER_CAP
+        for (let k = 0; k < toRemove; k++) buffer.delete(sortedIds[k])
+      }
+      return { last_seq: delta.last_seq, active: delta.active, completed: [...buffer.values()] }
     },
     enabled: visible && enabled && !paused,
     refetchInterval: (query) => {
@@ -187,12 +215,9 @@ export default function QueryMonitorPage() {
   // (live drops completed entirely), so the buffer's prior contents become
   // semantically wrong. Reset everything and force a fresh full pull.
   React.useEffect(() => {
-    lastSeqRef.current = 0
-    setCompletedBuffer(new Map())
-    queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
-    // viewMode is the only dep we want — re-running on queryClient/setCompletedBuffer
-    // identity changes would loop. eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
+    resetPendingRef.current = true
+    queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
+  }, [viewMode, queryClient])
 
   // Tab-visibility restore — the operator may have been away long enough
   // for the in-memory ring buffer (deque maxlen=400 on the backend) to
@@ -200,74 +225,28 @@ export default function QueryMonitorPage() {
   const wasVisibleRef = React.useRef(visible)
   React.useEffect(() => {
     if (visible && !wasVisibleRef.current) {
-      lastSeqRef.current = 0
-      setCompletedBuffer(new Map())
-      queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
+      resetPendingRef.current = true
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
     }
     wasVisibleRef.current = visible
   }, [visible, queryClient])
 
-  // Accumulate the delta into completedBuffer (and advance lastSeqRef).
-  // Pause: skip — the query itself is disabled so data won't update, but
-  // belt-and-suspenders.
-  React.useEffect(() => {
-    const data = snapshotQuery.data
-    if (!data || paused) return
-    if (data.last_seq > lastSeqRef.current) {
-      lastSeqRef.current = data.last_seq
-    }
-    if (!data.completed || data.completed.length === 0) return
-    setCompletedBuffer((prev) => {
-      const next = new Map(prev)
-      for (const row of data.completed) {
-        next.set(row.query_id, row)
-      }
-      // FIFO eviction by query_id (lowest id = oldest insert). For a
-      // 500-row cap and ~1-2 new completions per tick, this runs rarely.
-      if (next.size > COMPLETED_BUFFER_CAP) {
-        const sortedIds = [...next.keys()].sort((a, b) => a - b)
-        const toRemove = sortedIds.length - COMPLETED_BUFFER_CAP
-        for (let i = 0; i < toRemove; i++) next.delete(sortedIds[i])
-      }
-      return next
-    })
-  }, [snapshotQuery.data, paused])
-
-  // Synthesize the buffered snapshot for downstream filtering: active comes
-  // from the raw response (backend sends full list each poll), completed
-  // comes from the accumulated buffer.
-  //
-  // Stable-array trick: memoize the spread of completedBuffer separately
-  // on completedBuffer identity. The buffer ref only changes when the
-  // accumulator effect actually appended new rows (no-op polls bail out
-  // before setCompletedBuffer), so downstream memos that depend on
-  // bufferedSnapshot.completed get a stable reference across same-data
-  // polls instead of a fresh array every time snapshotQuery.data ticks.
-  const completedArray = React.useMemo(
-    () => [...completedBuffer.values()],
-    [completedBuffer],
-  )
-  const bufferedSnapshot: SnapshotResponse | undefined = React.useMemo(() => {
-    if (!snapshotQuery.data) return undefined
-    return {
-      last_seq: snapshotQuery.data.last_seq,
-      active: snapshotQuery.data.active,
-      completed: completedArray,
-    }
-  }, [snapshotQuery.data, completedArray])
+  // The query already returns active (full list each poll) + the accumulated completed rows.
+  const bufferedSnapshot: SnapshotResponse | undefined = snapshotQuery.data
 
   const cancelMutation = useMutation({
     mutationFn: async (qid: number): Promise<CancelResponse> => {
-      const r = await adminFetch(`/api/admin/queries/${qid}/cancel`, { method: 'POST' })
-      if (!r.ok) {
-        const body = await r.text().catch(() => '')
-        throw new Error(body || `status ${r.status}`)
-      }
-      return r.json()
+      const r = await adminJsonResult<'/api/admin/queries/{qid}/cancel', CancelResponse, 'post'>(
+        '/api/admin/queries/{qid}/cancel',
+        `/api/admin/queries/${qid}/cancel`,
+        { method: 'POST' },
+      )
+      if (!r.ok) throw new Error(r.errorText || `status ${r.status}`)
+      return r.data
     },
     onSuccess: (res) => {
       setActionError('')
-      queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
       // SRE-17: plain-English result for the non-cancelled terminal states
       // instead of a raw enum dump ("Cancel returned: connection_gone"). The
       // row state-machine already gives the positive confirmation for a real
@@ -288,8 +267,8 @@ export default function QueryMonitorPage() {
   // 'recent'. Background polling stays off (this isn't a live view);
   // staleTime is 30s so toggling between 24h / 7d back-to-back doesn't
   // re-hit SQLite if the data was just fetched.
-  const historicalQuery = useQuery<{ rows: CompletedRow[] }>({
-    queryKey: ['admin', 'query-monitor', 'slow-history', slowHistoryMode, slowThresholdMs],
+  const historicalQuery = useQuery<SlowQueriesResult>({
+    queryKey: queryKeys.admin.queryMonitorSlowHistory(slowHistoryMode, slowThresholdMs),
     queryFn: async ({ signal }) => {
       let sinceHours = 24
       if (slowHistoryMode === 'past_1h') sinceHours = 1
@@ -298,18 +277,17 @@ export default function QueryMonitorPage() {
       else if (slowHistoryMode === 'past_24h') sinceHours = 24
       else if (slowHistoryMode === 'past_7d') sinceHours = 168
 
-      const r = await adminFetch(
+      return adminJson<'/api/admin/slow-queries', SlowQueriesResult>(
+        '/api/admin/slow-queries',
         `/api/admin/slow-queries?since_hours=${sinceHours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
         { signal },
       )
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
     },
     enabled: slowHistoryMode !== 'recent' && enabled,
     staleTime: 30_000,
   })
 
-  const { justFinished, filteredActive, completed, slowQueries } = useFilteredActive({
+  const { filteredActive, completed, slowQueries } = useFilteredActive({
     snapshot: bufferedSnapshot,
     search,
     kindFilter,
@@ -319,12 +297,7 @@ export default function QueryMonitorPage() {
     expandedRunIds,
   })
 
-  const [copiedQueries, setCopiedQueries] = React.useState(false)
-  React.useEffect(() => {
-    if (!copiedQueries) return
-    const t = setTimeout(() => setCopiedQueries(false), 1500)
-    return () => clearTimeout(t)
-  }, [copiedQueries])
+  const { copied: copiedQueries, copy: copyText } = useCopyToClipboard(1500)
 
   const handleCopyQueries = React.useCallback(async () => {
     const queries = slowHistoryMode === 'recent'
@@ -350,7 +323,7 @@ export default function QueryMonitorPage() {
 
     queries.forEach((row, i) => {
       text += `--------------------------------------------------\n`
-      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${row.duration_ms.toLocaleString()} ms | Outcome: ${row.outcome}\n`
+      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${formatCount(row.duration_ms)} ms | Outcome: ${row.outcome}\n`
 
       const started = row.started_at_utc
         ? new Date(row.started_at_utc < 10000000000 ? row.started_at_utc * 1000 : row.started_at_utc).toISOString()
@@ -383,13 +356,8 @@ export default function QueryMonitorPage() {
 
     text += `==================================================\n`
 
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopiedQueries(true)
-    } catch {
-      // ignore
-    }
-  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs])
+    await copyText(text)
+  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs, copyText])
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {
@@ -459,13 +427,35 @@ export default function QueryMonitorPage() {
     [shortcutsOpen, confirmKill, detailRow],
   )
 
+  const [isManualRefreshing, setIsManualRefreshing] = React.useState(false)
+
+  const handleManualRefresh = React.useCallback(() => {
+    setIsManualRefreshing(true)
+    resetPendingRef.current = true
+    // The refresh is over when every refetch it started has settled — tracked on the promises
+    // instead of mirroring the queries' isFetching flags into state from an effect.
+    const pending: Promise<unknown>[] = [
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() }),
+    ]
+    if (slowHistoryMode !== 'recent') {
+      pending.push(historicalQuery.refetch())
+    }
+    void Promise.allSettled(pending).then(() => setIsManualRefreshing(false))
+  }, [queryClient, slowHistoryMode, historicalQuery])
+
   useKeyboardShortcuts(shortcuts, enabled)
 
+  const isInitialLoading = snapshotQuery.isPending && !bufferedSnapshot
+  const isRefreshingActive = isManualRefreshing && snapshotQuery.isFetching
+  const isRefreshingSlow =
+    (isManualRefreshing && (snapshotQuery.isFetching || historicalQuery.isFetching)) ||
+    (slowHistoryMode !== 'recent' && historicalQuery.isFetching && !!historicalQuery.data)
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="admin-queries-root">
       <PageHeader
         title="Live Query Monitor"
-        description="Real-time view of every executing DuckDB and SQLite query. Click a row to see the full SQL."
+        description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
       >
         <BackToAdminLink variant="secondary" prefetch={false} />
       </PageHeader>
@@ -482,18 +472,37 @@ export default function QueryMonitorPage() {
 
       {enabled && (
         <>
-          <div className="flex items-center justify-between gap-3">
+          <div
+            data-testid="admin-queries-summary-reservation"
+            className="flex items-center justify-between gap-3 min-h-[36px] [contain-intrinsic-size:auto_36px] [content-visibility:auto]"
+          >
             <SummaryStrip snapshot={bufferedSnapshot} />
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 px-2"
-              onClick={() => setShortcutsOpen(true)}
-              title="Keyboard shortcuts (?)"
-            >
-              <Keyboard className="h-4 w-4 text-muted-foreground" />
-              <span className="sr-only">Show keyboard shortcuts</span>
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                data-testid="admin-queries-refresh-btn"
+                onClick={handleManualRefresh}
+                disabled={snapshotQuery.isFetching}
+                title="Refresh query snapshot"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 mr-1 ${isRefreshingActive ? 'animate-spin' : ''}`}
+                />
+                Refresh
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => setShortcutsOpen(true)}
+                title="Keyboard shortcuts (?)"
+              >
+                <Keyboard className="h-4 w-4 text-muted-foreground" />
+                <span className="sr-only">Show keyboard shortcuts</span>
+              </Button>
+            </div>
           </div>
 
           {actionError && (
@@ -512,241 +521,288 @@ export default function QueryMonitorPage() {
           </Tabs>
 
           {viewMode !== 'past' && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Active &amp; Just-Finished
-                  <Badge variant="secondary">
-                    {/* Count the rows the user can actually see (post-filter),
-                       not the unfiltered totals. The prior version showed
-                       totals and produced a confusing "44 just-finished but
-                       empty table" mismatch when a filter (db / kind) was
-                       hiding everything. */}
-                    {filteredActive.filter((r) => !r._completed).length} active
-                    {filteredActive.some((r) => r._completed) &&
-                      ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
-                  </Badge>
-                  <PollingIndicator
-                    visible={visible}
-                    isFetching={snapshotQuery.isFetching}
-                    isError={snapshotQuery.isError}
-                    paused={paused}
-                  />
-                </CardTitle>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant={paused ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => {
-                      if (paused) {
-                        // Resume → immediately fetch so the user gets fresh
-                        // data on the click rather than waiting up to 300ms.
-                        setPaused(false)
-                        queryClient.invalidateQueries({
-                          queryKey: ['admin', 'query-monitor', 'snapshot'],
-                        })
-                      } else {
-                        setPaused(true)
-                      }
-                    }}
-                    title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
-                  >
-                    {paused ? (
-                      <>
-                        <Play className="h-3 w-3 mr-1" /> Resume
-                      </>
-                    ) : (
-                      <>
-                        <Pause className="h-3 w-3 mr-1" /> Pause
-                      </>
-                    )}
-                  </Button>
-                  <DbFilterChips value={dbFilter} onChange={setDbFilter} />
-                  <FilterChips value={kindFilter} onChange={setKindFilter} />
-                  <Button
-                    variant={groupCrons ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => setGroupCrons((v) => !v)}
-                    title={
-                      groupCrons
-                        ? 'Cron rows from the same run are collapsed. Click to expand.'
-                        : 'Cron rows are shown individually. Click to group by run.'
-                    }
-                  >
-                    <Group className="h-3 w-3 mr-1" />
-                    Group crons
-                  </Button>
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                    <Input
-                      ref={searchInputRef}
-                      placeholder="Filter by SQL or caller…"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      className="h-8 w-64 pl-7 text-sm"
+            <div
+              data-testid="admin-queries-active-reservation"
+              className="min-h-[480px] [contain-intrinsic-size:auto_480px] [content-visibility:auto]"
+            >
+              <Card className="min-h-[480px]">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 gap-2">
+                  <CardTitle className="text-base flex items-center gap-2 whitespace-nowrap shrink-0">
+                    Active &amp; Just-Finished
+                    <Badge variant="secondary" className="whitespace-nowrap">
+                      {/* Count the rows the user can actually see (post-filter),
+                         not the unfiltered totals. The prior version showed
+                         totals and produced a confusing "44 just-finished but
+                         empty table" mismatch when a filter (db / kind) was
+                         hiding everything. */}
+                      {filteredActive.filter((r) => !r._completed).length} active
+                      {filteredActive.some((r) => r._completed) &&
+                        ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
+                    </Badge>
+                    <PollingIndicator
+                      visible={visible}
+                      isFetching={snapshotQuery.isFetching}
+                      isError={snapshotQuery.isError}
+                      paused={paused}
                     />
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0">
-                <ActiveTable
-                  rows={filteredActive}
-                  onRowClick={(row) => setDetailRow(row)}
-                  onKill={requestKill}
-                  cancellingQid={cancelMutation.variables ?? null}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
-          )}
-
-          {viewMode !== 'live' && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Notable Slow Queries
-                  <Badge variant="outline">
-                    {slowHistoryMode === 'recent'
-                      ? slowQueries.length
-                      : (historicalQuery.data?.rows ?? []).length}
-                  </Badge>
-                  <span className="text-xs text-muted-foreground font-normal">
-                    ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
-                    sorted slowest first
-                  </span>
-                  {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
-                    <span className="text-xs text-muted-foreground italic">loading…</span>
-                  )}
-                </CardTitle>
-                <div className="flex items-center gap-1">
-                  {/* History-window toggle. 'recent' is the in-memory
-                      ring buffer (no fetch — what the page already had);
-                      the other two query the persistent slow_queries
-                      SQLite table via /api/admin/slow-queries. */}
-                  <div className="flex items-center gap-1 mr-2">
-                    {(['recent', 'past_1h', 'past_6h', 'past_12h', 'past_24h', 'past_7d'] as const).map((m) => (
-                      <Button
-                        key={m}
-                        variant={slowHistoryMode === m ? 'default' : 'outline'}
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => setSlowHistoryMode(m)}
-                        title={
-                          m === 'recent'
-                            ? 'Live in-memory ring (~10–30 min window, clears on restart)'
-                            : m === 'past_1h'
-                              ? 'Persistent history — last 1 h'
-                              : m === 'past_6h'
-                                ? 'Persistent history — last 6 h'
-                                : m === 'past_12h'
-                                  ? 'Persistent history — last 12 h'
-                                  : m === 'past_24h'
-                                    ? 'Persistent history — last 24 h'
-                                    : 'Persistent history — last 7 d'
-                        }
-                      >
-                        {m === 'recent'
-                          ? 'Recent'
-                          : m === 'past_1h'
-                            ? '1 h'
-                            : m === 'past_6h'
-                              ? '6 h'
-                              : m === 'past_12h'
-                                ? '12 h'
-                                : m === 'past_24h'
-                                  ? '24 h'
-                                  : '7 d'}
-                      </Button>
-                    ))}
-                  </div>
-                  {[100, 500, 1000, 2000, 5000].map((ms) => (
+                  </CardTitle>
+                  <div className="flex items-center gap-2 shrink-0">
                     <Button
-                      key={ms}
-                      variant={slowThresholdMs === ms ? 'default' : 'outline'}
+                      variant={paused ? 'default' : 'outline'}
                       size="sm"
                       className="h-7 px-2 text-xs"
-                      onClick={() => setSlowThresholdMs(ms)}
+                      onClick={() => {
+                        if (paused) {
+                          // Resume → immediately fetch so the user gets fresh
+                          // data on the click rather than waiting up to 300ms.
+                          setPaused(false)
+                          queryClient.invalidateQueries({
+                            queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
+                          })
+                        } else {
+                          setPaused(true)
+                        }
+                      }}
+                      title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
                     >
-                      {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                      {paused ? (
+                        <>
+                          <Play className="h-3 w-3 mr-1" /> Resume
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="h-3 w-3 mr-1" /> Pause
+                        </>
+                      )}
                     </Button>
-                  ))}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
-                    disabled={
-                      (slowHistoryMode === 'recent'
-                        ? slowQueries
-                        : (historicalQuery.data?.rows ?? [])
-                      ).length === 0
-                    }
-                    onClick={handleCopyQueries}
-                    title="Copy slow queries report to clipboard"
-                  >
-                    {copiedQueries ? (
-                      <>
-                        <Check className="h-3 w-3 mr-1 text-emerald-500 animate-in fade-in zoom-in-95 duration-150" />
-                        Copied!
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3 mr-1" />
-                        Copy queries
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0">
-                <CompletedTable
-                  rows={
-                    slowHistoryMode === 'recent'
-                      ? slowQueries
-                      : (historicalQuery.data?.rows ?? [])
-                  }
-                  onRowClick={(row) => setDetailRow(row)}
-                  emptyMessage={
-                    slowHistoryMode === 'recent'
-                      ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
-                      : historicalQuery.isFetching
-                        ? 'Loading…'
-                        : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${
-                            slowHistoryMode === 'past_1h'
-                              ? '1 hour'
-                              : slowHistoryMode === 'past_6h'
-                                ? '6 hours'
-                                : slowHistoryMode === 'past_12h'
-                                  ? '12 hours'
-                                  : slowHistoryMode === 'past_24h'
-                                    ? '24 hours'
-                                    : '7 days'
-                          }.`
-                  }
-                  initialSorting={[{ id: 'duration_ms', desc: true }]}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
+                    <DbFilterChips value={dbFilter} onChange={setDbFilter} />
+                    <FilterChips value={kindFilter} onChange={setKindFilter} />
+                    <Button
+                      variant={groupCrons ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setGroupCrons((v) => !v)}
+                      title={
+                        groupCrons
+                          ? 'Cron rows from the same run are collapsed. Click to expand.'
+                          : 'Cron rows are shown individually. Click to group by run.'
+                      }
+                    >
+                      <Group className="h-3 w-3 mr-1" />
+                      Group crons
+                    </Button>
+                    <div className="relative">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                      <Input
+                        ref={searchInputRef}
+                        placeholder="Filter by SQL or caller…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="h-8 w-48 pl-7 text-sm"
+                      />
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingActive ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  {isInitialLoading ? (
+                    <div data-testid="admin-queries-active-skeleton">
+                      <Skeleton className="h-10 w-full rounded-none" />
+                      <div className="h-[400px] flex items-center justify-center text-xs text-muted-foreground">
+                        Inspecting DuckDB connection pool...
+                      </div>
+                    </div>
+                  ) : (
+                    <ActiveTable
+                      rows={filteredActive}
+                      onRowClick={(row) => setDetailRow(row)}
+                      onKill={requestKill}
+                      cancellingQid={cancelMutation.variables ?? null}
+                      onToggleGroup={toggleGroup}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           )}
 
           {viewMode !== 'live' && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  Recently Completed
-                  <Badge variant="outline">{completed.length}</Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <CompletedTable
-                  rows={completed}
-                  onRowClick={(row) => setDetailRow(row)}
-                  onToggleGroup={toggleGroup}
-                />
-              </CardContent>
-            </Card>
+            <div
+              data-testid="admin-queries-slow-reservation"
+              className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+            >
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Notable Slow Queries
+                    <Badge variant="outline">
+                      {slowHistoryMode === 'recent'
+                        ? slowQueries.length
+                        : (historicalQuery.data?.rows ?? []).length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground font-normal">
+                      ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
+                      sorted slowest first
+                    </span>
+                    {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
+                      <span className="text-xs text-muted-foreground italic">
+                        Loading query telemetry...
+                      </span>
+                    )}
+                  </CardTitle>
+                  <div className="flex items-center gap-1">
+                    {/* History-window toggle. 'recent' is the in-memory
+                        ring buffer (no fetch — what the page already had);
+                        the other options query the persistent slow_queries
+                        PostgreSQL table (METADATA_DSN) via /api/admin/slow-queries. */}
+                    <div className="flex items-center gap-1 mr-2">
+                      {(['recent', 'past_1h', 'past_6h', 'past_12h', 'past_24h', 'past_7d'] as const).map((m) => (
+                        <Button
+                          key={m}
+                          variant={slowHistoryMode === m ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => setSlowHistoryMode(m)}
+                          title={
+                            m === 'recent'
+                              ? 'Live in-memory ring (~10–30 min window, clears on restart)'
+                              : m === 'past_1h'
+                                ? 'Persistent history — last 1 h'
+                                : m === 'past_6h'
+                                  ? 'Persistent history — last 6 h'
+                                  : m === 'past_12h'
+                                    ? 'Persistent history — last 12 h'
+                                    : m === 'past_24h'
+                                      ? 'Persistent history — last 24 h'
+                                      : 'Persistent history — last 7 d'
+                          }
+                        >
+                          {m === 'recent'
+                            ? 'Recent'
+                            : m === 'past_1h'
+                              ? '1 h'
+                              : m === 'past_6h'
+                                ? '6 h'
+                                : m === 'past_12h'
+                                  ? '12 h'
+                                  : m === 'past_24h'
+                                    ? '24 h'
+                                    : '7 d'}
+                        </Button>
+                      ))}
+                    </div>
+                    {[100, 500, 1000, 2000, 5000].map((ms) => (
+                      <Button
+                        key={ms}
+                        variant={slowThresholdMs === ms ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => setSlowThresholdMs(ms)}
+                      >
+                        {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                      </Button>
+                    ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
+                      disabled={
+                        (slowHistoryMode === 'recent'
+                          ? slowQueries
+                          : (historicalQuery.data?.rows ?? [])
+                        ).length === 0
+                      }
+                      onClick={handleCopyQueries}
+                      title="Copy slow queries report to clipboard"
+                    >
+                      {copiedQueries ? (
+                        <>
+                          <Check className="h-3 w-3 mr-1 text-emerald-500 animate-in fade-in zoom-in-95 duration-150" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 mr-1" />
+                          Copy queries
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingSlow ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  {isInitialLoading ? (
+                    <div data-testid="admin-queries-slow-skeleton">
+                      <Skeleton className="h-10 w-full rounded-none" />
+                      <div className="h-24 flex items-center justify-center text-xs text-muted-foreground">
+                        Loading query telemetry...
+                      </div>
+                    </div>
+                  ) : (
+                    <CompletedTable
+                      rows={
+                        slowHistoryMode === 'recent'
+                          ? slowQueries
+                          : (historicalQuery.data?.rows ?? [])
+                      }
+                      onRowClick={(row) => setDetailRow(row)}
+                      emptyMessage={
+                        slowHistoryMode === 'recent'
+                          ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
+                          : historicalQuery.isFetching
+                            ? 'Loading query telemetry...'
+                            : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${
+                                slowHistoryMode === 'past_1h'
+                                  ? '1 hour'
+                                  : slowHistoryMode === 'past_6h'
+                                    ? '6 hours'
+                                    : slowHistoryMode === 'past_12h'
+                                      ? '12 hours'
+                                      : slowHistoryMode === 'past_24h'
+                                        ? '24 hours'
+                                        : '7 days'
+                              }.`
+                      }
+                      initialSorting={[{ id: 'duration_ms', desc: true }]}
+                      onToggleGroup={toggleGroup}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {viewMode !== 'live' && (
+            <div
+              data-testid="admin-queries-completed-reservation"
+              className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+            >
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Recently Completed
+                    <Badge variant="outline">{completed.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent
+                  className={`p-0 transition-opacity duration-150 ${
+                    isRefreshingActive ? 'opacity-40 pointer-events-none' : ''
+                  }`}
+                >
+                  <CompletedTable
+                    rows={completed}
+                    onRowClick={(row) => setDetailRow(row)}
+                    onToggleGroup={toggleGroup}
+                  />
+                </CardContent>
+              </Card>
+            </div>
           )}
         </>
       )}

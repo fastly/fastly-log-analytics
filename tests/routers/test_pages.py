@@ -47,19 +47,6 @@ def test_security_aggregates_endpoint(client, in_memory_duckdb, test_service_sou
     assert "tls_fingerprints" in response.json()
 
 
-def test_security_top_bots_endpoint(client, in_memory_duckdb, test_service_source):
-    logs = generate_mock_logs(test_service_source, num_logs=30)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    response = client.post(
-        "/api/security/top-bots", headers={"x-fastly-service-id": MOCK_SERVICE_ID}, json={"filters": {}}
-    )
-    assert response.status_code == 200, response.text
-    data = response.json()
-    assert "bots" in data
-    assert "ngwaf_bots" in data
-
-
 def test_usage_log_activity_endpoint(client):
     # No data seeded — endpoint should still return an empty result.
     response = client.get(

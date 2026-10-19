@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 # Kept as a single source of truth so disable_rum can find them by name to undo cleanly.
 _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
     {
+        "name": "service_id",
+        "label": "Service ID",
+        "description": "Fastly Service ID handling the request.",
+        "vcl_log_expression": "req.service_id",
+        "collection_stage": "beacon",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 22,
+        "enabled": True,
+    },
+    {
         "name": "rum_cid",
         "label": "RUM Session ID",
         "description": "Derived from session scoring sid; per-session correlation key for joining with edge_sid.",
@@ -224,18 +235,6 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
     },
 ]
 _RUM_FIELD_NAMES = {cf["name"] for cf in _RUM_CUSTOM_FIELDS}
-
-
-def merge_rum_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
-    """Return ``custom_fields`` with the canonical RUM fields re-applied.
-
-    Drops any existing entries whose name collides with a RUM field, then
-    appends fresh copies of ``_RUM_CUSTOM_FIELDS`` (code is the source of truth).
-    """
-    if not isinstance(custom_fields, list):
-        custom_fields = []
-    kept = [cf for cf in custom_fields if isinstance(cf, dict) and cf.get("name") not in _RUM_FIELD_NAMES]
-    return kept + [dict(cf) for cf in _RUM_CUSTOM_FIELDS]
 
 
 def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = None) -> str:
@@ -812,7 +811,7 @@ def disable_rum(
             from backend.provision.fos_setup import delete_fos_prefix
 
             prefix = cfg.get("fos_prefix", "")
-            rum_prefix = f"{prefix.strip('/')}/rum/raw/" if prefix else "rum/raw/"
+            rum_prefix = f"{prefix.strip('/')}/raw/rum/" if prefix else "raw/rum/"
             if status_cb:
                 status_cb("⏳ Deleting RUM cloud files...")
             delete_fos_prefix(
@@ -856,38 +855,4 @@ def disable_rum(
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
         "deactivated": result.activated_version is not None,
-    }
-
-
-def get_rum_status(logging_service_id: str, token: str) -> dict[str, Any]:
-    """Get RUM status for a logging service.
-
-    Checks if RUM is enabled in config and detects any drift from Fastly.
-
-    Args:
-        logging_service_id: Fastly service ID.
-        token: Fastly API token.
-
-    Returns:
-        {
-            "enabled": bool (in config),
-            "enabled_at": str (ISO timestamp, or empty),
-            "last_activated_version": int,
-            "drift_detected": bool (config != Fastly),
-        }
-    """
-    cfg = svcconfig.load_config(logging_service_id)
-    if not cfg:
-        return {
-            "enabled": False,
-            "enabled_at": "",
-            "last_activated_version": None,
-            "drift_detected": False,
-        }
-
-    return {
-        "enabled": cfg.get("rum_enabled", False),
-        "enabled_at": cfg.get("rum_enabled_at", ""),
-        "last_activated_version": cfg.get("last_activated_version"),
-        "drift_detected": False,  # TODO: Implement drift detection
     }

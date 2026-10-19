@@ -21,15 +21,10 @@
 // x-axis range agree — the old 'auto' resolved to 30d for mature services and
 // squashed the bars), anchor=quantizeAnchor(now) on the 60s grid, filterPayload={},
 // bucketSeconds=3600 (default 24h span → "1 hour" → INTERVAL_SECONDS['1 hour']).
-// anchor=quantizeAnchor(snapped-end ?? now): when bootstrap.log_extents shows
-// the service's latest log is >15min stale, this snaps to the same
-// [latest-24h, latest] window FilterBar's client-side autoSetRange would land
-// on (lib/log-extents-snap.ts — shared with FilterBar so both sides make the
-// identical decision); otherwise it's just `now`, unchanged from before.
-// Divergence cases: the rare minute-boundary straddle (unchanged), plus a new
-// rare 15-minute-staleness-boundary straddle where SSR and the client
-// disagree on stale-vs-fresh — both self-heal via one client refetch, never a
-// leak/crash (identical risk class to origin/insights).
+// anchor=quantizeAnchor(now): it no longer snaps to bootstrap.log_extents (the
+// stale-latest-log snap was removed with lib/log-extents-snap.ts). The only
+// divergence is the rare minute-boundary straddle, which self-heals via one
+// client refetch, never a leak/crash (identical risk class to origin/insights).
 
 import { quantizeAnchor } from '@/lib/time-window'
 
@@ -49,6 +44,7 @@ export const SECURITY_SSR_SECTIONS = [
   'ipv6_adoption',
   'proxy_dist',
   'conn_reuse_dist',
+  'proxies',
 ] as const
 
 // bucketSeconds=3600 is load-bearing for the key-match: ReportLayout derives it
@@ -77,8 +73,6 @@ export interface SecuritySsrSeed {
  */
 export function resolveSecurityDefaultKey(
   now: Date = new Date(),
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
@@ -92,15 +86,12 @@ export function resolveSecurityDefaultKey(
  * @param serviceId   Active service id (from the SSR'd bootstrap). Without it the
  *                    backend's context resolution 400s — bail to client fetch.
  * @param now         Render instant; floored to the anchor quantum. Injectable.
- * @param logExtents  bootstrap.log_extents for serviceId, if available. See
- *                    resolveSecurityDefaultKey.
  */
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-  logExtents?: unknown,
 ): Promise<SecuritySsrSeed | null> {
-  const { rangeToken, anchor } = resolveSecurityDefaultKey(now, logExtents)
+  const { rangeToken, anchor } = resolveSecurityDefaultKey(now)
 
   if (!serviceId) return null
 

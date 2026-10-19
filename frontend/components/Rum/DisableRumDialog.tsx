@@ -21,9 +21,8 @@ import {
   panelDialogFooter,
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
-import type { components } from '@/types/api.generated'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface DisableRumDialogProps {
   service: ServiceConfig | null

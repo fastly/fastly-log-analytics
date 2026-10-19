@@ -13,6 +13,7 @@ from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, ma
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
@@ -38,6 +39,13 @@ MAX_QUERY_ROWS = 10_000
 # rejects any user reference to it outright (not in the {logs, logs_<svc>}
 # allowlist), so an analyst can't name it directly.
 _ANALYST_WINDOW_VIEW = "_analyst_window_logs"
+
+# Holds the per-service cid salt for the lifetime of one analyst request. The salt is a secret, so it is
+# bound as a PARAMETER into this one-row temp table and the view reads it via a scalar subquery: no SQL
+# text (live query registry, persisted slow_queries, DuckDB error excerpts, EXPLAIN) ever carries the
+# value. Same reserved-name rules as the view: the SQL validator's table allowlist rejects any user
+# reference to it, and it is dropped in execute_query's finally.
+_ANALYST_CID_SALT_TABLE = "_analyst_cid_salt"
 
 
 def execute_query(
@@ -150,13 +158,15 @@ def execute_query(
                 # Non-fatal: CREATE OR REPLACE on the next analyst request
                 # refreshes it before use, so a leaked view can't serve stale
                 # data — but log it so a recurring leak is visible.
-                logger.debug("[query] failed to drop analyst window view", exc_info=True)
+                if log_once_per("[query] failed to drop analyst window view", 60):
+                    logger.debug("[query] failed to drop analyst window view", exc_info=True)
+            _drop_analyst_cid_salt(con)
 
 
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 
-_PII_COLS_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
-_PII_COLS_CACHE_TTL = 300.0  # 5 minutes
+_PII_COLS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=300.0)  # 5 minutes
 _CacheRegistry.register("query._PII_COLS_CACHE", _PII_COLS_CACHE)
 
 
@@ -183,16 +193,14 @@ def _pii_redact_cols(con: duckdb.DuckDBPyConnection, table_name: str | None) -> 
     if table_name is None or not keys:
         return frozenset()
 
-    now = time.time()
-    if table_name in _PII_COLS_CACHE:
-        ts, cached_res = _PII_COLS_CACHE[table_name]
-        if now - ts < _PII_COLS_CACHE_TTL:
-            return cached_res
+    cached_res = _PII_COLS_CACHE.get(table_name)
+    if cached_res is not None:
+        return cached_res
 
     try:
         cols = {row[0] for row in con.execute(f"DESCRIBE {table_name}").fetchall()}
         res = frozenset(c for c in keys if c in cols)
-        _PII_COLS_CACHE[table_name] = (now, res)
+        _PII_COLS_CACHE[table_name] = res
         return res
     except Exception:
         return frozenset()
@@ -238,26 +246,6 @@ def _rebind_table_to_window_view(
     if not has_window and not redact_cols:
         return None
 
-    select_list = "*"
-    if redact_cols:
-        # Escape internal double-quotes so a hostile column name can't break out
-        # of the quoted identifier (SESSION_ID_KEYS are static literals today,
-        # but keep the guard for any future addition — mirrors optional_col in
-        # _base.py). Sorted for a deterministic, testable view definition.
-        repl_list = []
-        for col in sorted(redact_cols):
-            escaped_col = col.replace('"', '""')
-            if col == "cid" and service_id:
-                from backend.core.duckdb import get_or_generate_cid_salt
-
-                salt = get_or_generate_cid_salt(service_id)
-                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE sha256(CONCAT(\'{salt}\', "{escaped_col}")) END AS "{escaped_col}"'
-            else:
-                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE \'[redacted]\' END AS "{escaped_col}"'
-            repl_list.append(expr)
-        replacements = ", ".join(repl_list)
-        select_list = f"* REPLACE ({replacements})"
-
     where_sql = ""
     if has_window:
         # Fail closed: a bound that doesn't parse is a programming error, not a
@@ -272,10 +260,52 @@ def _rebind_table_to_window_view(
             f"AND timestamp < TIMESTAMPTZ '{end_dt.isoformat()}'"
         )
 
-    con.execute(
-        f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS SELECT {select_list} FROM {table_name}{where_sql}"
-    )
+    select_list = "*"
+    if redact_cols:
+        # Escape internal double-quotes so a hostile column name can't break out
+        # of the quoted identifier (SESSION_ID_KEYS are static literals today,
+        # but keep the guard for any future addition — mirrors optional_col in
+        # _base.py). Sorted for a deterministic, testable view definition.
+        repl_list = []
+        for col in sorted(redact_cols):
+            escaped_col = col.replace('"', '""')
+            if col == "cid" and service_id:
+                from backend.core.duckdb import get_or_generate_cid_salt
+                from backend.utils.error_redaction import register_salt
+
+                cid_salt = get_or_generate_cid_salt(service_id)
+                register_salt(cid_salt)
+                con.execute(
+                    f"CREATE OR REPLACE TEMP TABLE {_ANALYST_CID_SALT_TABLE} AS SELECT ?::VARCHAR AS salt",
+                    [cid_salt],
+                )
+                expr = (
+                    f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" '
+                    f'ELSE sha256(CONCAT((SELECT salt FROM {_ANALYST_CID_SALT_TABLE}), "{escaped_col}")) '
+                    f'END AS "{escaped_col}"'
+                )
+            else:
+                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE \'[redacted]\' END AS "{escaped_col}"'
+            repl_list.append(expr)
+        replacements = ", ".join(repl_list)
+        select_list = f"* REPLACE ({replacements})"
+
+    try:
+        con.execute(
+            f"CREATE OR REPLACE TEMP VIEW {_ANALYST_WINDOW_VIEW} AS SELECT {select_list} FROM {table_name}{where_sql}"
+        )
+    except BaseException:
+        _drop_analyst_cid_salt(con)
+        raise
     return _ANALYST_WINDOW_VIEW
+
+
+def _drop_analyst_cid_salt(con: duckdb.DuckDBPyConnection) -> None:
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {_ANALYST_CID_SALT_TABLE}")
+    except Exception:
+        if log_once_per("[query] failed to drop analyst cid-salt table", 60):
+            logger.debug("[query] failed to drop analyst cid-salt table", exc_info=True)
 
 
 def _run_validated_query(
@@ -307,7 +337,11 @@ def _run_validated_query(
         plan_rows = con.execute(explain_sql).fetchall()
         explain_plan = "\n".join(r[1] for r in plan_rows if r[1])
         _debug_queries.append(
-            {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.perf_counter() - t_exp) * 1000, 2)}
+            {
+                "sql": _compact_sql_for_debug(explain_sql),
+                "time_ms": round((time.perf_counter() - t_exp) * 1000, 2),
+                "engine": "DuckDB",
+            }
         )
         timer.mark("explain", t_exp)
 
@@ -336,7 +370,7 @@ def _run_validated_query(
     arrow_table = result.to_arrow_table()
     timer.mark("fetch_arrow", _t_fetch)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
+    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms, "engine": "DuckDB"})
 
     fetched_rows = arrow_table.num_rows
     if is_simple_select:
@@ -380,6 +414,7 @@ def _run_validated_query(
         "truncated": truncated,
         "elapsed_ms": int(elapsed_ms),
         "debug_queries": _debug_queries,
+        "_debug_queries": _debug_queries,
         "debug_calls": get_tracked_calls(),
         "section_timings": section_timings,
     }

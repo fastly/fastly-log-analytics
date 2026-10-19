@@ -4,8 +4,10 @@ import React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { cn } from '@/lib/utils'
 import { ApproxBadge } from './ApproxBadge'
+import type { OriginSummary, SectionQuery } from './types'
 
-export function Aggregates({ summary }: { summary: any }) {
+import { formatCount } from '@/lib/format'
+export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }) {
   const error = summary.error as AnalyticsCardError | null
   // Backend sets ``_approx: true`` on long-window panels (>= 48h) that
   // are served from the per-hour origin_summary rollup — percentiles are
@@ -26,8 +28,9 @@ export function Aggregates({ summary }: { summary: any }) {
         title="Origin TTFB (P50)"
         isLoading={summary.isLoading}
         isFetching={summary.isFetching}
+        loadingMessage="Loading Origin TTFB (P50)..."
         error={error}
-        className="h-auto"
+        className="min-h-[110px] [contain-intrinsic-size:110px] [content-visibility:auto]"
         helpContent={<p>Median time taken by your backend to start returning a response after Fastly forwards a request. Lower is better.</p>}
       >
         <div className="flex flex-col">
@@ -39,7 +42,9 @@ export function Aggregates({ summary }: { summary: any }) {
         title="Origin TTFB (P95)"
         isLoading={summary.isLoading}
         isFetching={summary.isFetching}
+        loadingMessage="Loading Origin TTFB (P95)..."
         error={error}
+        className="min-h-[110px] [contain-intrinsic-size:110px] [content-visibility:auto]"
         helpContent={<p>The 95th percentile of backend response times. Indicates the tail latency experienced by the slowest 5% of requests.</p>}
       >
         <div className="flex flex-col">
@@ -51,7 +56,9 @@ export function Aggregates({ summary }: { summary: any }) {
         title="Origin Error Rate"
         isLoading={summary.isLoading}
         isFetching={summary.isFetching}
+        loadingMessage="Loading Origin Error Rate..."
         error={error}
+        className="min-h-[110px] [contain-intrinsic-size:110px] [content-visibility:auto]"
         helpContent={<p>Percentage of cache miss/pass requests where the backend returned a 5xx HTTP status code.</p>}
       >
         <div className="flex flex-col">
@@ -65,12 +72,14 @@ export function Aggregates({ summary }: { summary: any }) {
         title="Fetch Volume"
         isLoading={summary.isLoading}
         isFetching={summary.isFetching}
+        loadingMessage="Loading Fetch Volume..."
         error={error}
+        className="min-h-[110px] [contain-intrinsic-size:110px] [content-visibility:auto]"
         helpContent={<p>The total number of requests sent to the backend (cache misses and passes) during this time window.</p>}
       >
         <div className="flex flex-col">
           <div className="text-3xl font-bold">
-            {((summary.data?.total_misses || 0) + (summary.data?.total_passes || 0)).toLocaleString()}
+            {formatCount((summary.data?.total_misses || 0) + (summary.data?.total_passes || 0))}
           </div>
           <div className="text-xs text-muted-foreground mt-1">Total cache misses & passes</div>
         </div>

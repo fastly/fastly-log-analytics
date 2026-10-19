@@ -42,14 +42,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import duckdb
-
+from backend.core.duckdb import get_memory_connection
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.date_utils import parse_day_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
@@ -75,12 +77,27 @@ _WEEKLY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_WEEKLY_TIER_DAYS", "30
 _DAILY_DIR = "daily"
 _WEEKLY_DIR = "weekly"
 
+from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
+
 _HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
 # Daily file naming from _compact_daily_tier: daily_YYYY-MM-DD_<hex>.parquet
 _DAILY_FILE_RE = re.compile(r"^daily_(\d{4}-\d{2}-\d{2})_[0-9a-f]+\.parquet$")
 
 
-def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: bool) -> str:
+def _detect_natural_keys(col_names: set[str]) -> tuple[str, ...] | None:
+    """Detect if the given parquet columns match known RUM composite natural keys."""
+    for natural_keys in RUM_NATURAL_KEYS.values():
+        if set(natural_keys).issubset(col_names):
+            return natural_keys
+    return None
+
+
+def _build_merge_select_sql(
+    paths_sql: str,
+    cols_to_strip: list[str],
+    has_rid: bool = False,
+    natural_keys: tuple[str, ...] | list[str] | None = None,
+) -> str:
     """SELECT clause for the COPY that produces a merged parquet.
 
     When the schema has a ``rid`` column, dedupe by ``rid`` keeping the
@@ -96,27 +113,41 @@ def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: b
     is preserved without a uniqueness guarantee. In practice prod data
     has zero NULL rids (verified 2026-06-12), so this branch is defensive.
 
-    When the schema has no ``rid`` column (older sources, test fixtures),
-    fall through to a plain SELECT — no dedup, original behaviour.
+    When ``natural_keys`` is supplied (e.g. for RUM tables ``client_vitals``
+    and ``client_errors``), dedupe by the composite natural key using
+    ``ROW_NUMBER() OVER (PARTITION BY ... ORDER BY timestamp)``.
+
+    When the schema has no ``rid`` column and no ``natural_keys`` (older
+    sources, test fixtures), fall through to a plain SELECT — no dedup,
+    original behaviour.
     """
     exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-    if not has_rid:
-        return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-    # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
-    # into the output parquet schema.
-    inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
-    return (
-        # Non-NULL rid: dedupe, keep earliest occurrence.
-        f"SELECT *{inner_exclude_clause} FROM ("
-        f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
-        f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
-        f"  WHERE rid IS NOT NULL"
-        f") WHERE _dup_rn = 1"
-        f" UNION ALL BY NAME "
-        # NULL rid: pass through.
-        f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-        f" WHERE rid IS NULL"
-    )
+    if has_rid:
+        # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
+        # into the output parquet schema.
+        inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+        return (
+            # Non-NULL rid: dedupe, keep earliest occurrence.
+            f"SELECT *{inner_exclude_clause} FROM ("
+            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
+            f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f"  WHERE rid IS NOT NULL"
+            f") WHERE _dup_rn = 1"
+            f" UNION ALL BY NAME "
+            # NULL rid: pass through.
+            f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f" WHERE rid IS NULL"
+        )
+    if natural_keys:
+        inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+        partition_expr = ", ".join(f'"{k}"' for k in natural_keys)
+        return (
+            f"SELECT *{inner_exclude_clause} FROM ("
+            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition_expr} ORDER BY timestamp) AS _dup_rn"
+            f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f") WHERE _dup_rn = 1"
+        )
+    return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
 
 
 def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list[str]]:
@@ -156,7 +187,11 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
 
 
 def compact_local_partitions(
-    source: dict, min_files_per_partition: int = 1, dry_run: bool = False, table_name: str = "logs"
+    source: dict,
+    min_files_per_partition: int = 1,
+    dry_run: bool = False,
+    table_name: str = "logs",
+    compact_active_hour: bool = False,
 ) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
@@ -221,15 +256,18 @@ def compact_local_partitions(
     if not dry_run:
         with publish_lock:
             result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
+            result["watermark_evicted"] = _enforce_disk_watermark(data_dir)
 
-    # ── Active-hour guard: do NOT compact the current UTC hour. The sync
+    # ── Active-hour guard: do NOT compact the current UTC hour (unless compact_active_hour is True). The sync
     # cron may be flushing buffer files into this partition mid-pass; our
     # delete-then-rename is atomic per-file but a half-second window after
     # we listdir() and before we delete is enough for a freshly-arrived
     # file to be in the listing of one operation and gone from the other.
     # Skipping the active hour is cheap and removes the race entirely.
     active_hour = datetime.now(UTC).strftime("timestamp_hour=%Y-%m-%d-%H")
-    result["active_hour_skipped"] = os.path.isdir(os.path.join(data_dir, active_hour))
+    result["active_hour_skipped"] = (
+        os.path.isdir(os.path.join(data_dir, active_hour)) if not compact_active_hour else False
+    )
 
     # Accumulate every basename we delete across all three tiers so we
     # can register them in one SQLite write at the end (vs N small writes).
@@ -237,7 +275,7 @@ def compact_local_partitions(
 
     # ── Hourly tier: walk each partition dir, merge if multi-file.
     for entry in sorted(os.listdir(data_dir)):
-        if entry == active_hour:
+        if entry == active_hour and not compact_active_hour:
             continue
         if entry in (_DAILY_DIR, _WEEKLY_DIR):
             continue  # daily/weekly rollup dirs handled in subsequent passes
@@ -278,6 +316,9 @@ def compact_local_partitions(
                 # block dashboard reads for ~1s per partition.
                 with publish_lock:
                     r = _compact_single_partition(part_dir, bin_basenames, dry_run=dry_run)
+                if r.get("skipped_enospc"):
+                    result["errors"].append(f"{part_dir}: ENOSPC pre-check failed (< 2x needed free disk)")
+                    continue
                 partition_compacted = True
                 result["files_merged"] += r["files_merged"]
                 result["files_removed"] += r["files_removed"]
@@ -355,6 +396,71 @@ def compact_local_partitions(
     return result
 
 
+def _enforce_disk_watermark(data_dir: str, threshold_pct: float = 0.85, target_pct: float = 0.70) -> int:
+    """Check disk pressure and aggressively evict oldest local parquet if exceeded.
+
+    Prevents high-volume services from exhausting the shared 64TB PVC by automatically
+    shrinking their local query cache. Ensures we gracefully degrade the local drill-down
+    window rather than crashing the pod. Rollups and S3 durable data are unaffected.
+    """
+    import shutil
+
+    try:
+        usage = shutil.disk_usage(data_dir)
+    except OSError:
+        return 0
+
+    current_pct = usage.used / max(usage.total, 1)
+    if current_pct <= threshold_pct:
+        return 0
+
+    target_used_bytes = usage.total * target_pct
+    bytes_to_free = usage.used - target_used_bytes
+
+    if bytes_to_free <= 0:
+        return 0
+
+    logger.warning(
+        "Disk pressure hit %.1f%% (threshold %.1f%%). Evicting oldest cache to reach %.1f%%...",
+        current_pct * 100,
+        threshold_pct * 100,
+        target_pct * 100,
+    )
+
+    files_with_mtime = []
+    for root, _, files in os.walk(data_dir):
+        for f in files:
+            if f.endswith(".parquet"):
+                path = os.path.join(root, f)
+                try:
+                    stat = os.stat(path)
+                    files_with_mtime.append((stat.st_mtime, stat.st_size, path))
+                except OSError:
+                    pass
+
+    # Sort oldest first
+    files_with_mtime.sort(key=lambda x: x[0])
+
+    freed = 0
+    removed_count = 0
+    for mtime, size, path in files_with_mtime:
+        if freed >= bytes_to_free:
+            break
+        try:
+            os.remove(path)
+            freed += size
+            removed_count += 1
+        except OSError:
+            pass
+
+    if removed_count > 0:
+        logger.warning(
+            "Evicted %d old cache files (%.2f MB) to relieve disk pressure.", removed_count, freed / (1024 * 1024)
+        )
+
+    return removed_count
+
+
 def _cleanup_stale_tmp(data_dir: str) -> int:
     """Walk data_dir and rm any *.parquet.tmp left over from crashed runs.
 
@@ -407,6 +513,21 @@ def _rollup_bins(
             result["bytes_before"] += bytes_before
             continue
 
+        # Pre-check available disk space before merge (Section 7)
+        try:
+            free_bytes = shutil.disk_usage(out_root).free
+            if free_bytes < 2 * bytes_before:
+                logger.warning(
+                    "[local-compact] Insufficient disk space in %s for %s: %d bytes free < 2x needed (%d bytes). Skipping.",
+                    out_root,
+                    rollup_key,
+                    free_bytes,
+                    2 * bytes_before,
+                )
+                continue
+        except OSError:
+            pass
+
         if len(bin_paths) == 1:
             # Migrate single-file bin to the tier folder to retire the source.
             old_path = bin_paths[0]
@@ -429,7 +550,7 @@ def _rollup_bins(
             tmp_path = os.path.join(out_root, f"{out_name}.tmp")
             out_path = os.path.join(out_root, out_name)
             try:
-                con = duckdb.connect(":memory:")
+                con = get_memory_connection()
                 try:
                     paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in bin_paths)
                     probe = (
@@ -440,7 +561,11 @@ def _rollup_bins(
                     )
                     col_names = {d[0] for d in probe}
                     cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
-                    select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+                    has_rid = "rid" in col_names
+                    natural_keys = None if has_rid else _detect_natural_keys(col_names)
+                    select_sql = _build_merge_select_sql(
+                        paths_sql, cols_to_strip, has_rid=has_rid, natural_keys=natural_keys
+                    )
                     order_by = "ORDER BY timestamp"
                     if "ip" in col_names:
                         order_by += ", ip"
@@ -450,6 +575,12 @@ def _rollup_bins(
                     )
                 finally:
                     con.close()
+
+                # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
+                # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
+                os.rename(tmp_path, out_path)
+                bytes_after = os.path.getsize(out_path)
+
                 for p in bin_paths:
                     try:
                         os.remove(p)
@@ -457,8 +588,7 @@ def _rollup_bins(
                         result.setdefault("removed_basenames", []).append(os.path.basename(p))
                     except OSError as e:
                         logger.warning("[local-compact] failed to remove %s: %s", p, e)
-                os.rename(tmp_path, out_path)
-                bytes_after = os.path.getsize(out_path)
+
                 result[rollup_key] += 1
                 result["files_merged"] += len(bin_paths)
                 result["bytes_before"] += bytes_before
@@ -487,12 +617,12 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
     # day_str -> [(hour_part_dir, [parquet_paths])]
     by_day: dict[str, list[tuple[str, list[str]]]] = defaultdict(list)
     for entry in os.listdir(data_dir):
-        m = _HOUR_PART_RE.match(entry)
+        m = _HOUR_PART_RE.fullmatch(entry)
         if not m:
             continue
         day_str = m.group(1)
         try:
-            day = datetime.strptime(day_str, "%Y-%m-%d").date()
+            day = parse_day_key_strict(day_str).date()
         except ValueError:
             continue
         if day >= cutoff:
@@ -589,11 +719,11 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
     for fname in os.listdir(daily_root):
         if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
             continue
-        m = _DAILY_FILE_RE.match(fname)
+        m = _DAILY_FILE_RE.fullmatch(fname)
         if not m:
             continue
         try:
-            day = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            day = parse_day_key_strict(m.group(1)).date()
         except ValueError:
             continue
         if day >= cutoff:
@@ -659,6 +789,27 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
             "bytes_after": 0,
         }
 
+    # Pre-check available disk space before merge (Section 7): abort if free space < 2x target bin size
+    try:
+        free_bytes = shutil.disk_usage(part_dir).free
+        if free_bytes < 2 * bytes_before:
+            logger.warning(
+                "[local-compact] Insufficient disk space in %s: %d bytes free < 2x needed (%d bytes). Skipping.",
+                part_dir,
+                free_bytes,
+                2 * bytes_before,
+            )
+            return {
+                "files_merged": 0,
+                "files_removed": 0,
+                "removed_basenames": [],
+                "bytes_before": bytes_before,
+                "bytes_after": 0,
+                "skipped_enospc": True,
+            }
+    except OSError:
+        pass
+
     # Write to a temp file in the same directory so the atomic rename
     # below stays within one filesystem (rename across filesystems is
     # NOT atomic on POSIX).
@@ -670,7 +821,7 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     # Use in-memory DuckDB so we don't contend with the per-service writer
     # lock. read_parquet with explicit list + union_by_name matches the
     # view's semantics so the resulting file is query-compatible.
-    con = duckdb.connect(":memory:")
+    con = get_memory_connection()
     try:
         paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
         # Strip the computed `timestamp_hour` / `dt` columns from output
@@ -681,7 +832,9 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
         probe = con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description or []
         col_names = {d[0] for d in probe}
         cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
-        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+        has_rid = "rid" in col_names
+        natural_keys = None if has_rid else _detect_natural_keys(col_names)
+        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, has_rid=has_rid, natural_keys=natural_keys)
         order_by = "ORDER BY timestamp"
         if "ip" in col_names:
             order_by += ", ip"
@@ -693,9 +846,20 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     finally:
         con.close()
 
-    # Atomic publish: delete originals BEFORE rename so a crash leaves
-    # only the tmp (which the dashboard glob ignores via the .parquet.tmp
-    # suffix). Worst case: cleanup pass next run removes the orphaned tmp.
+    # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
+    # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
+    # Original source files remain untouched until atomic rename succeeds.
+    try:
+        os.rename(tmp_path, out_path)
+        bytes_after = os.path.getsize(out_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
     files_removed = 0
     removed_basenames: list[str] = []
     for p in paths:
@@ -705,8 +869,6 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
             removed_basenames.append(os.path.basename(p))
         except OSError as e:
             logger.warning("[local-compact] failed to remove %s: %s", p, e)
-    os.rename(tmp_path, out_path)
-    bytes_after = os.path.getsize(out_path)
 
     return {
         "files_merged": len(parquets),
@@ -723,7 +885,7 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
 # 5 s lag is well inside the staleness budget the dashboard already
 # tolerates.
 _COMPACTION_STATS_TTL = 5.0
-_COMPACTION_STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_COMPACTION_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_COMPACTION_STATS_TTL)
 
 
 def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
@@ -740,11 +902,10 @@ def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
     from backend.core.duckdb import _cache_dir
 
     cache_root = _cache_dir(source)
-    now = time.monotonic()
     cache_key = f"{cache_root}:{table_name}"
     cached = _COMPACTION_STATS_CACHE.get(cache_key)
-    if cached is not None and (now - cached[0]) < _COMPACTION_STATS_TTL:
-        return cached[1]
+    if cached is not None:
+        return cached
 
     data_dir = os.path.join(cache_root, "data" if table_name == "logs" else f"data_{table_name}")
     total_files = 0
@@ -763,7 +924,7 @@ def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
             "weekly_files": 0,
             "avg_files_per_partition": 0.0,
         }
-        _COMPACTION_STATS_CACHE[cache_key] = (now, result)
+        _COMPACTION_STATS_CACHE[cache_key] = result
         return result
     for entry in os.listdir(data_dir):
         full = os.path.join(data_dir, entry)
@@ -790,7 +951,7 @@ def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
         "weekly_files": weekly_files,
         "avg_files_per_partition": (total_files / partitions) if partitions else 0.0,
     }
-    _COMPACTION_STATS_CACHE[cache_key] = (now, result)
+    _COMPACTION_STATS_CACHE[cache_key] = result
     return result
 
 

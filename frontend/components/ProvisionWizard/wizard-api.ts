@@ -1,12 +1,16 @@
 "use client";
 
 import { client } from "@/lib/api";
+import type { components } from "@/types/api.generated";
 import type {
   FosStatus,
   ProvisionConfig,
   ProvisionService,
   Step,
 } from "./types";
+
+type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
+type LakeInfo = components["schemas"]["ProvisionLakeInfoResponse"];
 
 // ── validate mutation factory ──
 export interface ValidateMutationDeps {
@@ -18,36 +22,37 @@ export interface ValidateMutationDeps {
   }) => void;
   setConfig: (updater: (prev: ProvisionConfig) => ProvisionConfig) => void;
   setStep: (s: Step) => void;
-  mode: any;
+  mode: string | null;
 }
 
 export const validateMutationFn = (token: string) =>
   async (serviceId: string) => {
     const { data } = await client.POST("/api/provision/validate", {
-      body: { token, service_id: serviceId } as any,
+      body: { token, service_id: serviceId },
     });
-    return data as any;
+    return data;
   };
 
 export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
-  return (data: any) => {
-    if (data?.token_info) {
-      deps.setTokenInfo(data.token_info);
+  return (data: ValidateResponse | undefined) => {
+    const tokenInfo = data?.token_info;
+    if (tokenInfo?.id && tokenInfo.name && tokenInfo.type) {
+      deps.setTokenInfo({ id: tokenInfo.id, name: tokenInfo.name, type: tokenInfo.type });
     }
-    if (data?.defaults) {
+    const defaults = data?.defaults;
+    if (defaults) {
       deps.setConfig((prev) => ({
         ...prev,
-        endpoint_name:
-          data.defaults.endpoint_name || "Fastly Object Storage Logs",
-        fos_region: data.defaults.fos_region || "us-east-1",
-        fos_bucket_name: data.defaults.fos_bucket_name?.toLowerCase() || "",
-        fos_prefix: data.defaults.fos_prefix || "",
+        endpoint_name: defaults.endpoint_name || "Fastly Object Storage Logs",
+        fos_region: defaults.fos_region || "us-east-1",
+        fos_bucket_name: defaults.fos_bucket_name?.toLowerCase() || "",
+        fos_prefix: defaults.fos_prefix || "",
         cdn_service_name:
-          data.defaults.cdn_service_name || `${data.service_name} (CDN)`,
+          defaults.cdn_service_name || `${data.service_name} (CDN)`,
         cdn_prefix: (
-          data.defaults.cdn_prefix ||
-          (data.defaults.fos_bucket_name
-            ? `fos-${data.defaults.fos_bucket_name.split("-").slice(0, 2).join("-")}`
+          defaults.cdn_prefix ||
+          (defaults.fos_bucket_name
+            ? `fos-${defaults.fos_bucket_name.split("-").slice(0, 2).join("-")}`
             : "")
         ).toLowerCase(),
       }));
@@ -93,10 +98,10 @@ export async function runCheckConfig(args: CheckConfigArgs) {
           service_id: selectedService.id,
           cdn_service_id: selectedCdnService.id,
           bucket: config.fos_bucket_name,
-        } as any,
+        },
       },
     });
-    setConfigStatus(data as any);
+    if (data) setConfigStatus(data);
   } catch (e) {
     console.error("Failed to check config", e);
   } finally {
@@ -128,17 +133,17 @@ export async function runCheckFos(args: CheckFosArgs) {
   setFosError("");
   try {
     const { data } = await client.POST("/api/provision/check-fos", {
-      body: { bucket, region, access_key, secret_key } as any,
+      body: { bucket, region, access_key, secret_key },
     });
-    if ((data as any)?.ok) {
+    if (data?.ok) {
       setFosStatus("success");
     } else {
       setFosStatus("error");
-      setFosError((data as any)?.error || "Failed to connect.");
+      setFosError(data?.error || "Failed to connect.");
     }
-  } catch (err: any) {
+  } catch (err) {
     setFosStatus("error");
-    setFosError(err.message || "An error occurred.");
+    setFosError(err instanceof Error && err.message ? err.message : "An error occurred.");
   }
 }
 
@@ -159,7 +164,7 @@ export async function runCheckDomain(args: CheckDomainArgs) {
     const { data } = await client.GET("/api/provision/check-domain", {
       params: { query: { prefix } },
     });
-    if ((data as any)?.available) {
+    if (data?.available) {
       setDomainStatus("available");
       setDomainMessage("Domain available!");
     } else {
@@ -176,7 +181,7 @@ export interface AnalyzeLakeArgs {
   config: ProvisionConfig;
   icebergMetadataLocation: string;
   setIsAnalyzing: (b: boolean) => void;
-  setLakeInfo: (l: any) => void;
+  setLakeInfo: (l: LakeInfo) => void;
   setImportRange: (r: { start: string; end: string }) => void;
   setStep: (s: Step) => void;
   setFosStatus: (s: FosStatus) => void;
@@ -205,24 +210,24 @@ export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
         prefix: config.fos_prefix,
         endpoint: config.fos_endpoint || undefined,
         iceberg_metadata_location: icebergMetadataLocation || undefined,
-      } as any,
+      },
     });
-    if ((data as any)?.ok) {
-      setLakeInfo(data as any);
-      if ((data as any)?.range?.start && (data as any)?.range?.end) {
+    if (data?.ok) {
+      setLakeInfo(data);
+      if (data.range?.start && data.range?.end) {
         setImportRange({
-          start: (data as any).range.start,
-          end: (data as any).range.end,
+          start: data.range.start,
+          end: data.range.end,
         });
       }
       setStep("analyze");
     } else {
       setFosStatus("error");
-      setFosError((data as any)?.error || "Failed to analyze data lake.");
+      setFosError(data?.error || "Failed to analyze data lake.");
     }
-  } catch (e: any) {
+  } catch (e) {
     setFosStatus("error");
-    setFosError(e.message || String(e));
+    setFosError(e instanceof Error ? e.message : String(e));
   } finally {
     setIsAnalyzing(false);
   }

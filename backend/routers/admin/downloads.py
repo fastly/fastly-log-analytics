@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.deps import get_source
 from backend.utils.path_safety import path_within_dir
-from backend.utils.router_utils import query_errors, raise_internal
+from backend.utils.router_utils import query_errors, raise_internal, require_service_id
 
 from ._helpers import _fetch_file_to_zip, stream_zip
 from ._router import router
@@ -152,7 +152,7 @@ def download_file(
             try:
                 cdn_resp.close()
             except Exception:
-                pass
+                logger.debug("download_file: cdn_resp.close failed (ignored)", exc_info=True)
             raise
 
         def _iter_cdn(chunk_size: int = 65536):
@@ -170,7 +170,7 @@ def download_file(
                 try:
                     cdn_resp.close()
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: cdn_resp.close failed (ignored)", exc_info=True)
                 try:
                     _rcdn(
                         "GET",
@@ -181,7 +181,7 @@ def download_file(
                         caller="api:/download",
                     )
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: _rcdn failed (ignored)", exc_info=True)
 
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -221,7 +221,7 @@ def download_file(
             try:
                 body.close()
             except Exception:
-                pass
+                logger.debug("_iter_fos: body.close failed (ignored)", exc_info=True)
 
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
@@ -242,9 +242,7 @@ def download_all_files(
     from backend.core import duckdb as _db
 
     src = source
-    service_id = src.get("name", "")
-    if not service_id:
-        raise HTTPException(status_code=400, detail={"error": "service_id required"})
+    service_id = require_service_id(src.get("name"))
 
     def populate(zf):
         if include == "local":

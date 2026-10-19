@@ -1,4 +1,4 @@
-from backend.core.log_fields import PRESETS, generate_log_format, validate_group_deps
+from backend.core.log_fields import PRESETS, generate_log_format
 from backend.provision import generate_capture_vcl
 
 
@@ -231,16 +231,6 @@ def test_cmcd_string_fields_do_not_starve_scoring_budget():
     assert cmcd_sid_match, "cmcd_sid should appear in the format"
     cmcd_sid_limit = int(cmcd_sid_match.group(1))
     assert cmcd_sid_limit < 2000, f"cmcd_sid should use bytes_estimate-derived limit, not 2000 (got {cmcd_sid_limit})"
-
-
-def test_validate_group_deps():
-    """Verify that dependent groups throw validation errors if not met."""
-    # E requires D
-    assert len(validate_group_deps(["E"])) == 1
-    assert "requires Group D" in validate_group_deps(["E"])[0]
-
-    # If D is present, it should pass
-    assert len(validate_group_deps(["D", "E"])) == 0
 
 
 # ── validate_custom_field: 14-rule validation gauntlet ─────────────────────

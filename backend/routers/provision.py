@@ -12,7 +12,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
 from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -33,10 +32,15 @@ from backend.models.provision import (
     ProvisionValidateRequest,
     ProvisionValidateResponse,
 )
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal
+from backend.provision.fos_setup import _get_fos_s3_client
+from backend.utils.router_utils import make_error, raise_internal, require_service_id
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAULT_ERROR_RESPONSES)
+
+# Prefix parse of the client's "HTTP <code> <method> <path>" error text (not an identifier check).
+_FASTLY_HTTP_ERROR_RE = re.compile(r"HTTP (\d+) ")
 
 
 def _invalidate_service_credentials(service_id: str) -> None:
@@ -152,6 +156,7 @@ def provision_validate(body: ProvisionValidateRequest):
 
         safe_service_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
         safe_service_id = re.sub(r"-+", "-", safe_service_id).strip("-")
+        safe_service_id_lower = safe_service_id.lower()
 
         return {
             "service_name": svc_name,
@@ -159,7 +164,7 @@ def provision_validate(body: ProvisionValidateRequest):
             "defaults": {
                 "endpoint_name": "Fastly Object Storage Logs",
                 "fos_region": "us-east-1",
-                "fos_bucket_name": f"fos-{safe_service_id}-logs",
+                "fos_bucket_name": f"fos-{safe_service_id_lower}-logs",
                 "fos_prefix": "",
                 "sample_rate": 100,
                 "edge_only": True,
@@ -185,13 +190,13 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
         raise HTTPException(status_code=400, detail={"error": "Prefix is required"})
     if is_custom:
         domain = prefix.strip() if prefix else ""
-        if not domain or "." not in domain or not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        if not domain or "." not in domain or not re.fullmatch(r"^[a-zA-Z0-9.-]+$", domain):
             return {
                 "available": False,
                 "reason": "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
             }
     else:
-        if not re.match(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
+        if not re.fullmatch(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
             return {
                 "available": False,
                 "reason": "Prefix must be alphanumeric and may contain hyphens (cannot start/end with hyphen)",
@@ -209,33 +214,56 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
 
 @router.post("/check-fos", response_model=ProvisionCheckFosResponse, response_model_exclude_unset=True)
 def provision_check_fos(req: CheckFosRequest):
-    """Validate FOS credentials by attempting to list objects."""
+    """Validate FOS credentials against the same raw prefixes ingest reads."""
     bucket = req.bucket
     region = req.region
     access_key = req.access_key
     secret_key = req.secret_key
     import botocore.exceptions
 
-    from backend.core.duckdb import _get_fos_client
-
-    src = {
-        "bucket": bucket,
-        "endpoint": f"{region}.object.fastlystorage.app",
-        "access_key_id": access_key,
-        "secret_access_key": secret_key,
-        "region": region,
-        "storage_mode": "cloud",
-    }
-
     from backend.utils.telemetry import get_tracked_calls
 
     try:
-        client = _get_fos_client(src)
-        # Attempt to list 1 object to verify read permissions
-        client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        # This endpoint receives credentials that are not yet persisted in a
+        # service config.  The telemetry-proxy client intentionally signs from
+        # persisted config, so using it here would silently send an unsigned
+        # request and report a false auth failure.
+        client = _get_fos_s3_client(
+            access_key,
+            secret_key,
+            region,
+            bucket_name=bucket,
+            context="provision:check-fos",
+        )
+        endpoint = f"{region}.object.fastlystorage.app"
+        representative: tuple[str, str] | None = None
+        for prefix in ("raw/request/", "raw/rum/"):
+            page = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+            contents = page.get("Contents") or []
+            if contents:
+                key = str(contents[0]["Key"])
+                client.get_object(Bucket=bucket, Key=key, Range="bytes=0-0")["Body"].close()
+                representative = (prefix, key)
+                break
+        prefix, key = representative or ("raw/request/", "")
+        logger.info(
+            "[provision] FOS credential probe succeeded bucket=%s region=%s endpoint=%s prefix=%s key=%s",
+            bucket,
+            region,
+            endpoint,
+            prefix,
+            key or "<none>",
+        )
         return {"ok": True, "_debug_calls": get_tracked_calls()}
     except Exception as e:
         err_msg = str(e)
+        logger.warning(
+            "[provision] FOS credential probe failed bucket=%s region=%s endpoint=%s: %s",
+            bucket,
+            region,
+            f"{region}.object.fastlystorage.app",
+            err_msg[:200],
+        )
         if isinstance(e, botocore.exceptions.ClientError):
             code = e.response.get("Error", {}).get("Code", "Unknown")
             if code in ("AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"):
@@ -403,7 +431,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                     _cache_src = svcconfig.config_to_source(svc_cfg) if svc_cfg else {"name": sid}
                     db_iceberg.invalidate_service_caches(_cache_src)
                 except Exception:
-                    pass
+                    logger.debug("stream: db_iceberg.invalidate_service_caches failed (ignored)", exc_info=True)
 
                 # Also drop the credential-bearing caches (boto3 FOS client +
                 # pooled DuckDB S3 SECRET) so a same-process re-provision of this
@@ -494,7 +522,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                         },
                     )
                 except Exception:
-                    pass
+                    logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
 
             if sid:
                 logs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs", sid))
@@ -514,7 +542,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/lake-info", response_model=ProvisionLakeInfoResponse, response_model_exclude_unset=True)
@@ -617,7 +645,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         try:
             cfg["log_fields"] = json.loads(log_fields)
         except Exception:
-            pass
+            logger.debug("provision_execute: step failed (ignored)", exc_info=True)
 
     if req.cmcd_enabled:
         import datetime as _dt
@@ -655,6 +683,13 @@ def provision_execute(req: ProvisionExecuteRequest):
         if cond_err:
             raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_err))
         cfg["rum"]["custom_condition"] = rum_cond
+        if getattr(req, "rum_log_period", None) is not None:
+            try:
+                rum_period_val = parse_period(str(req.rum_log_period))
+                cfg["rum"]["log_period"] = rum_period_val
+                cfg["rum_log_period"] = rum_period_val
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=make_error("invalid_rum_log_period", str(e)))
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
@@ -662,7 +697,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     bucket = cfg["fos_bucket_name"]
-    if not re.match(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
+    if not re.fullmatch(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
         raise HTTPException(
             status_code=400,
             detail=make_error(
@@ -672,7 +707,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         )
 
     prefix = cfg.get("fos_prefix", "")
-    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
+    if prefix and not re.fullmatch(r"^[A-Za-z0-9/_-]*$", prefix):
         raise HTTPException(
             status_code=400,
             detail=make_error("invalid_prefix", "Invalid prefix. Use alphanumerics, /, _, -."),
@@ -740,7 +775,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                             },
                         )
                     except Exception:
-                        pass
+                        logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
 
                     try:
                         from backend.provision import _sync_crontab
@@ -755,12 +790,12 @@ def provision_execute(req: ProvisionExecuteRequest):
                         except Exception as e:
                             logger.warning("[provision] Initial metadata sync after provision failed: %s", e)
                     except Exception:
-                        pass
+                        logger.debug("stream: step failed (ignored)", exc_info=True)
         except Exception as e:
             if not error_already_emitted:
                 yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/reconcile")
@@ -841,7 +876,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
             except queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/terraform/preview", response_model=dict[str, str])
@@ -858,9 +893,18 @@ def provision_terraform_preview(body: ProvisionConfigRequest):
     return generate_terraform(cfg, access_key, secret_key)
 
 
-# response_model intentionally omitted: streams a ZIP (StreamingResponse),
-# not a JSON body.
-@router.post("/terraform/export")
+# No response_model: streams a ZIP (StreamingResponse), declared as a binary
+# file download via ``responses`` so the generated client does not type it as JSON.
+@router.post(
+    "/terraform/export",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "ZIP archive of the generated Terraform files (Content-Disposition: attachment).",
+            "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}},
+        }
+    },
+)
 def provision_terraform_export(body: ProvisionConfigRequest):
     import io
     import zipfile
@@ -917,6 +961,13 @@ def provision_ingest(payload: ProvisionConfigRequest):
 
     fetch_pop_locations(token)
 
+    from backend import config as svcconfig
+
+    existing_cfg = svcconfig.load_config(logging_service_id) or {}
+    existing_fos_proxy = existing_cfg.get("fos_proxy")
+    if not isinstance(existing_fos_proxy, dict):
+        existing_fos_proxy = {}
+
     try:
         if body.get("log_period"):
             body["log_period"] = parse_period(body["log_period"])
@@ -968,7 +1019,9 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 raise_internal(logger, e, code="ensure_access_key_failed", status=400)
 
     if not body.get("cdn_secret"):
-        body["cdn_secret"] = secrets.token_urlsafe(24)
+        body["cdn_secret"] = (
+            existing_cfg.get("cdn_secret") or existing_fos_proxy.get("secret") or secrets.token_urlsafe(24)
+        )
 
     # Store state just like execute does
     state = {
@@ -1003,7 +1056,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         try:
             state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
-            pass
+            logger.debug("provision_ingest: step failed (ignored)", exc_info=True)
 
     # Construct nested CMCD config from flat fields if present
     has_flat_cmcd = any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
@@ -1074,10 +1127,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 if k in existing_rum:
                     state["rum"][k] = existing_rum[k]
         else:
-            from backend import config as svcconfig
-
-            on_disk_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
-            on_disk_rum = on_disk_cfg.get("rum")
+            on_disk_rum = existing_cfg.get("rum")
             if isinstance(on_disk_rum, dict) and on_disk_rum.get("faro_version"):
                 for k in _faro_keys:
                     if k in on_disk_rum:
@@ -1087,6 +1137,15 @@ def provision_ingest(payload: ProvisionConfigRequest):
     # top of the handler (validate_destructive_token above); the prior second
     # pass here re-imported and re-validated the identical token+service_id.
     write_service_config(state)
+
+    # Reload scheduler immediately to pick up any changed log periods or sync intervals
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+        logger.info("[provision_ingest] Successfully reloaded scheduler with new intervals! 🔄")
+    except Exception as e:
+        logger.warning("[provision_ingest] Failed to reload scheduler after ingest: %s", e)
 
     # Re-ingest can carry refreshed FOS creds; drop the credential-bearing
     # caches so the next sync/read picks them up rather than 401ing on a stale
@@ -1098,7 +1157,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
 
         _sync_crontab()
     except Exception:
-        pass
+        logger.warning("provision_ingest: _sync_crontab failed (ignored)", exc_info=True)
 
     # Eagerly trigger an initial metadata sync in a background thread to warm up the status cache
     # so `/api/bootstrap` has populated status fields (such as "rum" and "request" sub-payloads)
@@ -1128,11 +1187,12 @@ def provision_ingest(payload: ProvisionConfigRequest):
 )
 def provision_check_config(
     token: str = Query(...),
-    service_id: str = Query(...),
+    service_id: str | None = Query(default=None),
     cdn_service_id: str = Query(...),
     bucket: str = Query(...),
 ):
     """Verify that both services are correctly configured for log analysis."""
+    service_id = require_service_id(service_id)
     from backend.core.fastly.client import fastly
 
     results = {
@@ -1259,7 +1319,7 @@ def provision_check_config(
     response_model_exclude_unset=True,
 )
 def provision_ngwaf_workspaces(
-    service_id: str = Query(...),
+    service_id: str | None = Query(default=None),
     token: str = Query(default=""),
     authorization: str | None = Header(default=None),
 ):
@@ -1278,11 +1338,10 @@ def provision_ngwaf_workspaces(
     Either way an unauthenticated caller can't enumerate workspaces
     even if they reach the loopback admin surface.
     """
-    import urllib.error
-
     from backend.provision import fastly
     from backend.utils.fastly_auth import validate_destructive_token
 
+    service_id = require_service_id(service_id)
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[len("bearer ") :].strip()
     else:
@@ -1307,12 +1366,9 @@ def provision_ngwaf_workspaces(
     _req_headers = {"Fastly-Key": token, "Accept": "application/json"}
 
     try:
-        req = urllib.request.Request(_ngwaf_url, headers=_req_headers)
-        resp_status = None
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw_body = resp.read().decode()
-            resp_status = resp.status
-        data = json.loads(raw_body)
+        data = fastly("GET", "/ngwaf/v1/workspaces", token=token, max_retries=0, timeout=10)
+        raw_body = json.dumps(data)
+        resp_status = 200
         logger.debug(
             "[ngwaf-workspaces] keys=%s raw_body_preview=%s",
             list(data.keys()) if isinstance(data, dict) else type(data),
@@ -1341,18 +1397,17 @@ def provision_ngwaf_workspaces(
                         "To use NGWAF features, please use a Personal API Token from a human user with Security permissions."
                     )
             except Exception:
-                pass
+                logger.debug("provision_ngwaf_workspaces: step failed (ignored)", exc_info=True)
             req_debug = format_debug_request("GET", _ngwaf_url, _req_headers)
             result["_debug_raw"] = f"{req_debug}\n\n--- Response ({resp_status}) ---\n{raw_body[:500]}"
         return result
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode()
-        except Exception:
-            pass
-        logger.warning("[ngwaf-workspaces] HTTPError %s body=%s", exc.code, body[:300])
-        if exc.code == 401:
+    except RuntimeError as exc:
+        http_match = _FASTLY_HTTP_ERROR_RE.match(str(exc))
+        if http_match is None:
+            raise_internal(logger, exc, code="ngwaf_workspaces_failed", status=400)
+        status_code = int(http_match.group(1))
+        logger.warning("[ngwaf-workspaces] HTTPError %s body=%s", status_code, str(exc)[:300])
+        if status_code == 401:
             raise HTTPException(
                 status_code=400,
                 detail=make_error(
@@ -1394,9 +1449,8 @@ def provision_set_ngwaf_workspace(
     /api/provision/ block also gates this for analysts.
     """
 
-    from backend import config as svcconfig
     from backend.utils.fastly_auth import validate_destructive_token
-    from backend.utils.router_utils import load_service_config
+    from backend.utils.router_utils import load_service_config, mutate_service_config
 
     cfg = load_service_config(service_id)
 
@@ -1418,14 +1472,13 @@ def provision_set_ngwaf_workspace(
     validate_destructive_token(token, service_id=service_id)
 
     workspace_id = (body.get("ngwaf_workspace_id") or "").strip() or None
-    cfg["ngwaf_workspace_id"] = workspace_id
-    svcconfig.save_config(service_id, cfg)
+    mutate_service_config(service_id, lambda c: c.__setitem__("ngwaf_workspace_id", workspace_id))
 
     try:
         from backend.provision import _sync_crontab
 
         _sync_crontab()
     except Exception:
-        pass
+        logger.warning("provision_set_ngwaf_workspace: _sync_crontab failed (ignored)", exc_info=True)
 
     return {"ok": True, "ngwaf_workspace_id": workspace_id}

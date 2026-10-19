@@ -12,6 +12,7 @@ import { analystFetch } from '@/lib/analystFetch'
 
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']
+type ClaimResponse = components['schemas']['ShareClaimResponse']
 
 // Fixed code→copy allowlist for ?oauth_error=<code>. The raw param is NEVER
 // rendered (reflected-content hygiene on an unauth page) — an unknown code
@@ -28,9 +29,9 @@ const OAUTH_ERROR_COPY: Record<string, string> = {
 const OAUTH_ERROR_DEFAULT = 'Sign-in failed. Please try again.'
 
 // Cap the post-login redirect to in-app paths only. Without this,
-// ?return=//evil.example/ would relative-resolve to evil.example via
-// window.location.assign, turning the login screen into an open
-// redirector. Any value not starting with a single forward slash falls
+// ?return=//evil.example/ or ?next=//evil.example/ would relative-resolve
+// to evil.example via window.location.assign, turning the login screen into
+// an open redirector. Any value not starting with a single forward slash falls
 // back to the server-suggested redirect.
 export function safeReturnTarget(raw: string | null | undefined): string | null {
   if (!raw) return null
@@ -42,18 +43,21 @@ export function safeReturnTarget(raw: string | null | undefined): string | null 
   const normalized = raw.replace(/\s/g, '')
   if (!normalized.startsWith('/')) return null
   if (normalized.startsWith('//') || normalized.startsWith('/\\')) return null
+  if (normalized.startsWith('/share-login')) return null
   return raw
 }
 
 export function ShareLoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const returnTarget = safeReturnTarget(searchParams.get('return'))
+  const returnTarget = safeReturnTarget(searchParams.get('return') ?? searchParams.get('next'))
+  const inviteToken = searchParams.get('token') ?? searchParams.get('invite')
   const oauthErrorCode = searchParams.get('oauth_error')
   const [email, setEmail] = React.useState('')
   const [passcode, setPasscode] = React.useState('')
   const [reveal, setReveal] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
+  const [claimedInvite, setClaimedInvite] = React.useState<ClaimResponse | null>(null)
   // Seed the banner from ?oauth_error via the fixed allowlist (never the raw
   // param). A passcode-login error later overwrites this.
   const [error, setError] = React.useState<string | null>(() =>
@@ -61,8 +65,8 @@ export function ShareLoginForm() {
   )
   const [retryAfter, setRetryAfter] = React.useState<number | null>(null)
   const [redirecting, setRedirecting] = React.useState<string | null>(null)
-  // Auth-config drives graceful degradation. 'loading' → render nothing that
-  // pops (avoid CLS); 'failed' → fail OPEN to the passcode form.
+  // Auth-config drives graceful degradation. 'loading' → render contextual
+  // zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
   const [config, setConfig] = React.useState<AuthConfig | null>(null)
   const [configState, setConfigState] = React.useState<'loading' | 'loaded' | 'failed'>('loading')
   const emailInputRef = React.useRef<HTMLInputElement>(null)
@@ -88,6 +92,37 @@ export function ShareLoginForm() {
       cancelled = true
     }
   }, [])
+
+  // Validate optional ?token= or ?invite= query parameter via /api/share/claim/{token}
+  React.useEffect(() => {
+    if (!inviteToken) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken)}`, {
+          method: 'POST',
+        })
+        if (cancelled) return
+        if (res.status === 404 || res.status === 410) {
+          setError('This invitation link has expired or is no longer valid.')
+          return
+        }
+        if (!res.ok) return
+        const data = (await res.json()) as ClaimResponse
+        if (cancelled) return
+        setClaimedInvite(data)
+        const claimedEmail = data.email
+        if (claimedEmail) {
+          setEmail((prev) => prev || claimedEmail)
+        }
+      } catch {
+        // Non-fatal: user can still enter email + passcode manually
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [inviteToken])
 
   const providers = config?.providers ?? []
   // Fail-open: on a config fetch failure, offer the passcode form.
@@ -178,7 +213,7 @@ export function ShareLoginForm() {
           : '/share-login/acknowledge'
         router.push(ack)
       } else {
-        // E-3: honor the ?return= param set by the 401-redirect fetch
+        // E-3: honor the ?return= / ?next= param set by the 401-redirect fetch
         // middleware in lib/api.ts so the analyst lands back on the
         // page they were viewing before their session died. Falls back
         // to the server-suggested redirect, then /dashboard.
@@ -187,17 +222,41 @@ export function ShareLoginForm() {
         // sees stale needs_login=true and bounces back here).
         window.location.assign(returnTarget ?? data.redirect ?? '/dashboard')
       }
-    } catch (err: any) {
-      setError(err?.message || 'Network error reaching the server.')
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="space-y-4">
+    <div
+      data-testid="share-login-form-container"
+      className="space-y-4 min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
+    >
+      {configState === 'loading' && (
+        <div
+          data-testid="share-login-loading-skeleton"
+          role="status"
+          aria-live="polite"
+          className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto] flex flex-col justify-center items-center gap-3 py-6 text-xs text-muted-foreground"
+        >
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          <span>Verifying share session &amp; security policies...</span>
+        </div>
+      )}
+
+      {claimedInvite && (
+        <div
+          data-testid="share-login-invite-banner"
+          className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
+          Invitation verified for <span className="font-medium text-foreground">{claimedInvite.name || claimedInvite.email}</span>
+        </div>
+      )}
+
       {error && (
-        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1}>
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1} data-testid="share-login-error-alert">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>
             {error}
@@ -218,7 +277,7 @@ export function ShareLoginForm() {
         )}
 
       {showProviders && (
-        <div className="space-y-2">
+        <div className="space-y-2" data-testid="share-login-sso-providers">
           {providers.map((p) => (
             <Button
               key={p.id}
@@ -244,47 +303,60 @@ export function ShareLoginForm() {
       )}
 
       {showLockout && (
-        <p className="text-sm text-muted-foreground text-center">
+        <p className="text-sm text-muted-foreground text-center" data-testid="share-login-lockout-notice">
           Sign-in is not configured for this dashboard. Contact the dashboard owner.
         </p>
       )}
 
       {showPasscode && (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <Label htmlFor="email" className="text-xs">Email</Label>
-            <Input
-              id="email"
-              ref={emailInputRef}
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={busy}
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="passcode" className="text-xs">Passcode</Label>
-            <div className="flex items-center gap-2">
+        <form
+          onSubmit={handleSubmit}
+          data-testid="share-login-form"
+          className="space-y-4 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+        >
+          <div
+            data-testid="share-login-fields"
+            className={
+              busy
+                ? 'space-y-4 opacity-40 pointer-events-none transition-opacity'
+                : 'space-y-4 transition-opacity'
+            }
+          >
+            <div className="space-y-1">
+              <Label htmlFor="email" className="text-xs">Email</Label>
               <Input
-                id="passcode"
-                type={reveal ? 'text' : 'password'}
-                autoComplete="current-password"
+                id="email"
+                ref={emailInputRef}
+                type="email"
+                autoComplete="email"
                 required
-                value={passcode}
-                onChange={(e) => setPasscode(e.target.value)}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 disabled={busy}
               />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => setReveal((r) => !r)}
-                aria-label={reveal ? 'Hide passcode' : 'Reveal passcode'}
-              >
-                {reveal ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
-              </Button>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="passcode" className="text-xs">Passcode</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="passcode"
+                  type={reveal ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  required
+                  value={passcode}
+                  onChange={(e) => setPasscode(e.target.value)}
+                  disabled={busy}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setReveal((r) => !r)}
+                  aria-label={reveal ? 'Hide passcode' : 'Reveal passcode'}
+                >
+                  {reveal ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                </Button>
+              </div>
             </div>
           </div>
 
@@ -296,6 +368,10 @@ export function ShareLoginForm() {
             {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Sign in
           </Button>
+
+          <p className="text-[11px] text-muted-foreground text-center">
+            Upon signing in, you will be prompted to review and agree to the Terms of Access before viewing the dashboard.
+          </p>
         </form>
       )}
     </div>

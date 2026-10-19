@@ -13,6 +13,8 @@ import { client } from '@/lib/api'
 import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
+import { formatBytesTiered, formatCount } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
 // Deliberate narrowing of the all-optional generated MetadataStorageResponse
 // (+ its MetadataTableStat / MetadataRetentionValues sub-schemas): the
 // endpoint always emits tables/db_path/retention; db_bytes is null only when
@@ -62,16 +64,12 @@ function labelFor(rawName: string): { label: string; sub: string } {
 }
 
 function fmtBytes(n: number | null | undefined): string {
-  if (n == null) return '–'
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+  return formatBytesTiered(n, { maxUnit: 'GB' })
 }
 
 function fmtRows(n: number | null | undefined): string {
   if (n == null) return '–'
-  return n.toLocaleString()
+  return formatCount(n)
 }
 
 function fmtDays(n: number): string {
@@ -95,7 +93,7 @@ export function MetadataStorageCard() {
   // means the card sits in loading forever when the store hasn't hydrated.
   // Freshness via useAdminEventStream. Safety-net poll only.
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
-    queryKey: ['admin', 'metadata-storage'],
+    queryKey: queryKeys.admin.metadataStorage(),
     queryFn: async () => {
       const { data } = await client.GET('/api/admin/metadata-storage')
       // Narrow the all-optional wire type to the producer-guaranteed local
@@ -136,12 +134,12 @@ export function MetadataStorageCard() {
         ingested_files_days: Math.max(0, parseInt(draft.ingested_files_days, 10) || 0),
         cron_runs_days: Math.max(0, parseInt(draft.cron_runs_days, 10) || 0),
       }
-      const { data } = await client.PATCH('/api/admin/metadata-retention' as any, { body } as any)
+      const { data } = await client.PATCH('/api/admin/metadata-retention', { body })
       return data
     },
     onSuccess: () => {
       setEditing(false)
-      qc.invalidateQueries({ queryKey: ['admin', 'metadata-storage'] })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() })
     },
   })
 
@@ -175,7 +173,7 @@ export function MetadataStorageCard() {
       }
       endpoint="/api/admin/metadata-cleanup"
       body={{}}
-      onClose={() => qc.invalidateQueries({ queryKey: ['admin', 'metadata-storage'] })}
+      onClose={() => qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() })}
       trigger={
         <Button size="sm" variant="outline">
           <Trash2 className="h-3.5 w-3.5 mr-1.5" />

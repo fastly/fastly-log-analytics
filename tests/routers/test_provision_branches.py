@@ -213,7 +213,7 @@ def test_check_fos_returns_ok_on_successful_list():
     """Happy path: list_objects_v2 succeeds → ok=True."""
     fake_client = MagicMock()
     fake_client.list_objects_v2.return_value = {"Contents": []}
-    with patch("backend.core.duckdb._get_fos_client", return_value=fake_client):
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
         resp = _client().post(
             "/api/provision/check-fos",
             json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
@@ -240,7 +240,7 @@ def test_check_fos_maps_boto_client_error_codes_to_user_messages(code, expected_
     fake_client.list_objects_v2.side_effect = botocore.exceptions.ClientError(
         {"Error": {"Code": code, "Message": "raw"}}, "ListObjectsV2"
     )
-    with patch("backend.core.duckdb._get_fos_client", return_value=fake_client):
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
         resp = _client().post(
             "/api/provision/check-fos",
             json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
@@ -257,7 +257,7 @@ def test_check_fos_treats_endpoint_connection_error_as_region_mismatch():
     fake_client.list_objects_v2.side_effect = RuntimeError(
         "EndpointConnectionError: Could not connect to the endpoint URL"
     )
-    with patch("backend.core.duckdb._get_fos_client", return_value=fake_client):
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
         resp = _client().post(
             "/api/provision/check-fos",
             json={"bucket": "b", "region": "bad", "access_key": "k", "secret_key": "s"},
@@ -273,7 +273,7 @@ def test_check_fos_passes_through_unknown_errors():
     'ok: false'."""
     fake_client = MagicMock()
     fake_client.list_objects_v2.side_effect = RuntimeError("weird unknown error xyz")
-    with patch("backend.core.duckdb._get_fos_client", return_value=fake_client):
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
         resp = _client().post(
             "/api/provision/check-fos",
             json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},

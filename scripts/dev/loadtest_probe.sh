@@ -10,11 +10,11 @@
 #               you'll see HTTP 503 "pool saturated" responses fire after
 #               max_wait=10s, which is the expected behavior.
 #
-#   endpoints:  Fires one query at each of the 8 dashboard endpoints for a
+#   endpoints:  Fires one query at each of the 7 dashboard analytics endpoints for a
 #               given time range. Smoke test that the full surface works.
 #
 # Assumes the backend is running at http://127.0.0.1:18002 and that the
-# generator has put data in the target hour (see scripts/loadtest_generator.py).
+# generator has put data in the target hour (see scripts/load_test/generate_synthetic_traffic.py).
 #
 # Usage:
 #   scripts/dev/loadtest_probe.sh serial     <svc> <hour-start-utc> [iters]
@@ -130,7 +130,7 @@ cmd_concurrent() {
 
 cmd_endpoints() {
   local svc="$1" start="$2" end="$3"
-  echo "=== endpoints: 8 read endpoints against ${svc} window=${start}..${end} ==="
+  echo "=== endpoints: 7 read endpoints against ${svc} window=${start}..${end} ==="
   _probe() {
     local path="$1" body="$2" desc="$3"
     local tmp; tmp=$(mktemp)
@@ -146,7 +146,6 @@ cmd_endpoints() {
     rm -f "${tmp}"
   }
   _probe "/api/dashboard/aggregates" "{\"start_time\":\"${start}\",\"end_time\":\"${end}\",\"filters\":{},\"chart_interval\":\"1 minute\",\"chart_metric\":\"requests\"}" "dashboard/aggregates"
-  _probe "/api/dashboard/raw" "{\"start_time\":\"${start}\",\"end_time\":\"${end}\",\"filters\":{},\"page\":1,\"limit\":50,\"sort\":[]}" "dashboard/raw"
   _probe "/api/dashboard/field-values" "{\"start_time\":\"${start}\",\"end_time\":\"${end}\",\"field\":\"country\",\"limit\":100}" "dashboard/field-values"
   _probe "/api/security/aggregates" "{\"start_time\":\"${start}\",\"end_time\":\"${end}\",\"filters\":{}}" "security/aggregates"
   _probe "/api/network-health" "{\"start_time\":\"${start}\",\"end_time\":\"${end}\",\"filters\":{},\"metric\":\"health_score\",\"bucket_seconds\":60,\"top_n\":30}" "network-health"

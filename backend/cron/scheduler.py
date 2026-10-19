@@ -11,13 +11,14 @@ compat shim was retired 2026-07-06 — import directly from here or from
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 import os
 import sys
 import threading
 import time
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 # Anchor the logger to the historical ``backend.scheduler`` name so
 # log filters in tests (and downstream parsers) keep working after
@@ -63,6 +64,54 @@ def dev_mode_no_crons() -> bool:
     the cron settings modal.
     """
     return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
+
+
+def partial_hour_merge_enabled() -> bool:
+    return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
+
+
+def partial_hour_merge_interval_sec() -> int:
+    try:
+        val = int(os.environ.get("PARTIAL_HOUR_MERGE_INTERVAL_SEC", "30"))
+        return max(10, min(120, val))
+    except (ValueError, TypeError):
+        return 30
+
+
+def dev_local_crons_enabled() -> bool:
+    return os.environ.get("FLA_DEV_LOCAL_CRONS", "true").lower() in ("1", "true", "yes")
+
+
+def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], default_request_interval: int) -> int:
+    """Resolve the RUM ingest sync/discovery interval in seconds.
+
+    If an operator explicitly configured ``sync_interval_seconds`` in RUM settings,
+    respect it for backwards-compatibility.
+    Otherwise, derive the sync interval from the RUM log rotation period:
+      - If rum_log_period >= 60: max(5, rum_log_period // 2)
+      - If rum_log_period < 60: max(5, rum_log_period)
+    If no RUM log period is configured, fall back to the request log sync interval.
+    """
+    if "sync_interval_seconds" in rum_cfg and rum_cfg["sync_interval_seconds"] is not None:
+        try:
+            return max(5, int(rum_cfg["sync_interval_seconds"]))
+        except (ValueError, TypeError):
+            pass
+
+    rum_log_period = rum_cfg.get("log_period")
+    if rum_log_period is None:
+        rum_log_period = cfg.get("rum_log_period")
+
+    if rum_log_period is not None:
+        try:
+            period_val = int(rum_log_period)
+            if period_val >= 60:
+                return max(5, period_val // 2)
+            return max(5, period_val)
+        except (ValueError, TypeError):
+            pass
+
+    return max(5, int(default_request_interval))
 
 
 def _display_name(src: dict, fallback: str) -> str:
@@ -236,7 +285,11 @@ def _log_and_add_progress(
         else:
             icon = TYPE_ICONS.get(t, "ℹ️ ")
 
-        prefix = f"{icon}{c}[{job_name}]{c_end}"
+        display_job_name = job_name
+        if display_job_name == "sync":
+            display_job_name = "log_discovery"
+
+        prefix = f"{icon}{c}[{display_job_name}]{c_end}"
         # Read the logger from module globals at call time so tests that
         # ``patch("backend.cron.scheduler.logger")`` intercept these calls.
         log = logger
@@ -348,22 +401,61 @@ class Scheduler:
     """Thin wrapper around APScheduler's BackgroundScheduler."""
 
     def __init__(self) -> None:
+        import os
+
+        self.mode = os.environ.get("SCHEDULER_MODE", "inprocess")
+        from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
         from apscheduler.schedulers.background import BackgroundScheduler
 
-        self._sched = BackgroundScheduler(timezone=UTC)
+        executors = {
+            "default": APSThreadPoolExecutor(10),
+            "streaming": APSThreadPoolExecutor(10),
+            "maintenance": APSThreadPoolExecutor(3),
+        }
+        self._sched = BackgroundScheduler(timezone=UTC, executors=executors)
         # Track per-service job IDs so we can replace them when settings change.
         self._job_ids: dict[str, str] = {}  # job_id -> job_id
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    # Jobs that go to RedBeat (Celery workers) in external mode: the
+    # ledger/FOS family that never opens the per-service .duckdb file.
+    # EVERYTHING ELSE stays on this process's APScheduler even in external
+    # mode — rollup/compaction/alerts/view-refresh jobs read the pod-local
+    # DuckDB file and cache, which is single-writer across processes: run
+    # from a worker they either fight the backend's readers for the file
+    # lock or (metric_snapshot) sample the wrong process's vitals. The
+    # allowlist is deliberately tight so a NEW job defaults to backend-local
+    # unless explicitly promoted to the worker fleet.
+    _REDBEAT_JOB_PREFIXES = (
+        "log_discovery_",
+        "commit_",
+        "ledger_sweep_",
+        "full_sync_",
+        "gap_heal_",
+        "rum_discovery_",
+        "ledger_rum_sweep_",
+    )
+
+    def _routes_to_redbeat(self, job_id: str) -> bool:
+        return self.mode == "external" and str(job_id).startswith(self._REDBEAT_JOB_PREFIXES)
+
     def start(self) -> None:
+        if self.mode == "external":
+            logger.info(
+                "[scheduler] External mode: ledger/FOS jobs -> RedBeat (workers); "
+                "pod-local jobs (rollups/compaction/alerts/snapshots) -> in-process APScheduler."
+            )
+            self._sync_jobs()
+            self._sched.start()
+            return
         """Start the scheduler and register jobs for all configured services."""
         if dev_mode_no_crons():
             logger.warning(
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
                 "(sync/full_sweep/gap_heal/commit/optimize/expire/ngwaf_sync/metadata_cleanup/"
                 "bot_data_refresh/rdns/alerts). Registering ONLY local-safe jobs (local_compact, "
-                "rollup_compact) that touch the local cache only. "
+                "rollup_compact, insights_prewarmer) that touch the local cache only. "
                 "HTTP API calls (including /api/admin/rebuild-local-view) remain functional."
             )
             self._register_dev_local_safe_jobs()
@@ -406,7 +498,7 @@ class Scheduler:
             if cfg.get("access_level") == "read_only" and sync_cfg.get("enabled", True):
                 try:
                     # Run in background so we don't block the lifespan startup
-                    self._sched.add_job(
+                    self._add_job(
                         _run_metadata_sync, args=[service_id], id=f"initial_sync_{service_id}", replace_existing=True
                     )
                 except Exception:
@@ -455,42 +547,68 @@ class Scheduler:
 
     # ── Job management ────────────────────────────────────────────────────────
 
-    def _register_alerts_evaluation_job(self, service_id: str, seconds: int, seen_ids: set[str]) -> None:
+    def _register_alerts_evaluation_job(
+        self, service_id: str, seconds: int, seen_ids: set[str], enabled: bool = True
+    ) -> None:
         """Register (or reschedule) the per-service alerts-evaluation cron
         job. Gated on having at least one alert configured — otherwise the
         cron just fires a "skipped" log every tick. Shared between the
         analyst (read-only) and admin paths in :func:`_sync_jobs`; the only
         per-path difference is the tick interval, so we take it as ``seconds``.
         """
+        if not enabled:
+            return
         from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
         if not _service_has_alerts(service_id):
             return
         alert_job_id = f"alerts_evaluation_{service_id}"
         seen_ids.add(alert_job_id)
-        if alert_job_id in self._job_ids:
-            try:
-                job = self._sched.get_job(alert_job_id)
-                if job:
-                    job.reschedule("interval", seconds=seconds)
-            except Exception:
-                pass
-        else:
-            self._sched.add_job(
-                _run_service_alerts_evaluation,
-                "interval",
-                seconds=seconds,
-                id=alert_job_id,
-                args=[service_id],
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=60,
-            )
-            self._job_ids[alert_job_id] = alert_job_id
+        if self._reschedule_or_add_job(
+            _run_service_alerts_evaluation,
+            "interval",
+            seconds=seconds,
+            id=alert_job_id,
+            args=[service_id],
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        ):
             logger.info(
                 "🔔 [scheduler] Registered alerts evaluation job %s (every %ds).",
                 alert_job_id,
                 seconds,
+            )
+
+    def _register_insights_prewarmer_job(self, service_id: str, seen_ids: set[str], prov: dict) -> None:
+        """Register (or reschedule) the per-service insights cache prewarmer.
+        Runs for both admin and analyst services so users land on a prewarmed cache.
+        """
+        from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
+
+        cron_ip = prov.get("cron_insights_prewarmer", {})
+        if not cron_ip.get("enabled", True):
+            return
+
+        interval_seconds = int(cron_ip.get("interval_seconds", 240))
+        ip_job_id = f"insights_prewarmer_{service_id}"
+        seen_ids.add(ip_job_id)
+        if self._reschedule_or_add_job(
+            _run_insights_prewarmer,
+            "interval",
+            seconds=interval_seconds,
+            jitter=15,
+            reschedule_kwargs={"seconds": interval_seconds, "jitter": 15},
+            args=[service_id],
+            id=ip_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=360,
+        ):
+            logger.info(
+                "🔥 [scheduler] Registered insights_prewarmer job %s (every %ds).",
+                ip_job_id,
+                interval_seconds,
             )
 
     def _register_recycle_job(self, seen_ids: set[str] | None = None) -> None:
@@ -513,7 +631,7 @@ class Scheduler:
         if seen_ids is not None:
             seen_ids.add(recycle_id)
         if recycle_id not in self._job_ids:
-            self._sched.add_job(
+            self._add_job(
                 run_duckdb_recycle,
                 "interval",
                 minutes=recycle_interval,
@@ -521,32 +639,67 @@ class Scheduler:
                 max_instances=1,
                 coalesce=True,
                 misfire_grace_time=120,
+                executor="maintenance",
             )
             self._job_ids[recycle_id] = recycle_id
             logger.info(
-                "♻️  \x1b[35m[recycle]\x1b[0m Registered DuckDB instance recycle job (every %gm).",
+                "♻️  \x1b[35m[recycle]\x1b[0m Registered DuckDB instance recycle job (every %gm, executor=maintenance).",
                 recycle_interval,
             )
+
+    def _register_metric_snapshot_job(self, seen_ids: set[str] | None = None) -> None:
+        """Register the minute-cadence operational-vital snapshot job.
+
+        Local-safe (samples local host/process/db vitals, zero FOS writes,
+        zero outbound calls), so it is registered from BOTH _sync_jobs and
+        _register_dev_local_safe_jobs.
+        """
+        from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
+
+        snapshot_id = "metric_snapshot"
+        if seen_ids is not None:
+            seen_ids.add(snapshot_id)
+        if snapshot_id not in self._job_ids:
+            self._add_job(
+                _run_metric_snapshot,
+                "interval",
+                seconds=60,
+                jitter=5,
+                id=snapshot_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
+            self._job_ids[snapshot_id] = snapshot_id
+            logger.info("📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).")
 
     def _register_dev_local_safe_jobs(self) -> None:
         """FLA_DEV_NO_CRONS allowlist: register ONLY the local-only jobs.
 
-        ``local_compact`` + ``rollup_compact`` + ``rollup_heal`` rewrite
-        the local parquet cache and never touch the shared FOS bucket or
-        send anything outbound, so they're safe to run against a dev
-        backend that reads the same FOS bucket as prod. Everything else
-        stays gated off (see :func:`dev_mode_no_crons`); the FOS-writing
-        jobs (``optimize``/``commit``/``expire``) are deliberately NOT here.
+        ``local_compact`` + ``rollup_compact`` + ``rollup_heal`` +
+        ``partial_hour_merge`` + ``insights_prewarmer`` rewrite or prewarm
+        the local cache and never touch the shared FOS bucket or send
+        anything outbound, so they're safe to run against a dev backend that
+        reads the same FOS bucket as prod. Everything else stays gated off
+        (see :func:`dev_mode_no_crons`); the FOS-writing jobs
+        (``optimize``/``commit``/``expire``) are deliberately NOT here.
 
-        Mirrors the trigger config of the same three jobs in
-        :meth:`_sync_jobs` — keep them in sync. Runs once at startup;
+        Mirrors the trigger config of the same jobs in :meth:`_sync_jobs` —
+        keep them in sync. Runs once at startup;
         :meth:`reload` stays a no-op under the kill switch so a dev config
         save can't sneak the gated jobs back in.
         """
+        if not dev_local_crons_enabled():
+            logger.warning("🚫 [scheduler] FLA_DEV_LOCAL_CRONS=0 — no dev-local-safe jobs registered.")
+            return
+
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
+        from backend.cron.jobs.partial_hour import _run_partial_hour_merge
+        from backend.high_scale.registry import get_high_scale_service_registry
 
+        seen_ids: set[str] = set()
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id", "")
             if not service_id:
@@ -554,23 +707,59 @@ class Scheduler:
             src = get_source_for_service(service_id)
             if not src or not is_configured(src):
                 continue
+            if get_high_scale_service_registry().resolve(service_id) is not None:
+                logger.info(
+                    "⏭️  [scheduler] (dev-local) Skipping legacy local jobs for high-scale service %s.", service_id
+                )
+                continue
+
+            prov = cfg.get("provisioning", {})
 
             # local_compact — local-only parquet compaction, always-on
-            # (no config/access gate), every 2 min. Matches _sync_jobs.
+            # (no config/access gate), every 2 min (or LOCAL_COMPACT_INTERVAL_MIN). Matches _sync_jobs.
             lc_job_id = f"local_compact_{service_id}"
             if lc_job_id not in self._job_ids:
-                self._sched.add_job(
+                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
+                self._add_job(
                     _run_local_compact,
                     "interval",
-                    minutes=2,
+                    minutes=lc_interval_mins,
+                    jitter=10,
                     args=[service_id],
                     id=lc_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=120,
+                    misfire_grace_time=60,
                 )
                 self._job_ids[lc_job_id] = lc_job_id
-                logger.info("⚙️  [scheduler] (dev-local) Registered %s (every 2 min, local-only).", lc_job_id)
+                logger.info(
+                    "⚙️  [scheduler] (dev-local) Registered %s (every %d min, local-only).", lc_job_id, lc_interval_mins
+                )
+
+            # partial_hour_merge — local-only partial-hour rollup merge,
+            # always-on, every 30s (or PARTIAL_HOUR_MERGE_INTERVAL_SEC). Same local-only
+            # safety profile as local_compact (never touches the shared FOS bucket),
+            # so it belongs in the dev-safe allowlist too. Matches _sync_jobs.
+            ph_job_id = f"partial_hour_merge_{service_id}"
+            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
+                ph_interval_sec = partial_hour_merge_interval_sec()
+                self._add_job(
+                    _run_partial_hour_merge,
+                    "interval",
+                    seconds=ph_interval_sec,
+                    jitter=5,
+                    args=[service_id],
+                    id=ph_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                )
+                self._job_ids[ph_job_id] = ph_job_id
+                logger.info(
+                    "⚡ [scheduler] (dev-local) Registered %s (every %ds, local-only).",
+                    ph_job_id,
+                    ph_interval_sec,
+                )
 
             # rollup_compact — local-only per-day rollup compaction, daily
             # 02:00 UTC, gated on cron_compact.enabled + read-write.
@@ -580,7 +769,7 @@ class Scheduler:
             if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
                 rc_job_id = f"rollup_compact_{service_id}"
                 if rc_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_rollup_compact_daily,
                         "cron",
                         hour=2,
@@ -599,10 +788,11 @@ class Scheduler:
                 # _sync_jobs.
                 rh_job_id = f"rollup_heal_{service_id}"
                 if rh_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_rollup_hour_heal,
                         "cron",
                         minute=5,
+                        next_run_time=datetime.now(UTC) + timedelta(seconds=30),
                         args=[service_id],
                         id=rh_job_id,
                         max_instances=1,
@@ -611,6 +801,15 @@ class Scheduler:
                     )
                     self._job_ids[rh_job_id] = rh_job_id
                     logger.info("🩹 [scheduler] (dev-local) Registered %s (hourly at :05).", rh_job_id)
+
+            # insights_prewarmer — local-safe read-only cache prewarmer,
+            # populates in-memory cache, never touches FOS or writes data.
+            # Permitted under FLA_DEV_NO_CRONS=1.
+            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
+
+        # Operational-vital snapshots is local-safe (samples local host/process/db
+        # vitals, no FOS writes) → safe under the dev kill switch.
+        self._register_metric_snapshot_job()
 
         # DuckDB instance recycle is local-safe (closes/reopens local conns,
         # no FOS writes) → safe under the dev kill switch. Still OFF unless
@@ -625,7 +824,6 @@ class Scheduler:
         from backend.cron.jobs.commit import _run_commit
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.expire import _run_expire_snapshots
-        from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
             _run_metadata_cleanup,
@@ -635,12 +833,24 @@ class Scheduler:
             _run_share_audit_purge,
         )
         from backend.cron.jobs.optimize import _run_optimize
+        from backend.cron.jobs.partial_hour import _run_partial_hour_merge
         from backend.cron.jobs.rum_commit import _run_rum_commit
         from backend.cron.jobs.rum_sync import _run_rum_sync
-        from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal, _run_service_cron
+        from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal
+        from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
 
         configs = svcconfig.list_configs()
         seen_ids: set[str] = set()
+
+        if self.mode == "external":
+            # RedBeat entry.save() is an upsert, so re-registering every
+            # redbeat-routed job on each reload is cheap and is what lets an
+            # interval change from a config edit take effect. ONLY the
+            # redbeat-routed ids are cleared — the pod-local jobs live on the
+            # real APScheduler where re-adding an existing id raises, and its
+            # reschedule path below handles their interval changes.
+            for jid in [j for j in self._job_ids if str(j).startswith(self._REDBEAT_JOB_PREFIXES)]:
+                del self._job_ids[jid]
 
         for cfg in configs:
             service_id = cfg.get("service_id", "")
@@ -676,32 +886,26 @@ class Scheduler:
             # it on-demand immediately after a successful 'commit' to stay in sync.
             sync_metadata_id = f"sync_metadata_{service_id}"
             if is_readonly:
-                seen_ids.add(sync_metadata_id)
+                meta_cfg = prov.get("cron_metadata_sync", {})
+                if meta_cfg.get("enabled", True):
+                    meta_interval = int(meta_cfg.get("interval_seconds") or interval_seconds)
+                    seen_ids.add(sync_metadata_id)
 
-                if sync_metadata_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(sync_metadata_id)
-                        if job:
-                            job.reschedule("interval", seconds=interval_seconds)
-                    except Exception:
-                        pass
-                else:
                     # Start immediately so the dashboard isn't slow/empty
-                    self._sched.add_job(
+                    if self._reschedule_or_add_job(
                         _run_metadata_sync,
                         "interval",
-                        seconds=interval_seconds,
+                        seconds=meta_interval,
                         id=sync_metadata_id,
                         replace_existing=True,
                         start_date=None,
                         args=[service_id],
                         coalesce=True,
                         misfire_grace_time=60,
-                    )
-                    self._job_ids[sync_metadata_id] = sync_metadata_id
-                    logger.info(
-                        "[scheduler] Registered metadata sync job %s (every %ds).", sync_metadata_id, interval_seconds
-                    )
+                    ):
+                        logger.info(
+                            "[scheduler] Registered metadata sync job %s (every %ds).", sync_metadata_id, meta_interval
+                        )
 
                 # ── Alerts evaluation job for analysts ────────────────────────
                 # Analysts evaluate alerts against their locally-cached data,
@@ -709,7 +913,13 @@ class Scheduler:
                 # When the user adds an alert, the alerts router calls
                 # scheduler.reload() to register the job; deleting the last
                 # alert lets the cleanup loop unregister it on the next sync.
-                self._register_alerts_evaluation_job(service_id, interval_seconds, seen_ids)
+                alerts_cfg = prov.get("cron_alerts", {})
+                alerts_enabled = alerts_cfg.get("enabled", True)
+                alerts_seconds = int(alerts_cfg.get("interval_seconds") or interval_seconds)
+                self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
+
+                # ── Insights prewarmer job for analysts ───────────────────────
+                self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
                 # Analysts don't ingest or commit — skip the rest.
                 continue
@@ -719,7 +929,7 @@ class Scheduler:
                 pass
 
             # ── Sync job (ingest raw files from FOS → local buffer) ───────────
-            job_id = f"sync_{service_id}"
+            job_id = f"log_discovery_{service_id}"
             seen_ids.add(job_id)
 
             if job_id in self._job_ids:
@@ -727,12 +937,14 @@ class Scheduler:
                     job = self._sched.get_job(job_id)
                     if job:
                         job.reschedule("interval", seconds=interval_seconds)
-                        logger.info("[scheduler] Rescheduled sync job %s to every %ds.", job_id, interval_seconds)
+                        logger.info(
+                            "[scheduler] Rescheduled log_discovery job %s to every %ds.", job_id, interval_seconds
+                        )
                 except Exception as e:
                     logger.error("[scheduler] Failed to reschedule sync job %s: %s", job_id, e)
             else:
                 # Start immediately so the dashboard isn't slow/empty
-                self._sched.add_job(
+                self._add_job(
                     _run_service_cron,
                     "interval",
                     seconds=interval_seconds,
@@ -745,94 +957,145 @@ class Scheduler:
                     misfire_grace_time=60,
                 )
                 self._job_ids[job_id] = job_id
-                logger.info("🔄 [scheduler] Registered sync job %s (every %ds).", job_id, interval_seconds)
+                logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
 
             # ── Commit job (flush local buffer → Iceberg snapshot in FOS) ─────
             commit_job_id = f"commit_{service_id}"
             seen_ids.add(commit_job_id)
 
-            if commit_job_id in self._job_ids:
-                try:
-                    job = self._sched.get_job(commit_job_id)
-                    if job:
-                        job.reschedule("interval", minutes=commit_interval_mins)
-                except Exception:
-                    pass
-            else:
-                self._sched.add_job(
-                    _run_commit,
-                    "interval",
-                    minutes=commit_interval_mins,
-                    jitter=30,
-                    args=[service_id],
-                    id=commit_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=commit_interval_mins * 60,
-                )
-                self._job_ids[commit_job_id] = commit_job_id
+            if self._reschedule_or_add_job(
+                _run_commit,
+                "interval",
+                minutes=commit_interval_mins,
+                jitter=30,
+                args=[service_id],
+                id=commit_job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=commit_interval_mins * 60,
+            ):
                 logger.info(
                     "📦 [scheduler] Registered commit job %s (every %dm).",
                     commit_job_id,
                     commit_interval_mins,
                 )
 
-            # ── RUM sync job (ingest RUM beacons from FOS) ─────────────────────
-            # Only register if RUM is enabled for this service
-            rum_cfg = cfg.get("rum", {})
-            rum_enabled = bool(cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False))
-            if rum_enabled:
-                rum_sync_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))
+            # ── Ledger sweep (celery-mode crash net) ───────────────────────────
+            # Reclaims stale ingest_ledger claims, re-dispatches stuck rows, and
+            # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
+            # the previous `now.minute % 15 == 0` gate inside the discovery tick
+            if svcconfig.is_high_scale_mode(src):
+                from backend.cron.jobs.ledger import _run_ledger_sweep
+
+                sweep_cfg = prov.get("cron_ledger_sweep", {})
+                if sweep_cfg.get("enabled", True):
+                    sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
+                    sweep_job_id = f"ledger_sweep_{service_id}"
+                    seen_ids.add(sweep_job_id)
+                    if self._reschedule_or_add_job(
+                        _run_ledger_sweep,
+                        "interval",
+                        minutes=sweep_interval_mins,
+                        args=[service_id],
+                        id=sweep_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=300,
+                    ):
+                        logger.info(
+                            "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
+                            sweep_job_id,
+                            sweep_interval_mins,
+                        )
+
+            # ── RUM ingest jobs (ingest RUM beacons from FOS) ──────────────────
+            # Only register if RUM is enabled for this service. Celery mode
+            # gets the ledger-based, per-file-fanout jobs (mirroring
+            # log_discovery_/ledger_sweep_ above); non-celery mode keeps the
+            # original single-job-per-service rum_sync_{id}/rum_commit_{id}
+            # pair completely unchanged. The two pipelines must never both
+            # be registered for the same service — they'd double-ingest
+            # into the same DuckLake client_vitals/client_errors tables via
+            # independent dedup registries that don't know about each other.
+            rum_cfg = cfg.get("rum")
+            rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+            rum_enabled = svcconfig.is_rum_enabled(cfg)
+            if rum_enabled and svcconfig.is_high_scale_mode(src):
+                from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
+
+                rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
+                rum_disc_job_id = f"rum_discovery_{service_id}"
+                seen_ids.add(rum_disc_job_id)
+                if self._reschedule_or_add_job(
+                    _run_rum_discovery_cron,
+                    "interval",
+                    seconds=rum_disc_interval_secs,
+                    args=[service_id],
+                    id=rum_disc_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
+                    logger.info(
+                        "[scheduler] Registered RUM discovery job %s (every %ds).",
+                        rum_disc_job_id,
+                        rum_disc_interval_secs,
+                    )
+
+                rum_sweep_cfg = prov.get("cron_ledger_rum_sweep") or prov.get("cron_rum_ledger_sweep") or {}
+                if rum_sweep_cfg.get("enabled", True):
+                    rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
+                    rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
+                    seen_ids.add(rum_sweep_job_id)
+                    if self._reschedule_or_add_job(
+                        _run_rum_ledger_sweep,
+                        "interval",
+                        minutes=rum_sweep_interval_mins,
+                        args=[service_id],
+                        id=rum_sweep_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=300,
+                    ):
+                        logger.info(
+                            "🧹 [scheduler] Registered ledger_rum_sweep job %s (every %dm).",
+                            rum_sweep_job_id,
+                            rum_sweep_interval_mins,
+                        )
+            elif rum_enabled:
+                rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_sync_job_id = f"rum_sync_{service_id}"
                 seen_ids.add(rum_sync_job_id)
 
-                if rum_sync_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(rum_sync_job_id)
-                        if job:
-                            job.reschedule("interval", seconds=rum_sync_interval_secs)
-                    except Exception:
-                        pass
-                else:
-                    self._sched.add_job(
-                        _run_rum_sync,
-                        "interval",
-                        seconds=rum_sync_interval_secs,
-                        args=[service_id],
-                        id=rum_sync_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[rum_sync_job_id] = rum_sync_job_id
+                if self._reschedule_or_add_job(
+                    _run_rum_sync,
+                    "interval",
+                    seconds=rum_sync_interval_secs,
+                    args=[service_id],
+                    id=rum_sync_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
                     logger.info(
                         "[scheduler] Registered RUM sync job %s (every %ds).", rum_sync_job_id, rum_sync_interval_secs
                     )
 
                 # ── RUM commit job (compact RUM tables) ──────────────────────
-                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", commit_interval_mins)))
+                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
                 rum_commit_job_id = f"rum_commit_{service_id}"
                 seen_ids.add(rum_commit_job_id)
 
-                if rum_commit_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(rum_commit_job_id)
-                        if job:
-                            job.reschedule("interval", minutes=rum_commit_interval_mins)
-                    except Exception:
-                        pass
-                else:
-                    self._sched.add_job(
-                        _run_rum_commit,
-                        "interval",
-                        minutes=rum_commit_interval_mins,
-                        args=[service_id],
-                        id=rum_commit_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[rum_commit_job_id] = rum_commit_job_id
+                if self._reschedule_or_add_job(
+                    _run_rum_commit,
+                    "interval",
+                    minutes=rum_commit_interval_mins,
+                    args=[service_id],
+                    id=rum_commit_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
                     logger.info(
                         "[scheduler] Registered RUM commit job %s (every %dm).",
                         rum_commit_job_id,
@@ -841,27 +1104,35 @@ class Scheduler:
 
             # ── Alerts evaluation job (Per Service) ───────────────────────────
             # See note above (analyst branch) on the no-alerts gate.
-            self._register_alerts_evaluation_job(service_id, log_period, seen_ids)
+            alerts_cfg = prov.get("cron_alerts", {})
+            alerts_enabled = alerts_cfg.get("enabled", True)
+            alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
+            self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
 
-            # ── Daily full-LIST sweep (catches late-arriving files) ───────────
+            # ── Full-LIST sweep (catches late-arriving files, every 6h) ───────
             full_sweep_cfg = prov.get("cron_full_sweep", {})
             if full_sweep_cfg.get("enabled", True):
                 full_job_id = f"full_sync_{service_id}"
                 seen_ids.add(full_job_id)
-                if full_job_id not in self._job_ids:
-                    self._sched.add_job(
-                        _run_full_sweep,
-                        "cron",
-                        hour=3,
-                        minute=30,  # 03:30 UTC — runs before optimize (04:00)
-                        args=[service_id],
-                        id=full_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
+                cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
+                cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
+                if self._reschedule_or_add_job(
+                    _run_full_sweep,
+                    "cron",
+                    hour=cron_hours,
+                    minute=cron_minute,  # 03:30, 09:30, 15:30, 21:30 UTC
+                    args=[service_id],
+                    id=full_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                ):
+                    logger.info(
+                        "🔍 [scheduler] Registered full-sweep job %s (hours: %s at :%02d UTC).",
+                        full_job_id,
+                        cron_hours,
+                        cron_minute,
                     )
-                    self._job_ids[full_job_id] = full_job_id
-                    logger.info("🔍 [scheduler] Registered full-sweep job %s (daily 03:30 UTC).", full_job_id)
 
             # ── Gap-heal evaluator (auto full_sweep on sustained loss) ────────
             # Polls compute_log_accounting every 30 min; when sustained loss
@@ -878,22 +1149,21 @@ class Scheduler:
             if heal_cfg.get("enabled", True) and has_logging_svc:
                 heal_job_id = f"gap_heal_{service_id}"
                 seen_ids.add(heal_job_id)
-                if heal_job_id not in self._job_ids:
-                    self._sched.add_job(
-                        _run_gap_heal,
-                        "interval",
-                        minutes=int(heal_cfg.get("interval_minutes", 30)),
-                        args=[service_id],
-                        id=heal_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=600,
-                    )
-                    self._job_ids[heal_job_id] = heal_job_id
+                interval_mins = int(heal_cfg.get("interval_minutes", 30))
+                if self._reschedule_or_add_job(
+                    _run_gap_heal,
+                    "interval",
+                    minutes=interval_mins,
+                    args=[service_id],
+                    id=heal_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=600,
+                ):
                     logger.info(
                         "🩹 [scheduler] Registered gap-heal job %s (every %d min).",
                         heal_job_id,
-                        int(heal_cfg.get("interval_minutes", 30)),
+                        interval_mins,
                     )
 
             # ── Daily optimize job (Iceberg small-file compaction) ────────────
@@ -902,7 +1172,7 @@ class Scheduler:
                 opt_job_id = f"optimize_{service_id}"
                 seen_ids.add(opt_job_id)
                 if opt_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_optimize,
                         "cron",
                         hour=4,
@@ -931,44 +1201,59 @@ class Scheduler:
             lc_job_id = f"local_compact_{service_id}"
             seen_ids.add(lc_job_id)
             if lc_job_id not in self._job_ids:
-                self._sched.add_job(
+                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
+                self._add_job(
                     _run_local_compact,
                     "interval",
-                    minutes=2,
-                    jitter=15,
+                    minutes=lc_interval_mins,
+                    jitter=10,
                     args=[service_id],
                     id=lc_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=120,
+                    misfire_grace_time=60,
                 )
                 self._job_ids[lc_job_id] = lc_job_id
-                logger.info("⚙️  [scheduler] Registered local_compact job %s (every 2 min, local-only).", lc_job_id)
+                logger.info(
+                    "⚙️  [scheduler] Registered local_compact job %s (every %d min, local-only).",
+                    lc_job_id,
+                    lc_interval_mins,
+                )
 
-            # ── Insights cache prewarmer (perf #76) ───────────────────────────
-            # 240 s cadence — just under the 300 s INSIGHTS_CACHE_TTL so the
-            # default (window=1h, baseline=168h) selection never expires
-            # between prewarmer ticks. Runs for both admin and analyst
-            # services since the insights tab is visible to both.
-            ip_job_id = f"insights_prewarmer_{service_id}"
-            seen_ids.add(ip_job_id)
-            if ip_job_id not in self._job_ids:
-                self._sched.add_job(
-                    _run_insights_prewarmer,
+            # ── Partial-hour incremental merge (speed layer) ──────────────────
+            # 30s cadence — folds newly-landed buffer/active-hour-partition
+            # files into the pod-local partial-hour rollup so the active-hour
+            # live scan (execute_top_n_rollups / try_time_series_from_rollup /
+            # try_count_from_rollup) only needs to cover "since the last tick"
+            # instead of "since the top of the hour". Always-on like
+            # local_compact — benefits file-mode and durable-mode services
+            # alike. Back off to a longer interval here (and in the misfire
+            # grace) if profiling shows contention with request-serving.
+            ph_job_id = f"partial_hour_merge_{service_id}"
+            if partial_hour_merge_enabled():
+                seen_ids.add(ph_job_id)
+            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
+                ph_interval_sec = partial_hour_merge_interval_sec()
+                self._add_job(
+                    _run_partial_hour_merge,
                     "interval",
-                    seconds=240,
-                    jitter=15,
+                    seconds=ph_interval_sec,
+                    jitter=5,
                     args=[service_id],
-                    id=ip_job_id,
+                    id=ph_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=360,
+                    misfire_grace_time=60,
                 )
-                self._job_ids[ip_job_id] = ip_job_id
+                self._job_ids[ph_job_id] = ph_job_id
                 logger.info(
-                    "🔥 [scheduler] Registered insights_prewarmer job %s (every 240s).",
-                    ip_job_id,
+                    "⚡ [scheduler] Registered partial_hour_merge job %s (every %ds, local-only).",
+                    ph_job_id,
+                    ph_interval_sec,
                 )
+
+            # ── Insights cache prewarmer (perf #76) ───────────────────────────
+            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
             # ── Daily rollup compaction (per-day parquet from per-hour) ────
             # 02:00 UTC — runs before optimize (04:00) so per-day rollups
@@ -978,7 +1263,7 @@ class Scheduler:
                 rc_job_id = f"rollup_compact_{service_id}"
                 seen_ids.add(rc_job_id)
                 if rc_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_rollup_compact_daily,
                         "cron",
                         hour=2,
@@ -1007,10 +1292,11 @@ class Scheduler:
                 rh_job_id = f"rollup_heal_{service_id}"
                 seen_ids.add(rh_job_id)
                 if rh_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_rollup_hour_heal,
                         "cron",
                         minute=5,
+                        next_run_time=datetime.now(UTC) + timedelta(seconds=30),
                         args=[service_id],
                         id=rh_job_id,
                         max_instances=1,
@@ -1040,12 +1326,12 @@ class Scheduler:
             # recoverability — the 2026-08 rollback was recovered precisely
             # because old metadata still existed — so it is operator-tunable
             # (``cron_sync.keep_snapshot_days``) and stays at 7 by default.
-            if compact_cfg.get("enabled", True):
+            if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
                 exp_job_id = f"expire_{service_id}"
                 seen_ids.add(exp_job_id)
                 expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))
                 if exp_job_id not in self._job_ids:
-                    self._sched.add_job(
+                    self._add_job(
                         _run_expire_snapshots,
                         "interval",
                         minutes=expire_interval_mins,
@@ -1079,28 +1365,20 @@ class Scheduler:
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
                 ngwaf_job_id = f"ngwaf_sync_{service_id}"
                 seen_ids.add(ngwaf_job_id)
-                if ngwaf_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(ngwaf_job_id)
-                        if job:
-                            job.reschedule("interval", minutes=ngwaf_interval_mins)
-                    except Exception:
-                        pass
-                else:
-                    self._sched.add_job(
-                        _run_ngwaf_bot_sync,
-                        "interval",
-                        minutes=ngwaf_interval_mins,
-                        jitter=15,
-                        args=[service_id],
-                        id=ngwaf_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=300,
-                    )
-                    self._job_ids[ngwaf_job_id] = ngwaf_job_id
+                if self._reschedule_or_add_job(
+                    _run_ngwaf_bot_sync,
+                    "interval",
+                    minutes=ngwaf_interval_mins,
+                    jitter=15,
+                    args=[service_id],
+                    id=ngwaf_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=300,
+                    executor="maintenance",
+                ):
                     logger.info(
-                        "👾 \x1b[36m[ngwaf_sync]\x1b[0m Registered NGWAF bot sync job %s (every %dm).",
+                        "👾 \x1b[36m[ngwaf_sync]\x1b[0m Registered NGWAF bot sync job %s (every %dm, executor=maintenance).",
                         ngwaf_job_id,
                         ngwaf_interval_mins,
                     )
@@ -1112,31 +1390,35 @@ class Scheduler:
             # + cron_runs per cfg["metadata_retention"]; defaults to 1d for
             # the first two and 7d for cron_runs. See
             # backend.core.metadata_db.cleanup_metadata.
-            cleanup_job_id = f"metadata_cleanup_{service_id}"
-            seen_ids.add(cleanup_job_id)
-            if cleanup_job_id not in self._job_ids:
-                self._sched.add_job(
+            cleanup_cfg = prov.get("cron_metadata_cleanup", {})
+            if cleanup_cfg.get("enabled", True) and not dev_mode_no_crons():
+                cleanup_job_id = f"metadata_cleanup_{service_id}"
+                seen_ids.add(cleanup_job_id)
+                cron_hour = int(cleanup_cfg.get("cron_hour", 3))
+                cron_minute = int(cleanup_cfg.get("cron_minute", 15))
+                if self._reschedule_or_add_job(
                     _run_metadata_cleanup,
                     "cron",
-                    hour=3,
-                    minute=15,
+                    hour=cron_hour,
+                    minute=cron_minute,
                     args=[service_id],
                     id=cleanup_job_id,
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=3600,
-                )
-                self._job_ids[cleanup_job_id] = cleanup_job_id
-                logger.info(
-                    "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily 03:15 UTC).",
-                    cleanup_job_id,
-                )
+                ):
+                    logger.info(
+                        "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily %02d:%02d UTC).",
+                        cleanup_job_id,
+                        cron_hour,
+                        cron_minute,
+                    )
 
         # ── Bot data refresh job ──────────────────────────────────────────────
         bot_refresh_id = "bot_data_refresh"
         seen_ids.add(bot_refresh_id)
         if bot_refresh_id not in self._job_ids:
-            self._sched.add_job(
+            self._add_job(
                 _run_bot_data_refresh,
                 "cron",
                 hour=2,
@@ -1153,7 +1435,7 @@ class Scheduler:
         rdns_job_id = "rdns_enrichment"
         seen_ids.add(rdns_job_id)
         if rdns_job_id not in self._job_ids:
-            self._sched.add_job(
+            self._add_job(
                 _run_rdns_enrichment,
                 "interval",
                 minutes=5,
@@ -1174,7 +1456,7 @@ class Scheduler:
         share_purge_id = "share_audit_purge"
         seen_ids.add(share_purge_id)
         if share_purge_id not in self._job_ids:
-            self._sched.add_job(
+            self._add_job(
                 _run_share_audit_purge,
                 "cron",
                 hour=3,
@@ -1185,40 +1467,170 @@ class Scheduler:
                 misfire_grace_time=3600,
             )
             self._job_ids[share_purge_id] = share_purge_id
-            logger.info("🧹 \x1b[35m[share_audit_purge]\x1b[0m Registered share audit purge job (daily 03:45 UTC).")
+            logger.info(
+                "🧹 \x1b[35m[share_audit_purge]\x1b[0m Registered share audit purge job (daily 03:45 UTC, executor=maintenance)."
+            )
 
         # ── Operational-vital snapshots (Trends tab + System Health sparklines) ──
-        from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
-
-        snapshot_id = "metric_snapshot"
-        seen_ids.add(snapshot_id)
-        if snapshot_id not in self._job_ids:
-            self._sched.add_job(
-                _run_metric_snapshot,
-                "interval",
-                seconds=60,
-                jitter=5,
-                id=snapshot_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=60,
-            )
-            self._job_ids[snapshot_id] = snapshot_id
-            logger.info("📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).")
+        self._register_metric_snapshot_job(seen_ids)
 
         # DuckDB instance recycle (object-cache leak guard) — local-safe, so it
         # registers in both this path and the dev-local-safe path.
         self._register_recycle_job(seen_ids)
 
-        # Remove jobs for deleted services
-        stale = set(self._job_ids) - seen_ids
-        for job_id in stale:
+        # Cleanup
+        if self.mode == "external":
+            # Sweep Redis itself, not just this process's _job_ids: RedBeat
+            # entries persist across restarts, so a renamed/removed/relocated
+            # job otherwise keeps firing forever (observed as a KeyError storm
+            # in the worker after the sync→log_discovery rename). An entry is
+            # stale if it isn't a currently-seen id OR isn't redbeat-routed at
+            # all (a pod-local job left behind in Redis from before the
+            # backend-local/worker split). Leave celery's internal entries
+            # (e.g. celery.backend_cleanup) alone.
+            from redbeat import RedBeatSchedulerEntry
+
+            from backend.celery_app import app
+            from backend.celery_status import redbeat_schedule_entries
+
+            for stale in redbeat_schedule_entries():
+                name = stale["name"]
+                if name.startswith("celery."):
+                    continue
+                if name in seen_ids and self._routes_to_redbeat(name):
+                    continue
+                try:
+                    RedBeatSchedulerEntry.from_key(f"redbeat:{name}", app=app).delete()
+                    logger.info("[scheduler] Removed stale RedBeat entry %s (task=%s).", name, stale.get("task"))
+                except Exception as e:
+                    logger.warning("[scheduler] Failed to remove stale RedBeat entry %s: %s", name, e)
+                if self._routes_to_redbeat(name):
+                    self._job_ids.pop(name, None)
+
+        # Pod-local jobs (all jobs in inprocess mode; the non-redbeat family
+        # in external mode) are removed from the live APScheduler when their
+        # service/config disappears.
+        for jid in list(self._job_ids.keys()):
+            if jid in seen_ids or self._routes_to_redbeat(jid):
+                continue
             try:
-                self._sched.remove_job(job_id)
+                self._sched.remove_job(jid)
             except Exception:
                 pass
-            del self._job_ids[job_id]
-            logger.info("[scheduler] Removed stale job %s.", job_id)
+            logger.info("[scheduler] Removed stale job %s.", jid)
+            del self._job_ids[jid]
+
+    def _reschedule_or_add_job(self, func, trigger=None, *, reschedule_kwargs: dict | None = None, **kwargs) -> bool:
+        """Reschedule ``kwargs["id"]`` when it is already tracked, else add it.
+
+        Returns True when the job was newly added (so the caller logs its
+        "Registered ..." line), False when an existing job was rescheduled.
+        A missing/failed reschedule is swallowed: the next ``reload()`` retries.
+        By default only the trigger's own timing kwargs are re-applied
+        (``seconds``/``minutes``/``hours`` for interval, ``hour``/``minute`` for
+        cron); pass ``reschedule_kwargs`` to re-apply a different set. ``jitter``,
+        ``misfire_grace_time`` etc. only take effect when the job is first added.
+        """
+        job_id = kwargs["id"]
+        if job_id in self._job_ids:
+            if reschedule_kwargs is None:
+                keys = ("seconds", "minutes", "hours") if trigger == "interval" else ("hour", "minute")
+                reschedule_kwargs = {k: kwargs[k] for k in keys if k in kwargs}
+            try:
+                job = self._sched.get_job(job_id)
+                if job:
+                    job.reschedule(trigger, **reschedule_kwargs)
+            except Exception:
+                pass
+            return False
+        self._add_job(func, trigger, **kwargs)
+        self._job_ids[job_id] = job_id
+        return True
+
+    def _add_job(self, func, trigger=None, **kwargs):
+        job_id = kwargs.pop("id", None)
+        args = kwargs.pop("args", [])
+
+        if "executor" not in kwargs and job_id:
+            jid = str(job_id)
+            if jid.startswith(("log_discovery_", "rum_discovery_", "rum_sync_", "commit_", "sync_")):
+                kwargs["executor"] = "streaming"
+            elif jid.startswith(
+                (
+                    "insights_prewarmer_",
+                    "local_compact_",
+                    "rollup_compact_",
+                    "rollup_heal_",
+                    "metric_snapshot",
+                    "reconcile_fastly_",
+                    "metadata_cleanup",
+                    "rdns_enrichment",
+                    "rdns_refresh",
+                    "bot_data_refresh",
+                    "optimize_",
+                    "ngwaf_sync_",
+                    "share_audit_purge",
+                    "duckdb_recycle",
+                )
+            ):
+                kwargs["executor"] = "maintenance"
+            else:
+                kwargs["executor"] = "default"
+
+        if self.mode == "external" and not self._routes_to_redbeat(job_id):
+            # Pod-local job in external mode: schedule on this process's
+            # APScheduler exactly like inprocess mode (see the
+            # _REDBEAT_JOB_PREFIXES note above for why the split exists).
+            self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
+            self._job_ids[job_id] = job_id
+            return
+
+        if self.mode == "external":
+            from celery.schedules import crontab as celery_crontab
+            from celery.schedules import schedule as celery_schedule
+            from redbeat import RedBeatSchedulerEntry
+
+            from backend.celery_app import app
+
+            celery_task = getattr(func, "celery_task", None)
+            if celery_task is None:
+                # Scheduling an unregistered name makes beat fire KeyErrors
+                # forever with zero work done — refuse loudly instead.
+                logger.error(
+                    "[scheduler] Cannot schedule %s.%s in external mode: it has no "
+                    "registered Celery task (wrap it with @cron_task/@global_job or "
+                    "attach .celery_task). Job %s NOT scheduled.",
+                    func.__module__,
+                    func.__name__,
+                    job_id,
+                )
+                return
+            task_name = celery_task.name
+
+            if trigger == "interval":
+                secs = kwargs.get("seconds", 0) + kwargs.get("minutes", 0) * 60 + kwargs.get("hours", 0) * 3600
+                schedule = celery_schedule(run_every=secs)
+            elif trigger == "cron":
+                # APScheduler's cron trigger defaults unspecified lower-order
+                # fields to their MINIMUM (hour=2 ⇒ minute 0, once daily);
+                # celery's crontab defaults minute='*' (hour=2 ⇒ 60 runs/hour).
+                # Mirror APScheduler so daily jobs stay daily.
+                h = kwargs.get("hour", "*")
+                m = kwargs.get("minute", 0 if "hour" in kwargs else "*")
+                dow = kwargs.get("day_of_week", "*")
+                schedule = celery_crontab(minute=m, hour=h, day_of_week=dow)
+            else:
+                schedule = celery_schedule(run_every=60)
+
+            # entry.save() is an upsert keyed by name, so re-registering an
+            # existing job updates its schedule in place (interval changes
+            # from a config edit take effect on the next reload).
+            entry = RedBeatSchedulerEntry(job_id, task_name, schedule, args=args, app=app)
+            entry.save()
+            self._job_ids[job_id] = job_id
+        else:
+            self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
+            self._job_ids[job_id] = job_id
 
     def reload(self) -> None:
         """Re-read service configs and update all jobs. Call after adding/removing a service."""
@@ -1231,7 +1643,14 @@ class Scheduler:
         self._sync_jobs()
 
     def get_job(self, job_id: str):
-        """Return the APScheduler Job object for a given job ID, or None."""
+        """Return the APScheduler Job object for a given job ID, or None.
+
+        RedBeat-routed jobs have no APScheduler object (their reschedule
+        happens via the upsert in ``_add_job``); pod-local jobs resolve
+        normally in both modes.
+        """
+        if self._routes_to_redbeat(job_id):
+            return None
         return self._sched.get_job(job_id)
 
 

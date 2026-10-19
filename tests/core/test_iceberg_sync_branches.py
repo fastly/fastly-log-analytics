@@ -475,7 +475,7 @@ def test_sync_data_cdn_auth_error_does_not_retry(
     with (
         patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]),
         patch("backend.core.iceberg.sync._cdn_open", side_effect=_raise_401),
-        patch("time.sleep") as mock_sleep,
+        patch("backend.core.iceberg.sync._retry_sleep") as mock_sleep,
         pytest.raises(RuntimeError, match="CDN download failed"),
     ):
         _ice.sync_data(source)
@@ -547,7 +547,7 @@ def test_sync_data_cdn_transient_error_retries_then_succeeds(
     with (
         patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]),
         patch("backend.core.iceberg.sync._cdn_open", side_effect=_flaky_open),
-        patch("time.sleep"),
+        patch("backend.core.iceberg.sync._retry_sleep"),
     ):
         res = _ice.sync_data(source)
 

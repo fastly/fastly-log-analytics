@@ -31,6 +31,11 @@ from starlette.responses import JSONResponse, Response
 
 from backend.core import share_db
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.utils.admin_gateway import (
+    ADMIN_GATEWAY_HEADER,
+    admin_gateway_required,
+    authenticated_admin_gateway,
+)
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -94,7 +99,6 @@ _UNAUTH_ANALYST_PATHS = {
     # Public RUM assets and beacon endpoints
     "/js/rum.js",
     "/js/faro-sdk.js",
-    "/rum-beacon",
     "/api/web-vitals",
     "/api/ux-events",
 }
@@ -168,10 +172,16 @@ _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
     "/audit",
     "/threshold",
     "/exclude-regex",
+    "/exclude-regex/validate",
     "/enforce-status-code",
     "/enforce-threshold",  # N-5: operator's enforce decision; also a KV-ID-leak vector via outbound calls
     "/l2-enforce",  # operator's L2-enforcement opt-in; same enforce-decision + outbound-call sensitivity as /enforce-threshold
     "/matrix-versions",  # N-5: ML retrain history
+    "/restore",  # matrix-versions/{version}/restore mutation
+    "/retrain",  # ML retrain mutation
+    "/rotate-key",  # secret key rotation mutation
+    "/enable",  # SSE provisioning mutation
+    "/disable",  # SSE teardown mutation
     "/dashboard",  # N-5: admin scoring dashboard (handler returned 400 to analyst, but block before reaching it)
     "/evaluation/per-reason",  # N-5: per-reason evaluation breakdown (same reasoning as /dashboard)
 )
@@ -197,6 +207,7 @@ _ANALYST_BLOCKED_RUM_SUFFIXES: tuple[str, ...] = (
     "/disable",  # mutates deployed edge configuration
     "/versions",  # discloses the operator's pinned Faro Web SDK version
     "/upgrade",  # mutates deployed edge configuration
+    "/settings",  # mutates RUM capture settings and re-deploys rum-tracker.js / Fastly VCL
 )
 
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
@@ -217,6 +228,7 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/insights",  # POST /api/insights (no trailing slash — exact path)
     "/api/network-health",  # POST /api/network-health
     "/api/network-quality",  # POST /api/network-quality
+    "/api/network/",  # POST /api/network/bundle
     "/api/query",  # POST /api/query
     "/api/sessions",  # POST /api/sessions and /api/sessions/detail
     "/api/cmcd/",  # POST /api/cmcd/aggregates — streaming read-only query
@@ -226,6 +238,8 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/web-vitals",  # POST /api/web-vitals — client perf telemetry
     "/api/ux-events",  # POST /api/ux-events — DataTable column reorders + sibling UX signals
     "/api/assets/",  # POST /api/assets/aggregates — assets/shield read-only query
+    "/api/logs",  # POST /api/logs and /api/logs/query — raw logs read-only paginated query
+    "/api/high-scale/",  # POST high-scale request-fact queries are read-only
 )
 
 # Pure fire-and-forget telemetry beacons. These can fire from a backgrounded
@@ -258,7 +272,17 @@ _ANALYST_SSE_ALLOWLIST: set[str] = {
     # being deliberately allowed; this entry makes that allowance
     # explicit instead of accidental.
     "/realtime-stream",
+    # Control Room's bounded recent 4xx/5xx request-event feed. Payloads are
+    # analyst-safe because client IPs are masked in the router.
+    "/control-room/error-stream",
+    # Live log streaming feed (/api/stream/{service_id}). The sibling
+    # /api/services/{service_id}/stream is matched by
+    # _ANALYST_SSE_ALLOWED_PATTERNS — a bare "/stream" suffix entry here would
+    # open every ``*/stream`` route (cron, admin, ...) to analysts.
+    "/api/stream",
 }
+
+_ANALYST_SSE_ALLOWED_PATTERNS = (re.compile(r"^/api/services/[^/]+/stream$"),)
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
 # ``testserver`` is starlette.testclient.TestClient's default Host header.
@@ -303,11 +327,9 @@ _ADMIN_TOKEN_EXEMPT_PATHS = {
     # second-factor gate on the admin loopback branch.
     "/api/web-vitals",
     "/api/ux-events",
-    "/api/services/rum-beacon",
     # Public RUM assets and beacon endpoints
     "/js/rum.js",
     "/js/faro-sdk.js",
-    "/rum-beacon",
 }
 
 
@@ -331,9 +353,58 @@ if _env_hosts:
 
 import ipaddress
 
+# LOCAL_ADMIN_CIDRS: explicit, default-OFF widening of the admin trust
+# boundary for containerized topologies. On the single-VM prod deploy the
+# admin boundary is loopback (SSH tunnel / Caddy on the same host), but in
+# the multipod compose (and eventually k8s) NOTHING arrives over loopback —
+# the operator's browser lands as the docker gateway IP and the frontend's
+# SSR as its container IP, so both were misclassified as remote analysts.
+# The operator declares the ISOLATED infra network (e.g. 172.28.0.0/16, the
+# fixed compose subnet whose only ingress is a 127.0.0.1-bound Caddy) as
+# admin-trusted. NEVER set this to a subnet that untrusted clients can
+# source from; 0.0.0.0/0 (and ::/0) are rejected outright.
+_LOCAL_ADMIN_CIDRS_ENV = "LOCAL_ADMIN_CIDRS"
+_local_admin_cidrs_cache: tuple[str, tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = ("", ())
+
+
+def _local_admin_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    global _local_admin_cidrs_cache
+    raw = os.environ.get(_LOCAL_ADMIN_CIDRS_ENV, "")
+    if raw == _local_admin_cidrs_cache[0]:
+        return _local_admin_cidrs_cache[1]
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            net = ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            logger.error("[remote_access] ignoring invalid %s entry %r", _LOCAL_ADMIN_CIDRS_ENV, part)
+            continue
+        # Refuse anything that isn't a NARROW, private infra segment. This
+        # guard exists to make the two historical bypass classes
+        # unconfigurable: a broad RFC1918 range (VPN analyst promoted to
+        # admin — e.g. 10.0.0.0/8) and link-local (169.254.169.254 cloud
+        # metadata SSRF-as-admin). 2**16 still admits a /16 compose/pod
+        # subnet, which is as wide as an isolated infra network ever needs.
+        if not net.is_private or net.is_link_local or net.num_addresses > 2**16:
+            logger.error(
+                "[remote_access] REFUSING %s entry %r — admin trust segments must "
+                "be private, non-link-local, and no wider than a /16. Scope it to "
+                "the isolated infra network.",
+                _LOCAL_ADMIN_CIDRS_ENV,
+                part,
+            )
+            continue
+        nets.append(net)
+    _local_admin_cidrs_cache = (raw, tuple(nets))
+    return _local_admin_cidrs_cache[1]
+
 
 def _is_private_or_loopback(ip_str: str) -> bool:
-    """Check if the provided IP or hostname is loopback or a local-test stub.
+    """Check if the provided IP or hostname is loopback, an operator-declared
+    local-admin network member, or a local-test stub.
 
     The original implementation treated ANY RFC1918 / link-local IP as
     "local admin" — which broke down for real users coming in from a
@@ -348,21 +419,28 @@ def _is_private_or_loopback(ip_str: str) -> bool:
     (127.0.0.1, host network mode + ``--forwarded-allow-ips=127.0.0.1``)
     so the only legitimate "this is the admin / TestClient" peer is
     loopback. Keep ``is_loopback`` and the literal-stub set; drop the
-    over-broad ``is_private`` rule.
+    over-broad ``is_private`` rule. Containerized topologies opt in to a
+    NARROW extra trust segment via ``LOCAL_ADMIN_CIDRS`` (see above) —
+    default empty, so prod behavior is unchanged.
 
     Function name is retained for backwards compatibility with the rest
     of remote_access.py — callers see no signature change.
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-        return ip.is_loopback
     except ValueError:
         # Hostnames or test client stub names (e.g. "testclient", "localhost")
         return ip_str in ("testclient", "localhost")
+    if ip.is_loopback:
+        return True
+    return any(ip in net for net in _local_admin_networks())
 
 
 def is_request_remote(request: Request) -> bool:
     """Decide whether this request is from a remote analyst.
+
+    An authenticated mTLS gateway credential selects the admin branch.
+    Required gateway mode disables the legacy socket-based admin branch.
 
     Production topology:
       Fastly edge → Caddy on this VM → uvicorn on 127.0.0.1.
@@ -376,9 +454,8 @@ def is_request_remote(request: Request) -> bool:
         (admin SSH-tunnel, container-internal healthcheck, TestClient stub).
       * otherwise — Caddy-proxied request and the value is the real client IP.
 
-    We never trust the ``Host`` header or any other client-supplied header for
-    this classification — the Host header was the source of the critical
-    auth bypass.
+    Host and asserted identity headers never select the administrator branch.
+    The gateway credential is verified separately, not accepted as a marker.
 
     The ``X-Remote-Analyst: 1`` fallback is honored ONLY when the TCP peer is
     loopback AND tunnel sharing is active. This exists for two legitimate
@@ -396,6 +473,10 @@ def is_request_remote(request: Request) -> bool:
     # prod this is unreachable (Caddy is the sole ingress and always populates
     # the peer — see ADR-03 / prod-network-topology), so this only hardens the
     # abnormal ASGI case; TestClient always presents a "testclient" peer.
+    if authenticated_admin_gateway(request):
+        return False
+    if admin_gateway_required() or ADMIN_GATEWAY_HEADER in request.headers:
+        return True
     if request.client is None:
         return True
 
@@ -463,6 +544,20 @@ def _remote_host_allowed(host_header: str) -> bool:
         pe = urlparse(state.public_endpoint)
         if pe.hostname:
             candidates.append(pe.hostname.lower())
+
+    try:
+        from backend import config
+
+        for cfg in config.list_configs():
+            rf = cfg.get("remote_frontend")
+            if isinstance(rf, dict):
+                for k in ("domain_name", "origin_host", "override_host"):
+                    val = rf.get(k)
+                    if val and isinstance(val, str):
+                        candidates.append(val.strip().lower())
+    except Exception:
+        logger.debug("_remote_host_allowed: step failed (ignored)", exc_info=True)
+
     return any(base == c for c in candidates)
 
 
@@ -481,6 +576,20 @@ def _origin_allowed(origin: str) -> bool:
         pe = urlparse(state.public_endpoint)
         if pe.hostname and pe.hostname.lower() == host:
             return True
+
+    try:
+        from backend import config
+
+        for cfg in config.list_configs():
+            rf = cfg.get("remote_frontend")
+            if isinstance(rf, dict):
+                for k in ("domain_name", "origin_host", "override_host"):
+                    val = rf.get(k)
+                    if val and isinstance(val, str) and val.strip().lower() == host:
+                        return True
+    except Exception:
+        logger.debug("_origin_allowed: step failed (ignored)", exc_info=True)
+
     return False
 
 
@@ -524,7 +633,9 @@ def _is_blocked_path(path: str) -> bool:
     for sp in _ANALYST_BLOCKED_SUBPATHS:
         if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
             return True
-    if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
+    if ("/scoring/" in normalized or "/session-scoring/" in normalized) and normalized.endswith(
+        _ANALYST_BLOCKED_SCORING_SUFFIXES
+    ):
         return True
     if "/rum/" in normalized and normalized.endswith(_ANALYST_BLOCKED_RUM_SUFFIXES):
         return True
@@ -587,7 +698,7 @@ def _path_service_ids(request: Request) -> list[str]:
 
 
 def _is_sse_route(path: str) -> bool:
-    if "/sse" in path:
+    if "/sse" in path or path.startswith("/api/stream"):
         return True
     # Match the final path segment being exactly "stream" (the original
     # `endswith("/stream")` case) OR hyphen-suffixed with "-stream" (e.g.
@@ -1050,6 +1161,19 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
         host_header = request.headers.get("host", "")
 
+        gateway_authenticated = authenticated_admin_gateway(request)
+        if ADMIN_GATEWAY_HEADER in request.headers and not gateway_authenticated:
+            logger.warning("[remote_access] rejected invalid admin gateway credential")
+            return JSONResponse(status_code=401, content={"error": "admin_gateway_invalid"})
+        request.state.admin_gateway_authenticated = gateway_authenticated
+        if gateway_authenticated:
+            request.scope["headers"] = [
+                (key, value)
+                for key, value in request.scope["headers"]
+                if key.lower() != ADMIN_GATEWAY_HEADER.lower().encode()
+            ]
+            if hasattr(request, "_headers"):
+                del request._headers
         is_remote = is_request_remote(request)
         request.state.is_remote = is_remote
         request.state.analyst_session = None
@@ -1071,6 +1195,18 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         elif host_header and not _local_host_allowed(host_header):
             return JSONResponse(status_code=400, content={"error": "host_not_allowed", "host": host_header})
 
+        if gateway_authenticated:
+            origin = request.headers.get("origin")
+            cross_site = request.headers.get("sec-fetch-site") == "cross-site"
+            unsafe_origin = (
+                method not in ("GET", "HEAD", "OPTIONS")
+                and origin is not None
+                and origin.lower() != f"https://{host_header.lower()}"
+            )
+            if cross_site or unsafe_origin:
+                logger.warning("[remote_access] rejected cross-origin admin gateway request")
+                return JSONResponse(status_code=403, content={"error": "admin_origin_not_allowed"})
+
         if not is_remote:
             # Pure-local request — no analyst gating. Hardening headers still
             # apply: the admin tunnel (uvicorn on :3001 over SSH) bypasses
@@ -1088,7 +1224,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # here — every OPTIONS that does is a deliberate caller and
             # must still carry the token.
             secret = _admin_shared_secret()
-            if secret and path not in _ADMIN_TOKEN_EXEMPT_PATHS:
+            if secret and not gateway_authenticated and path not in _ADMIN_TOKEN_EXEMPT_PATHS:
                 supplied = request.headers.get(ADMIN_TOKEN_HEADER, "")
                 # Constant-time compare so the token length / prefix doesn't
                 # leak through CPU-cache timing on a short-circuit mismatch.
@@ -1124,7 +1260,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                     _dur_ms,
                 )
             except Exception:
-                pass
+                logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
             return apply_response_hardening(response)
 
         # ── From here down, we're on the analyst path. ──
@@ -1233,8 +1369,15 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # path suffix (a leading "/"-prefixed segment, for routes
         # parameterized by service_id, e.g. "/realtime-stream" matching
         # "/api/services/{service_id}/realtime-stream").
-        if _is_sse_route(path) and not any(
-            path == allowed or path.endswith(allowed) for allowed in _ANALYST_SSE_ALLOWLIST
+        if (
+            _is_sse_route(path)
+            and not any(
+                path == allowed
+                or path.endswith(allowed)
+                or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
+                for allowed in _ANALYST_SSE_ALLOWLIST
+            )
+            and not any(pat.fullmatch(path) for pat in _ANALYST_SSE_ALLOWED_PATTERNS)
         ):
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 
@@ -1414,7 +1557,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 int(_touched_idle),
             )
         except Exception:
-            pass
+            logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
 
         # N-1 + N-10: strip server-internal telemetry envelope from analyst
         # responses (success AND error bodies). The handler-side
@@ -1438,6 +1581,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.error_redaction import redact_error_text
 
 # L5: hard ceiling on the width of an analyst's clamped query window. The
 # per-invite ``query_window_hours`` already bounds scoped invites; this is the
@@ -1486,11 +1630,15 @@ class TimeBounds:
             eff_start = now - timedelta(hours=1)
             eff_end = now
         elif eff_start is None:
-            assert eff_end is not None  # narrowed by `not (start is None and end is None)` above
+            # narrowed by `not (start is None and end is None)` above
+            if eff_end is None:
+                raise RuntimeError("eff_end is unexpectedly None")
             eff_start = eff_end - timedelta(hours=1)
         elif eff_end is None:
             eff_end = datetime.now(UTC)
-        assert eff_start is not None and eff_end is not None  # narrowed by the branches above
+        # narrowed by the branches above
+        if eff_start is None or eff_end is None:
+            raise RuntimeError("eff_start / eff_end is unexpectedly None")
         # L5: cap the maximum span (keep the most-recent ``max_span`` slice).
         if max_span is not None and (eff_end - eff_start) > max_span:
             eff_start = eff_end - max_span
@@ -1637,6 +1785,6 @@ def clamp_or_400(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": str(exc), "time_range_empty": True},
+            detail={"error": redact_error_text(exc), "time_range_empty": True},
         ) from exc
     return start.isoformat(), end.isoformat()

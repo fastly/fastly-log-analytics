@@ -1,12 +1,15 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
 import type { components } from '@/types/api.generated'
+import { useSeededReady } from '@/hooks/useSeededReady'
+import { queryKeys } from '@/lib/query-keys'
+
+const SEED_KEYS = [queryKeys.syncStatus] as const
 
 export { useIsAnalyst }
 export type SyncStatus = components['schemas']['SyncStatusResponse']
@@ -36,7 +39,6 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  */
 export function useSyncStatus() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const queryClient = useQueryClient()
 
   // Perf audit Phase D-2: useBootstrap now seeds the
   // ['sync-status', service_id] cache from the bootstrap response on
@@ -49,25 +51,10 @@ export function useSyncStatus() {
   // any analyst fetch is a guaranteed 403 — skip it.
   const isAnalyst = useIsAnalyst()
 
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    if (activeServiceId) {
-      const existing = queryClient.getQueryData(['sync-status', activeServiceId])
-      if (existing === undefined) {
-        queryClient.setQueryData(['sync-status', activeServiceId], null)
-      }
-      queueMicrotask(() => {
-        setReady(true)
-      })
-    } else {
-      queueMicrotask(() => {
-        setReady(false)
-      })
-    }
-  }, [activeServiceId, queryClient])
+  const ready = useSeededReady(activeServiceId, SEED_KEYS)
 
   return useQuery({
-    queryKey: ['sync-status', activeServiceId],
+    queryKey: queryKeys.syncStatus(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data, error } = await client.GET('/api/sync-status', {
         signal,

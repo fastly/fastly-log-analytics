@@ -7,6 +7,7 @@ Pulls five operational vitals from the surfaces they already live on
 - ``pool_wait_p95_ms``    (per-service)
 - ``cron_duration_ms``    (per-service, per-task; latest terminal run)
 - ``ingest_lag_s``        (per-service)
+- ``duckdb_file_bytes``   (per-service)
 - ``active_query_count``  (global)
 - ``cpu_load_1m`` / ``mem_used_pct`` / ``disk_used_pct``  (global)
 
@@ -14,7 +15,7 @@ Failure of one metric is logged and skipped; the others still get
 recorded.
 
 Registered as a global APScheduler interval job (every 60 s) from
-:meth:`Scheduler._sync_jobs` — see ``metric_snapshot`` block there.
+:meth:`Scheduler._sync_jobs` and :meth:`Scheduler._register_dev_local_safe_jobs`.
 """
 
 from __future__ import annotations
@@ -28,15 +29,55 @@ from backend.core import metric_snapshots
 logger = logging.getLogger("backend.scheduler")
 
 
-def _safe_record(metric: str, value: float, *, service_id: str | None = None, task: str | None = None) -> None:
+def _safe_record(
+    metric: str,
+    value: float,
+    *,
+    service_id: str | None = None,
+    task: str | None = None,
+    **attributes: str,
+) -> bool:
     """Wrap record_snapshot so one bad metric can't poison the rest of the tick."""
+    recorded = False
     try:
         metric_snapshots.record_snapshot(metric, value, service_id=service_id, task=task)
+        recorded = True
     except Exception as e:
         logger.debug("[metric_snapshot] record %s failed: %s", metric, e)
+    try:
+        from backend.core import operational_metrics
+
+        if metric in {"celery_active_tasks", "celery_active_workers"}:
+            operational_metrics.record(metric, value)
+        elif metric.startswith("celery_queue_depth_"):
+            operational_metrics.record(
+                "celery_queue_depth",
+                value,
+                queue=metric.removeprefix("celery_queue_depth_"),
+            )
+        elif metric == "celery_queue_depth":
+            operational_metrics.record(metric, value, queue="all")
+        elif metric == "celery_broker_reachable":
+            operational_metrics.record(metric, value)
+        elif metric.startswith("ingest_ledger_"):
+            operational_metrics.record(
+                "ingest_ledger_rows",
+                value,
+                status=metric.removeprefix("ingest_ledger_"),
+            )
+        elif metric.startswith("high_scale_"):
+            if service_id is not None:
+                attributes["service_id"] = service_id
+            if task is not None:
+                attributes["task"] = task
+            operational_metrics.record(metric, value, **attributes)
+    except Exception as e:
+        logger.debug("[metric_snapshot] operational metric %s failed: %s", metric, e)
+    return recorded
 
 
-def _sample_pool_wait() -> None:
+def _sample_pool_wait() -> int:
+    count = 0
     try:
         from backend.core import duckdb_pool
 
@@ -44,12 +85,15 @@ def _sample_pool_wait() -> None:
             wait = stats.get("wait") or {}
             p95 = wait.get("p95_ms")
             if p95 is not None and stats.get("service"):
-                _safe_record("pool_wait_p95_ms", float(p95), service_id=stats["service"])
+                if _safe_record("pool_wait_p95_ms", float(p95), service_id=stats["service"]):
+                    count += 1
     except Exception as e:
         logger.debug("[metric_snapshot] pool_wait sample failed: %s", e)
+    return count
 
 
-def _sample_cron_duration() -> None:
+def _sample_cron_duration() -> int:
+    count = 0
     try:
         from backend import config as svcconfig
         from backend.core.metadata.base import get_con
@@ -60,31 +104,64 @@ def _sample_cron_duration() -> None:
                 continue
             try:
                 con = get_con(service_id)
-                rows = con.execute(
-                    """
-                    SELECT task, duration_seconds
-                    FROM cron_runs
-                    WHERE status IN ('success', 'error')
-                      AND duration_seconds IS NOT NULL
-                      AND id IN (
-                          SELECT max(id) FROM cron_runs
-                          WHERE status IN ('success', 'error')
-                          GROUP BY task
-                      )
-                    """
-                ).fetchall()
+                has_service_id = False
+                try:
+                    con.execute("SELECT service_id FROM cron_runs LIMIT 0")
+                    has_service_id = True
+                except Exception:
+                    pass
+
+                if has_service_id:
+                    rows = con.execute(
+                        """
+                        SELECT task, duration_s
+                        FROM cron_runs
+                        WHERE service_id = ?
+                          AND status IN ('success', 'warning', 'error')
+                          AND duration_s IS NOT NULL
+                          AND id IN (
+                              SELECT max(id) FROM cron_runs
+                              WHERE service_id = ? AND status IN ('success', 'warning', 'error')
+                              GROUP BY service_id, task
+                          )
+                        """,
+                        (service_id, service_id),
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        """
+                        SELECT task, duration_s
+                        FROM cron_runs
+                        WHERE status IN ('success', 'warning', 'error')
+                          AND duration_s IS NOT NULL
+                          AND id IN (
+                              SELECT max(id) FROM cron_runs
+                              WHERE status IN ('success', 'warning', 'error')
+                              GROUP BY task
+                          )
+                        """
+                    ).fetchall()
+
                 for r in rows:
                     task = r["task"]
-                    secs = r["duration_seconds"]
+                    secs = r["duration_s"]
                     if task and secs is not None:
-                        _safe_record("cron_duration_ms", float(secs) * 1000.0, service_id=service_id, task=task)
+                        if _safe_record(
+                            "cron_duration_ms",
+                            float(secs) * 1000.0,
+                            service_id=service_id,
+                            task=task,
+                        ):
+                            count += 1
             except Exception as e:
                 logger.debug("[metric_snapshot] cron_duration for %s failed: %s", service_id, e)
     except Exception as e:
         logger.debug("[metric_snapshot] cron_duration sample failed: %s", e)
+    return count
 
 
-def _sample_ingest_lag() -> None:
+def _sample_ingest_lag() -> int:
+    count = 0
     try:
         from datetime import UTC, datetime
 
@@ -104,28 +181,67 @@ def _sample_ingest_lag() -> None:
                 if latest_dt is None:
                     continue
                 lag_s = max(0.0, (datetime.now(UTC) - latest_dt).total_seconds())
-                _safe_record("ingest_lag_s", lag_s, service_id=service_id)
+                if _safe_record("ingest_lag_s", lag_s, service_id=service_id):
+                    count += 1
             except Exception as e:
                 logger.debug("[metric_snapshot] ingest_lag for %s failed: %s", service_id, e)
     except Exception as e:
         logger.debug("[metric_snapshot] ingest_lag sample failed: %s", e)
+    return count
 
 
-def _sample_active_queries() -> None:
+def _sample_active_queries() -> int:
+    count = 0
     try:
         from backend.core.query_registry import query_registry
 
         summary = query_registry.summary()
-        _safe_record("active_query_count", float(summary.get("active_total", 0)))
+        if _safe_record("active_query_count", float(summary.get("active_total", 0))):
+            count += 1
     except Exception as e:
         logger.debug("[metric_snapshot] active_query sample failed: %s", e)
+    return count
 
 
-def _sample_os_vitals() -> None:
+def _sample_ducklake_admission() -> int:
+    count = 0
+    try:
+        from backend.core.ducklake_admission import get_admission_stats
+
+        for service_id, stats in get_admission_stats().items():
+            acquisitions = stats.get("acquisitions", 0.0)
+            if acquisitions <= 0:
+                continue
+            if _safe_record(
+                "ducklake_admission_wait_avg_ms",
+                stats.get("wait_ms_total", 0.0) / acquisitions,
+                service_id=service_id,
+            ):
+                count += 1
+            if _safe_record(
+                "ducklake_admission_hold_avg_ms",
+                stats.get("hold_ms_total", 0.0) / acquisitions,
+                service_id=service_id,
+            ):
+                count += 1
+            if _safe_record(
+                "ducklake_admission_timeouts",
+                stats.get("timeouts", 0.0),
+                service_id=service_id,
+            ):
+                count += 1
+    except Exception as e:
+        logger.debug("[metric_snapshot] ducklake_admission sample failed: %s", e)
+    return count
+
+
+def _sample_os_vitals() -> int:
+    count = 0
     # CPU load (1-minute moving average).
     try:
         load1, _, _ = os.getloadavg()
-        _safe_record("cpu_load_1m", float(load1))
+        if _safe_record("cpu_load_1m", float(load1)):
+            count += 1
     except Exception as e:
         logger.debug("[metric_snapshot] cpu_load sample failed: %s", e)
 
@@ -142,7 +258,8 @@ def _sample_os_vitals() -> None:
         total = meminfo.get("MemTotal", 0)
         avail = meminfo.get("MemAvailable", 0)
         if total:
-            _safe_record("mem_used_pct", round((1 - avail / total) * 100, 2))
+            if _safe_record("mem_used_pct", round((1 - avail / total) * 100, 2)):
+                count += 1
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -153,22 +270,250 @@ def _sample_os_vitals() -> None:
         try:
             d = shutil.disk_usage(path)
             if d.total:
-                _safe_record(metric, round(d.used / d.total * 100, 2))
+                if _safe_record(metric, round(d.used / d.total * 100, 2)):
+                    count += 1
         except FileNotFoundError:
             continue
         except Exception as e:
             logger.debug("[metric_snapshot] disk sample for %s failed: %s", path, e)
+    return count
 
 
-def _run_metric_snapshot() -> None:
+def _sample_celery_queues() -> int:
+    count = 0
+    try:
+        from backend.celery_status import KNOWN_QUEUES, celery_queue_depths
+
+        queues, broker_reachable = celery_queue_depths()
+        if _safe_record("celery_broker_reachable", 1.0 if broker_reachable else 0.0):
+            count += 1
+        total_depth = 0.0
+        for queue in sorted(set(KNOWN_QUEUES) | set(queues)):
+            depth = float(queues.get(queue, 0))
+            total_depth += depth
+            if _safe_record(f"celery_queue_depth_{queue}", depth):
+                count += 1
+        if _safe_record("celery_queue_depth", total_depth):
+            count += 1
+    except Exception as e:
+        logger.debug("[metric_snapshot] celery_queues sample failed: %s", e)
+    return count
+
+
+def _sample_ingest_ledger() -> int:
+    count = 0
+    try:
+        from backend.celery_status import ingest_ledger_summary
+
+        for status, count_val in ingest_ledger_summary().items():
+            if _safe_record(f"ingest_ledger_{status}", float(count_val)):
+                count += 1
+    except Exception as e:
+        logger.debug("[metric_snapshot] ingest_ledger sample failed: %s", e)
+    return count
+
+
+def _sample_high_scale() -> int:
+    if os.getenv("HIGH_SCALE_ENABLED", "").lower() not in {"1", "true", "yes", "on"}:
+        return 0
+    count = 0
+    try:
+        from backend import config as svcconfig
+        from backend.high_scale.postgres_control import PostgresControlPlane
+
+        control = PostgresControlPlane()
+        configured_domains = {
+            domain.strip() for domain in os.getenv("HIGH_SCALE_DOMAINS", "").split(",") if domain.strip()
+        }
+        source_statuses = (
+            "discovered",
+            "claimed",
+            "appended",
+            "archived",
+            "acknowledged",
+            "source_deleted",
+            "source_missing",
+        )
+        for cfg in svcconfig.list_configs():
+            service_id = cfg.get("service_id")
+            if not service_id:
+                continue
+            snapshot = control.operational_snapshot(service_id)
+            domains = configured_domains | {
+                row["domain"] for row in snapshot["source_objects"] + snapshot["source_age"] + snapshot["publications"]
+            }
+            for domain in domains:
+                for status in source_statuses:
+                    if _safe_record(
+                        "high_scale_source_objects",
+                        0.0,
+                        service_id=service_id,
+                        domain=domain,
+                        status=status,
+                    ):
+                        count += 1
+                if _safe_record(
+                    "high_scale_oldest_active_age_seconds",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                ):
+                    count += 1
+                if _safe_record(
+                    "high_scale_pending_manifests",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                ):
+                    count += 1
+                if _safe_record(
+                    "high_scale_publication_lag_seconds",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                ):
+                    count += 1
+                if _safe_record(
+                    "high_scale_rows_published_total",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                ):
+                    count += 1
+            for row in snapshot["source_objects"]:
+                if _safe_record(
+                    "high_scale_source_objects",
+                    float(row["count"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                    status=row["status"],
+                ):
+                    count += 1
+            for row in snapshot["source_age"]:
+                if _safe_record(
+                    "high_scale_oldest_active_age_seconds",
+                    row["age_seconds"],
+                    service_id=service_id,
+                    domain=row["domain"],
+                ):
+                    count += 1
+            for row in snapshot["publications"]:
+                if _safe_record(
+                    "high_scale_pending_manifests",
+                    float(row["pending"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                ):
+                    count += 1
+                if _safe_record(
+                    "high_scale_publication_lag_seconds",
+                    row["lag_seconds"],
+                    service_id=service_id,
+                    domain=row["domain"],
+                ):
+                    count += 1
+                if _safe_record(
+                    "high_scale_rows_published_total",
+                    float(row["published_rows"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                ):
+                    count += 1
+    except Exception as e:
+        logger.debug("[metric_snapshot] high_scale sample failed: %s", e)
+    return count
+
+
+def _sample_high_scale_disk() -> int:
+    """Evaluate the serving-volume disk guard (high-scale topology only)."""
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_scale_mode():
+        return 0
+    count = 0
+    try:
+        from backend.core.clickhouse_client import get_clickhouse_client
+        from backend.high_scale.disk_sampler import MODE_LEVELS, sample_disk_state
+
+        client = get_clickhouse_client()
+        if client is None:
+            return 0
+        snapshot = sample_disk_state(client)
+        if _safe_record("high_scale_disk_mode_level", float(MODE_LEVELS[snapshot.state.mode])):
+            count += 1
+        if _safe_record("high_scale_disk_free_fraction", snapshot.state.free_fraction):
+            count += 1
+    except Exception as e:
+        import structlog
+
+        structlog.get_logger(__name__).warning("high_scale.disk_sample_failed", error_kind=type(e).__name__)
+    return count
+
+
+def _sample_duckdb_size() -> int:
+    count = 0
+    try:
+        from backend import config as svcconfig
+
+        for cfg in svcconfig.list_configs():
+            service_id = cfg.get("service_id")
+            if not service_id:
+                continue
+            try:
+                db_path = svcconfig.duckdb_path(service_id)
+                if os.path.exists(db_path):
+                    size_bytes = os.path.getsize(db_path)
+                    if _safe_record("duckdb_file_bytes", float(size_bytes), service_id=service_id):
+                        count += 1
+            except Exception as e:
+                logger.debug("[metric_snapshot] duckdb_size for %s failed: %s", service_id, e)
+    except Exception as e:
+        logger.debug("[metric_snapshot] duckdb_size sample failed: %s", e)
+    return count
+
+
+def _sample_celery_workers() -> int:
+    count = 0
+    try:
+        from backend.celery_app import app
+
+        i = app.control.inspect(timeout=0.5)
+        stats = i.stats() or {}
+        if _safe_record("celery_active_workers", float(len(stats))):
+            count += 1
+
+        active = i.active() or {}
+        active_tasks = sum(len(tasks) for tasks in active.values())
+        if _safe_record("celery_active_tasks", float(active_tasks)):
+            count += 1
+    except Exception as e:
+        logger.debug("[metric_snapshot] celery_workers sample failed: %s", e)
+    return count
+
+
+from backend.cron.decorators import global_job
+
+
+@global_job("metric_snapshot", color="32", tag="metric_snapshot", label="Metric snapshot")
+def _run_metric_snapshot() -> str:
     """Sample every vital once. Designed to finish in <100 ms on a single-service deploy.
 
     Not decorated with @cron_task because it doesn't open a DuckDB
     connection or hit FOS and the standard watchdog / usage-log envelope
-    would be net overhead for a job that writes ~5 SQLite rows.
+    would be net overhead for a job that writes rows to PostgreSQL
+    metric_snapshots.
     """
-    _sample_pool_wait()
-    _sample_cron_duration()
-    _sample_ingest_lag()
-    _sample_active_queries()
-    _sample_os_vitals()
+    total = 0
+    total += _sample_pool_wait()
+    total += _sample_cron_duration()
+    total += _sample_ingest_lag()
+    total += _sample_duckdb_size()
+    total += _sample_active_queries()
+    total += _sample_ducklake_admission()
+    total += _sample_high_scale()
+    total += _sample_high_scale_disk()
+    total += _sample_os_vitals()
+    total += _sample_celery_queues()
+    total += _sample_ingest_ledger()
+    total += _sample_celery_workers()
+    return f"sampled={total} metrics"

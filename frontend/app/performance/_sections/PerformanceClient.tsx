@@ -5,12 +5,11 @@ import React from 'react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
 import { Zap, Server, Shield, Clock, Network } from 'lucide-react'
@@ -19,23 +18,28 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
 import { useFieldLabel } from '@/hooks/useFieldLabel';
+import { CHART_COLORS } from '@/lib/chart-colors'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+import type { FiltersPayload } from '@/types/filters'
+type PerformanceUrlRow = components['schemas']['PerformanceUrlRow']
+type PerformanceAsnRow = components['schemas']['PerformanceAsnRow']
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
-const urlColumns = makeLatencyColumns('url', 'URL', 'url')
-const asnColumns = makeLatencyColumns('label', 'ASN', 'asn')
+const urlColumns = makeLatencyColumns<PerformanceUrlRow>('url', 'URL', 'url')
+const asnColumns = makeLatencyColumns<PerformanceAsnRow>('label', 'ASN', 'asn')
 
 // Module-level so identity is stable across renders — PlotlyChart's React.memo
 // shallow-compares layout, and a fresh object literal each render forces a
 // full re-plot.
-const WATERFALL_LAYOUT = {
+const WATERFALL_LAYOUT: PlotlyLayout = {
   xaxis: { title: 'Latency (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
   yaxis: { autorange: 'reversed' },
   margin: { l: 140, r: 20, t: 20, b: 40 },
   showlegend: false,
 }
-const TTL_DIST_LAYOUT = { yaxis: { title: 'Count' } }
-const SCATTER_LAYOUT = {
+const TTL_DIST_LAYOUT: PlotlyLayout = { yaxis: { title: 'Count' } }
+const SCATTER_LAYOUT: PlotlyLayout = {
   xaxis: { title: 'Origin TTFB (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
   yaxis: { title: 'Edge Processing (ms)', ticksuffix: 'ms', separatethousands: true, exponentformat: 'none' },
 }
@@ -56,7 +60,7 @@ const SCATTER_LAYOUT = {
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
-  filterPayload: any
+  filterPayload: FiltersPayload
   // startTime/endTime feed the custom-absolute-range scan window (lib/range-wire).
   startTime: string | null
   endTime: string | null
@@ -99,11 +103,14 @@ function PerformanceBody({
   // rangeKey is "24h". A custom absolute range instead keys on "abs:<start>|<end>"
   // and sends the explicit bounds, so the tables/distributions reflect exactly the
   // selected window. Both queries share one wire so they stay on one cache key.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const performanceQuery = useServiceQuery(
-    ['performance', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
-    async ({ signal }) => {
-      const { data } = await client.POST("/api/performance/aggregates", { signal,
+  const performanceQuery = useAnalyticsReportQuery({
+    namespace: ['performance', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: ['p99'],
+    queryFn: async ({ rangeBody, signal }) => {
+      const { data, error } = await client.POST("/api/performance/aggregates", { signal,
         body: {
           filters: filterPayload,
           sort_by: 'p99',
@@ -111,34 +118,36 @@ function PerformanceBody({
           ...rangeBody,
         }
       })
+      if (error) throw error
       return data
     }
-  )
+  })
 
   const coreData = performanceQuery.data
   const distData = performanceQuery.data
 
   // ── Charts ──────────────────────────────────────────────────────────────
 
-  const ttlDistData = React.useMemo(() => {
-    if (!distData?.ttl_dist?.length) return []
+  const ttlDist = distData?.ttl_dist
+  const ttlDistData = React.useMemo((): PlotlyTrace[] => {
+    if (!ttlDist?.length) return []
     return [{
-      x: distData.ttl_dist.map(d => d.bucket),
-      y: distData.ttl_dist.map(d => d.count),
+      x: ttlDist.map(d => d.bucket),
+      y: ttlDist.map(d => d.count),
       type: 'bar',
       marker: { color: '#6366f1' }
     }]
-  }, [distData?.ttl_dist])
+  }, [ttlDist])
 
-  const scatterData = React.useMemo(() => {
-    if (!coreData?.scatter?.length) return []
-    // `cache` is typed `unknown` in the generated schema and the backend can
-    // legitimately emit null; narrow at runtime so a dirty row falls into MISS
-    // instead of throwing `null.startsWith` during render and crashing the
-    // whole route to the error boundary.
-    const isHit = (c: unknown) => typeof c === 'string' && c.startsWith('HIT')
-    const hit = coreData.scatter.filter(d => isHit(d.cache))
-    const miss = coreData.scatter.filter(d => !isHit(d.cache))
+  const scatterRows = coreData?.scatter
+  const scatterData = React.useMemo((): PlotlyTrace[] => {
+    if (!scatterRows?.length) return []
+    // The backend can legitimately emit a null `cache`; a dirty row falls into MISS
+    // instead of throwing `null.startsWith` during render and crashing the whole
+    // route to the error boundary.
+    const isHit = (c: string | null | undefined) => c?.startsWith('HIT') === true
+    const hit = scatterRows.filter(d => isHit(d.cache))
+    const miss = scatterRows.filter(d => !isHit(d.cache))
     return [
       {
         x: hit.map(d => d.origin),
@@ -146,7 +155,7 @@ function PerformanceBody({
         mode: 'markers',
         type: 'scatter',
         name: 'HIT',
-        marker: { color: '#10b981', size: 4, opacity: 0.6 }
+        marker: { color: CHART_COLORS.success, size: 4, opacity: 0.6 }
       },
       {
         x: miss.map(d => d.origin),
@@ -154,25 +163,25 @@ function PerformanceBody({
         mode: 'markers',
         type: 'scatter',
         name: 'MISS',
-        marker: { color: '#f59e0b', size: 4, opacity: 0.6 }
+        marker: { color: CHART_COLORS.warning, size: 4, opacity: 0.6 }
       }
     ]
-  }, [coreData?.scatter])
+  }, [scatterRows])
   // One bar per component, each on its own y-row. Averages are additive,
   // but stacking them buries the small components when one (typically
   // origin_wait) dominates. Per-row bars keep every component visible at
   // its true scale on the shared x-axis. The y-axis label identifies each
   // bar, so no legend is needed.
-  const waterfallData = React.useMemo(() => {
-    const avg = coreData?.waterfall?.avg
+  const avg = coreData?.waterfall?.avg
+  const waterfallData = React.useMemo((): PlotlyTrace[] => {
     if (!avg) return []
     return [
       { x: [avg.edge_processing || 0], y: ['Edge Processing'],  type: 'bar', orientation: 'h', marker: { color: '#8b5cf6' }, showlegend: false },
-      { x: [avg.origin_wait || 0],     y: ['Origin TTFB Wait'], type: 'bar', orientation: 'h', marker: { color: '#f59e0b' }, showlegend: false },
+      { x: [avg.origin_wait || 0],     y: ['Origin TTFB Wait'], type: 'bar', orientation: 'h', marker: { color: CHART_COLORS.warning }, showlegend: false },
       { x: [avg.origin_download || 0], y: ['Origin Download'],  type: 'bar', orientation: 'h', marker: { color: '#ec4899' }, showlegend: false },
-      { x: [avg.client_download || 0], y: ['Client Download'],  type: 'bar', orientation: 'h', marker: { color: '#10b981' }, showlegend: false },
+      { x: [avg.client_download || 0], y: ['Client Download'],  type: 'bar', orientation: 'h', marker: { color: CHART_COLORS.success }, showlegend: false },
     ]
-  }, [coreData?.waterfall])
+  }, [avg])
 
   return (
     <>
@@ -182,9 +191,10 @@ function PerformanceBody({
           icon={<Network className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Calculating latency percentiles..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={!coreData?.waterfall?.avg}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={
             <div className="space-y-4">
@@ -232,9 +242,10 @@ function PerformanceBody({
           }
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling endpoint latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_urls?.length ?? 0) === 0}
-          className="min-h-[300px]"
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestUrlsHelp />}
         >
@@ -261,9 +272,10 @@ function PerformanceBody({
           }
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling network latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_asns?.length ?? 0) === 0}
-          className="min-h-[300px]"
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestNetworksHelp />}
         >
@@ -283,9 +295,10 @@ function PerformanceBody({
           icon={<Clock className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling cache TTL distribution..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(distData?.ttl_dist?.length ?? 0) === 0}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<CacheTtlHelp />}
         >
@@ -293,16 +306,18 @@ function PerformanceBody({
             data={ttlDistData}
             layout={TTL_DIST_LAYOUT}
             height="100%"
-          />        </AnalyticsCard>
+          />
+        </AnalyticsCard>
 
         <AnalyticsCard
           title="Origin vs Edge Processing (ms)"
           icon={<Zap className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling origin vs edge latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.scatter?.length ?? 0) === 0}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<OriginVsEdgeHelp />}
         >
@@ -310,7 +325,8 @@ function PerformanceBody({
             data={scatterData}
             layout={SCATTER_LAYOUT}
             height="100%"
-          />        </AnalyticsCard>
+          />
+        </AnalyticsCard>
       </div>
     </>
   )
@@ -341,7 +357,7 @@ export default function PerformanceClient({ nowServerStr }: { nowServerStr?: str
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 

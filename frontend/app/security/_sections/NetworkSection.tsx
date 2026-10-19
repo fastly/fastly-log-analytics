@@ -2,11 +2,13 @@ import React from 'react'
 import { Globe, Network, Repeat } from 'lucide-react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/hooks/useTimeseriesToTraces'
+import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { SECURITY_INFO } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
 
@@ -16,7 +18,7 @@ type Props = {
   isFetching: boolean
   error: Error | null
   timezone: string
-  commonTimeLayout: any
+  commonTimeLayout: PlotlyLayout
 }
 
 export function NetworkSection({
@@ -30,32 +32,30 @@ export function NetworkSection({
   // Distinguish "field group not enabled" from "enabled but no data yet" so a
   // low-traffic/fresh service doesn't read as misconfigured.
   const { isFieldActive } = useActiveLogFields()
-  // Re-narrow: schema types these dict-of-unknown rows opaquely; the
-  // backend invariant is `{ time, ...metric_keys }`.
   const ipv6Data = useTimeseriesToTraces(
-    data?.ipv6_adoption as TimeseriesDataPoint[] | undefined,
+    data?.ipv6_adoption,
     [{ key: 'pct', name: 'IPv6 %', color: '#8b5cf6', fill: 'tozeroy' }],
     timezone,
   )
 
-  const proxyData = React.useMemo(() => {
+  const proxyData = React.useMemo((): PlotlyTrace[] => {
     const proxy_dist = data?.proxy_dist
     if (!proxy_dist?.length) return []
     return [{
-      values: proxy_dist.map((d: any) => d.count),
-      labels: proxy_dist.map((d: any) => d.type),
+      values: proxy_dist.map((d) => d.count),
+      labels: proxy_dist.map((d) => d.type ?? null),
       type: 'pie',
       hole: 0.4,
-      marker: { colors: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'] }
+      marker: { colors: [CHART_COLORS.info, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, '#8b5cf6'] }
     }]
   }, [data])
 
-  const connReuseData = React.useMemo(() => {
+  const connReuseData = React.useMemo((): PlotlyTrace[] => {
     const conn_reuse_dist = data?.conn_reuse_dist
     if (!conn_reuse_dist?.length) return []
     return [{
-      x: conn_reuse_dist.map((d: any) => d.bucket),
-      y: conn_reuse_dist.map((d: any) => d.count),
+      x: conn_reuse_dist.map((d) => d.bucket ?? d.label ?? null),
+      y: conn_reuse_dist.map((d) => d.count),
       type: 'bar',
       marker: { color: '#06b6d4' }
     }]
@@ -69,8 +69,9 @@ export function NetworkSection({
           icon={<Globe className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading IPv6 adoption data..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.ipv6.title}
           helpContent={SECURITY_INFO.ipv6.body}
@@ -79,7 +80,7 @@ export function NetworkSection({
             <ChartEmptyState requires={isFieldActive('is_ipv6') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
-              data={ipv6Data as any[]}
+              data={ipv6Data}
               layout={{
                 ...commonTimeLayout,
                 yaxis: { title: 'IPv6 %', range: [0, 100] }
@@ -94,8 +95,9 @@ export function NetworkSection({
           icon={<Network className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading proxy/anonymizer breakdown..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.proxy.title}
           helpContent={SECURITY_INFO.proxy.body}
@@ -104,7 +106,7 @@ export function NetworkSection({
             <ChartEmptyState requires={isFieldActive('p_type') ? undefined : "Security: Proxy & Anonymization (Group I) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
-              data={proxyData as any[]}
+              data={proxyData}
               height="100%"
             />
           )}
@@ -117,8 +119,9 @@ export function NetworkSection({
           icon={<Repeat className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading connection reuse distribution..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.conn_reuse.title}
           helpContent={SECURITY_INFO.conn_reuse.body}
@@ -127,7 +130,7 @@ export function NetworkSection({
             <ChartEmptyState requires={isFieldActive('conn_requests') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
           ) : (
             <PlotlyChart
-              data={connReuseData as any[]}
+              data={connReuseData}
               layout={{ yaxis: { title: 'Count' } }}
               height="100%"
             />

@@ -1,0 +1,25 @@
+"""Admin endpoint exposing Celery worker/queue/RedBeat/ledger status.
+
+The computation lives in backend/celery_status.py (top-level) so the SSE
+sampler and health snapshot can reuse it without importing through the
+routers package. Admin-only via RemoteAccessMiddleware path gating.
+"""
+
+from fastapi import Depends
+
+from backend.celery_status import get_celery_status
+from backend.deps import require_admin
+from backend.models.admin_status import CeleryStatusResponse
+from backend.routers.admin._router import router
+
+
+@router.get(
+    "/admin/celery/status",
+    response_model=CeleryStatusResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_status():
+    """Expose Celery queue depths, worker status, RedBeat schedule, and
+    ingest-ledger summary."""
+    return get_celery_status()

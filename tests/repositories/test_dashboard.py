@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import (
     DASHBOARD_CACHE_TTL,
@@ -55,7 +56,7 @@ def test_get_aggregates_with_data(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -144,6 +145,13 @@ def test_self_heal_fires_once_and_returns_data_when_view_is_stale(in_memory_duck
         "backend.config.get_status",
         lambda _name: {"local_rows": 30, "earliest_log_at": start_time, "latest_log_at": latest},
     )
+
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
+
+    from backend.repositories._base import QueryRunner
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", lambda *a, **k: ([("url", "some_url", 10)], ["url"]))
 
     rebuild_calls = {"n": 0}
 
@@ -281,7 +289,6 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     Pinned to catch a regression that re-introduces the second call OR
     drops per_field_limits and falls back to limit=10 for country (which
     would silently re-cap the choropleth at 10 entries)."""
-    import os
 
     from backend.repositories import dashboard as dash
     from backend.repositories._base import QueryRunner
@@ -290,14 +297,8 @@ def test_get_aggregates_rollup_path_map_data_uses_per_field_limits(in_memory_duc
     logs = generate_mock_logs(test_service_source, num_logs=40)
     insert_mock_logs(in_memory_duckdb, table_name, logs)
 
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
 
     # Track every execute_top_n_rollups call: (fields, limit, per_field_limits).
     calls: list[tuple] = []
@@ -363,7 +364,6 @@ def test_get_aggregates_topten_only_keeps_rollup_batch_whole(in_memory_duckdb, t
     test_get_aggregates_rollup_path_map_data_uses_per_field_limits, then
     assert exactly one call AND that include_top_n=True keeps the panel
     population path on (results[field]['top'] populated)."""
-    import os
 
     from backend.repositories import dashboard as dash
     from backend.repositories._base import QueryRunner
@@ -372,14 +372,8 @@ def test_get_aggregates_topten_only_keeps_rollup_batch_whole(in_memory_duckdb, t
     logs = generate_mock_logs(test_service_source, num_logs=40)
     insert_mock_logs(in_memory_duckdb, table_name, logs)
 
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
 
     calls: list[tuple] = []
 
@@ -425,7 +419,6 @@ def test_get_aggregates_core_only_skips_top_n_scan(in_memory_duckdb, test_servic
     the rollup path falls back to deriving from all_top_res only when
     map_data is also requested with country in the field list, but with
     no top-N scan and no map gate, both are empty."""
-    import os
 
     from backend.repositories import dashboard as dash
     from backend.repositories._base import QueryRunner
@@ -434,14 +427,8 @@ def test_get_aggregates_core_only_skips_top_n_scan(in_memory_duckdb, test_servic
     logs = generate_mock_logs(test_service_source, num_logs=20)
     insert_mock_logs(in_memory_duckdb, table_name, logs)
 
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
 
     calls: list[tuple] = []
 
@@ -550,7 +537,7 @@ def test_get_aggregates_5xx_metric(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="5xx",
     )
@@ -574,7 +561,7 @@ def test_get_aggregates_hit_rate_metric(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="hit_rate",
     )
@@ -598,7 +585,7 @@ def test_get_aggregates_debug_queries_populated(in_memory_duckdb, test_service_s
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -1076,7 +1063,7 @@ def test_get_aggregates_4xx_metric_returns_time_series(in_memory_duckdb, test_se
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="4xx",
     )
@@ -1098,7 +1085,7 @@ def test_get_aggregates_p95_latency_metric_uses_percentile_expression(in_memory_
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p95_latency",
     )
@@ -1119,7 +1106,7 @@ def test_get_aggregates_p50_latency_metric_uses_median_expression(in_memory_duck
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p50_latency",
     )
@@ -1140,7 +1127,7 @@ def test_get_aggregates_p99_latency_metric_uses_percentile_expression(in_memory_
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p99_latency",
     )
@@ -1161,7 +1148,7 @@ def test_get_aggregates_throughput_metric_uses_throughput_formula(in_memory_duck
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="throughput",
     )
@@ -1182,7 +1169,7 @@ def test_get_aggregates_ttfb_metric_uses_ttfb_ms_expression(in_memory_duckdb, te
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="ttfb",
     )
@@ -1460,7 +1447,6 @@ def test_get_aggregates_rollup_path_builds_no_temp_and_serves_conn_requests_roll
     """Rollup fast-path materializes NO per-request temp (the eager narrow
     live-temp — 391ms on the 2026-07-06 trace — is gone) and the
     conn_requests histogram serves from try_conn_requests_hist_from_rollup."""
-    import os
 
     from backend.repositories import dashboard as dash
     from backend.repositories._base import QueryRunner
@@ -1469,14 +1455,8 @@ def test_get_aggregates_rollup_path_builds_no_temp_and_serves_conn_requests_roll
     logs = generate_mock_logs(test_service_source, num_logs=20)
     insert_mock_logs(in_memory_duckdb, table_name, logs)
 
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
     monkeypatch.setattr(
         QueryRunner,
         "execute_top_n_rollups",
@@ -1518,13 +1498,61 @@ def test_get_aggregates_rollup_path_builds_no_temp_and_serves_conn_requests_roll
     assert result["data"]["conn_requests"] == sentinel
 
 
+def test_get_aggregates_rollup_empty_virtual_field_does_not_scan_base_table(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    insert_mock_logs(in_memory_duckdb, table_name, generate_mock_logs(test_service_source, num_logs=20))
+
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_top_n_rollups",
+        lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([], fields),
+    )
+    virtual_calls: list[str] = []
+
+    def _stub_virtual(self, virtual_id, backing_col, start_time, end_time, *, has_filters, actual_cols=None):
+        virtual_calls.append(virtual_id)
+        return {"top": [], "total": 0}
+
+    monkeypatch.setattr(QueryRunner, "try_virtual_field_top_n_from_rollup", _stub_virtual)
+    real_execute = QueryRunner.execute
+    base_scan_sql: list[str] = []
+
+    def _spy_execute(self, sql, params=None):
+        if "string_split" in sql:
+            base_scan_sql.append(sql)
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy_execute)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-02T00:00:00Z",
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert "waf_sig_ind" in virtual_calls
+    assert base_scan_sql == []
+    assert result["data"]["waf_sig_ind"] == {"top": [], "total": 0}
+
+
 def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
     in_memory_duckdb, test_service_source, monkeypatch
 ):
     """When the histogram reader returns None on the rollup path, the live
     CONN_REQUESTS_BUCKET scan runs against the BASE table with the real
     where_clause/params (there is no temp to rewrite them to '1=1')."""
-    import os
     from datetime import UTC, datetime, timedelta
 
     from backend.repositories import dashboard as dash
@@ -1539,14 +1567,8 @@ def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
         f"UPDATE {table_name} SET conn_requests = 7 WHERE rowid IN (SELECT rowid FROM {table_name} LIMIT 1)"
     )
 
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
     monkeypatch.setattr(
         QueryRunner,
         "execute_top_n_rollups",
@@ -1569,7 +1591,7 @@ def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
         src=test_service_source,
         start_time=st,
         end_time=et,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -1582,20 +1604,13 @@ def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
 
 def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_source, monkeypatch):
     """Verify that fields in NON_TOP_N_FIELDS are pruned from batch_fields in both paths."""
-    import os
 
     from backend.repositories import dashboard as dash
     from backend.repositories._base import QueryRunner
 
     # 1. Test Rollup Path
-    real_isdir = os.path.isdir
-
-    def fake_isdir(path: str) -> bool:
-        if path.endswith(os.path.join("rollups", "hour")):
-            return True
-        return real_isdir(path)
-
-    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    # Rollup fast-path is gated by rollups_present(); force it on.
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
 
     rollup_calls: list[list[str]] = []
 
@@ -1604,6 +1619,10 @@ def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_s
         return [(f, f"{f}_val", 5) for f in fields], list(fields)
 
     monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n_rollups)
+
+    in_memory_duckdb.execute(
+        "CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ, status VARCHAR, host VARCHAR, req_bytes INTEGER, resp_bytes INTEGER)"
+    )
 
     dash.get_aggregates(
         con=in_memory_duckdb,
@@ -1628,7 +1647,7 @@ def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_s
 
     # 2. Test Non-rollup Path
     # Force use_rollups = False
-    monkeypatch.setattr(dash.os.path, "isdir", lambda path: False)
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: False)
 
     batch_calls: list[list[str]] = []
 
@@ -1645,7 +1664,7 @@ def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_s
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
         fields_filter=["status", "req_bytes", "resp_bytes", "host"],

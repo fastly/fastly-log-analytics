@@ -276,9 +276,9 @@ def test_fastly_retries_on_url_error():
     assert out == {"ok": True}
 
 
-def test_fastly_retries_on_timeout_error():
-    err = TimeoutError("read timed out")
-    attempts = [err, _fake_resp()]
+@pytest.mark.parametrize("exc", [TimeoutError("read timed out"), ConnectionError("reset by peer")])
+def test_fastly_retries_on_timeout_and_connection_errors(exc):
+    attempts = [exc, _fake_resp()]
 
     def _side_effect(req, timeout):
         x = attempts.pop(0)
@@ -286,22 +286,14 @@ def test_fastly_retries_on_timeout_error():
             raise x
         return x
 
-    with patch("urllib.request.urlopen", side_effect=_side_effect), patch("time.sleep"):
+    with (
+        patch("urllib.request.urlopen", side_effect=_side_effect) as mock_urlopen,
+        patch("time.sleep") as mock_sleep,
+    ):
         fastly_client.fastly("GET", "/x", token="t")  # must not raise
 
-
-def test_fastly_retries_on_connection_error():
-    err = ConnectionError("reset by peer")
-    attempts = [err, _fake_resp()]
-
-    def _side_effect(req, timeout):
-        x = attempts.pop(0)
-        if isinstance(x, Exception):
-            raise x
-        return x
-
-    with patch("urllib.request.urlopen", side_effect=_side_effect), patch("time.sleep"):
-        fastly_client.fastly("GET", "/x", token="t")
+    assert mock_urlopen.call_count == 2
+    mock_sleep.assert_called_once()
 
 
 def test_fastly_raises_runtime_error_after_max_network_retries():

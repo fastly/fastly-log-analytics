@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import compaction
 
 
@@ -68,7 +69,7 @@ def test_local_compact_skips_when_start_cron_run_raises(monkeypatch, stub_source
     touching the underlying compaction logic."""
     monkeypatch.setattr(
         "backend.core.duckdb.start_cron_run",
-        MagicMock(side_effect=RuntimeError("already running")),
+        MagicMock(side_effect=CronLeaseHeldError("already running")),
     )
     compact_mock = MagicMock()
     monkeypatch.setattr("backend.core.local_compaction.compact_local_partitions", compact_mock)
@@ -161,7 +162,7 @@ def test_rollup_compact_returns_when_source_missing(monkeypatch):
 def test_rollup_compact_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_progress):
     monkeypatch.setattr(
         "backend.core.duckdb.start_cron_run",
-        MagicMock(side_effect=RuntimeError("already running")),
+        MagicMock(side_effect=CronLeaseHeldError("already running")),
     )
     compact_mock = MagicMock()
     monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", compact_mock)
@@ -222,18 +223,16 @@ def test_rollup_compact_logs_warning_when_bundle_step_fails(monkeypatch, stub_so
     from backend.core import duckdb as _db
 
     args, kwargs = _db.log_cron_run.call_args
-    # Still success — bundling is best-effort.
-    assert args[3] == "success"
+    # Subsystem errors log status="warning" with error_message listing failed subsystems per spec §5.8.
+    assert args[3] == "warning"
+    assert "day_bundles: disk full" in kwargs["error_message"]
     # Summary shows 0 bundled.
     assert "bundled 0 day" in kwargs["summary"]
 
 
 def test_rollup_compact_records_error_on_exception(monkeypatch, stub_source, stub_progress):
     _mock_rollups(monkeypatch)
-    monkeypatch.setattr(
-        "backend.core.rollups.compact_closed_days_to_daily",
-        MagicMock(side_effect=RuntimeError("manifest read failed")),
-    )
+    stub_progress["start_progress"].side_effect = RuntimeError("manifest read failed")
 
     compaction._run_rollup_compact_daily.__wrapped__("svc-1")
 
@@ -266,7 +265,7 @@ def test_rollup_heal_defers_under_api_load(monkeypatch, stub_source, stub_progre
 def test_rollup_heal_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_progress):
     monkeypatch.setattr(
         "backend.core.duckdb.start_cron_run",
-        MagicMock(side_effect=RuntimeError("already running")),
+        MagicMock(side_effect=CronLeaseHeldError("already running")),
     )
     heal_mock = MagicMock()
     monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
@@ -276,15 +275,15 @@ def test_rollup_heal_skips_when_start_cron_run_raises(monkeypatch, stub_source, 
     heal_mock.assert_not_called()
 
 
-def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stub_progress):
-    """The hourly tick must stay CHEAP: 1-day lookback, not the daily
+def test_rollup_heal_success_uses_48h_lookback(monkeypatch, stub_source, stub_progress):
+    """The hourly tick must stay CHEAP: 48h lookback, not the daily
     deep pass's 30 — the whole point of the split cadence."""
     heal_mock = MagicMock(return_value={"missing": 2, "rebuilt_fields": 8, "bundled": 2})
     monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
 
     compaction._run_rollup_hour_heal.__wrapped__("svc-1")
 
-    assert heal_mock.call_args.kwargs.get("lookback_days") == 1
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 2
 
     from backend.core import duckdb as _db
 
@@ -293,6 +292,48 @@ def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stu
     assert args[3] == "success"
     assert "Healed 2 missing hour(s)" in kwargs["summary"]
     assert "2 hour(s) bundled" in kwargs["summary"]
+
+
+def test_rollup_heal_dashboard_catchup_marks_ready_under_durable_mode(monkeypatch, stub_source, stub_progress):
+    """A durable service gets a complete dashboard-window pass before becoming trusted."""
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1, "coverage_verified": True})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.rollup_readiness.rollup_coverage_ready", lambda sid: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_called_once_with("svc-1")
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 2
+    assert heal_mock.call_args.kwargs.get("max_missing_hours") == 1
+
+
+def test_rollup_heal_does_not_mark_ready_when_not_durable_mode(monkeypatch, stub_source, stub_progress):
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
+
+
+def test_rollup_heal_does_not_mark_ready_on_failure(monkeypatch, stub_source, stub_progress):
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles",
+        MagicMock(side_effect=RuntimeError("view refresh failed")),
+    )
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
 
 
 def test_rollup_heal_records_error_on_exception(monkeypatch, stub_source, stub_progress):

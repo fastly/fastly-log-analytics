@@ -14,6 +14,7 @@
  * frontend-coverage path (file was 1.8% covered pre-test) — pure
  * functions, no React, no MSW.
  */
+import { without } from '@/__tests__/helpers/partial'
 import { describe, it, expect } from 'vitest'
 
 import {
@@ -22,24 +23,38 @@ import {
   buildToggleGroup,
   buildTogglePreset,
 } from '@/components/ProvisionWizard/wizard-config-helpers'
-import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
+import { INITIAL_CONFIG, type LogFieldsCatalog } from '@/components/ProvisionWizard/types'
 
 // Catalog fixture mirroring the shape the API returns. `requires` is the
 // dependency edge the toggleGroup helper auto-expands.
-const CATALOG = {
+const group = (id: string, label: string, requires: string | null = null) => ({
+  id,
+  label,
+  description: '',
+  locked: false,
+  requires,
+  note: null,
+  recommended_with: null,
+  total_bytes: 0,
+  fields: [],
+})
+
+const PRESETS = {
+  minimal: { label: 'Minimal', description: '', groups: ['core'] },
+  standard: { label: 'Standard', description: '', groups: ['core', 'http'] },
+  full: { label: 'Full', description: '', groups: ['core', 'http', 'tls', 'security'] },
+}
+
+const CATALOG: LogFieldsCatalog = {
   groups: [
-    { id: 'core', label: 'Core' },
-    { id: 'http', label: 'HTTP', requires: 'core' },
-    { id: 'tls', label: 'TLS', requires: 'core' },
-    { id: 'security', label: 'Security', requires: 'http' },
+    group('core', 'Core'),
+    group('http', 'HTTP', 'core'),
+    group('tls', 'TLS', 'core'),
+    group('security', 'Security', 'http'),
     // Cycle-free chain: detail → http → core
-    { id: 'detail', label: 'Detail', requires: 'http' },
+    group('detail', 'Detail', 'http'),
   ],
-  presets: {
-    minimal: { label: 'Minimal', groups: ['core'] },
-    standard: { label: 'Standard', groups: ['core', 'http'] },
-    full: { label: 'Full', groups: ['core', 'http', 'tls', 'security'] },
-  },
+  presets: PRESETS,
 }
 
 function configWithGroups(groups: string[]) {
@@ -99,9 +114,9 @@ describe('buildToggleGroup', () => {
 
   it('tolerates a config with no groups array set yet', () => {
     const toggle = buildToggleGroup(CATALOG)
-    const config = {
+    const config: typeof INITIAL_CONFIG = {
       ...INITIAL_CONFIG,
-      log_fields: { ...INITIAL_CONFIG.log_fields, groups: undefined as unknown as string[] },
+      log_fields: without(INITIAL_CONFIG.log_fields, 'groups') as typeof INITIAL_CONFIG.log_fields,
     }
     const next = toggle(config, 'core', true)
     expect(next.log_fields.groups).toEqual(['core'])
@@ -135,8 +150,7 @@ describe('applyToggleField', () => {
     const config = {
       ...INITIAL_CONFIG,
       log_fields: {
-        ...INITIAL_CONFIG.log_fields,
-        field_overrides: undefined as unknown as Record<string, boolean>,
+        ...without(INITIAL_CONFIG.log_fields, 'field_overrides'),
       },
     }
     const next = applyToggleField(config, 'cookie_id', false, true)
@@ -182,8 +196,7 @@ describe('applyUpdateFieldLimit', () => {
     const config = {
       ...INITIAL_CONFIG,
       log_fields: {
-        ...INITIAL_CONFIG.log_fields,
-        field_limits: undefined as unknown as Record<string, number>,
+        ...without(INITIAL_CONFIG.log_fields, 'field_limits'),
       },
     }
     const next = applyUpdateFieldLimit(config, 'url', 4096)
@@ -201,13 +214,13 @@ describe('buildTogglePreset', () => {
 
   it('adds all groups in a preset (and their dependencies)', () => {
     const toggle = buildTogglePreset(CATALOG, isPresetActiveFor([]))
-    const next = toggle(configWithGroups([]), CATALOG.presets.standard.groups)
+    const next = toggle(configWithGroups([]), PRESETS.standard.groups)
     expect(new Set(next.log_fields.groups)).toEqual(new Set(['core', 'http']))
   })
 
   it('pulls in transitive dependencies when activating a preset', () => {
     const toggle = buildTogglePreset(CATALOG, isPresetActiveFor([]))
-    const next = toggle(configWithGroups([]), CATALOG.presets.full.groups)
+    const next = toggle(configWithGroups([]), PRESETS.full.groups)
     expect(new Set(next.log_fields.groups)).toEqual(
       new Set(['core', 'http', 'tls', 'security']),
     )
@@ -219,7 +232,7 @@ describe('buildTogglePreset', () => {
     // otherwise keep `core` alive.
     const isolatedCatalog = {
       ...CATALOG,
-      presets: { standard: CATALOG.presets.standard },
+      presets: { standard: PRESETS.standard },
     }
     const startingGroups = ['core', 'http']
     const toggle = buildTogglePreset(isolatedCatalog, isPresetActiveFor(startingGroups))
@@ -235,7 +248,7 @@ describe('buildTogglePreset', () => {
     // must keep `core` because minimal=['core'] is still satisfied.
     const startingGroups = ['core', 'http']
     const toggle = buildTogglePreset(CATALOG, isPresetActiveFor(startingGroups))
-    const next = toggle(configWithGroups(startingGroups), CATALOG.presets.standard.groups)
+    const next = toggle(configWithGroups(startingGroups), PRESETS.standard.groups)
     expect(next.log_fields.groups).toEqual(['core'])
   })
 
@@ -244,7 +257,7 @@ describe('buildTogglePreset', () => {
     // Toggling standard off must NOT remove core/http because full needs them.
     const startingGroups = ['core', 'http', 'tls', 'security']
     const toggle = buildTogglePreset(CATALOG, isPresetActiveFor(startingGroups))
-    const next = toggle(configWithGroups(startingGroups), CATALOG.presets.standard.groups)
+    const next = toggle(configWithGroups(startingGroups), PRESETS.standard.groups)
     // All four still present — full preset is still on.
     expect(new Set(next.log_fields.groups)).toEqual(
       new Set(['core', 'http', 'tls', 'security']),
@@ -260,7 +273,7 @@ describe('buildTogglePreset', () => {
     // inside the helper.
     const isolatedCatalog = {
       ...CATALOG,
-      presets: { standard: CATALOG.presets.standard },
+      presets: { standard: PRESETS.standard },
     }
     const startingGroups = ['core', 'http', 'detail']
     const toggle = buildTogglePreset(isolatedCatalog, isPresetActiveFor(startingGroups))

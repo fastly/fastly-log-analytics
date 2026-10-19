@@ -7,82 +7,114 @@ import { PopLabel } from '@/components/PopLabel'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils';
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 import { Server, MapPin, Globe } from 'lucide-react'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type {
+  OriginIpHealth,
+  OriginIpHealthRow,
+  OriginPopLatency,
+  OriginPopLatencyRow,
+  OriginSlowUrlRow,
+  OriginSlowUrls,
+  OriginSummary,
+  SectionQuery,
+} from './types'
 
 // Shared column scaffolding — every column header is the same dense
 // uppercase span, and requests/p50/p95 are byte-identical across the
 // url/pop/ip variants. Factor them out so the three column sets compose
 // from one definition each (rendered output is unchanged).
-const metricHeader = (label: string) => () => (
-  <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
-)
-const msCell = (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span>
+const metricHeader = (label: string) =>
+  function MetricHeader() {
+    return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
+  }
+type LatencyRow = { p50_ms?: number | null; p95_ms?: number | null; requests: number }
 
-const requestsCol = { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'), cell: (info: any) => info.getValue().toLocaleString() }
-const p50Col = { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: metricHeader('P50'), cell: msCell }
-const p95Col = { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'), cell: msCell }
+const msCell = (value: number | null | undefined) => <span>{value?.toFixed(1)}ms</span>
 
-const COLUMNS = {
-  url: [
-    {
-      accessorKey: 'url',
-      id: 'url', meta: { label: 'URL' }, header: metricHeader('URL'),
-      cell: (info: any) => (
-        <FilterValueCell
-          filters={[{ column: 'url', value: info.getValue() }]}
-          className="font-mono text-xs"
-          containerClassName="max-w-[400px]"
-        />
-      )
-    },
-    requestsCol,
-    p50Col,
-    p95Col,
-    { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: metricHeader('P99'), cell: msCell },
-  ],
-  pop: [
-    {
-      accessorKey: 'pop',
-      id: 'pop', meta: { label: 'POP' }, header: metricHeader('POP'),
-      cell: (info: any) => (
-        <FilterValueCell
-          filters={[{ column: 'pop', value: info.getValue() }]}
-          display={<PopLabel code={info.getValue()} />}
-          className="font-bold"
-        />
-      )
-    },
-    requestsCol,
-    p50Col,
-    { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'), cell: (info: any) => (
-      <span className={cn(info.row.original.elevated ? "text-destructive font-bold" : "")}>
-        {info.getValue()?.toFixed(1)}ms
+const requestsCol = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+  accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'),
+  cell: ({ row }) => formatCount(row.original.requests),
+})
+const p50Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+  accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: metricHeader('P50'),
+  cell: ({ row }) => msCell(row.original.p50_ms),
+})
+const p95Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+  accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'),
+  cell: ({ row }) => msCell(row.original.p95_ms),
+})
+
+const URL_COLUMNS: ColumnDef<OriginSlowUrlRow>[] = [
+  {
+    accessorKey: 'url',
+    id: 'url', meta: { label: 'URL' }, header: metricHeader('URL'),
+    cell: ({ row }) => (
+      <FilterValueCell
+        filters={[{ column: 'url', value: row.original.url }]}
+        className="font-mono text-xs"
+        containerClassName="max-w-[400px]"
+      />
+    )
+  },
+  requestsCol(),
+  p50Col(),
+  p95Col(),
+  {
+    accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: metricHeader('P99'),
+    cell: ({ row }) => msCell(row.original.p99_ms),
+  },
+]
+
+const POP_COLUMNS: ColumnDef<OriginPopLatencyRow>[] = [
+  {
+    accessorKey: 'pop',
+    id: 'pop', meta: { label: 'POP' }, header: metricHeader('POP'),
+    cell: ({ row }) => (
+      <FilterValueCell
+        filters={[{ column: 'pop', value: row.original.pop }]}
+        display={<PopLabel code={row.original.pop} />}
+        className="font-bold"
+      />
+    )
+  },
+  requestsCol(),
+  p50Col(),
+  {
+    accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'),
+    cell: ({ row }) => (
+      <span className={cn(row.original.elevated ? "text-destructive font-bold" : "")}>
+        {row.original.p95_ms?.toFixed(1)}ms
       </span>
-    )},
-  ],
-  ip: [
-    {
-      accessorKey: 'oip',
-      id: 'oip', meta: { label: 'Origin IP' }, header: metricHeader('Origin IP'),
-      cell: (info: any) => (
-        <FilterValueCell
-          filters={[{ column: 'oip', value: info.getValue() }]}
-          className="font-mono text-xs"
-        />
-      )
-    },
-    requestsCol,
-    p50Col,
-    p95Col,
-    { accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: metricHeader('5xx %'), cell: (info: any) => (
-      <span className={cn(info.getValue() > 1 ? "text-destructive font-bold" : "")}>
-        {info.getValue()}%
+    ),
+  },
+]
+
+const IP_COLUMNS: ColumnDef<OriginIpHealthRow>[] = [
+  {
+    accessorKey: 'oip',
+    id: 'oip', meta: { label: 'Origin IP' }, header: metricHeader('Origin IP'),
+    cell: ({ row }) => (
+      <FilterValueCell
+        filters={[{ column: 'oip', value: row.original.oip }]}
+        className="font-mono text-xs"
+      />
+    )
+  },
+  requestsCol(),
+  p50Col(),
+  p95Col(),
+  {
+    accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: metricHeader('5xx %'),
+    cell: ({ row }) => (
+      <span className={cn((row.original.error_pct ?? 0) > 1 ? "text-destructive font-bold" : "")}>
+        {row.original.error_pct}%
       </span>
-    )},
-  ]
-}
+    ),
+  },
+]
 
 const COLUMN_LABELS: Record<string, string> = {
   url: 'URL',
@@ -96,6 +128,22 @@ const COLUMN_LABELS: Record<string, string> = {
 }
 
 const getLabels = (ids: string[]) => ids.map(id => ({ id, label: COLUMN_LABELS[id] || id }))
+
+interface LatencyHeatmapProps {
+  slowUrls: SectionQuery<OriginSlowUrls>
+  popLatency: SectionQuery<OriginPopLatency>
+  ipHealth: SectionQuery<OriginIpHealth>
+  summary: SectionQuery<OriginSummary>
+  urlVisibility: VisibilityState
+  setUrlVisibility: (visibility: VisibilityState) => void
+  onUrlVisChange: (id: string, visible: boolean) => void
+  popVisibility: VisibilityState
+  setPopVisibility: (visibility: VisibilityState) => void
+  onPopVisChange: (id: string, visible: boolean) => void
+  ipVisibility: VisibilityState
+  setIpVisibility: (visibility: VisibilityState) => void
+  onIpVisChange: (id: string, visible: boolean) => void
+}
 
 export function LatencyHeatmap({
   slowUrls,
@@ -111,7 +159,7 @@ export function LatencyHeatmap({
   ipVisibility,
   setIpVisibility,
   onIpVisChange,
-}: any) {
+}: LatencyHeatmapProps) {
   // Distinguish "field group not enabled" from "enabled but no data in this
   // window yet" so the empty tables don't falsely read as misconfigured.
   const { isFieldActive } = useActiveLogFields()
@@ -123,7 +171,9 @@ export function LatencyHeatmap({
           icon={<Server className="h-4 w-4" />}
           isLoading={slowUrls.isLoading}
           isFetching={slowUrls.isFetching}
+          loadingMessage="Loading slowest URLs at origin..."
           error={slowUrls.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>A list of specific URLs that take the longest time to fetch from the origin.</p>}
           headerAction={
@@ -140,7 +190,7 @@ export function LatencyHeatmap({
           }
         >
           <DataTable
-            columns={COLUMNS.url}
+            columns={URL_COLUMNS}
             data={slowUrls.data?.rows || []}
             emptyMessage={slowUrls.isLoading ? "" : (isFieldActive('ottfb') ? "No slow URLs in this time range." : "Requires Origin Metrics (Group L) fields to be enabled.")}
             hideToolbar
@@ -154,7 +204,9 @@ export function LatencyHeatmap({
           icon={<MapPin className="h-4 w-4" />}
           isLoading={popLatency.isLoading}
           isFetching={popLatency.isFetching}
+          loadingMessage="Loading origin performance by POP..."
           error={popLatency.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>Backend latency aggregated by Fastly POP location.</p>}
           headerAction={
@@ -171,7 +223,7 @@ export function LatencyHeatmap({
           }
         >
           <DataTable
-            columns={COLUMNS.pop}
+            columns={POP_COLUMNS}
             data={popLatency.data?.rows || []}
             emptyMessage={popLatency.isLoading ? "" : ((isFieldActive('ottfb') && isFieldActive('pop')) ? "No POP latency data in this time range." : "Requires Origin Metrics (Group L) and Infrastructure (Group C) fields to be enabled.")}
             hideToolbar
@@ -187,7 +239,9 @@ export function LatencyHeatmap({
           icon={<Globe className="h-4 w-4" />}
           isLoading={ipHealth.isLoading}
           isFetching={ipHealth.isFetching}
+          loadingMessage="Loading origin IP health..."
           error={ipHealth.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>Latency and error rates for individual backend IP addresses.</p>}
           headerAction={
@@ -204,7 +258,7 @@ export function LatencyHeatmap({
           }
         >
           <DataTable
-            columns={COLUMNS.ip}
+            columns={IP_COLUMNS}
             data={ipHealth.data?.rows || []}
             emptyMessage={ipHealth.isLoading ? "" : (isFieldActive('oip') ? "No origin IP data in this time range." : "Requires Origin Metrics (Group L) fields to be enabled.")}
             hideToolbar
@@ -218,7 +272,9 @@ export function LatencyHeatmap({
           icon={<Globe className="h-4 w-4" />}
           isLoading={summary.isLoading}
           isFetching={summary.isFetching}
+          loadingMessage="Loading origin payload size..."
           error={summary.error as AnalyticsCardError | null}
+          className="min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto]"
           helpContent={<p>The median size of the response body transferred from the origin to Fastly.</p>}
         >
           <div className="flex flex-col items-center justify-center py-4 text-center">

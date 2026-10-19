@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { reducer, DEFAULTS, calculate } from './calc'
-import type { CalcState } from './calc'
+import type { CalcState, PrefillResponse } from './calc'
 import { Inputs } from './Inputs'
 import { Pricing } from './Pricing'
 import { Results } from './Results'
@@ -10,7 +10,7 @@ import { Results } from './Results'
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 interface CostCalculatorProps {
-  prefillData?: any
+  prefillData?: PrefillResponse
   prefillNote?: string
   overrideBytesPerLine?: number
 }
@@ -19,7 +19,7 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
-    if (prefillData && !prefillData.error) {
+    if (prefillData) {
       dispatch({ type: 'PREFILL', prefill: prefillData })
     }
   }, [prefillData])
@@ -32,6 +32,10 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
 
   const set = (key: keyof CalcState) => (value: number | boolean) => {
     dispatch({ type: 'SET', key, value })
+  }
+
+  const setZone = (zone: import('./calc').BillingZone) => {
+    dispatch({ type: 'SET_ZONE', zone })
   }
 
   const r = useMemo(() => calculate(s), [s])
@@ -52,7 +56,7 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
 
         {/* ── Right: Pricing + What generates ops ── */}
         <div className='space-y-6'>
-          <Pricing s={s} />
+          <Pricing s={s} setZone={setZone} />
         </div>
       </div>
 

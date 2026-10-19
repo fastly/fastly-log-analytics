@@ -261,3 +261,212 @@ class TestAdminIdHelper:
         # the actual behavior so a future refactor of the helper doesn't
         # silently lose the no-client guard.
         assert _admin_id_from_request(FakeReq()) == "unknown"
+
+
+# ── Cancellation with active handle + audit logging ────────────────────────
+
+
+class TestCancelWithHandleAndAudit:
+    def test_cancel_cancellable_duckdb_query_interrupts_and_records_audit(self, client):
+        import time as _time
+
+        from backend.core import metadata as _meta
+
+        svc_id = "test_svc_cancel_audit"
+        _meta.clear_slow_queries(svc_id)
+
+        interrupted = []
+
+        class FakeDuckDBCon:
+            def interrupt(self):
+                interrupted.append(True)
+
+        fake_con = FakeDuckDBCon()
+        prev = current_attribution.get()
+        current_attribution.set(
+            Attribution.admin(
+                admin_id="127.0.0.1",
+                request_path="/api/query",
+                request_id="req-cancel-1",
+            )
+        )
+        try:
+            qid = query_registry.register("DuckDB", "SELECT * FROM logs", con=fake_con, service_id=svc_id)
+        finally:
+            current_attribution.set(prev)
+
+        resp = client.post(f"/api/admin/queries/{qid}/cancel")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "cancelled"
+        assert body["query_id"] == qid
+        assert interrupted == [True]
+
+        query_registry.deregister(qid, error=RuntimeError("Query interrupted"))
+        # Verify audit log entry was written for the service
+        audits = _meta.list_audit(svc_id, limit=20)
+        assert any(a["event_type"] == "query_cancelled" for a in audits)
+        _ = _time.time()
+
+
+# ── Persisted slow-queries endpoints (PostgreSQL METADATA_DSN) ─────────────
+
+
+class TestSlowQueriesEndpoints:
+    def test_list_count_and_clear_slow_queries(self, client):
+        import time as _time
+
+        from backend.core import metadata as _meta
+
+        svc_id = "test-service-id"
+        _meta.clear_slow_queries(svc_id)
+        now = _time.time()
+
+        _meta.insert_slow_query(
+            svc_id,
+            {
+                "query_id": 7001,
+                "db_type": "DuckDB",
+                "service_id": svc_id,
+                "started_at_utc": now - 120.0,
+                "ended_at_utc": now - 118.2,
+                "duration_ms": 1800.0,
+                "outcome": "ok",
+                "sql_preview": "SELECT count(*) FROM logs",
+                "sql_full": "SELECT count(*) FROM logs WHERE status >= 500",
+                "sql_len": 46,
+                "attr_kind": "admin",
+                "attr_label": "admin @ 127.0.0.1",
+                "attr_principal_id": "127.0.0.1",
+                "attr_caller_qualname": "dashboard.aggregates",
+                "attr_caller_file": "backend/routers/dashboard.py:42",
+                "attr_request_path": "/api/dashboard/aggregates",
+                "attr_request_id": "req-slow-1",
+                "attr_cron_job": None,
+                "attr_cron_run_id": None,
+                "attr_pool_slot": "pool#1",
+                "error_type": None,
+                "error_message": None,
+                "peak_memory_mb": 64.5,
+            },
+        )
+        _meta.insert_slow_query(
+            svc_id,
+            {
+                "query_id": 7002,
+                "db_type": "Postgres",
+                "service_id": svc_id,
+                "started_at_utc": now - 60.0,
+                "ended_at_utc": now - 59.5,
+                "duration_ms": 500.0,
+                "outcome": "ok",
+                "sql_preview": "SELECT * FROM ingested_files",
+                "sql_full": "SELECT * FROM ingested_files WHERE service_id = $1",
+                "sql_len": 50,
+                "attr_kind": "cron",
+                "attr_label": "cron:full_sync",
+                "attr_principal_id": None,
+                "attr_caller_qualname": "ingest_log.list_ingested_files",
+                "attr_caller_file": "backend/core/metadata/ingest_log.py:100",
+                "attr_request_path": None,
+                "attr_request_id": None,
+                "attr_cron_job": "full_sync",
+                "attr_cron_run_id": 99,
+                "attr_pool_slot": None,
+                "error_type": None,
+                "error_message": None,
+                "peak_memory_mb": None,
+            },
+        )
+
+        # Count with default 1000ms threshold -> only query 7001 qualifies
+        cnt_resp = client.get(f"/api/admin/slow-queries/count?service_id={svc_id}&since_hours=24&threshold_ms=1000")
+        assert cnt_resp.status_code == 200
+        cnt_body = cnt_resp.json()
+        assert cnt_body["count"] == 1
+        assert cnt_body["since_hours"] == 24
+        assert cnt_body["threshold_ms"] == 1000.0
+
+        # List with 100ms threshold -> both rows returned
+        list_resp = client.get(
+            f"/api/admin/slow-queries?service_id={svc_id}&since_hours=24&threshold_ms=100&sort=duration"
+        )
+        assert list_resp.status_code == 200
+        list_body = list_resp.json()
+        assert len(list_body["rows"]) == 2
+        assert list_body["rows"][0]["query_id"] == 7001
+        assert list_body["rows"][0]["sql"] == "SELECT count(*) FROM logs WHERE status >= 500"
+        assert list_body["rows"][0]["attribution"]["kind"] == "admin"
+        assert list_body["rows"][0]["attribution"]["pool_slot"] == "pool#1"
+        assert list_body["rows"][1]["attribution"]["cron_run_id"] == "99"
+
+        # Filter by db_type=Postgres
+        pg_resp = client.get(
+            f"/api/admin/slow-queries?service_id={svc_id}&since_hours=24&threshold_ms=100&db_type=Postgres"
+        )
+        assert pg_resp.status_code == 200
+        pg_rows = pg_resp.json()["rows"]
+        assert len(pg_rows) == 1
+        assert pg_rows[0]["query_id"] == 7002
+        assert pg_rows[0]["db_type"] == "Postgres"
+
+        # Clear persisted slow queries via DELETE /api/admin/slow-queries
+        del_resp = client.delete(f"/api/admin/slow-queries?service_id={svc_id}")
+        assert del_resp.status_code == 200
+        del_body = del_resp.json()
+        assert del_body["deleted"] == 2
+        assert del_body["service_id"] == svc_id
+
+        # Verify count is now 0
+        after_cnt = client.get(f"/api/admin/slow-queries/count?service_id={svc_id}&since_hours=24&threshold_ms=100")
+        assert after_cnt.status_code == 200
+        assert after_cnt.json()["count"] == 0
+
+
+# ── Analyst Path B RBAC rejection (403 Forbidden) ──────────────────────────
+
+
+class TestAnalystRbacRejection:
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            ("GET", "/api/admin/queries"),
+            ("GET", "/api/admin/queries/summary"),
+            ("GET", "/api/admin/queries/1"),
+            ("POST", "/api/admin/queries/1/cancel"),
+            ("GET", "/api/admin/slow-queries?service_id=svc1"),
+            ("GET", "/api/admin/slow-queries/count?service_id=svc1"),
+            ("DELETE", "/api/admin/slow-queries?service_id=svc1"),
+            ("GET", "/api/admin/app-config/query-monitor"),
+        ],
+    )
+    def test_analyst_session_receives_403_on_all_query_monitor_routes(self, client, method, path):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from backend.deps import require_admin
+        from backend.utils.remote_access import _is_blocked_path
+
+        raw_path = path.split("?", 1)[0]
+        assert _is_blocked_path(raw_path) is True, f"Expected {raw_path} to be blocked for Analyst Path B"
+
+        fake_req = SimpleNamespace(
+            state=SimpleNamespace(analyst_session=SimpleNamespace(session_id="sess_analyst_qmon")),
+            headers={},
+            client=SimpleNamespace(host="203.0.113.55"),
+        )
+        with pytest.raises(HTTPException) as exc:
+            require_admin(fake_req)  # type: ignore[arg-type]
+        assert exc.value.status_code == 403
+
+        # Also verify HTTP-layer rejection when require_admin evaluates an Analyst Path B session
+        def _analyst_override():
+            require_admin(fake_req)  # type: ignore[arg-type]
+
+        client.app.dependency_overrides[require_admin] = _analyst_override
+        try:
+            resp = client.request(method, path)
+            assert resp.status_code == 403
+        finally:
+            client.app.dependency_overrides.pop(require_admin, None)

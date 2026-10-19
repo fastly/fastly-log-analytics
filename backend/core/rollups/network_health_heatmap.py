@@ -63,7 +63,8 @@ def build_network_heatmap_bundles(service_id: str, source: dict, hours: list[str
         }
 
     def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
-        assert isinstance(ctx, dict)
+        if not isinstance(ctx, dict):
+            raise RuntimeError("isinstance(ctx, dict) must hold")
         rtt_min_expr = "CAST(APPROX_QUANTILE(rtt_min, 0.5) AS DOUBLE)" if ctx["has_rtt_min"] else "CAST(NULL AS DOUBLE)"
         rtt_var_expr = "CAST(APPROX_QUANTILE(rtt_var, 0.5) AS DOUBLE)" if ctx["has_rtt_var"] else "CAST(NULL AS DOUBLE)"
         ploss_sum_expr = "CAST(SUM(ploss) AS DOUBLE)" if ctx["has_ploss"] else "CAST(NULL AS DOUBLE)"

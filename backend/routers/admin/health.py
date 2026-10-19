@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
 
+from fastapi import Query
+
 from backend.models.admin import HealthSnapshotResponse
+from backend.models.admin_actions import VclHealthResponse
+from backend.utils.router_utils import require_service_id
 
 from ._router import router
 
+logger = logging.getLogger(__name__)
 
+
+@router.get("/admin/system-metrics", response_model=HealthSnapshotResponse)
+@router.get("/admin/health", response_model=HealthSnapshotResponse)
 @router.get("/admin/health-snapshot", response_model=HealthSnapshotResponse)
 def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     """One-shot health snapshot for the admin page system health card.
@@ -167,7 +176,14 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         failures: list[dict] = []
         for sid in _svcconfig.list_service_ids():
             try:
-                for task, run in latest_cron_per_task(sid).items():
+                # Exclude boot-reap rows (a cron the deploy/restart stopped
+                # mid-run) BEFORE ranking, so a restart-interrupted cron isn't
+                # reported as an environment fault and can't mask the real
+                # terminal run beneath it — same classification the deep-health
+                # degraded check applies in backend/main.py.
+                for task, run in latest_cron_per_task(
+                    sid, exclude_error_messages=("Process interrupted by server restart",)
+                ).items():
                     if run.get("status") == "error":
                         failures.append(
                             {
@@ -189,6 +205,10 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         out["recent_cron_failures"] = failures[:50]
     except Exception:
         out["recent_cron_failures"] = []
+
+    from backend.config import config_lock_degraded
+
+    out["config_lock_degraded"] = config_lock_degraded()
 
     # ── Effective observability mode (SRE-20) ────────────────────────
     # The runtime truth (vs. the ADR's aspirational wiring): prod runs
@@ -260,11 +280,36 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         except Exception:
             out["fos"] = None
 
+    # ── High-scale disk guard (high-scale topology only) ─────────────
+    # Latest serving-volume mode from the 60 s sampler. Absent in standard
+    # mode so that payload stays byte-identical.
+    try:
+        from backend import config as _hs_cfg
+
+        if _hs_cfg.is_high_scale_mode():
+            from dataclasses import asdict
+
+            from backend.high_scale.config import topology_from_environment
+            from backend.high_scale.disk_sampler import disk_snapshot_payload
+
+            topology: dict | None
+            try:
+                topology = asdict(topology_from_environment())
+            except ValueError:
+                logger.warning("health snapshot: HIGH_SCALE_PROFILE is not a known topology profile")
+                topology = None
+            out["high_scale"] = {"disk": disk_snapshot_payload(), "topology": topology}
+    except Exception:
+        logger.warning("health snapshot: high-scale block failed", exc_info=True)
+
+    # ── Celery Metrics (Deprecated) ──────────
+    out["celery"] = None
+
     return out
 
 
-@router.get("/admin/vcl-health")
-def api_vcl_health(service_id: str) -> dict[str, Any]:
+@router.get("/admin/vcl-health", response_model=VclHealthResponse, response_model_exclude_unset=True)
+def api_vcl_health(service_id: str | None = Query(default=None)) -> dict[str, Any]:
     """Verify VCL state after migration — check for legacy/consolidated snippet presence.
 
     Returns a dict with:
@@ -275,6 +320,7 @@ def api_vcl_health(service_id: str) -> dict[str, Any]:
 
     Used by the admin UI post-deploy to show migration status.
     """
+    service_id = require_service_id(service_id)
     try:
         from backend import config as svcconfig
         from backend.provision.declarative import fastly_integration

@@ -5,7 +5,7 @@ Companion to ``recover_orphaned_iceberg_metadata.py``. Use this when the
 orphaned branch and the live branch have DIVERGED FIELD IDS, which makes
 ``add_files`` impossible: Iceberg binds columns by field id, and a rollback
 that re-evolved the custom fields in a different order gives the same column a
-different id on each branch. The 2026-08 SE-demo incident had 27 such columns
+different id on each branch. The 2026-08 production incident had 27 such columns
 (``cmcd_*``, ``edge_*``, ``io_*``) — identical names and types, different ids.
 
 Strategy: read the orphaned parquet by NAME, project it onto the live table's

@@ -4,6 +4,7 @@ import React from 'react'
 import dynamic from 'next/dynamic'
 import { cn } from '@/lib/utils'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import type { DashboardAggregates, DashboardCatalog } from './types'
 
 // ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
 // blocked the dashboard's initial JS parse/eval; dynamic-import slices it
@@ -30,8 +31,8 @@ export interface GeoMapProps {
   isReady: boolean
   isLoadingAggs: boolean
   isFetchingAggs: boolean
-  aggregates: any
-  catalog: any
+  aggregates: DashboardAggregates | null | undefined
+  catalog: DashboardCatalog | undefined
   onCountryClick: (countryName: string) => void
 }
 
@@ -70,10 +71,10 @@ export function GeoMap({
                 if (isFieldActive('country')) {
                   return "No country data in this time range."
                 }
-                const countryField = (catalog?.fields as any[])?.find(f => f.id === 'country')
+                const countryField = catalog?.fields?.find((f) => f.id === 'country')
                 const groupId = countryField?.group
                 if (groupId) {
-                  const groupMeta = (catalog?.groups as any[])?.find(g => g.id === groupId)
+                  const groupMeta = catalog?.groups?.find((g) => g.id === groupId)
                   if (groupMeta) {
                     return `Requires ${groupMeta.label} fields to be enabled in Fastly logging.`
                   }

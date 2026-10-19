@@ -58,6 +58,14 @@ def _build_test_app() -> FastAPI:
     def _sse():
         return {"ok": True}
 
+    @app.get("/api/cron-runs/{run_id}/stream")
+    def _cron_run_stream(run_id: str):
+        return {"ok": True}
+
+    @app.get("/api/services/{service_id}/stream")
+    def _service_live_stream(service_id: str):
+        return {"ok": True}
+
     # Analyst-allowlisted SSE channel (header-badge push). Used by the
     # idle-timer exemption test below — it passes the SSE allowlist gate,
     # so it's a true positive for "reached the touch logic but skipped it".
@@ -292,6 +300,32 @@ def test_remote_request_unknown_host_rejected(client):
     assert r.json()["error"] == "host_not_allowed"
 
 
+def test_remote_frontend_configured_host_allowed(client, monkeypatch):
+    """A host configured in a service's remote_frontend block is permitted."""
+    _start_share()
+    fake_config = [
+        {
+            "service_id": "svc_test_rf",
+            "remote_frontend": {
+                "service_id": "fastly_test_123",
+                "domain_name": "fla-test.global.ssl.fastly.net",
+            },
+        }
+    ]
+    monkeypatch.setattr("backend.config.list_configs", lambda: fake_config)
+    r = client.get(
+        "/api/dashboard",
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "fla-test.global.ssl.fastly.net",
+        },
+    )
+    # The host check must succeed (not return 400 host_not_allowed).
+    # Since it's an unauthenticated remote request to /api/dashboard, it receives 401 unauthenticated.
+    assert r.status_code == 401
+    assert r.json()["error"] == "unauthenticated"
+
+
 # ── Local pass-through ─────────────────────────────────────────────────────
 
 
@@ -299,6 +333,28 @@ def test_local_admin_can_hit_admin_paths(client):
     """No X-Remote-Analyst header → local-admin → admin endpoints work."""
     r = client.get("/api/admin/share/status")
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/api/admin/clickhouse/status?service_id=svcA"),
+        ("POST", "/api/admin/clickhouse/replay"),
+    ],
+)
+def test_clickhouse_controls_block_authenticated_analyst(client, method, path):
+    from backend.routers.admin import router
+
+    client.app.include_router(router)
+    _start_share()
+    _login_analyst(client, _seed_invite())
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
+    allowed = client.get("/api/dashboard?service_id=svcA", headers=headers)
+    assert allowed.status_code == 200, allowed.text
+    response = client.request(method, path, headers=headers, json={"service_id": "svcA", "dataset_id": "dataset"})
+    assert response.status_code == 403
+    assert response.json()["error"] == "admin_only"
 
 
 def test_local_admin_writes_pass_through(client):
@@ -391,6 +447,21 @@ def test_admin_shared_secret_does_not_apply_to_analyst_branch(client, monkeypatc
     assert "admin_token" not in r.text
 
 
+@pytest.mark.security_regression
+def test_gateway_required_keeps_authenticated_analyst_restrictions(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", "test-gateway-secret-with-at-least-32-characters")
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver"}
+    allowed = client.get("/api/dashboard", headers=headers, params={"service_id": "svcA"})
+    assert allowed.status_code == 200
+    denied = client.get("/api/admin/share/status", headers=headers)
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "admin_only"
+
+
 # ── Analyst path ───────────────────────────────────────────────────────────
 
 
@@ -460,6 +531,20 @@ def test_analyst_blocked_from_unlisted_hyphenated_stream_route(client):
     )
     assert r.status_code == 403
     assert r.json()["error"] == "sse_blocked"
+
+
+def test_analyst_allowed_on_service_live_stream_but_not_other_stream_suffixes(client):
+    """The live-log feed /api/services/{id}/stream is analyst-visible; the
+    allowlist must not widen to every ``*/stream`` route."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    hdrs = {"X-Remote-Analyst": "1", "Host": "testserver"}
+    ok = client.get("/api/services/svcA/stream", headers=hdrs)
+    assert ok.status_code == 200
+    blocked = client.get("/api/cron-runs/7/stream", headers=hdrs)
+    assert blocked.status_code == 403
+    assert client.get("/api/cron/stream", headers=hdrs).json()["error"] == "sse_blocked"
 
 
 def test_analyst_blocked_from_admin_events_stream(client):

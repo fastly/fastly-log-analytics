@@ -33,8 +33,9 @@ import {
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
 import type { components } from '@/types/api.generated'
+import type { ServiceConfig } from '@/types/api'
+import { useNowMs } from '@/hooks/useNowSeconds'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 type AnalystInvite = components["schemas"]["AnalystInvite"]
 
 interface InviteAnalystDialogProps {
@@ -106,43 +107,51 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
   )
 }
 
+// Re-renders once per second (shared useNowMs ticker) so the remaining-minutes
+// hint stays accurate and the banner disappears the moment the cache entry
+// expires. Mounted only while the confirm step is visible, so a closed dialog
+// does not subscribe to the ticker.
+function CachedInviteBanner({ serviceId, onReveal }: { serviceId: string; onReveal: () => void }) {
+  const nowMs = useNowMs()
+  const entry = recentInvites.get(serviceId)
+  if (!entry || !getRecentInvite(serviceId)) return null
+  // useNowMs() is 0 on the server snapshot; treat the invite as brand new until the client clock lands.
+  const ageMs = nowMs ? nowMs - entry.issuedAt : 0
+  const remainingMin = Math.max(1, Math.ceil(Math.max(0, REVEAL_TTL_MS - ageMs) / 60000))
+  return (
+    <Alert className="bg-primary/5 border-primary/20">
+      <History className="h-4 w-4" />
+      <AlertDescription className="text-sm ml-1 flex items-center justify-between gap-3">
+        <span>
+          A key was issued for this service in the last {remainingMin} min — still available in this tab.
+        </span>
+        <Button variant="outline" size="sm" onClick={onReveal} className="h-8 shrink-0">
+          <Eye className="h-3.5 w-3.5 mr-1.5" />
+          Reveal
+        </Button>
+      </AlertDescription>
+    </Alert>
+  )
+}
+
 export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnalystDialogProps) {
   const [step, setStep] = useState<Step>('confirm')
   const [error, setError] = useState('')
   const [result, setResult] = useState<AnalystInvite | null>(null)
-  const [jsonCopied, setJsonCopied] = useState(false)
-  // Re-renders the "Reveal previously issued key" banner as TTL ticks down
-  // and forces it to disappear the moment the cache entry expires.
-  const [now, setNow] = useState(() => Date.now())
-
+  const { copied: jsonCopied, copy: copyJson } = useCopyToClipboard(2000)
   useEffect(() => {
     if (!open) {
       const tid = setTimeout(() => {
         setStep('confirm')
         setError('')
         setResult(null)
-        setJsonCopied(false)
       }, 300)
       return () => clearTimeout(tid)
     }
   }, [open])
 
-  // Tick once per second while the confirm step is visible so the
-  // "remaining minutes" hint stays accurate and the banner self-hides at TTL.
-  useEffect(() => {
-    if (!open || step !== 'confirm') return
-    setNow(Date.now())
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [open, step])
-
   if (!service) return null
 
-  const cachedInvite = getRecentInvite(service.service_id)
-  const cachedEntry = recentInvites.get(service.service_id)
-  const cachedAgeMs = cachedEntry ? now - cachedEntry.issuedAt : 0
-  const cachedRemainingMs = Math.max(0, REVEAL_TTL_MS - cachedAgeMs)
-  const cachedRemainingMin = Math.max(1, Math.ceil(cachedRemainingMs / 60000))
 
   const handleCreate = async () => {
     setError('')
@@ -155,13 +164,14 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
       recentInvites.set(service.service_id, { invite, issuedAt: Date.now() })
       setResult(invite)
       setStep('result')
-    } catch (e: any) {
-      setError(e.message || 'Failed to create analyst key')
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : 'Failed to create analyst key')
       setStep('confirm')
     }
   }
 
   const handleRevealCached = () => {
+    const cachedInvite = getRecentInvite(service.service_id)
     if (!cachedInvite) return
     setResult(cachedInvite)
     setStep('result')
@@ -183,9 +193,7 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
     if (result.cdn_service_id) config.cdn_service_id = result.cdn_service_id
     if (result.cdn_secret) config.cdn_secret = result.cdn_secret
     if (result.iceberg_metadata_location) config.iceberg_metadata_location = result.iceberg_metadata_location
-    navigator.clipboard.writeText(JSON.stringify(config, null, 2))
-    setJsonCopied(true)
-    setTimeout(() => setJsonCopied(false), 2000)
+    void copyJson(JSON.stringify(config, null, 2))
   }
 
   return (
@@ -215,25 +223,7 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
         <div className="flex-1 overflow-y-auto min-h-0">
           {step === 'confirm' && (
             <div className="p-8 space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
-              {cachedInvite && (
-                <Alert className="bg-primary/5 border-primary/20">
-                  <History className="h-4 w-4" />
-                  <AlertDescription className="text-sm ml-1 flex items-center justify-between gap-3">
-                    <span>
-                      A key was issued for this service in the last {cachedRemainingMin} min — still available in this tab.
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleRevealCached}
-                      className="h-8 shrink-0"
-                    >
-                      <Eye className="h-3.5 w-3.5 mr-1.5" />
-                      Reveal
-                    </Button>
-                  </AlertDescription>
-                </Alert>
-              )}
+              <CachedInviteBanner serviceId={service.service_id} onReveal={handleRevealCached} />
 
               <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-semibold">
@@ -241,9 +231,9 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
                   What will happen
                 </div>
                 <ul className="text-sm text-muted-foreground space-y-1.5 ml-6 list-disc">
-                  <li>A new <strong className="text-foreground">read-only</strong> Fastly Object Storage access key will be created, scoped to this service's bucket.</li>
+                  <li>A new <strong className="text-foreground">read-only</strong> Fastly Object Storage access key will be created, scoped to this service&apos;s bucket.</li>
                   <li>Your stored Fastly API token will be used — no re-entry needed.</li>
-                  <li>You'll receive a JSON config to send to the analyst.</li>
+                  <li>You&apos;ll receive a JSON config to send to the analyst.</li>
                 </ul>
               </div>
 

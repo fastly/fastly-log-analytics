@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { InsightCardData } from '@/types/api'
-import { cn } from '@/lib/utils'
+import { cn, keyByOccurrence } from '@/lib/utils'
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { InsightDataModal } from './InsightDataModal'
@@ -90,7 +90,7 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
 
   return (
     <>
-      <Card className="h-full flex flex-col">
+      <Card className="h-full flex flex-col min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto]">
         <CardHeader className="pb-2">
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
@@ -126,11 +126,11 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
 
           {insight.items && insight.items.length > 0 && (
             <div className="space-y-1.5 mt-1">
-              {insight.items.slice(0, 5).map((item, i) => (
+              {keyByOccurrence(insight.items.slice(0, 5), (it) => it.label).map(({ key }, index) => (
                 <InsightItemRow
-                  key={i}
-                  item={item}
-                  insightId={insight.id}
+                  key={key}
+                  insight={insight}
+                  index={index}
                   onMapClick={(data) => setSelectedMapItem(data)}
                   onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
                   onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}

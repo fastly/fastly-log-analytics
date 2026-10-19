@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator
 
+from backend.models.common import OkResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 
 logger = logging.getLogger("backend.ux_events")
@@ -84,7 +85,7 @@ class UxEventPayload(BaseModel):
     }
 
 
-@router.post("")
+@router.post("", response_model=OkResponse, response_model_exclude_unset=True)
 def report_ux_event(payload: UxEventPayload, request: Request) -> dict:
     """Log one UX event. Returns ``{"ok": true}``.
 

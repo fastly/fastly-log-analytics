@@ -5,13 +5,14 @@ import React from 'react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import type { PlotlyTrace } from '@/types/plotly'
+import type { RangeWireArgs } from '@/lib/range-wire'
+import type { ReportLayoutRenderProps } from '@/components/ReportLayout'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { Server } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { INTERVAL_SECONDS } from '@/lib/constants'
@@ -19,6 +20,7 @@ import { formatDate } from '@/lib/date'
 import { Aggregates } from './Aggregates'
 import { Timeseries } from './Timeseries'
 import { LatencyHeatmap } from './LatencyHeatmap'
+import { CHART_COLORS, statusHex } from '@/lib/chart-colors'
 
 // P-4 slice 4: section-selector mirroring /security, /network, /dashboard,
 // /performance. The origin page renders every section, so the list is the
@@ -42,6 +44,11 @@ const ORIGIN_SECTIONS: NonNullable<components['schemas']['OriginAggregatesReques
   'ip_health',
 ]
 
+type OriginAggregates = components['schemas']['OriginAggregatesResponse']
+
+type OriginReportContentProps = ReportLayoutRenderProps &
+  Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'>
+
 function OriginReportContent({
   startTime,
   endTime,
@@ -55,7 +62,7 @@ function OriginReportContent({
   relativeRange,
   isAutoRange,
   anchor,
-}: any) {
+}: OriginReportContentProps) {
   const [originMetric, setOriginMetric] = React.useState<'ttfb' | 'ttlb'>('ttfb')
   const [originPercentile, setOriginPercentile] = React.useState<'p50' | 'p95' | 'p99'>('p95')
 
@@ -92,11 +99,14 @@ function OriginReportContent({
   // "24h" (resolveRangeWire's token default). A custom absolute range instead
   // keys on "abs:<start>|<end>" and sends the explicit bounds, so it scans
   // exactly what the chart x-axis (hard-clamped to startTime/endTime) displays.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const bundle = useServiceQuery(
-    ['origin', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
-    async ({ signal }) => {
-      const { data } = await client.POST('/api/origin/aggregates', { signal,
+  const bundle = useAnalyticsReportQuery<OriginAggregates | undefined>({
+    namespace: ['origin', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: [bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
+    queryFn: async ({ rangeBody, signal }) => {
+      const { data, error } = await client.POST('/api/origin/aggregates', { signal,
         body: {
           // Token mode → {range_token, anchor} (server resolves the window).
           // Custom mode → {start_time, end_time} (backend falls back to these
@@ -121,16 +131,9 @@ function OriginReportContent({
           ...rangeBody,
         },
       })
-      // NOTE: the response is intentionally left `as any`. Typing it as
-      // OriginAggregatesResponse cascades into the section consumers below:
-      // every section (summary/timeseries/slow_urls/…) is an opaque
-      // `{ [key: string]: unknown }` dict in the generated schema, so the
-      // local `.series`/`.rows` reads would each need bespoke narrowing.
-      // The body `sections` list above is now typed (a section typo is a
-      // compile error) — that is the type-safety win for this file.
-      return data as any
+      return data
     },
-  )
+  })
 
   // useMemo so identity stays stable across re-renders for the same bundle
   // tick; the section components are dumb consumers and re-renders fan out
@@ -146,21 +149,22 @@ function OriginReportContent({
   const ipHealth = React.useMemo(() => ({ data: bundle.data?.ip_health, isLoading, isFetching, error }), [bundle.data?.ip_health, isLoading, isFetching, error])
 
   const baseOriginTraces = useTimeseriesToTraces(originTs.data?.series, React.useMemo(() => [
-    { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: '#ef4444', fill: 'tozeroy' }
+    { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: CHART_COLORS.danger, fill: 'tozeroy' }
   ], [originMetric]), timezone)
 
+  const originSeries = originTs.data?.series
   const originTsChartData = React.useMemo(() => {
     // Clone to avoid mutating the hook's cached array
-    const traces = baseOriginTraces.map(t => ({
+    const traces: PlotlyTrace[] = baseOriginTraces.map(t => ({
       ...t,
       mode: 'lines+markers',
       marker: { size: 4, color: t.line?.color }
     }))
 
-    if (trend !== 'off' && originTs.data?.series?.length) {
-      const time_series = originTs.data.series
-      const xValues = time_series.map((d: any) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
-      const yValues = time_series.map((d: any) => Number(d.value) || 0)
+    if (trend !== 'off' && originSeries?.length) {
+      const time_series = originSeries
+      const xValues = time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+      const yValues = time_series.map((d) => Number(d.value) || 0)
       const n = yValues.length
       let windowSize = 0
       if (trend === 'auto') {
@@ -190,33 +194,31 @@ function OriginReportContent({
           mode: 'lines',
           name: `${trend === 'auto' ? 'Auto ' : ''}Trend`,
           line: { color: '#f97316', width: 3 }
-        } as any)
+        })
       }
     }
 
     return traces
-  }, [baseOriginTraces, originTs.data?.series, timezone, trend, config.effectiveInterval])
+  }, [baseOriginTraces, originSeries, timezone, trend, config.effectiveInterval])
 
-  const statusData = React.useMemo(() => {
-    if (!statusCodes.data?.rows?.length) return []
+  const statusRows = statusCodes.data?.rows
+  const statusData = React.useMemo((): PlotlyTrace[] => {
+    if (!statusRows?.length) return []
     // N-8: backend bucketizes any status outside 100-599 as -1; map to a
     // single "Other" slice so the donut doesn't fabricate plausible-looking
     // status codes like "HTTP 829" from synthetic / corrupt origin values.
     return [{
-      values: statusCodes.data.rows.map((r: any) => r.count),
-      labels: statusCodes.data.rows.map((r: any) => r.status === -1 ? 'Other' : `HTTP ${r.status}`),
+      values: statusRows.map((r) => r.count),
+      labels: statusRows.map((r) => r.status === -1 ? 'Other' : `HTTP ${r.status}`),
       type: 'pie',
       hole: 0.4,
       marker: {
-        colors: statusCodes.data.rows.map((r: any) =>
-          r.status === -1 ? '#94a3b8' :
-          r.status >= 500 ? '#ef4444' :
-          r.status >= 400 ? '#f59e0b' :
-          r.status >= 300 ? '#3b82f6' : '#10b981'
+        colors: statusRows.map((r) =>
+          r.status === -1 ? CHART_COLORS.neutral : statusHex(r.status)
         )
       }
     }]
-  }, [statusCodes.data?.rows])
+  }, [statusRows])
 
   if (summary.data?.has_data === false) {
     return (
@@ -304,7 +306,7 @@ export default function OriginClient({ nowServerStr }: { nowServerStr?: string }
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
     const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    const baseStr = baseVal || undefined
     return quantizeAnchor(baseStr)
   }, [storeEndTime, nowServerStr, mounted])
 

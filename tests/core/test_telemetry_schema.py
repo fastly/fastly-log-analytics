@@ -9,7 +9,12 @@ def test_telemetry_schema_and_helpers(monkeypatch, tmp_path):
     con = usage_log_db.get_con("test_service")
 
     # Verify tables exist
-    tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    tables = [
+        r[0]
+        for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
+        ).fetchall()
+    ]
     assert "telemetry_queries" in tables
     assert "telemetry_sections" in tables
 

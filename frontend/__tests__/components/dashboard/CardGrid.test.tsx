@@ -72,8 +72,8 @@ describe('CardGrid', () => {
 
   it('renders categorized sections + the expected cards once aggregates arrive', () => {
     const visibleCardList = [
-      { id: 'ip', label: 'Client IP' },
-      { id: 'status', label: 'HTTP Status' },
+      { id: 'ip', label: 'Client IP', inActiveFormat: false },
+      { id: 'status', label: 'HTTP Status', inActiveFormat: false },
     ]
     render(
       <CardGrid
@@ -104,7 +104,7 @@ describe('CardGrid', () => {
     const toggle = vi.fn()
     render(
       <CardGrid
-        visibleCardList={[{ id: 'ip', label: 'Client IP' }]}
+        visibleCardList={[{ id: 'ip', label: 'Client IP', inActiveFormat: false }]}
         isReady={true}
         isLoadingAggs={false}
         isFetchingAggs={false}
@@ -125,7 +125,7 @@ describe('CardGrid', () => {
   it('hides the cards grid when the section is collapsed', () => {
     render(
       <CardGrid
-        visibleCardList={[{ id: 'ip', label: 'Client IP' }]}
+        visibleCardList={[{ id: 'ip', label: 'Client IP', inActiveFormat: false }]}
         isReady={true}
         isLoadingAggs={false}
         isFetchingAggs={false}
@@ -147,7 +147,7 @@ describe('CardGrid', () => {
   it('groups uncategorized cards under a Custom section', () => {
     render(
       <CardGrid
-        visibleCardList={[{ id: 'custom_field_42', label: 'My Custom Field' }]}
+        visibleCardList={[{ id: 'custom_field_42', label: 'My Custom Field', inActiveFormat: false }]}
         isReady={true}
         isLoadingAggs={false}
         isFetchingAggs={false}

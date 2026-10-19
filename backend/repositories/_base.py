@@ -16,12 +16,30 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
+from backend import config as svcconfig
+from backend.core import metric_expressions
+from backend.core.field_registry import Group, in_group
+from backend.core.retry import retry_call
+from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
 from backend.core.rollups._common import quote_path_list
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+from backend.utils.log_throttle import log_once_per
+from backend.utils.sql_validator import escape_sql_literal
+
 _logger = logging.getLogger(__name__)
+
+
+def _rc_service_id(src: dict) -> str:
+    # Every _base.py call site has `src`/`self.src` shaped as the source
+    # dict `get_source_for_service` returns — `service_id` is always
+    # present; `name` is a display fallback for older/local configs during
+    # the transition, matching the fallback already used elsewhere in this
+    # file (e.g. `self.src.get("name") or self.src.get("service_id")`).
+    return src.get("service_id") or src.get("name") or ""
+
 
 # Rate-limit table for empty-rollup warnings — (service_id, field) → monotonic
 # timestamp of last warning. Bounded growth by capping; reset on the next
@@ -40,6 +58,13 @@ _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 # below tells the operator to run the deep backfill instead.
 _MISSING_HOUR_HEAL_CAP = 48
 _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
+
+# Clock-skew margin (seconds) for `_create_active_hour_temp_direct`'s buffer
+# mtime pruning: a file finalized before `live_start - margin` cannot hold
+# rows >= live_start. NOT reused for `_partial_hour_adjusted_live_start`'s
+# watermark narrowing (I2, final whole-branch review) — see that method's
+# docstring for why subtracting a margin there is unsafe for this writer.
+_MTIME_SKEW_MARGIN_S = 300
 
 # Fields excluded from the LIVE active-hour top-up in execute_top_n_rollups.
 # The live merge tops up each field's rollup top-N with the current (not-yet-
@@ -70,6 +95,15 @@ _LIVE_TOPN_SKIP_FIELDS: frozenset[str] = frozenset(
         "lon",
         "waf_sig",  # raw col backing the virtual waf_sig_ind card (served via _exploded_top_n)
     }
+    # METRICS-group catalog entries (requests, hit_rate, p50_latency, ...)
+    # all have vcl=None — they are chart-metric-only synthetic concepts,
+    # never a real per-row column, so referencing one as a SELECT column
+    # against raw/buffer parquet always fails to bind. Derived from the
+    # registry (not hand-listed) so a new METRICS field can't silently
+    # reintroduce this same live incident: every 30s partial-hour-merge
+    # tick errored on every service the moment a "requests" field appeared
+    # in FIELDS, because no caller had ever excluded the METRICS group.
+    | {f.code for f in in_group(Group.METRICS)}
 )
 
 
@@ -204,6 +238,8 @@ def collect_hourly_bundle_paths(
     et,
     bundled_root: str,
     bundle_filename: str,
+    *,
+    allow_all_fields_coverage: bool = False,
 ) -> tuple[list[str], bool] | None:
     """Walk ``[st, et)`` by UTC hour, return ``(paths, crosses_active)``.
 
@@ -219,10 +255,20 @@ def collect_hourly_bundle_paths(
     The two callsites used to maintain identical walk logic with
     cross-referenced "mirrors X" comments; the dual maintenance is now
     one helper. The per-field listdir is done inline (callers do not
-    pre-supply it).
+    pre-supply it). ``allow_all_fields_coverage`` is limited to the scalar
+    time-series readers, where an ``all_fields.parquet`` file proves the
+    hour-bundling pass reached the hour even when the time-series bundle is
+    absent. The missing-hour check still distinguishes an empty sentinel
+    from a non-empty bundle and heals the latter.
     """
     import os
     from datetime import UTC, datetime, timedelta
+
+    if svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src)):
+        # Rollups are pod-local accelerators.  A durable serving replica
+        # cannot treat a missing local tree as evidence that the durable
+        # DuckLake table is empty or partially covered.
+        return None
 
     from backend.core.rollups import _rollups_root
 
@@ -263,6 +309,11 @@ def collect_hourly_bundle_paths(
             break
         path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
         if not os.path.isfile(path):
+            if allow_all_fields_coverage and os.path.isfile(
+                os.path.join(bundled_root, f"hour={hour_str}", "all_fields.parquet")
+            ):
+                cursor += timedelta(hours=1)
+                continue
             if _hour_had_any_data(hour_str):
                 return None
             cursor += timedelta(hours=1)
@@ -270,6 +321,132 @@ def collect_hourly_bundle_paths(
         paths.append(path)
         cursor += timedelta(hours=1)
     return paths, crosses_active
+
+
+def _find_missing_bundle_hours(
+    st,
+    et,
+    bundled_root: str,
+    bundle_filename: str,
+    cap: int = _MISSING_HOUR_HEAL_CAP,
+    coverage_bundle_filename: str | None = None,
+) -> list[str]:
+    """Closed hours in [st, et) with no ``bundle_filename`` file under
+    ``bundled_root`` — a writer-coverage gap the caller should live-heal,
+    not silently treat as zero. When ``coverage_bundle_filename`` is
+    provided, an hour with that file is considered covered even if the
+    requested bundle is absent. This is used by scalar time-series readers
+    because an empty ``all_fields.parquet`` sentinel proves the hour was
+    checked and has zero traffic, even though it has no time-series rows.
+
+    Bounded by ``cap``: mirrors ``execute_top_n_rollups``'s own heal, which
+    bounds the WALK ITSELF via ``heal_floor_dt = active_dt -
+    timedelta(hours=cap)`` (clamped up to ``st`` when the window starts more
+    recently) rather than walking the whole ``[st, et)`` window and
+    truncating after — on a window near the 366-day max this file already
+    allows, an unbounded walk would double the directory-stat cost
+    ``collect_hourly_bundle_paths`` already pays for the same window on
+    every request that hits a writer gap.
+    """
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    active_hour_str = active_dt.strftime("%Y-%m-%d-%H")
+    heal_floor_dt = active_dt - timedelta(hours=cap)
+    if st > heal_floor_dt:
+        heal_floor_dt = st
+    missing: list[str] = []
+    cursor = heal_floor_dt.replace(minute=0, second=0, microsecond=0)
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
+        coverage_path = (
+            os.path.join(bundled_root, f"hour={hour_str}", coverage_bundle_filename)
+            if coverage_bundle_filename
+            else None
+        )
+        if not os.path.isfile(path) and (coverage_path is None or not _is_empty_bundle(coverage_path)):
+            missing.append(hour_str)
+        cursor += timedelta(hours=1)
+    return missing
+
+
+# I5 (final whole-branch review) investigated: execute_top_n_rollups's own
+# missing-hour walk additionally excludes day-compacted days and consults
+# per-field markers, while this function only checks bundle_filename
+# presence. In principle that's a source of disagreement between the two
+# readers — in practice, for this function's only current caller
+# (TIME_SERIES_BUNDLE_FILENAME), it is not: (1) time_series.parquet has NO
+# day-compacted counterpart (it is never in a `compact_closed_days` jobs
+# list), so a day-compaction exclusion check would never find anything to
+# exclude here; (2) hour_bundled/*/time_series.parquet files are never
+# deleted or swept (unlike the per-field `rollups/hour` tree
+# execute_top_n_rollups's walk reads, which IS cleaned up post-bundling) —
+# so "missing" here always means a genuine gap, not a compacted-away
+# source. If this function is ever reused for a bundle_filename that DOES
+# have a day-compacted form, this reasoning must be re-checked.
+
+
+def _count_expected_closed_hours(st, et, active_hour_str: str) -> int:
+    """Pure-arithmetic count of closed hourly buckets in ``[st, et)`` before
+    ``active_hour_str`` — mirrors ``collect_hourly_bundle_paths``'s own
+    hour-stepping walk with zero disk I/O, so its result can be diffed
+    against ``len(rollup_paths)`` to detect a writer-coverage gap that walk
+    silently skipped (no bundle file, no per-field marker) which ALSO falls
+    outside ``_find_missing_bundle_hours``'s heal cap — see C2 (final
+    whole-branch review, part 2): without this check, a genuine gap older
+    than the cap is neither served, nor healed, nor surfaced — the caller
+    would silently serve a truncated window instead of falling back to a
+    raw scan.
+    """
+    from datetime import timedelta
+
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    count = 0
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        count += 1
+        cursor += timedelta(hours=1)
+    return count
+
+
+def _is_empty_bundle(path: str) -> bool:
+    """Return whether a parquet bundle is the verified-empty sentinel."""
+    import os
+
+    if not os.path.isfile(path):
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        return pq.read_metadata(path).num_rows == 0
+    except Exception:
+        return False
+
+
+def _count_covered_closed_hours(st, et, bundled_root: str, active_hour_str: str, bundle_filename: str) -> int:
+    """Count closed hours with a data bundle or a verified-empty sentinel."""
+    import os
+    from datetime import timedelta
+
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    count = 0
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        hour_dir = os.path.join(bundled_root, f"hour={hour_str}")
+        if os.path.isfile(os.path.join(hour_dir, bundle_filename)) or _is_empty_bundle(
+            os.path.join(hour_dir, "all_fields.parquet")
+        ):
+            count += 1
+        cursor += timedelta(hours=1)
+    return count
 
 
 def _compact_sql_for_debug(sql: str) -> str:
@@ -309,11 +486,11 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
     attached = False
     if sqlite_path and os.path.exists(sqlite_path):
         try:
-            escaped = sqlite_path.replace("'", "''")
+            escaped = escape_sql_literal(sqlite_path)
             con.execute(f"ATTACH '{escaped}' AS {alias} (TYPE SQLITE, READ_ONLY)")
             attached = True
         except Exception:
-            pass
+            _logger.debug("_attach_sqlite: step failed (ignored)", exc_info=True)
     try:
         yield attached
     finally:
@@ -321,7 +498,7 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
             try:
                 con.execute(f"DETACH {alias}")
             except Exception:
-                pass
+                _logger.debug("_attach_sqlite: con.execute failed (ignored)", exc_info=True)
 
 
 def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -> bool:
@@ -365,22 +542,41 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     from backend import config as svcconfig
 
     db_path = svcconfig.ngwaf_db_path()
-    if not db_path or not os.path.exists(db_path):
-        return False
+    rows = []
+    if db_path:
+        if not os.path.exists(db_path):
+            return False
+        import sqlite3
 
-    import sqlite3
-
-    try:
-        sconn = sqlite3.connect(db_path, timeout=5)
         try:
-            rows = sconn.execute(
-                "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-            ).fetchall()
-        finally:
-            sconn.close()
-    except sqlite3.Error as e:
-        _logger.warning("[ngwaf_bots] cache read failed for %s: %s", alias, e)
-        return False
+            sconn = sqlite3.connect(db_path, timeout=5)
+            try:
+                cur = sconn.execute(
+                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = cur.fetchall()
+            finally:
+                sconn.close()
+        except Exception as e:
+            _logger.warning("[ngwaf_bots] sqlite cache read failed for %s: %s", alias, e)
+            return False
+    else:
+        try:
+            from backend.core.metadata import pg_connection
+
+            pconn = pg_connection.get_pg_readonly_connection()
+            try:
+                cur = pconn.execute(
+                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = [
+                    (r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"]) for r in cur.fetchall()
+                ]
+            finally:
+                pconn.close()
+        except Exception as e:
+            _logger.warning("[ngwaf_bots] postgres cache read failed for %s: %s", alias, e)
+            return False
 
     import pyarrow as pa
 
@@ -393,14 +589,10 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         }
     )
     try:
-        con.execute(f"ATTACH ':memory:' AS {alias}")
-        con.from_arrow(tbl).create(f"{alias}.ngwaf_bots")
+        con.register(f"temp_arrow_{alias}", tbl)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
     except Exception as e:
-        _logger.warning("[ngwaf_bots] materializing %s.ngwaf_bots failed: %s", alias, e)
-        try:
-            con.execute(f"DETACH {alias}")
-        except Exception:
-            pass
+        _logger.warning("[ngwaf_bots] materializing %s_ngwaf_bots failed: %s", alias, e)
         return False
     return True
 
@@ -444,7 +636,11 @@ def _get_schema(con: duckdb.DuckDBPyConnection, src: dict) -> list[dict]:
     return get_schema(con, src, stats=False)
 
 
-from backend.utils.date_utils import safe_iso  # noqa: E402, F401 — re-export
+from backend.utils.date_utils import (  # noqa: E402
+    parse_day_key_strict,
+    parse_hour_key_strict,
+    safe_iso,  # noqa: F401 — re-export
+)
 
 
 def _is_stale_view_error(e: Exception) -> bool:
@@ -475,6 +671,7 @@ def _is_stale_view_error(e: Exception) -> bool:
         or "Catalog Error: Table with name" in msg
         or "does not exist" in msg
         or "No such file or directory" in msg
+        or "Cannot open file" in msg
     )
     if not looks_stale:
         return False
@@ -560,15 +757,17 @@ def error_rate_expr(status_col: str = "status", threshold: int = 500, filter_exp
 
 
 def origin_latency_us_expr(actual_cols: set[str] | list[str]) -> str:
-    """Unified expression resolving ottfb (us) vs ttfb (s) vs nothing."""
-    if "ottfb" in actual_cols and "ttfb" in actual_cols:
-        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-    elif "ottfb" in actual_cols:
-        return '"ottfb"'
-    elif "ttfb" in actual_cols:
-        return '"ttfb" * 1000000.0'
-    else:
-        return "NULL"
+    """Unified expression resolving ottfb (us) vs ttfb (s) vs nothing.
+
+    Thin delegate over :func:`backend.core.metric_expressions.origin_latency_us`
+    (the canonical catalog). Kept as a named export because origin.py and the
+    base-branch tests import this symbol directly.
+    """
+    expr = metric_expressions.origin_latency_us(actual_cols, absent="NULL")
+    # absent="NULL" guarantees a non-None result.
+    if expr is None:
+        raise RuntimeError("origin_latency_us returned None despite absent='NULL'")
+    return expr
 
 
 def empty_schema_response(**extra_fields) -> dict:
@@ -607,7 +806,7 @@ def get_source_extent(
             count = runner.execute(f"SELECT count(*) FROM {orig_table_name}").fetchone()[0]
             return count, None, None
         except Exception:
-            pass
+            _logger.debug("get_source_extent: step failed (ignored)", exc_info=True)
     return 0, None, None
 
 
@@ -645,14 +844,14 @@ def _latest_log_in_window(
             if st_dt is not None and latest_dt < st_dt:
                 return False
         except Exception:
-            pass
+            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
     if end_time:
         try:
             et_dt = parse_iso_utc(end_time)
             if et_dt is not None and latest_dt > et_dt:
                 return False
         except Exception:
-            pass
+            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
     return True
 
 
@@ -761,7 +960,8 @@ class QueryRunner:
             try:
                 self.execute(f'DROP TABLE IF EXISTS "{name}"')
             except Exception:
-                pass
+                if log_once_per("end_shared_active_hour_temps: DROP TABLE failed (ignored)", 60):
+                    _logger.debug("end_shared_active_hour_temps: DROP TABLE failed (ignored)", exc_info=True)
 
     def release_active_direct_temp(self, name: str) -> None:
         """Drop a direct active-hour temp unless the shared scope owns it.
@@ -774,7 +974,8 @@ class QueryRunner:
         try:
             self.execute(f'DROP TABLE IF EXISTS "{name}"')
         except Exception:
-            pass
+            if log_once_per("release_active_direct_temp: DROP TABLE failed (ignored)", 60):
+                _logger.debug("release_active_direct_temp: DROP TABLE failed (ignored)", exc_info=True)
 
     @property
     def debug_calls(self) -> list[dict]:
@@ -843,7 +1044,11 @@ class QueryRunner:
                 raise e
             res = self.con.execute(q, p if p is not None else [])
         self.debug_queries.append(
-            {"sql": _compact_sql_for_debug(q.strip()), "time_ms": round((time.time() - t0) * 1000, 2)}
+            {
+                "sql": _compact_sql_for_debug(q.strip()),
+                "time_ms": round((time.time() - t0) * 1000, 2),
+                "engine": "DuckDB",
+            }
         )
         return res
 
@@ -862,6 +1067,8 @@ class QueryRunner:
             return cached
 
         actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
+        if actual_cols == ["timestamp"]:
+            actual_cols = []
         if not actual_cols:
             # The connection's bound view is stale — most likely the sync
             # cron deleted a buffer file the cached view SQL still references,
@@ -895,7 +1102,7 @@ class QueryRunner:
                 db_iceberg.update_iceberg_view(self.con, self.src, force=True)
                 actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
             except Exception:
-                pass
+                _logger.debug("get_schema_cols: step failed (ignored)", exc_info=True)
         self.actual_cols = set(actual_cols)
         # Only cache non-empty results. An empty result here means the
         # self-heal path also failed — caching empty would pin the
@@ -907,24 +1114,37 @@ class QueryRunner:
             _schema_cols_cache[cache_key] = actual_cols
         return actual_cols
 
+    def _run_with_stale_retry(self, run):
+        """Run ``run()`` with one stale-view refresh + retry.
+
+        Returns ``(True, result)`` on success. A non-stale error on the first
+        attempt re-raises; any failure once the view refresh has been attempted
+        (refresh itself or the retried call) yields ``(False, None)``.
+        """
+        refreshed = False
+
+        def _refresh(_exc: BaseException) -> None:
+            nonlocal refreshed
+            refreshed = True
+            from backend.core import iceberg as db_iceberg
+
+            db_iceberg.update_iceberg_view(self.con, self.src)
+
+        try:
+            return True, retry_call(run, retry_on=_is_stale_view_error, attempts=2, before_retry=_refresh)
+        except Exception:
+            if not refreshed:
+                raise
+            return False, None
+
     def execute_with_retry(self, sql: str, params: list | None = None):
         """Execute a query with one stale-view retry.
 
         Returns the cursor on success, or None on permanent failure after retry.
         Non-stale errors are re-raised immediately.
         """
-        try:
-            return self.execute(sql, params)
-        except Exception as e:
-            if not _is_stale_view_error(e):
-                raise
-        try:
-            from backend.core import iceberg as db_iceberg
-
-            db_iceberg.update_iceberg_view(self.con, self.src)
-            return self.execute(sql, params)
-        except Exception:
-            return None
+        _, cursor = self._run_with_stale_retry(lambda: self.execute(sql, params))
+        return cursor
 
     def create_temp_table(self, sql: str, params: list | None = None) -> bool:
         """Execute a CREATE TEMP TABLE statement with one stale-view retry.
@@ -937,21 +1157,8 @@ class QueryRunner:
         Returns True on success, False on permanent failure after retry.
         Non-stale errors are re-raised immediately.
         """
-        try:
-            self.execute(sql, params)
-            return True
-        except Exception as e:
-            if not _is_stale_view_error(e):
-                raise
-        # Stale view — refresh and retry once.
-        try:
-            from backend.core import iceberg as db_iceberg
-
-            db_iceberg.update_iceberg_view(self.con, self.src)
-            self.execute(sql, params)
-            return True
-        except Exception:
-            return False
+        ok, _ = self._run_with_stale_retry(lambda: self.execute(sql, params))
+        return ok
 
     def telemetry(self) -> dict:
         """Return the standard debug telemetry dict for response construction."""
@@ -1010,6 +1217,7 @@ class QueryRunner:
         import uuid as _uuid
         from datetime import timedelta as _timedelta
 
+        from backend import config as svcconfig
         from backend.core.duckdb import _cache_dir
 
         try:
@@ -1049,7 +1257,7 @@ class QueryRunner:
         # measured via live_active_hour:temp_create). The margin absorbs
         # edge-vs-VM clock skew; correctness only needs "no file whose
         # rows could reach live_start is dropped".
-        mtime_floor = (live_start - _timedelta(seconds=300)).timestamp()
+        mtime_floor = (live_start - _timedelta(seconds=_MTIME_SKEW_MARGIN_S)).timestamp()
 
         # TOMBSTONED buffer parquets MUST be excluded: their rows were
         # already committed into the hourly partitions this read also
@@ -1089,16 +1297,40 @@ class QueryRunner:
                 pass
             return out
 
-        buffer_files = _list_parquets(buffer_dir, prune_mtime=True)
+        durable_serving = svcconfig.is_durable_serving_mode(self.src)
+        buffer_files = [] if durable_serving else _list_parquets(buffer_dir, prune_mtime=True)
+        # Committed rows for the active hour live in the per-service
+        # DuckLake table (post-v3) — without this branch up to ~55 min of
+        # the live hour vanished from dashboards once a commit drained the
+        # buffer. DuckLake prunes the scan on file stats, so the timestamp
+        # WHERE below keeps this cheap. Tombstoned buffer parquets stay
+        # excluded above: their rows are ALREADY in the lake table and
+        # reading both double-counts (Trap #26).
+        lake_table = None
+        try:
+            from backend.core.iceberg._ducklake import ducklake_table_name
+
+            cand = ducklake_table_name(self.src)
+            row = self.con.execute(
+                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                [cand],
+            ).fetchone()
+            if row:
+                lake_table = cand
+        except Exception:
+            lake_table = None
         # Hourly-partition files are already scoped to the active hour —
         # no mtime pruning (compaction may rewrite them with fresh mtimes
-        # anyway), and tombstones only ever mark buffer files.
-        hourly_files = _list_parquets(hourly_dir, prune_mtime=False)
+        # anyway), and tombstones only ever mark buffer files. Legacy
+        # fallback for pre-DuckLake caches: skipped when the lake table
+        # exists, since migrated hourly files may be registered there too
+        # (reading both would double-count).
+        hourly_files = [] if durable_serving or lake_table else _list_parquets(hourly_dir, prune_mtime=False)
         self._last_active_direct_n_files = len(buffer_files) + len(hourly_files)
-        if not buffer_files and not hourly_files:
+        if not buffer_files and not hourly_files and not lake_table:
             # Nothing on disk for the active hour. Caller will report
             # empty live_res — semantically correct (no current-hour rows).
-            return None
+            return "__empty__"
 
         # Escape internal double quotes (audit finding 004).
         cols_sql = ", ".join('"{}"'.format(c.replace('"', '""')) for c in projected)
@@ -1108,17 +1340,58 @@ class QueryRunner:
 
         def _create_sql(union_by_name: str) -> str:
             branches: list[str] = []
+
+            # To get derived fields (c_speed mapped, timestamp_hour, etc.) correctly
+            # we must apply the same view derivations to the active-hour raw rows.
+            # We select * from the raw sources, union them, wrap with _finalize_view_sql,
+            # and finally project just the columns we need.
+
             if buffer_files:
                 paths_sql = quote_path_list(buffer_files)
                 branches.append(
-                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
+            if lake_table:
+                lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
+                branches.append(f"SELECT * FROM {lake_ident} WHERE {where}")
             if hourly_files:
                 paths_sql = quote_path_list(hourly_files)
                 branches.append(
-                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
-            return " UNION ALL ".join(branches)
+
+            joiner = " UNION ALL BY NAME " if union_by_name == "true" else " UNION ALL "
+            # We must use BY NAME across the branches (lake_table vs buffer_files) because
+            # their physical column layouts can differ (e.g. lake catalog columns vs raw).
+            union_sql = " UNION ALL BY NAME ".join(branches)
+
+            # Probe physical columns present in union_sql so that EXCLUDE clauses
+            # in _finalize_view_sql and projection lists only reference columns that
+            # actually exist in the underlying raw data (avoiding BinderExceptions on
+            # computed/view-only columns like timestamp_hour or dt).
+            desc = self.con.execute(f"SELECT * FROM ({union_sql}) LIMIT 0").description or []
+            physical_cols = {d[0] for d in desc}
+
+            from backend.core.iceberg.view import _finalize_view_sql
+
+            target_table = "logs"  # QueryRunner active hour direct is only used for logs path right now
+            # For exact correctness, we could pass the real dynamic schema fields, but custom fields
+            # are real columns in the parquet anyway, so passing an empty set is fine for the EXCLUDE logic.
+            finalized = _finalize_view_sql(
+                union_sql,
+                self.src,
+                target_table=target_table,
+                dynamic_schema_field_names=set(),
+                existing_cols=physical_cols,
+            )
+
+            available_cols = physical_cols | {"timestamp_hour", "dt"}
+            valid_projected = [c for c in projected if c in available_cols]
+            valid_cols_sql = (
+                ", ".join('"{}"'.format(c.replace('"', '""')) for c in valid_projected) if valid_projected else "*"
+            )
+
+            return f"SELECT {valid_cols_sql} FROM ({finalized})"
 
         temp_name = f"t_active_direct_{_uuid.uuid4().hex}"
         # union_by_name=false first: with =true DuckDB reconciles every
@@ -1135,7 +1408,8 @@ class QueryRunner:
             try:
                 self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
             except Exception:
-                pass
+                if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
+                    _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
             try:
                 self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
             except Exception:
@@ -1143,11 +1417,104 @@ class QueryRunner:
                 try:
                     self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
                 except Exception:
-                    pass
+                    if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
+                        _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
                 return None
         if self._shared_active_temps is not None:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
         return temp_name
+
+    def _partial_hour_adjusted_live_start(self, naive_live_start, active_hour_token: str, window_end):
+        """Returns ``(adjusted_live_start, partial_rows, partial_total)`` for
+        the active-hour live-scan callers: if a partial-hour rollup exists
+        for ``active_hour_token`` AND the caller's own window
+        (``naive_live_start``..``window_end``) covers it exactly, narrow the
+        live scan to start at its watermark instead of ``naive_live_start``
+        and hand back its pre-aggregated
+        ``(field, value, count)`` rows plus the real request total (read
+        from the writer's synthetic ``__total__`` row — never derive a
+        total by summing ``partial_rows``, see C1 in the final whole-branch
+        review: that counts every request once PER POPULATED FIELD). If no
+        partial rollup exists yet, or the caller's window doesn't cover the
+        partial rollup's span, returns the unmodified ``naive_live_start``,
+        an empty row list, and a zero total — today's (pre-partial-hour)
+        behavior.
+
+        I1 (final whole-branch review): the partial rollup always
+        represents the WHOLE ``[hour_start, watermark)`` span — it has no
+        notion of a caller's own sub-hour window. Using it is only safe
+        when the caller's actual window starts at/before the active hour's
+        start AND ends at/after the watermark; otherwise the caller falls
+        back to its live-scan-only path (already correct for a custom
+        range that doesn't align with the partial rollup's span).
+
+        I2 (final whole-branch review) — investigated, NOT fixed by
+        subtracting a margin from the narrowing boundary; see the long
+        comment below for why that literal reading of the finding is
+        unsafe for this writer, and what's done instead.
+        """
+        from datetime import UTC, datetime
+
+        from backend.core.rollups.partial_hour import (
+            read_partial_hour_all_fields,
+            read_partial_hour_total,
+            read_partial_hour_watermark,
+        )
+
+        watermark = read_partial_hour_watermark(self.src, active_hour_token)
+        if watermark <= 0.0:
+            return naive_live_start, [], 0
+
+        watermark_dt = datetime.fromtimestamp(watermark, tz=UTC)
+        active_hour_dt = parse_hour_key_strict(active_hour_token)
+
+        if naive_live_start > active_hour_dt or window_end < watermark_dt:
+            return naive_live_start, [], 0
+
+        # I2 investigation (final whole-branch review): the finding's
+        # literal suggestion — narrow to `watermark - skew margin` instead
+        # of `watermark` exactly, so the live scan re-covers a "small
+        # trailing slice" the partial rollup nominally already includes —
+        # is UNSAFE for this writer and was deliberately NOT implemented.
+        # merge_partial_hour aggregates a processed file's ENTIRE row set
+        # via COUNT(*)/GROUP BY, not gated by each row's event timestamp
+        # relative to the file's own mtime; a file can legitimately contain
+        # rows spanning several minutes up to its close time (these are
+        # ingest-pipeline batch files, not one-row-per-flush). Subtracting
+        # even a few minutes from the narrowing boundary would re-scan (and
+        # double-count) real rows from whichever file(s) set the current
+        # watermark, essentially every time a partial rollup exists — not
+        # a rare edge case, since the writer processes a new batch on most
+        # 30s ticks. The invariant that DOES hold, and that this function
+        # already relies on unchanged from before this review: no row in
+        # any PROCESSED file can have an event timestamp after that file's
+        # own mtime, so narrowing to the raw (unmodified) watermark_dt can
+        # never double-count an already-processed row. The actual gap I2
+        # describes — a delivery-lagged row that lands in a file whose
+        # mtime is fresh enough to be "new" next tick but isn't processed
+        # yet THIS tick — is real but already self-heals within one tick
+        # (<=30s at this cadence): the next merge_partial_hour call picks
+        # up that file (via COUNT(*), regardless of its rows' individual
+        # timestamps) and folds it into both the persisted total and the
+        # advanced watermark atomically. That bound matches the feature's
+        # own designed latency floor and needs no additional narrowing
+        # margin to be correct.
+        try:
+            partial_rows = read_partial_hour_all_fields(self.src, active_hour_token, con=self.con)
+            partial_total = read_partial_hour_total(self.src, active_hour_token, con=self.con)
+        except Exception as e:
+            _logger.warning(
+                "[partial_hour] Failed reading partial hour for %s: %s; falling back to full live scan",
+                active_hour_token,
+                e,
+            )
+            return naive_live_start, [], 0
+
+        if not partial_rows and partial_total == 0:
+            return naive_live_start, [], 0
+
+        adjusted = max(naive_live_start, watermark_dt)
+        return adjusted, partial_rows, partial_total
 
     @contextlib.contextmanager
     def temp_table(
@@ -1171,7 +1538,8 @@ class QueryRunner:
                 try:
                     self.execute(f'DROP TABLE IF EXISTS "{name}"')
                 except Exception:
-                    pass
+                    if log_once_per("temp_table: DROP TABLE failed (ignored)", 60):
+                        _logger.debug("temp_table: DROP TABLE failed (ignored)", exc_info=True)
 
     def execute_top_n_rollups(
         self,
@@ -1227,6 +1595,12 @@ class QueryRunner:
         from backend.core.rollups import _is_safe_ident, _safe_table_for
         from backend.utils.date_utils import parse_iso_utc
 
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+            # The result shape is retained for existing callers, but an
+            # empty tuple is explicitly an unavailable rollup result.  Each
+            # serving path must then run its DuckLake-backed raw fallback.
+            return [], fields
+
         # Optional phase-log instrumentation. Caller passes a list; we
         # append {"section": "top_n_rollups:<phase>", "time_ms": N} per
         # phase. None = no-op. Negligible overhead.
@@ -1236,8 +1610,6 @@ class QueryRunner:
 
         cache_dir = _cache_dir(self.src)
         rollup_dir = os.path.join(cache_dir, "rollups", "hour")
-        if not os.path.exists(rollup_dir):
-            return [], fields
 
         # Defense-in-depth: field names land in a SQL IN-list as quoted
         # literals AND the service name lands in the base-table identifier.
@@ -1346,7 +1718,7 @@ class QueryRunner:
         # back to per-hour rollups for their in-window hours.
         def _day_fully_in_window(day_str: str) -> bool:
             try:
-                day_start = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=UTC)
+                day_start = parse_day_key_strict(day_str)
             except ValueError:
                 return False
             day_end = day_start + timedelta(days=1)
@@ -1408,25 +1780,39 @@ class QueryRunner:
         # window fall through to per-field-hour for the in-window
         # portion (same fall-through as per-field-day).
         if os.path.isdir(bundled_day_root):
-            for day_entry in _cached_listdir(bundled_day_root):
-                if not day_entry.startswith("day="):
+            for entry in _cached_listdir(bundled_day_root):
+                b_day: str | None = None
+                bundle_path: str | None = None
+                if entry.startswith("day="):
+                    cand_day = entry[len("day=") :]
+                    if len(cand_day) == 10:
+                        cand1 = os.path.join(bundled_day_root, entry, "all_fields.parquet")
+                        cand2 = os.path.join(bundled_day_root, entry, f"day_bundle_{cand_day}.parquet")
+                        if os.path.isfile(cand1):
+                            b_day, bundle_path = cand_day, cand1
+                        elif os.path.isfile(cand2):
+                            b_day, bundle_path = cand_day, cand2
+                elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+                    cand_day = entry[len("day_bundle_") : -len(".parquet")]
+                    if len(cand_day) == 10:
+                        cand = os.path.join(bundled_day_root, entry)
+                        if os.path.isfile(cand):
+                            b_day, bundle_path = cand_day, cand
+                if not b_day or not bundle_path:
                     continue
-                day = day_entry[len("day=") :]
-                if len(day) != 10:
+                days_with_day_files_any.add(b_day)
+                if b_day >= active_day:
                     continue
-                days_with_day_files_any.add(day)
-                if day >= active_day:
+                if st_str_floor and b_day < st_str_floor[:10]:
                     continue
-                if st_str_floor and day < st_str_floor[:10]:
+                if et_str_floor and b_day > et_str_floor[:10]:
                     continue
-                if et_str_floor and day > et_str_floor[:10]:
+                if not _day_fully_in_window(b_day):
                     continue
-                if not _day_fully_in_window(day):
+                if b_day in bundled_days_set:
                     continue
-                bundle_path = os.path.join(bundled_day_root, day_entry, "all_fields.parquet")
-                if os.path.isfile(bundle_path):
-                    bundled_day_paths.append(bundle_path)
-                    bundled_days_set.add(day)
+                bundled_day_paths.append(bundle_path)
+                bundled_days_set.add(b_day)
 
         if os.path.isdir(bundled_hour_root):
             for hour_entry in _cached_listdir(bundled_hour_root):
@@ -1562,7 +1948,7 @@ class QueryRunner:
             # aggregation hash table and the QUALIFY partitions to just the
             # requested fields. safe_fields is _is_safe_ident-validated;
             # quotes escaped anyway (defense-in-depth, see the note above).
-            field_in_list = ", ".join("'" + f.replace("'", "''") + "'" for f in safe_fields)
+            field_in_list = ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields)
             if day_paths:
                 paths_sql = quote_path_list(day_paths)
                 branches.append(
@@ -1628,6 +2014,7 @@ class QueryRunner:
         # We also need to get the live active hour stats from the base table
         _t_live = time.perf_counter()
         live_res: list[tuple] = []
+        partial_rows: list[tuple] = []
         # Defined here so the partial-day block below can reuse them
         # without re-fetching if the active-hour block populated them.
         # Callers (dashboard repo) already computed these once for the
@@ -1702,9 +2089,23 @@ class QueryRunner:
                         if f not in custom_fields:
                             continue
                     live_topn_fields.append(f)
+                live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
+                    live_start, active_str, live_end
+                )
+                # live_where was built above from the un-narrowed live_start;
+                # rebuild it here so the create_filtered_temp_table fallback
+                # (used when the direct-read path below returns None) scans
+                # only [narrowed live_start, live_end) too. Otherwise the
+                # fallback re-scans [hour_start, watermark) — the exact
+                # range partial_rows already covers — and both get summed
+                # into the same by_field dict, double-counting every
+                # affected field.
+                live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
                 _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
-                if tmp_name is None:
+                if tmp_name == "__empty__":
+                    tmp_name = None
+                elif tmp_name is None:
                     tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
                 _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
                 _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
@@ -1713,11 +2114,12 @@ class QueryRunner:
                         # Diagnostic row count (in-memory temp, ~free): tells
                         # the perf harness whether a slow live merge is data
                         # volume (busy active hour) or per-field batch cost.
+                        _n_live = 0
                         try:
                             _n_live = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
                             _phase("live_active_hour:n_rows", float(_n_live))
                         except Exception:
-                            pass
+                            _n_live = 1
                         # Filter to columns present in the temp's projection.
                         # Virtual fields (waf_sig_ind, edge_score_reason_ind)
                         # have rollup parquets but no live column — including
@@ -1725,24 +2127,28 @@ class QueryRunner:
                         # column and BinderException out the entire UNION
                         # ALL, silently dropping the live-hour merge for
                         # the real fields too.
-                        live_fields = [f for f in live_topn_fields if f in actual_cols]
-                        if live_fields:
-                            _t_lb = time.perf_counter()
-                            live_res, _ = self.execute_top_n_batch(
-                                live_fields,
-                                tmp_name,
-                                actual_cols,
-                                schema_types,
-                                limit=limit,
-                                per_field_limits=per_field_limits,
-                            )
-                            _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
+                        # When _n_live == 0, the active hour has zero rows; skipping
+                        # the 50+ UNION ALL grouping branches saves ~130ms of DuckDB
+                        # query planning, parsing, and pipeline setup.
+                        if _n_live > 0:
+                            live_fields = [f for f in live_topn_fields if f in actual_cols]
+                            if live_fields:
+                                _t_lb = time.perf_counter()
+                                live_res, _ = self.execute_top_n_batch(
+                                    live_fields,
+                                    tmp_name,
+                                    actual_cols,
+                                    schema_types,
+                                    limit=limit,
+                                    per_field_limits=per_field_limits,
+                                )
+                                _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
                     finally:
                         # Deferred to scope-exit when the shared active-hour
                         # scope owns this temp (dashboard rollup path).
                         self.release_active_direct_temp(tmp_name)
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.exception("[top_n_rollups] live active hour query failed")
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
         # ── Missing-hour live heal ────────────────────────────────────────
@@ -1885,7 +2291,8 @@ class QueryRunner:
                         try:
                             self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
                         except Exception:
-                            pass
+                            if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
+                                _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
             except Exception:
                 # Best-effort: a failed heal leaves the pre-fallback
                 # behavior (rollups + active hour only), never a 500.
@@ -1910,6 +2317,9 @@ class QueryRunner:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
         for field, value, count in heal_res:
+            bucket = by_field.setdefault(field, {})
+            bucket[value] = bucket.get(value, 0) + count
+        for field, value, count in partial_rows:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
 
@@ -1941,7 +2351,7 @@ class QueryRunner:
                     _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key, 0.0)
                     if _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
                         _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
-                        _logger.warning(
+                        _logger.debug(
                             "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
                             "panel will render empty; check rollup backfill coverage if unexpected",
                             field,
@@ -2108,8 +2518,15 @@ class QueryRunner:
         # bundle on disk — that's the writer-behind case where serving the
         # rollup path would undercount, so we fall back to raw.
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        active_hour_dt = parse_hour_key_strict(active_hour_str)
+        collected = collect_hourly_bundle_paths(
+            self.src,
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            allow_all_fields_coverage=True,
+        )
         if collected is None:
             return None
         rollup_paths, crosses_active = collected
@@ -2144,6 +2561,59 @@ class QueryRunner:
                 f"GROUP BY 1"
             )
 
+        # Missing-hour live heal: a CLOSED hour in [st, et) with no
+        # time_series bundle at all is a writer-coverage gap, not proof of
+        # zero traffic — collect_hourly_bundle_paths silently SKIPS such an
+        # hour rather than raising, so without this the hour just
+        # contributes nothing to the chart (see execute_top_n_rollups's own
+        # "Missing-hour live heal" for the sibling fix; that reader already
+        # had this heal, this one didn't). Uses a literal, unparameterized
+        # where-clause against the raw base table — mirrors the pattern
+        # above, sidestepping bound-parameter bookkeeping across UNION ALL
+        # branches since none of this SQL needs them.
+        missing_hours = _find_missing_bundle_hours(
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            coverage_bundle_filename="all_fields.parquet",
+        )
+        # C2 (final whole-branch review, part 2): _find_missing_bundle_hours
+        # is capped (default 48h) — a genuine writer-coverage gap OLDER than
+        # the cap would otherwise be silently un-served (collect_hourly_
+        # bundle_paths skipped it with no marker present) AND un-healed
+        # (outside the cap), producing a truncated-but-served window instead
+        # of the correct-but-slower raw-scan fallback. Comparing the full
+        # expected hour count against what rollup_paths actually covered
+        # detects that case with zero extra disk I/O (rollup_paths already
+        # walked the full window above).
+        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
+        covered_closed_hours = _count_covered_closed_hours(
+            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
+        )
+        if expected_closed_hours - covered_closed_hours > len(missing_hours):
+            return None
+        if missing_hours:
+            from backend.core.rollups import _safe_table_for
+
+            heal_base_table = _safe_table_for(self.src)
+            if heal_base_table:
+                heal_start_dt = max(parse_hour_key_strict(missing_hours[0]), st)
+                heal_end_dt = min(parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1), et)
+                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+                heal_where = (
+                    f"timestamp >= '{heal_start_dt.isoformat()}' "
+                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
+                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+                )
+                select_clauses.append(
+                    f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
+                    f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
+                    f"FROM {heal_base_table} "
+                    f"WHERE {heal_where} "
+                    f"GROUP BY 1"
+                )
+
         direct_live_tmp: str | None = None
         live_needs_params = False
         if crosses_active:
@@ -2151,7 +2621,23 @@ class QueryRunner:
             # the same metric-derivation logic as the rollup branch so the
             # buckets align exactly.
             live_start = max(st, active_hour_dt)
+            # Only "requests" has a compensating partial-rollup merge below
+            # (the other metrics' num/den semantics differ per-metric and
+            # aren't derivable from partial_rows' plain (field, value, count)
+            # shape). Narrowing live_start for those metrics without a
+            # compensating clause would silently drop the
+            # [original_live_start, watermark) range from BOTH branches —
+            # the rollup branch never covers it (still-open hour) and the
+            # narrowed live branch would skip it too. So non-"requests"
+            # metrics keep scanning their full original live range,
+            # unchanged from before partial-hour support existed.
             live_end = et
+            if chart_metric == "requests":
+                live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
+                    live_start, active_hour_str, live_end
+                )
+            else:
+                partial_total = 0
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
 
@@ -2179,21 +2665,38 @@ class QueryRunner:
                         )
                 except Exception:
                     direct_live_tmp = None
-            if direct_live_tmp is not None:
+            if direct_live_tmp == "__empty__":
+                live_source = None
+            elif direct_live_tmp is not None:
                 live_source, live_where = direct_live_tmp, "1=1"
             else:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
-            select_clauses.append(
-                f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
-                f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
-                f"FROM {live_source} "
-                f"WHERE {live_where} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
-                f"GROUP BY 1"
-            )
+            if live_source is not None:
+                select_clauses.append(
+                    f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
+                    f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
+                    f"FROM {live_source} "
+                    f"WHERE {live_where} "
+                    f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                    f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
+                    f"GROUP BY 1"
+                )
+
+            if partial_total:
+                # partial_total is only ever non-zero when chart_metric ==
+                # "requests" (see the narrowing gate above) — every other
+                # metric's num/den semantics aren't derivable from
+                # partial_rows' plain (field, value, count) shape. Read
+                # from the writer's synthetic __total__ row (C1, final
+                # whole-branch review) — summing partial_rows itself would
+                # count each request once per populated field.
+                partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
+                select_clauses.append(
+                    f"SELECT TIMESTAMPTZ '{partial_bucket_tz}' AS out_bucket, "
+                    f"       {partial_total} AS num, {partial_total} AS den"
+                )
 
         if not select_clauses:
             return []
@@ -2210,6 +2713,9 @@ class QueryRunner:
         else:  # rate
             value_expr = "ROUND(SUM(num) * 100.0 / NULLIF(SUM(den), 0), 2)"
 
+        if not select_clauses:
+            return []
+
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
         final_sql = (
             f"SELECT out_bucket, {value_expr} AS value "
@@ -2225,9 +2731,7 @@ class QueryRunner:
             # Any read failure (stale view, missing column, schema drift
             # in older bundles, …) drops us to the raw path. Logged at
             # debug — the caller will produce a working result anyway.
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[time_series_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             return None
         finally:
             if direct_live_tmp is not None:
@@ -2253,6 +2757,8 @@ class QueryRunner:
         where_clause: str,
         params: list,
         unfiltered_window: bool = False,
+        projected_fields: list[str] | None = None,
+        actual_cols: list[str] | set[str] | None = None,
     ) -> int | None:
         """Serve the total requests count from per-hour rollup parquets when eligible.
 
@@ -2283,8 +2789,15 @@ class QueryRunner:
             return None
 
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-        active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        active_hour_dt = parse_hour_key_strict(active_hour_str)
+        collected = collect_hourly_bundle_paths(
+            self.src,
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            allow_all_fields_coverage=True,
+        )
         if collected is None:
             return None
         rollup_paths, crosses_active = collected
@@ -2305,32 +2818,83 @@ class QueryRunner:
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
             )
 
+        # Missing-hour live heal: see try_time_series_from_rollup's sibling
+        # comment — a CLOSED hour with no time_series bundle is a
+        # writer-coverage gap, not zero traffic.
+        missing_hours = _find_missing_bundle_hours(
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            coverage_bundle_filename="all_fields.parquet",
+        )
+        # C2 (final whole-branch review, part 2): see try_time_series_from_
+        # rollup's sibling comment — refuse rather than silently serve a
+        # window with a genuine gap older than the heal cap.
+        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
+        covered_closed_hours = _count_covered_closed_hours(
+            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
+        )
+        if expected_closed_hours - covered_closed_hours > len(missing_hours):
+            return None
+        if missing_hours:
+            from backend.core.rollups import _safe_table_for
+
+            heal_base_table = _safe_table_for(self.src)
+            if heal_base_table:
+                heal_start_dt = max(parse_hour_key_strict(missing_hours[0]), st)
+                heal_end_dt = min(parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1), et)
+                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+                heal_where = (
+                    f"timestamp >= '{heal_start_dt.isoformat()}' "
+                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
+                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+                )
+                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where}")
+
         direct_live_tmp: str | None = None
         live_needs_params = False
         if crosses_active:
             live_start = max(st, active_hour_dt)
             live_end = et
+            live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
+                live_start, active_hour_str, live_end
+            )
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
 
             if unfiltered_window:
                 try:
-                    direct_live_tmp = self._create_active_hour_temp_direct([], [], live_start, live_end)
+                    direct_live_tmp = self._create_active_hour_temp_direct(
+                        projected_fields or [],
+                        actual_cols or [],
+                        live_start,
+                        live_end,
+                    )
                 except Exception:
                     direct_live_tmp = None
-            if direct_live_tmp is not None:
+            if direct_live_tmp == "__empty__":
+                live_source = None
+            elif direct_live_tmp is not None:
                 live_source, live_where = direct_live_tmp, "1=1"
             else:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
-            select_clauses.append(
-                f"SELECT COUNT(*) AS num "
-                f"FROM {live_source} "
-                f"WHERE {live_where} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
-            )
+            if live_source is not None:
+                select_clauses.append(
+                    f"SELECT COUNT(*) AS num "
+                    f"FROM {live_source} "
+                    f"WHERE {live_where} "
+                    f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                    f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
+                )
+
+            if partial_total:
+                # Read from the writer's synthetic __total__ row (C1, final
+                # whole-branch review) — summing partial_rows itself would
+                # count each request once per populated field.
+                select_clauses.append(f"SELECT {partial_total} AS num")
 
         if not select_clauses:
             return 0
@@ -2341,9 +2905,7 @@ class QueryRunner:
         try:
             return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
         except Exception as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[count_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[count_rollup] read failed, falling back to raw: %s", e)
             return None
         finally:
             if direct_live_tmp is not None:
@@ -2380,7 +2942,7 @@ class QueryRunner:
         """
         from datetime import timedelta
 
-        from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import parse_window
 
         if has_filters:
             return None
@@ -2388,10 +2950,10 @@ class QueryRunner:
             return None
         if require_top_asns is not None and not require_top_asns:
             return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
+        window = parse_window(start_time, end_time)
+        if window is None:
             return None
+        st, et = window
         if (et - st) < timedelta(hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS):
             return None
         if (et - st) > timedelta(days=366):
@@ -2445,6 +3007,9 @@ class QueryRunner:
         but the ranking is preserved for the URLs that dominate the
         panel.
         """
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+            return None
+
         import os
         from datetime import UTC, datetime, timedelta
 
@@ -2516,9 +3081,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
             return None
 
         out_rows = []
@@ -2565,12 +3128,19 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
+        from backend.core.rollups._common import (
+            DAY_BUNDLE_FILENAME,
+            _day_bundled_root,
+            _hour_bundled_root,
+        )
+
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+            return None
 
         hour_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(hour_root):
-            return None
         day_root = _day_bundled_root(self.src)
+        if not os.path.isdir(hour_root) and not os.path.isdir(day_root):
+            return None
 
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         day_buckets: dict[str, list[str]] = {}
@@ -2590,11 +3160,19 @@ class QueryRunner:
         covered_hours = 0
         for day_str, hours_in_day in sorted(day_buckets.items()):
             day_file = os.path.join(day_root, f"day={day_str}", bundle_filename)
+            chosen_day = day_file if os.path.isfile(day_file) else None
+            if not chosen_day and bundle_filename == DAY_BUNDLE_FILENAME:
+                alt_day_file = os.path.join(day_root, f"day={day_str}", f"day_bundle_{day_str}.parquet")
+                flat_day_file = os.path.join(day_root, f"day_bundle_{day_str}.parquet")
+                if os.path.isfile(alt_day_file):
+                    chosen_day = alt_day_file
+                elif os.path.isfile(flat_day_file):
+                    chosen_day = flat_day_file
             # Use the per-day compacted file only when the window spans the
             # ENTIRE UTC day (24 in-window hours); a partial day would pick up
             # out-of-range hours. Per-hour fallback keeps the window correct.
-            if len(hours_in_day) == 24 and os.path.isfile(day_file):
-                rollup_paths.append(day_file)
+            if len(hours_in_day) == 24 and chosen_day:
+                rollup_paths.append(chosen_day)
                 covered_hours += 24
             else:
                 for hour_str in hours_in_day:
@@ -2670,9 +3248,7 @@ class QueryRunner:
         try:
             row = self.execute(sql).fetchone()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
             return None
 
         if row is None or row[0] is None or row[0] == 0:
@@ -2769,9 +3345,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_pop_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_pop_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -2857,9 +3431,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_ip_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_ip_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -2921,9 +3493,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_path_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_path_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3007,9 +3577,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_status_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_status_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3184,9 +3752,7 @@ class QueryRunner:
         try:
             rows = self.execute(final_sql, params if crosses_active else []).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
             return None
 
         series: list[dict] = []
@@ -3210,17 +3776,90 @@ class QueryRunner:
         ``None`` when the metric's column is absent.
         """
         if metric == "ttfb":
-            if "ottfb" in cols and "ttfb" in cols:
-                return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-            if "ottfb" in cols:
-                return '"ottfb"'
-            if "ttfb" in cols:
-                return '"ttfb" * 1000000.0'
-            return None
+            return metric_expressions.origin_latency_us(cols, absent=None)
         # ttlb
         if "ottlb" in cols:
             return '"ottlb"'
         return None
+
+    def try_network_quality_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        region_country: str,
+    ) -> dict[str, Any] | None:
+        from backend.core.rollups._common import (
+            NETWORK_QUALITY_ASN_FILENAME,
+            NETWORK_QUALITY_COUNTRY_FILENAME,
+            NETWORK_QUALITY_POP_FILENAME,
+            NETWORK_QUALITY_REGION_FILENAME,
+        )
+
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, require_top_asns=None, min_hours=24
+        )
+        if win is None:
+            return None
+        st, et = win
+
+        def _run_dim(
+            filename: str, group_col: str, filter_sql: str = "", filter_params: list = None
+        ) -> list[dict] | None:
+            rollup_paths = self._collect_rollup_paths(st, et, filename)
+            if not rollup_paths:
+                return None
+            paths_sql = ", ".join(f"'{p}'" for p in rollup_paths)
+
+            sql = (
+                f"SELECT dim_val as label, "
+                f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms, "
+                f"       SUM(requests) AS reqs "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE 1=1 {filter_sql} "
+                f"GROUP BY dim_val "
+                f"ORDER BY reqs DESC "
+                f"LIMIT 25"
+            )
+            rows = self.execute(sql, filter_params or []).fetchall()
+            return [
+                {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])}
+                for r in rows
+                if r[1] is not None
+            ]
+
+        try:
+            by_country = _run_dim(NETWORK_QUALITY_COUNTRY_FILENAME, "country")
+            if by_country is None:
+                return None
+
+            by_asn = _run_dim(NETWORK_QUALITY_ASN_FILENAME, "asn")
+            if by_asn is None:
+                return None
+
+            by_pop = _run_dim(NETWORK_QUALITY_POP_FILENAME, "pop")
+            if by_pop is None:
+                return None
+
+            by_region = _run_dim(NETWORK_QUALITY_REGION_FILENAME, "region", "AND country = ?", [region_country])
+            if by_region is None:
+                return None
+
+            return {
+                "available": True,
+                "by_country": by_country,
+                "by_asn": by_asn,
+                "by_pop": by_pop,
+                "by_region": by_region,
+                "region_country": region_country,
+                "scatter": [],  # Scatter not supported in rollup; UI will just render empty or we handle it
+                "countries": [c["value"] for c in by_country],
+                "_approx": True,
+            }
+        except Exception as e:
+            _logger.debug("[network_quality_rollup] read failed: %s", e)
+            return None
 
     def try_network_rtt_from_rollup(
         self,
@@ -3247,7 +3886,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_RTT_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, require_top_asns=top_asns)
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=24
+        )
         if win is None:
             return None
         st, et = win
@@ -3274,9 +3915,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, top_asns).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_rtt_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_rtt_rollup] read failed, falling back: %s", e)
             return None
 
         out: dict[int, dict[str, float | None]] = {}
@@ -3310,7 +3949,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_SPEED_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, require_top_asns=top_asns)
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=24
+        )
         if win is None:
             return None
         st, et = win
@@ -3321,19 +3962,44 @@ class QueryRunner:
 
         asn_placeholders = ", ".join(["?"] * len(top_asns))
         paths_sql = quote_path_list(rollup_paths)
-        sql = (
-            f"SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"WHERE asn IN ({asn_placeholders}) "
-            f"GROUP BY asn, c_speed "
-            f"ORDER BY asn, cnt DESC"
-        )
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+            et_iso = et.isoformat()
+            sql = (
+                f"SELECT asn, c_speed, CAST(SUM(cnt) AS BIGINT) AS cnt FROM ("
+                f"  SELECT asn, c_speed, count AS cnt "
+                f"  FROM read_parquet([{paths_sql}]) "
+                f"  WHERE asn IN ({asn_placeholders}) "
+                f"  UNION ALL "
+                f"  SELECT asn, c_speed, CAST(COUNT(*) AS BIGINT) AS cnt "
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
+                f"    AND asn IN ({asn_placeholders}) AND c_speed IS NOT NULL "
+                f"  GROUP BY asn, c_speed"
+                f") GROUP BY asn, c_speed "
+                f"ORDER BY asn, cnt DESC"
+            )
+            # Duplicate top_asns because asn_placeholders appears twice
+            top_asns = top_asns + top_asns
+        else:
+            sql = (
+                f"SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE asn IN ({asn_placeholders}) "
+                f"GROUP BY asn, c_speed "
+                f"ORDER BY asn, cnt DESC"
+            )
         try:
             rows = self.execute(sql, top_asns).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_speed_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_speed_rollup] read failed, falling back: %s", e)
             return None
         return [(int(r[0]), str(r[1]), int(r[2])) for r in rows]
 
@@ -3350,13 +4016,32 @@ class QueryRunner:
         from per-hour + per-day network_heatmap parquets when eligible.
 
         Same eligibility posture as :meth:`try_network_rtt_from_rollup`:
-        unfiltered only, window ≥ 48 h, ≥ 50% closed-hour coverage.
+        unfiltered only, window ≥ 24 h, ≥ 50% closed-hour coverage.
 
         Each parquet row covers exactly one (asn, hour) pair. The reader
         returns one row per (asn, hour) with the hour as the heatmap
         bucket — hourly bucket granularity on 30 d windows (720 buckets
         instead of the 5-min live resolution of 8640), which is still
         meaningful for trend/health analysis.
+
+        BUCKET GRANULARITY: the caller's ``bucket_seconds`` is the FE's
+        *requested* resolution. The real caller (network.py) computes it as
+        ``max(router_default_300, span // 8640)``, which is 300 s for every
+        window from 24 h to 30 d (span // 8640 only exceeds 300 past 30 d).
+        So gating on ``== 3600`` made this rollup structurally unreachable
+        for every live FE window — every 30 d network-health query fell to
+        the multi-second raw scan (the source of the 504s under concurrent
+        load). The heatmap is a per-hour TIME SERIES: serving hourly buckets
+        when the caller asked for hourly-or-finer is correct, not a
+        downgrade of accuracy — the downstream ``bucket_idx`` is assigned
+        POSITIONALLY from the distinct row timestamps (network.py's
+        ``sorted(all_buckets_set)`` → ``enumerate``), never from
+        ``bucket_seconds``, so hourly rows render as a dense 720-column axis
+        with no gaps regardless of the requested width. We therefore serve
+        whenever ``bucket_seconds <= 3600`` and return ``None`` only for a
+        COARSER-than-hourly request (e.g. 2 h / daily buckets), which an
+        hourly rollup can't satisfy without re-aggregation this reader
+        doesn't do.
 
         Returns rows shaped as
         ``(asn, bucket_ts, throughput_bps, rtt_med_us, rtt_baseline_us,
@@ -3366,10 +4051,10 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_HEATMAP_BUNDLE_FILENAME
 
-        if bucket_seconds != 3600:
+        if bucket_seconds > 3600:
             return None
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
             return None
         st, et = win
@@ -3381,28 +4066,74 @@ class QueryRunner:
         paths_sql = quote_path_list(rollup_paths)
         st_iso = st.isoformat()
         et_iso = et.isoformat()
-        sql = (
-            f"SELECT"
-            f"  asn,"
-            f"  hour_ts                                                             AS bucket_ts,"
-            f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
-            f"  rtt_p50_us                                                         AS rtt_med_us,"
-            f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
-            f"  rtt_p50_us - COALESCE(rtt_min_p50_us, rtt_p50_us)                AS rtt_congestion_us,"
-            f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
-            f"  rtt_var_p50_us                                                     AS jitter_us,"
-            f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
-            f"  CAST(reqs AS BIGINT)                                               AS reqs"
-            f" FROM read_parquet([{paths_sql}])"
-            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-            f" ORDER BY reqs DESC"
-        )
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+
+            # The active hour duration in seconds for throughput calculation
+            active_duration_secs = max(1, (et - active_hour_start).total_seconds())
+
+            sql = (
+                f"SELECT * FROM ("
+                f"  SELECT"
+                f"    asn,"
+                f"    hour_ts                                                             AS bucket_ts,"
+                f"    resp_bytes_sum / 3600.0                                            AS throughput_bps,"
+                f"    rtt_p50_us                                                         AS rtt_med_us,"
+                f"    rtt_min_p50_us                                                     AS rtt_baseline_us,"
+                f"    CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"    ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
+                f"    rtt_var_p50_us                                                     AS jitter_us,"
+                f"    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
+                f"    CAST(reqs AS BIGINT)                                               AS reqs"
+                f"   FROM read_parquet([{paths_sql}])"
+                f"   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"   UNION ALL "
+                f"   SELECT"
+                f"    asn,"
+                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_baseline_us,"  # No min baseline for active hour
+                f"    0::BIGINT AS rtt_congestion_us,"
+                f"    0::DOUBLE AS avg_ploss,"  # Ploss requires packet info, assume 0 for live
+                f"    0::DOUBLE AS jitter_us,"
+                f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
+                f"   FROM {base_table} "
+                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
+                f"     AND asn IS NOT NULL"
+                f"   GROUP BY asn"
+                f")"
+                f" ORDER BY reqs DESC"
+            )
+        else:
+            sql = (
+                f"SELECT"
+                f"  asn,"
+                f"  hour_ts                                                             AS bucket_ts,"
+                f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
+                f"  rtt_p50_us                                                         AS rtt_med_us,"
+                f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
+                f"  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
+                f"  rtt_var_p50_us                                                     AS jitter_us,"
+                f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
+                f"  CAST(reqs AS BIGINT)                                               AS reqs"
+                f" FROM read_parquet([{paths_sql}])"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f" ORDER BY reqs DESC"
+            )
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_heatmap_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_heatmap_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3447,7 +4178,7 @@ class QueryRunner:
         if map_asn != "all":
             return None  # per-ASN map drill-down not supported by geo rollup
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
             return None
         st, et = win
@@ -3463,50 +4194,128 @@ class QueryRunner:
         # Map rows: per (geocell, hour) — one heatmap time-bucket per hour.
         # Row shape matches MAP_BY_COUNTRY_BUCKET output:
         #   (country, city, lat, lon, metro, bucket_ts, rtt_med, avg_ploss, error_pct, reqs)
-        map_sql = (
-            f"SELECT"
-            f"  country,"
-            f"  city,"
-            f"  lat,"
-            f"  lon,"
-            f"  metro,"
-            f"  hour_ts                                           AS bucket_ts,"
-            f"  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,"
-            f"  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,"
-            f"  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,"
-            f"  CAST(reqs AS BIGINT)                             AS reqs"
-            f" FROM read_parquet([{paths_sql}])"
-            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-            f" ORDER BY hour_ts, reqs DESC"
-            f" LIMIT 5000"
-        )
+        from datetime import UTC, datetime
 
-        # Metro rows: aggregated across all hours — no time dimension.
-        # Row shape matches METRO_LEADERBOARD output:
-        #   (country, city, region, metro, rtt_med_us, avg_ploss, error_pct, reqs)
-        metro_sql = (
-            f"SELECT"
-            f"  country,"
-            f"  city,"
-            f"  CAST('' AS VARCHAR)                                   AS region,"
-            f"  metro,"
-            f"  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,"
-            f"  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,"
-            f"  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,"
-            f"  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs"
-            f" FROM read_parquet([{paths_sql}])"
-            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-            f" GROUP BY country, city, metro"
-            f" ORDER BY total_reqs DESC"
-            f" LIMIT 100"
-        )
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        cols = set(self.get_schema_cols())
+        if "country" not in cols:
+            return None
+        has_city = "city" in cols
+        has_lat = "lat" in cols and "lon" in cols
+        has_metro = "metro" in cols
+        city_col = "city" if has_city else "CAST('' AS VARCHAR)"
+        lat_col = "CAST(lat AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
+        lon_col = "CAST(lon AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
+        metro_col = "metro" if has_metro else "CAST(NULL AS VARCHAR)"
+        city_grp = "city" if has_city else "''"
+        lat_grp = "lat" if has_lat else "NULL"
+        lon_grp = "lon" if has_lat else "NULL"
+        metro_grp = "metro" if has_metro else "NULL"
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+            map_sql = (
+                f"SELECT * FROM ("
+                f"  SELECT"
+                f"    country, city, lat, lon, metro, hour_ts AS bucket_ts,"
+                f"    rtt_sum / NULLIF(rtt_count, 0) AS rtt_med_us,"
+                f"    ploss_sum / NULLIF(ploss_count, 0) AS avg_ploss,"
+                f"    errors * 100.0 / NULLIF(reqs, 0) AS error_pct,"
+                f"    CAST(reqs AS BIGINT) AS reqs"
+                f"  FROM read_parquet([{paths_sql}])"
+                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"  UNION ALL "
+                f"  SELECT"
+                f"    country,"
+                f"    {city_col} AS city,"
+                f"    {lat_col} AS lat,"
+                f"    {lon_col} AS lon,"
+                f"    {metro_col} AS metro,"
+                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
+                f"    0::DOUBLE AS avg_ploss,"
+                f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
+                f"    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {lat_grp}, {lon_grp}, {metro_grp}"
+                f") ORDER BY bucket_ts, reqs DESC LIMIT 5000"
+            )
+            metro_sql = (
+                f"SELECT country, city, CAST('' AS VARCHAR) AS region, metro, "
+                f"  CAST(SUM(rtt_med_us * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS rtt_med_us,"
+                f"  CAST(SUM(avg_ploss * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS avg_ploss,"
+                f"  CAST(SUM(error_pct * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS error_pct,"
+                f"  CAST(SUM(reqs) AS BIGINT) AS total_reqs "
+                f"FROM ("
+                f"  SELECT country, city, metro,"
+                f"    SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0) AS rtt_med_us,"
+                f"    SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0) AS avg_ploss,"
+                f"    SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0) AS error_pct,"
+                f"    CAST(SUM(reqs) AS BIGINT) AS reqs"
+                f"  FROM read_parquet([{paths_sql}])"
+                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"  GROUP BY country, city, metro"
+                f"  UNION ALL "
+                f"  SELECT country, {city_col} AS city, {metro_col} AS metro,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
+                f"    0::DOUBLE AS avg_ploss,"
+                f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
+                f"    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {metro_grp}"
+                f") GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
+            )
+        else:
+            map_sql = (
+                f"SELECT"
+                f"  country,"
+                f"  city,"
+                f"  lat,"
+                f"  lon,"
+                f"  metro,"
+                f"  hour_ts                                           AS bucket_ts,"
+                f"  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,"
+                f"  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,"
+                f"  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,"
+                f"  CAST(reqs AS BIGINT)                             AS reqs"
+                f" FROM read_parquet([{paths_sql}])"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f" ORDER BY hour_ts, reqs DESC"
+                f" LIMIT 5000"
+            )
+
+            # Metro rows: aggregated across all hours — no time dimension.
+            # Row shape matches METRO_LEADERBOARD output:
+            #   (country, city, region, metro, rtt_med_us, avg_ploss, error_pct, reqs)
+            metro_sql = (
+                f"SELECT"
+                f"  country,"
+                f"  city,"
+                f"  CAST('' AS VARCHAR)                                   AS region,"
+                f"  metro,"
+                f"  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,"
+                f"  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,"
+                f"  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,"
+                f"  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs"
+                f" FROM read_parquet([{paths_sql}])"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f" GROUP BY country, city, metro"
+                f" ORDER BY total_reqs DESC"
+                f" LIMIT 100"
+            )
         try:
             map_rows = self.execute(map_sql).fetchall()
             metro_rows = self.execute(metro_sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_geo_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_geo_rollup] read failed, falling back: %s", e)
             return None
 
         if not map_rows and not metro_rows:
@@ -3551,7 +4360,7 @@ class QueryRunner:
         from datetime import UTC, datetime, timedelta
 
         from backend.core.rollups._common import VERIFIED_BOTS_TS_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import parse_window
 
         if has_filters:
             return None
@@ -3564,10 +4373,10 @@ class QueryRunner:
         # Minute-granular re-bucketing is only exact for whole-minute buckets.
         if n < 60 or n % 60 != 0:
             return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
+        window = parse_window(start_time, end_time)
+        if window is None:
             return None
+        st, et = window
         if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
             return None
         if (et - st) > timedelta(days=366):
@@ -3609,9 +4418,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
+            _logger.debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
             return None
         return [(r[0], str(r[1]), int(r[2])) for r in rows]
 
@@ -3676,9 +4483,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[perf_latency_rollup] read failed, falling back: %s", e)
+            _logger.debug("[perf_latency_rollup] read failed, falling back: %s", e)
             return None
 
         def _ms(v: Any) -> float | None:
@@ -3739,9 +4544,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_req_size_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_req_size_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -3786,9 +4589,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -3856,11 +4657,25 @@ class QueryRunner:
         st, et = win
 
         rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
+        use_all_fields = rollup_paths is None
+        if use_all_fields:
+            from backend.core.rollups._common import DAY_BUNDLE_FILENAME
+
+            rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+            if rollup_paths is None:
+                return None
         if rollup_paths is None:
-            return None
+            raise RuntimeError("rollup_paths is unexpectedly None")
 
         paths_sql = quote_path_list(rollup_paths)
-        sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
+        if use_all_fields:
+            sql = (
+                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                "WHERE field = 'conn_requests' GROUP BY value"
+            )
+        else:
+            sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
@@ -3871,6 +4686,14 @@ class QueryRunner:
 
         counts: dict[str, int] = {}
         for bucket, cnt in rows:
+            if use_all_fields:
+                try:
+                    numeric = int(float(bucket))
+                except (TypeError, ValueError):
+                    continue
+                bucket = (
+                    "1" if numeric == 1 else "2–5" if 2 <= numeric <= 5 else "6–20" if 6 <= numeric <= 20 else "21+"
+                )
             label = self._CONN_REUSE_TO_DASHBOARD_BUCKET.get(bucket, bucket)
             counts[label] = counts.get(label, 0) + int(cnt or 0)
 
@@ -3883,7 +4706,9 @@ class QueryRunner:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if "conn_requests" in cols:
                 tmp = self._create_active_hour_temp_direct(["conn_requests"], cols, live_start, live_end)
-                if tmp is not None:
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
                     try:
                         from backend.repositories._sql import dashboard as _dash_sql
 
@@ -3905,6 +4730,81 @@ class QueryRunner:
         extras = [b for b in counts if b not in self._CONN_REQUESTS_BUCKET_ORDER]
         top = [{"value": b, "count": counts[b]} for b in known + extras]
         return {"top": top, "total": sum(counts.values())}
+
+    def try_virtual_field_top_n_from_rollup(
+        self,
+        virtual_id: str,
+        backing_col: str,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        actual_cols: list[str] | set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Serve a CSV-backed virtual field from the all-fields rollups."""
+        if has_filters or not start_time or not end_time:
+            return None
+
+        from backend.core.rollups._common import DAY_BUNDLE_FILENAME
+        from backend.utils.date_utils import parse_iso_utc
+
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None:
+            return None
+        paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+        if paths is None:
+            return None
+
+        paths_sql = quote_path_list(paths)
+        try:
+            rows = self.execute(
+                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                "WHERE field = ? GROUP BY value ORDER BY c DESC",
+                [virtual_id],
+            ).fetchall()
+        except duckdb.Error:
+            return None
+
+        counts: dict[str, int] = {}
+        for value, count in rows:
+            counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
+
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = actual_cols if actual_cols is not None else self.get_schema_cols()
+            if backing_col in cols:
+                tmp = self._create_active_hour_temp_direct([backing_col], cols, live_start, live_end)
+                if tmp == "__empty__":
+                    return {"top": [], "total": 0}
+                if tmp is None:
+                    return None
+                try:
+                    live_rows = self.execute(
+                        f"SELECT trim(signal) AS value, COUNT(*) AS c "
+                        f"FROM (SELECT unnest(string_split(\"{backing_col}\", ',')) AS signal "
+                        f'FROM "{tmp}" WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != \'\') '
+                        "WHERE trim(signal) != '' GROUP BY value"
+                    ).fetchall()
+                except duckdb.Error:
+                    return None
+                finally:
+                    self.release_active_direct_temp(tmp)
+                for value, count in live_rows:
+                    counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
+
+        total = sum(counts.values())
+        top = [
+            {"value": value, "count": count}
+            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+            if value != "__other__"
+        ][:10]
+        return {"top": top, "total": total}
 
     def try_ngwaf_top_bots_from_rollup(
         self,
@@ -3978,12 +4878,14 @@ class QueryRunner:
             cols = self.get_schema_cols()
             if "waf_req_id" in cols:
                 tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
-                if tmp is not None:
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
                     try:
                         live_q = (
                             f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "
                             f'FROM "{tmp}" t '
-                            f"INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id) "
+                            f"INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id) "
                             f"WHERE nb.bot_name IS NOT NULL "
                             f"GROUP BY 1, 2"
                         )
@@ -4039,9 +4941,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_top_ips_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_top_ips_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -4081,9 +4981,7 @@ class QueryRunner:
         try:
             row = self.execute(sql).fetchone()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_coverage_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_coverage_rollup] read failed, falling back: %s", e)
             return None
         if row is None or row[0] is None or int(row[0]) == 0:
             return None
@@ -4134,9 +5032,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
+            _logger.debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
             return None
         return [{"bucket": r[0], "count": int(r[1])} for r in rows]
 
@@ -4186,6 +5082,9 @@ class QueryRunner:
         )
         from backend.utils.date_utils import parse_iso_utc
         from backend.utils.hll import HyperLogLog
+
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
+            return {}, {}
 
         def _phase(name: str, ms: float) -> None:
             if _phase_log is not None:
@@ -4303,7 +5202,7 @@ class QueryRunner:
         # filter goes on the column directly because the bundled
         # parquets carry field as a regular column. The per-field
         # branch reads it from the hive path via hive_partitioning=1.
-        field_filter_sql = "(" + ", ".join("'" + f.replace("'", "''") + "'" for f in safe_fields) + ")"
+        field_filter_sql = "(" + ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields) + ")"
 
         branches: list[str] = []
         if bundled_paths:
@@ -4329,9 +5228,7 @@ class QueryRunner:
         except duckdb.Error as e:
             # A read failure here drops the caller to its live fallback
             # — never let an ip_spread bug take down the security tab.
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[ip_spread_rollup] read failed: %s", e)
+            _logger.debug("[ip_spread_rollup] read failed: %s", e)
             return {}, {}
         _phase("read", (_time.perf_counter() - _t) * 1000.0)
 
@@ -4451,15 +5348,30 @@ class QueryRunner:
         field_order: list[str] = []
         _pfl = per_field_limits or {}
 
+        # Resolve the ACTUAL column types of the temp we're about to query.
+        # schema_types is derived from the durable `logs` view, but the live
+        # active-hour temp (_create_active_hour_temp_direct) reads raw buffer
+        # parquet and preserves its native types — e.g. `status` as INT32 even
+        # when the committed DuckLake schema declares it VARCHAR. Trusting
+        # schema_types applied the VARCHAR-only `!= ''` empty guard to an
+        # INT32 column, which DuckDB rejects ("Could not convert string '' to
+        # INT32"). Prefer the temp's real types; fall back to schema_types.
+        actual_types: dict[str, str] = {}
+        try:
+            for r in self.con.execute(f"DESCRIBE SELECT * FROM {table_name} LIMIT 0").fetchall():
+                actual_types[r[0]] = r[1]
+        except Exception:
+            actual_types = {}
+
         for field in fields:
             if not _is_safe_ident(field):
                 continue
             sql_col = field
-            col_type = schema_types.get(sql_col, "VARCHAR")
+            col_type = actual_types.get(sql_col) or schema_types.get(sql_col, "VARCHAR")
             field_limit = int(_pfl.get(field, limit))
 
             # Escape single quotes defensively on field names
-            field_lit = field.replace("'", "''")
+            field_lit = escape_sql_literal(field)
 
             # Simplify projection and filter predicates to allow direct column
             # scan pushdown inside DuckDB, avoiding intermediate subqueries/views.
@@ -4494,6 +5406,79 @@ class QueryRunner:
 
         q = "\n            UNION ALL\n            ".join(branches) + "\n            ORDER BY field, c DESC"
         return self.execute(q).fetchall(), field_order
+
+    def try_pop_health_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[tuple] | None:
+        """Serve the /api/network/pop-health panel from parquets."""
+        from backend.core.rollups._common import POP_HEALTH_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, POP_HEALTH_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+            et_iso = et.isoformat()
+            query = (
+                f"SELECT pop,"
+                f"  CAST(SUM(requests) AS BIGINT),"
+                f"  CAST(SUM(errors) AS BIGINT),"
+                f"  CAST(SUM(cache_hits) AS BIGINT),"
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),"
+                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"
+                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+                f"FROM ("
+                f"  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms "
+                f"  FROM read_parquet([{paths_sql}]) "
+                f"  WHERE pop IS NOT NULL AND pop != '' "
+                f"  UNION ALL "
+                f"  SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, "
+                f"         CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, "
+                f"         CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
+                f"         CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
+                f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
+                f"         CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms "
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
+                f"    AND pop IS NOT NULL AND pop != '' "
+                f"  GROUP BY pop"
+                f") "
+                f"GROUP BY pop"
+            )
+        else:
+            query = (
+                f"SELECT "
+                f"  pop, "
+                f"  CAST(SUM(requests) AS BIGINT), "
+                f"  CAST(SUM(errors) AS BIGINT), "
+                f"  CAST(SUM(cache_hits) AS BIGINT), "
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT), "
+                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
+                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE pop IS NOT NULL AND pop != '' "
+                f"GROUP BY pop"
+            )
+        return self.execute(query).fetchall()
 
 
 # R-1: register the schema + listdir caches so the autouse fixture in

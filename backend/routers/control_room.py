@@ -11,16 +11,32 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.core.metadata.state import list_audit, record_audit
+from backend.core.share_db.validation import mask_ip
 from backend.deps import ServiceId, require_admin, require_service_access
+from backend.high_scale.aggregate_query import query_clickhouse_aggregate
+from backend.high_scale.aggregates import AggregateRequest
+from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
+from backend.models.control_room import (
+    ControlRoomTabResponse,
+    CorrelateResponse,
+    LogFieldAuditResponse,
+    RealtimeSeedResponse,
+    WizardStateResponse,
+    WizardStepResponse,
+)
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, query_errors
+from backend.repositories import control_room as control_room_repo
+from backend.utils.auth import mask_ips_for
+from backend.utils.router_utils import query_errors
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +108,11 @@ TAB_STUBS: dict[str, dict] = {
 # ── Tab data endpoints (read) ────────────────────────────────────────────────
 
 
-@router.get("/services/{service_id}/control-room/{tab}")
+@router.get(
+    "/services/{service_id}/control-room/{tab}",
+    response_model=ControlRoomTabResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def control_room_tab(
     tab: str,
@@ -206,17 +226,14 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
     from backend.core.realtime.transform import transform_single_second
 
     api_key = config.get_fastly_api_key(service_id)
-    fastly_service_id = config.get_fastly_logging_service_id(service_id)
+    fastly_service_id = config.get_fastly_service_id(service_id)
     if not api_key or not fastly_service_id:
         return []
 
-    import requests as req_lib
+    from backend.core.fastly.client import fastly_rt
 
-    url = f"https://rt.fastly.com/v1/channel/{fastly_service_id}/ts/h?limit=120"
     try:
-        resp = req_lib.get(url, headers={"Fastly-Key": api_key}, timeout=10)
-        resp.raise_for_status()
-        rt_json = resp.json()
+        rt_json = fastly_rt(f"/v1/channel/{fastly_service_id}/ts/h?limit=120", token=api_key)
     except Exception:
         logger.warning("RT seed fetch failed for %s", service_id)
         return []
@@ -238,16 +255,20 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
     return ticks[-count:]
 
 
-@router.get("/services/{service_id}/realtime-seed")
+@router.get(
+    "/services/{service_id}/realtime-seed", response_model=RealtimeSeedResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def realtime_seed(
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ):
     """Return the last 60 metrics ticks for instant chart hydration."""
     from backend.core.realtime.poller import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
 
-    ticks = rt_publisher.get_recent_ticks(service_id, count=60)
+    # Sync Redis I/O in valkey-backplane mode — keep it off the event loop.
+    ticks = await asyncio.to_thread(rt_publisher.get_recent_ticks, service_id, 60)
     if len(ticks) >= 60:
         return {"ticks": ticks}
 
@@ -265,6 +286,7 @@ async def realtime_seed(
 async def realtime_stream(
     request: Request,
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
     """Real-time metrics stream powered by rt.fastly.com polling.
 
@@ -281,7 +303,74 @@ async def realtime_stream(
         async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
             yield json.dumps(payload)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
+
+
+# ── Recent error stream ─────────────────────────────────────────────────────
+
+
+def _recent_standard_errors(source: dict, service_id: str) -> list[dict]:
+    from backend.core import duckdb as _db
+    from backend.repositories._base import _safe_table
+
+    con = _db.get_connection(source=source, read_only=True)
+    try:
+        view_name = _safe_table(service_id.replace("-", "_"))
+        return control_room_repo.recent_standard_error_events(con, view_name)
+    finally:
+        con.close()
+
+
+def _recent_high_scale_errors(service: Any) -> list[dict]:
+    return control_room_repo.recent_high_scale_error_events(service.client, service.service_id)
+
+
+def _mask_error_events(events: list[dict], request: Request) -> list[dict]:
+    if not mask_ips_for(getattr(request.state, "analyst_session", None)):
+        return events
+    return [{**event, "client_ip": mask_ip(event["client_ip"])} for event in events]
+
+
+@router.get("/services/{service_id}/control-room/error-stream")
+async def control_room_error_stream(
+    request: Request,
+    service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+) -> EventSourceResponse:
+    """Stream bounded recent 4xx/5xx request events.
+
+    This analyst-reachable SSE path is explicitly listed in
+    ``remote_access._ANALYST_SSE_ALLOWLIST``.
+    """
+    from backend.core import duckdb as _db
+
+    source = _db.get_source_for_service(service_id)
+    high_scale_service = registry.resolve(service_id)
+
+    async def stream() -> AsyncIterator[dict]:
+        seen: set[str] = set()
+        while not await request.is_disconnected():
+            try:
+                if high_scale_service is not None:
+                    events = await asyncio.to_thread(_recent_high_scale_errors, high_scale_service)
+                elif source is not None:
+                    events = await asyncio.to_thread(_recent_standard_errors, source, service_id)
+                else:
+                    events = []
+                for event in reversed(_mask_error_events(events, request)):
+                    event_id = event["event_id"]
+                    if event_id in seen:
+                        continue
+                    seen.add(event_id)
+                    if len(seen) > 200:
+                        seen = set(list(seen)[-100:])
+                    yield {"event": "error_event", "data": json.dumps(event)}
+            except Exception:
+                logger.warning("Control Room error stream query failed for %s", service_id, exc_info=True)
+            await asyncio.sleep(2)
+
+    return sse_response(stream())
 
 
 # ── Log-field-audit endpoint ────────────────────────────────────────────────
@@ -297,7 +386,9 @@ FEATURE_REQUIRED_FIELDS: dict[str, list[str]] = {
 }
 
 
-@router.get("/services/{service_id}/log-field-audit")
+@router.get(
+    "/services/{service_id}/log-field-audit", response_model=LogFieldAuditResponse, response_model_exclude_unset=True
+)
 @query_errors()
 def log_field_audit(
     service_id: ServiceId,
@@ -340,18 +431,23 @@ class CorrelateRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
 
 
-@router.post("/services/{service_id}/control-room/correlate")
+@router.post(
+    "/services/{service_id}/control-room/correlate", response_model=CorrelateResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def control_room_correlate(
     body: CorrelateRequest,
     service_id: ServiceId,
+    request: Request,
     _access: str | None = Depends(require_service_access),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
     """Top-N breakdown by a log field within a recent time window."""
     from fastapi import HTTPException
 
     from backend.core import duckdb as _db
     from backend.core import field_registry
+    from backend.repositories._base import _safe_table
 
     field_def = field_registry.try_get(body.dimension)
     if field_def is None:
@@ -360,6 +456,39 @@ async def control_room_correlate(
             detail={"error": "unknown_dimension", "dimension": body.dimension},
         )
 
+    col = field_def.code
+    window_minutes = body.window_minutes
+    limit = body.limit
+
+    high_scale_service = registry.resolve(service_id)
+    if high_scale_service is not None:
+        start = datetime.now(UTC) - timedelta(minutes=window_minutes)
+        aggregate_dimension = "client_ip" if col == "ip" else col
+        response = query_clickhouse_aggregate(
+            high_scale_service.client,
+            AggregateRequest(
+                service_id=service_id,
+                domain="request",
+                start=start,
+                end=datetime.now(UTC),
+                dimension=aggregate_dimension,
+            ),
+            watermark=high_scale_service.watermark_for("request"),
+        )
+        top_values = list(response.top_values)[:limit]
+        if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+            top_values = [(mask_ip(value), count) for value, count in top_values]
+        return {
+            "dimension": body.dimension,
+            "top": [{"value": value, "count": count} for value, count in top_values],
+            "freshness": {
+                "latest_log_at": (
+                    response.watermark.coverage_end.isoformat() if response.watermark.coverage_end else None
+                ),
+                "lag_seconds": int(response.freshness_lag_seconds),
+            },
+        }
+
     source = _db.get_source_for_service(service_id)
     if source is None:
         raise HTTPException(
@@ -367,26 +496,13 @@ async def control_room_correlate(
             detail={"error": "no_data_source", "service_id": service_id},
         )
 
-    col = field_def.code
-    window_minutes = body.window_minutes
-    limit = body.limit
-
     def _query():
         con = _db.get_connection(source=source, read_only=True)
         try:
-            view_name = f"logs_{service_id.replace('-', '_')}"
-            result = con.execute(
-                f"""
-                SELECT {col} AS value, COUNT(*) AS count
-                FROM {view_name}
-                WHERE timestamp >= NOW() - INTERVAL '{window_minutes} minutes'
-                GROUP BY 1
-                ORDER BY 2 DESC
-                LIMIT {limit}
-                """,
-            ).fetchall()
-            freshness_row = con.execute(f"SELECT MAX(timestamp) AS latest FROM {view_name}").fetchone()
-            return result, freshness_row
+            view_name = _safe_table(service_id.replace("-", "_"))
+            return control_room_repo.correlate_top_values(
+                con, view_name, col, datetime.now(UTC) - timedelta(minutes=window_minutes), limit
+            )
         finally:
             con.close()
 
@@ -397,9 +513,13 @@ async def control_room_correlate(
     if latest_log_at:
         lag_seconds = max(0, int((datetime.now(UTC) - latest_log_at).total_seconds()))
 
+    top = [{"value": str(r[0]), "count": r[1]} for r in rows]
+    if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+        top = [{"value": mask_ip(item["value"]), "count": item["count"]} for item in top]
+
     return {
         "dimension": body.dimension,
-        "top": [{"value": str(r[0]), "count": r[1]} for r in rows],
+        "top": top,
         "freshness": {
             "latest_log_at": latest_log_at.isoformat() if latest_log_at else None,
             "lag_seconds": lag_seconds,
@@ -417,7 +537,11 @@ class WizardStepRequest(BaseModel):
     details: dict = {}
 
 
-@router.get("/services/{service_id}/control-room/wizard/state")
+@router.get(
+    "/services/{service_id}/control-room/wizard/state",
+    response_model=WizardStateResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def wizard_state(
     service_id: ServiceId,
@@ -438,7 +562,11 @@ def wizard_state(
     }
 
 
-@router.post("/services/{service_id}/control-room/wizard/step")
+@router.post(
+    "/services/{service_id}/control-room/wizard/step",
+    response_model=WizardStepResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def wizard_step(
     body: WizardStepRequest,

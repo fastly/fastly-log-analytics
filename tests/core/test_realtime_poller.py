@@ -275,6 +275,7 @@ def _test_mock_rt_response() -> dict:
 
 
 def test_mock_rt_response_valid_shape():
+    """Sanity-check the shared test fixture used to fake RT responses below."""
     rt = _test_mock_rt_response()
     assert "Data" in rt
     assert "Timestamp" in rt
@@ -283,6 +284,31 @@ def test_mock_rt_response_valid_shape():
     tick = transform_rt_response(rt)
     assert tick["status"] == "ok"
     assert tick["data"]["requests_per_second"] > 0
+
+
+def test_poller_fetch_without_credentials_skips_network(monkeypatch):
+    """No Fastly credentials configured -> short-circuit, never touch rt.fastly.com.
+
+    This is the real (non-mocked) behavior E2E relies on when a service has no
+    real Fastly API key/service id seeded: the poller must not retry against
+    the live API with garbage credentials (that caused a 403 retry storm that
+    cascaded into unrelated E2E page-load timeouts).
+    """
+    from backend import config as config_mod
+    from backend.core.realtime import poller as poller_mod
+
+    monkeypatch.setattr(config_mod, "get_fastly_api_key", lambda service_id: None)
+    monkeypatch.setattr(config_mod, "get_fastly_logging_service_id", lambda service_id: None)
+
+    class _NoNetworkSession:
+        headers: dict[str, str] = {}
+
+        def get(self, *args, **kwargs):
+            raise AssertionError("fetch with no credentials attempted network I/O")
+
+    rt = poller_mod.RealtimePoller()._fetch_realtime(_NoNetworkSession(), "svc", 0)
+
+    assert rt is None
 
 
 # ── poller lifecycle ────────────────────────────────────────────────────────

@@ -5,7 +5,9 @@ import { axe } from 'vitest-axe'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as apiLib from '@/lib/api'
+import type { ServiceConfig } from '@/types/api'
 import React from 'react'
+import { getOk } from '@/__tests__/helpers/api-result'
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -40,23 +42,23 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
 
-  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return { data: { groups: [{ id: 'core', label: 'Core', fields: [] }], fields: [], presets: {} } } as any
+      return getOk({ groups: [{ id: 'core', label: 'Core', fields: [] }], fields: [], presets: {} })
     }
     if (url.includes('/logging-settings')) {
-      return { data: { log_period: '60', sample_rate: 100, edge_only: true, custom_condition: 'req.url ~ "test"' } } as any
+      return getOk({ log_period: '60', sample_rate: 100, edge_only: true, custom_condition: 'req.url ~ "test"' })
     }
     if (url.includes('/log-fields')) {
-      return { data: { groups: ['core'] } } as any
+      return getOk({ groups: ['core'] })
     }
-    return { data: {} } as any
+    return getOk({})
   })
 
   render(
     <QueryClientProvider client={queryClient}>
       <LogSettingsModal
-        service={{ service_id: "test-svc", name: "Test Service" } as any}
+        service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
         open={true}
         onOpenChange={onOpenChange}
       />
@@ -113,26 +115,24 @@ test('LogSettingsModal shows custom fields in review step', async () => {
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
 
-  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return {
-        data: {
+      return getOk({
           groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
           fields: [
             { id: 'ip', label: 'IP Address', group: 'core', is_custom: false },
             { id: 'x_custom', label: 'My Custom Field', group: 'custom', is_custom: true }
           ],
           presets: {}
-        }
-      } as any
+      })
     }
-    return { data: { log_fields: { groups: ['core'] } } } as any
+    return getOk({ log_fields: { groups: ['core'] } })
   })
 
   render(
     <QueryClientProvider client={queryClient}>
       <LogSettingsModal
-        service={{ service_id: "test-svc", name: "Test Service" } as any}
+        service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
         open={true}
         onOpenChange={onOpenChange}
       />
@@ -170,26 +170,26 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
   const queryClient = new QueryClient()
   const onOpenChange = vi.fn()
 
-  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return {
-        data: {
+      return getOk({
           groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
           fields: [{ id: 'ip', label: 'IP Address', group: 'core', is_custom: false }],
           presets: {},
-        },
-      } as any
+      })
     }
-    return { data: { log_fields: { groups: ['core'], field_overrides: {} } } } as any
+    return getOk({ log_fields: { groups: ['core'], field_overrides: {} } })
   })
 
-  const postSpy: any = vi.fn(async () => ({ data: { ok: true } }))
+  const postSpy = vi.fn<(url: unknown, opts: { body: { log_fields: object } }) => Promise<{ data: { ok: boolean } }>>(
+    async () => ({ data: { ok: true } }),
+  )
   vi.spyOn(apiLib.client, 'POST').mockImplementation(postSpy)
 
   render(
     <QueryClientProvider client={queryClient}>
       <LogSettingsModal
-        service={{ service_id: 'test-svc', name: 'Test Service' } as any}
+        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
         open={true}
         onOpenChange={onOpenChange}
       />
@@ -207,13 +207,13 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
   await user.click(screen.getAllByRole('button', { name: /Deploy to Fastly/i })[0])
 
   await waitFor(() => {
-    const logFieldsCall = postSpy.mock.calls.find(([u]: any[]) =>
+    const logFieldsCall = postSpy.mock.calls.find(([u]) =>
       typeof u === 'string' && u.includes('/log-fields')
     )
     expect(logFieldsCall).toBeDefined()
   })
 
-  const logFieldsCall = postSpy.mock.calls.find(([u]: any[]) =>
+  const logFieldsCall = postSpy.mock.calls.find(([u]) =>
     typeof u === 'string' && u.includes('/log-fields')
   )!
   const [url, opts] = logFieldsCall
@@ -241,23 +241,21 @@ test('LogSettingsModal has no axe-detectable a11y violations', async () => {
 
   const queryClient = new QueryClient()
 
-  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: any) => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
-      return {
-        data: {
+      return getOk({
           groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
           fields: [{ id: 'ip', label: 'IP Address', group: 'core', is_custom: false }],
           presets: {},
-        },
-      } as any
+      })
     }
-    return { data: { log_fields: { groups: ['core'], field_overrides: {} } } } as any
+    return getOk({ log_fields: { groups: ['core'], field_overrides: {} } })
   })
 
   const { container } = render(
     <QueryClientProvider client={queryClient}>
       <LogSettingsModal
-        service={{ service_id: 'test-svc', name: 'Test Service' } as any}
+        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
         open={true}
         onOpenChange={vi.fn()}
       />

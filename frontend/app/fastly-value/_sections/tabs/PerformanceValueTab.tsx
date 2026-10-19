@@ -6,6 +6,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type PerformanceData = components['schemas']['PerformanceMetrics']
 
@@ -25,7 +26,7 @@ export default function PerformanceValueTab({ data }: { data?: PerformanceData |
       grouped[cat].x.push(p.time ?? '')
       grouped[cat].y.push(p.value)
     }
-    const colors: Record<string, string> = { hit: '#10b981', miss: '#ef4444' }
+    const colors: Record<string, string> = { hit: CHART_COLORS.success, miss: CHART_COLORS.danger }
     const names: Record<string, string> = { hit: 'Cache HIT', miss: 'Cache MISS' }
     return Object.entries(grouped).map(([cat, d]) => ({
       x: d.x,

@@ -8,7 +8,6 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
   TableBody,
@@ -20,13 +19,13 @@ import {
 import { client } from '@/lib/api'
 import { formatTimeAgo } from '@/lib/date'
 import type { components } from '@/types/api.generated'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 
 interface AuditLogTabProps {
   serviceId: string
 }
 
 type AuditRow = components['schemas']['ScoringAuditRow']
-type AuditResponse = components['schemas']['ScoringAuditListResponse']
 
 const AUDIT_LIMIT = 200
 
@@ -46,20 +45,20 @@ function truncate(s: string, max: number) {
 }
 
 export function AuditLogTab({ serviceId }: AuditLogTabProps) {
-  const query = useQuery<AuditResponse>({
+  const query = useQuery({
     queryKey: ['scoring-audit', serviceId, AUDIT_LIMIT],
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/audit' as any,
+        '/api/services/{service_id}/scoring/audit',
         {
           params: {
             path: { service_id: serviceId },
             query: { limit: AUDIT_LIMIT },
           },
-        } as any,
+        },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as AuditResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 30_000,
   })
@@ -78,7 +77,7 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
             <span className="text-sm font-medium">Failed to load audit log</span>
           </div>
           <p className="text-xs text-muted-foreground">
-            {(query.error as any)?.message || 'Unknown error'}
+            {query.error?.message || 'Unknown error'}
           </p>
           <Button size="sm" variant="outline" onClick={() => query.refetch()}>
             Retry
@@ -103,9 +102,7 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
     >
       {query.isLoading ? (
         <div className="p-4 space-y-2">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
+          <SkeletonGrid count={3} height="2.5rem" className="rounded-md" />
         </div>
       ) : (
         <div className="max-h-[520px] overflow-auto">

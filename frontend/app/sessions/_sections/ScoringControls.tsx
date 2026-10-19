@@ -7,6 +7,7 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 
 interface ScoringControlsProps {
   cmcdEnabled: boolean
@@ -18,7 +19,7 @@ interface ScoringControlsProps {
   setMinReqs: (v: number | '') => void
   min4xxPct: number | ''
   setMin4xxPct: (v: number | '') => void
-  data: any
+  data: Pick<components['schemas']['SessionsResponse'], 'min_reqs_flag' | 'min_4xx_pct_flag'> | undefined
   isFetching: boolean
   isLoadingInitial: boolean
   refetch: () => void
@@ -40,10 +41,14 @@ export function ScoringControls({
   refetch,
 }: ScoringControlsProps) {
   return (
-    <div className={cn("flex flex-wrap items-center gap-4 p-3 border rounded-lg bg-muted/30 transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+    <div
+      data-testid="sessions-scoring-controls"
+      className={cn("flex flex-wrap items-center gap-4 p-3 border rounded-lg bg-muted/30 transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}
+    >
       <div className="flex items-center gap-2">
         <Switch
           id="flagged-only"
+          data-testid="flagged-only-switch"
           checked={flaggedOnly}
           onCheckedChange={setFlaggedOnly}
         />
@@ -56,6 +61,7 @@ export function ScoringControls({
         <div className="flex items-center gap-2">
           <Switch
             id="streaming-only"
+            data-testid="streaming-only-switch"
             checked={streamingOnly}
             onCheckedChange={setStreamingOnly}
           />
@@ -72,11 +78,8 @@ export function ScoringControls({
           min={0}
           value={minReqs}
           onChange={e => setMinReqs(e.target.value === '' ? '' : Number(e.target.value))}
-          // Prefix with "≥" so the placeholder reads as a hint (the scoring
-          // system's default flag threshold) rather than a value already set
-          // on this filter — the input itself starts empty and rows are
-          // unfiltered until a value is typed.
           placeholder={`≥ ${data?.min_reqs_flag ?? 1000}`}
+          data-testid="min-reqs-input"
           className="h-8 w-24 text-sm text-right"
         />
       </div>
@@ -90,6 +93,7 @@ export function ScoringControls({
           value={min4xxPct}
           onChange={e => setMin4xxPct(e.target.value === '' ? '' : Number(e.target.value))}
           placeholder={`≥ ${data?.min_4xx_pct_flag ?? 20}`}
+          data-testid="min-4xx-input"
           className="h-8 w-24 text-sm text-right"
         />
       </div>

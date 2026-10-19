@@ -728,6 +728,166 @@ def test_get_sync_status_empty_view_falls_back_to_metadata_without_prior(in_memo
     assert out["local_rows"] == 400
 
 
+def test_get_sync_status_empty_view_reads_authoritative_lake_over_stale_prior(in_memory_duckdb, fos_source):
+    """An empty view on a service with no local cache mirror (GCE standard)
+    must NOT persist an ancient prior. Before the fix a skip_view_update
+    status connection holding a 'WHERE false' baked view returned 0 rows,
+    and the fallback preserved the last-known-good persisted local_rows /
+    latest_log_at forever — the GCE header flap that read a 10-day-stale
+    Sept-22 timestamp while the DuckLake table was committing fresh rows
+    every few minutes. The fix reads count/min/max STRAIGHT from the
+    committed lake table, self-healing the header. Pinned: trap #33/#35."""
+    from datetime import datetime
+
+    from backend.core import duckdb as _db
+    from backend.core._duckdb_status import get_sync_status
+    from backend.utils.date_utils import safe_iso
+
+    # Real EMPTY table → the view stats query returns (0, None, None) with no
+    # error, so the empty-view branch (not the exception branch) fires.
+    table_name = _db._safe_table_name(fos_source["name"])
+    in_memory_duckdb.execute(f"CREATE TABLE {table_name} (timestamp TIMESTAMP)")
+    in_memory_duckdb.execute(
+        "CREATE TABLE _cron_run_log (task VARCHAR, started_at VARCHAR, "
+        "duration_s DOUBLE, status VARCHAR, error_message VARCHAR, summary VARCHAR)"
+    )
+
+    fresh_max = datetime(2026, 10, 2, 20, 31, 27)
+    fresh_min = datetime(2026, 10, 1, 0, 0, 0)
+    real_execute = in_memory_duckdb.execute
+
+    def _patched_execute(sql, *args, **kwargs):
+        # Lake existence probe → the lake table exists.
+        if "duckdb_tables()" in sql and "database_name = 'lake'" in sql:
+
+            class _RExists:
+                def fetchone(self_inner):
+                    return (1,)
+
+            return _RExists()
+        # Direct read of the committed lake table → fresh authoritative stats.
+        if 'FROM lake."' in sql and "count(*)" in sql:
+
+            class _RFresh:
+                def fetchone(self_inner):
+                    return (500, fresh_min, fresh_max)
+
+            return _RFresh()
+        return real_execute(sql, *args, **kwargs)
+
+    class _ConProxy:
+        def execute(self, sql, *args, **kwargs):
+            return _patched_execute(sql, *args, **kwargs)
+
+    stale_prior = {"local_rows": 13_948_280, "latest_log_at": "2026-09-22T00:58:06"}
+    summary = {
+        "file_count": 1,
+        "total_rows": 100,
+        "total_bytes": 100,
+        "count_with_bytes": 1,
+        "last_ingested": "2026-10-02T20:31:00",
+        "latest_file_name": "raw/2026-10-02T20:31:00.gz",
+    }
+
+    with (
+        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.config.get_status", return_value=stale_prior),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.iceberg.buffer_files", return_value=[]),
+        patch("backend.core.iceberg.clear_source_caches") as mock_clear,
+        patch("backend.core.iceberg.update_iceberg_view") as mock_update,
+    ):
+        out = get_sync_status(_ConProxy(), fos_source, force=True)
+
+    # Empty view is not an error → no expensive rebuild.
+    mock_clear.assert_not_called()
+    mock_update.assert_not_called()
+    # The authoritative committed lake read wins over BOTH the stale prior
+    # (13.9M) and the trimmed metadata sum (100).
+    assert out["local_rows"] == 500
+    assert out["latest_log_at"] == safe_iso(fresh_max)
+    assert out["earliest_log_at"] == safe_iso(fresh_min)
+
+
+def test_get_sync_status_nonempty_stale_view_reconciles_against_authoritative_lake(in_memory_duckdb, fos_source):
+    """A skip_view_update status connection can hold a stale-but-NON-EMPTY
+    baked view (or a retention-trimmed local data mirror) whose max(timestamp)
+    lags the committed lake. The empty-view self-heal never fires here because
+    view_rows > 0, so the header flapped to an 11-day-old latest while the
+    DuckLake table was committing fresh rows every few minutes — the measured
+    GCE Remote-Standard header flap. The committed lake table is the latest
+    snapshot by construction, so get_sync_status must reconcile the extents
+    against it: never report a latest older (or an earliest newer) than the
+    authoritative lake holds. Row count stays the view's own non-zero value.
+    Pinned: trap #33/#35."""
+    from datetime import datetime
+
+    from backend.core._duckdb_status import get_sync_status
+    from backend.utils.date_utils import safe_iso
+
+    stale_max = datetime(2026, 9, 22, 0, 58, 6)
+    stale_min = datetime(2026, 6, 27, 0, 0, 0)
+    fresh_max = datetime(2026, 10, 2, 20, 31, 27)
+    fresh_min = datetime(2026, 6, 20, 0, 0, 0)
+
+    real_execute = in_memory_duckdb.execute
+
+    def _patched_execute(sql, *args, **kwargs):
+        # Lake existence probe → the lake table exists.
+        if "duckdb_tables()" in sql and "database_name = 'lake'" in sql:
+
+            class _RExists:
+                def fetchone(self_inner):
+                    return (1,)
+
+            return _RExists()
+        # Direct read of the committed lake table → FRESH authoritative stats.
+        if 'FROM lake."' in sql and "count(*)" in sql:
+
+            class _RFresh:
+                def fetchone(self_inner):
+                    return (600, fresh_min, fresh_max)
+
+            return _RFresh()
+        # The baked-view stats query → STALE but NON-ZERO count.
+        if "count(*)" in sql and "min(timestamp)" in sql and "max(timestamp)" in sql:
+
+            class _RStale:
+                def fetchone(self_inner):
+                    return (500, stale_min, stale_max)
+
+            return _RStale()
+        return real_execute(sql, *args, **kwargs)
+
+    class _ConProxy:
+        def execute(self, sql, *args, **kwargs):
+            return _patched_execute(sql, *args, **kwargs)
+
+    summary = {
+        "file_count": 1,
+        "total_rows": 100,
+        "total_bytes": 100,
+        "count_with_bytes": 1,
+        "last_ingested": "2026-10-02T20:31:00",
+        "latest_file_name": "raw/2026-10-02T20:31:00.gz",
+    }
+
+    with (
+        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.config.get_status", return_value=None),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.iceberg.buffer_files", return_value=[]),
+    ):
+        out = get_sync_status(_ConProxy(), fos_source, force=True)
+
+    # Row count stays the view's non-zero value — only the extents reconcile.
+    assert out["local_rows"] == 500
+    # The authoritative lake max wins over the stale baked-view max.
+    assert out["latest_log_at"] == safe_iso(fresh_max)
+    # The authoritative (older) lake min widens the earliest extent.
+    assert out["earliest_log_at"] == safe_iso(fresh_min)
+
+
 # ── refresh_config_status remaining branches ─────────────────────────
 
 
@@ -747,6 +907,28 @@ def test_refresh_config_status_returns_silently_when_config_missing():
 
     # Never reached update_status because load_config bailed early.
     mock_update.assert_not_called()
+
+
+def test_refresh_config_status_skips_legacy_reads_for_high_scale_service():
+    from backend.core._duckdb_status import refresh_config_status
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"name": "svc", "bucket": "b", "service_id": "svc"},
+        ),
+        patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b"}),
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
+        ),
+        patch("backend.core.duckdb.get_connection") as get_connection,
+        patch("backend.config.update_status") as update_status,
+    ):
+        refresh_config_status("svc")
+
+    get_connection.assert_not_called()
+    update_status.assert_not_called()
 
 
 def test_refresh_config_status_writes_iceberg_and_edge_ratio_on_happy_path(monkeypatch, tmp_path):
@@ -816,7 +998,68 @@ def test_refresh_config_status_writes_iceberg_and_edge_ratio_on_happy_path(monke
     assert status["schema"] == [{"name": "ip", "type": "VARCHAR"}]
 
 
-def test_refresh_config_status_skip_top_values_omits_schema_key():
+def test_refresh_config_status_reads_persisted_rum_without_nested_lake_scan(tmp_path):
+    """RUM freshness must come from the status doc persisted by rum_commit,
+    NOT a nested RUM-lake connection opened on the request-ingest cron path.
+
+    The old code opened a second ``_ConnectionHolder(rum_source)`` and ran a
+    live ``rum_count_and_latest`` DuckLake scan every refresh tick. A transient
+    DuckLake catalog stall there wedged the whole log_discovery cron (GCE
+    Remote-Standard freeze). Freshness is now persisted at RUM rollup time and
+    read cheaply here, mirroring the request side (AGENTS.md Trap #39)."""
+    from backend.core._duckdb_status import refresh_config_status
+
+    captured: dict = {}
+
+    class _StubCon:
+        def execute(self, *_a, **_k):
+            class _R:
+                def fetchone(self_inner):
+                    return None
+
+                def fetchall(self_inner):
+                    return []
+
+            return _R()
+
+        def close(self):
+            pass
+
+    live_rum = MagicMock(return_value=(0, None))
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={
+                "name": "svc",
+                "bucket": "b",
+                "service_id": "svc",
+                "status": {"rum": {"latest_log_at": "2026-10-01T12:00:00Z", "total_rows": 42, "last_sync_at": "S"}},
+            },
+        ),
+        patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b", "rum_enabled": True}),
+        patch(
+            "backend.config.update_status",
+            side_effect=lambda sid, status: captured.setdefault("status", status),
+        ),
+        patch("backend.core.duckdb.get_connection", return_value=_StubCon()),
+        patch("backend.core.duckdb.get_sync_status", return_value={"ingested": 0, "local_rows": 0}),
+        patch("backend.core._duckdb_status.get_schema", return_value=[]),
+        patch("backend.core._duckdb_status.update_top_values"),
+        patch("backend.core.iceberg.get_table_info", return_value={"error": "skip"}),
+        patch("backend.core.rollups.rum.rum_count_and_latest", live_rum),
+    ):
+        refresh_config_status("svc")
+
+    # The request-ingest status path must NOT run a live RUM lake scan.
+    live_rum.assert_not_called()
+    # Freshness/count come straight from the persisted rum block.
+    assert captured["status"]["rum"]["total_rows"] == 42
+    assert captured["status"]["rum"]["latest_log_at"] == "2026-10-01T12:00:00Z"
+
+
+@pytest.mark.parametrize("discovery_time", ["2026-09-08T18:00:00Z", None])
+def test_refresh_config_status_skip_top_values_omits_schema_key(discovery_time):
     """include_top_values=False MUST skip the schema SUMMARIZE
     write — that's the load-bearing optimisation that lets the
     high-cadence (5s) tick avoid the ~800 ms SUMMARIZE cost.
@@ -864,6 +1107,13 @@ def test_refresh_config_status_skip_top_values_omits_schema_key():
         ),
         patch("backend.core._duckdb_status.get_schema", side_effect=_track_schema),
         patch("backend.core._duckdb_status.update_top_values") as mock_tv,
+        patch(
+            "backend.core.metadata.cron_log.latest_cron_per_task",
+            return_value={
+                "sync": {"started_at": "2026-09-01T18:00:00Z"},
+                "log_discovery": {"started_at": discovery_time},
+            },
+        ),
     ):
         refresh_config_status("svc", include_top_values=False)
 
@@ -873,6 +1123,7 @@ def test_refresh_config_status_skip_top_values_omits_schema_key():
     mock_tv.assert_not_called()
     # And get_schema must not have been called by the refresh path.
     assert schema_calls["count"] == 0
+    assert captured["status"]["request"]["last_sync_at"] == (discovery_time or "2026-09-01T18:00:00Z")
 
 
 # ── delete_ingested_files remaining paths ────────────────────────────
@@ -1172,6 +1423,61 @@ def test_reconcile_fastly_stats_returns_zero_when_no_api_key():
     assert out == 0
 
 
+def test_reconcile_fastly_stats_fetches_aggregate_via_fastly_client():
+    """The hourly stats pull goes through core/fastly/client.fastly (path + token), and the
+    Class A/B counts, including the nested ``object_storage`` fallback, reach metadata."""
+    from backend.core._duckdb_status import reconcile_fastly_stats
+
+    payload = {
+        "data": [
+            {
+                "start_time": 1760000000,
+                "object_storage_class_a_operations_count": 7,
+                "object_storage_class_b_operations_count": 3,
+            },
+            {
+                "start_time": 1760003600,
+                "object_storage": {"class_a_operations_count": 2, "class_b_operations_count": 1},
+            },
+            {"start_time": None},
+        ]
+    }
+    fetched: list = []
+
+    def _fake_fastly(method, path, body=None, *, token, **kwargs):
+        fetched.append((method, path, token))
+        return payload
+
+    with (
+        patch("backend.config.is_usage_logging_enabled", return_value=True),
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch("backend.core.metadata.get_latest_reconciliation_ts", return_value=None),
+        patch("backend.core.fastly.client.fastly", side_effect=_fake_fastly),
+        patch("backend.core.metadata.reconcile_fastly_stats", return_value=2) as mock_recon,
+    ):
+        out = reconcile_fastly_stats({"name": "svc", "logging_service_id": "lsi"}, hours_back=2)
+
+    assert out == 2
+    assert len(fetched) == 1
+    method, path, token = fetched[0]
+    assert (method, token) == ("GET", "tok")
+    assert path.startswith("/stats/aggregate?by=hour&from=")
+    hourly = mock_recon.call_args.args[1]
+    assert [(h["class_a"], h["class_b"]) for h in hourly] == [(7, 3), (2, 1)]
+
+
+def test_reconcile_fastly_stats_swallows_fastly_errors():
+    from backend.core._duckdb_status import reconcile_fastly_stats
+
+    with (
+        patch("backend.config.is_usage_logging_enabled", return_value=True),
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch("backend.core.metadata.get_latest_reconciliation_ts", return_value=None),
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 500 GET /stats/aggregate")),
+    ):
+        assert reconcile_fastly_stats({"name": "svc", "logging_service_id": "lsi"}) == 0
+
+
 def test_purge_usage_log_no_service_id_returns_silently():
     """A source dict with neither name nor service_id must NOT
     crash purge_usage_log — the function is called from the
@@ -1401,6 +1707,131 @@ def test_get_sync_status_cached_dynamic_storage_mode(in_memory_duckdb, fos_sourc
         out = get_sync_status(in_memory_duckdb, local_source, skip_fos=True, force=False)
 
     assert out["storage_mode"] == "local"
+
+
+# ── RUM freshness: aggregates branch must report real sub-hour latest ──
+
+
+def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
+    """RUM freshness must surface the real sub-hour event time, not the
+    hour-truncated aggregate bucket_start. The raw-vs-bucket distinction is
+    computed at RUM rollup time (rum_count_and_latest → _rum_raw_latest reads
+    raw MAX(timestamp)) and persisted into the status doc by rum_commit; this
+    test pins that refresh_config_status surfaces that persisted real timestamp
+    through to the header WITHOUT re-scanning the RUM lake (GCE Remote-Standard
+    freeze; AGENTS.md Trap #39). The raw-vs-bucket math itself is pinned by
+    tests/core/test_rum_status_freshness.py and tests/core/test_rollups_rum.py."""
+    from backend.core._duckdb_status import refresh_config_status
+
+    captured: dict = {}
+
+    class _StubCon:
+        def execute(self, *_a, **_k):
+            class _R:
+                def fetchone(self_inner):
+                    return None
+
+                def fetchall(self_inner):
+                    return []
+
+            return _R()
+
+        def close(self):
+            pass
+
+    # The persisted rum block carries the real sub-hour MAX(timestamp), as
+    # computed+written by rum_commit, NOT the hour-truncated bucket_start.
+    src = {
+        "name": "svc",
+        "bucket": "b",
+        "service_id": "svc",
+        "rum_enabled": True,
+        "status": {"rum": {"latest_log_at": "2026-10-02T00:45:30", "total_rows": 155, "last_sync_at": "S"}},
+    }
+
+    live_rum = MagicMock(return_value=(0, None))
+
+    with (
+        patch("backend.config.load_config", return_value=src),
+        patch("backend.config.config_to_source", return_value=src),
+        patch("backend.config.update_status", side_effect=lambda sid, status: captured.setdefault("status", status)),
+        patch("backend.core.duckdb.get_connection", return_value=_StubCon()),
+        patch("backend.core.duckdb.get_sync_status", return_value={"ingested": 0, "local_rows": 0}),
+        patch("backend.core.rollups.rum.rum_count_and_latest", live_rum),
+        patch("backend.core._duckdb_status.get_schema", return_value=[{"name": "ip", "type": "VARCHAR"}]),
+        patch("backend.core._duckdb_status.update_top_values"),
+        patch("backend.core._duckdb_status._cache_dir", return_value="/tmp/nonexistent-rum-fresh"),
+    ):
+        refresh_config_status("svc")
+
+    # No live RUM lake scan on the request-ingest status path.
+    live_rum.assert_not_called()
+    rum = captured["status"]["rum"]
+    # Count is the persisted aggregate sum (100 + 50 + 5), unchanged.
+    assert rum["total_rows"] == 155
+    # Freshness is the real raw MAX(timestamp), NOT the hour-bucket.
+    assert rum["latest_log_at"] is not None
+    assert rum["latest_log_at"].startswith("2026-10-02T00:45:30"), (
+        f"RUM latest_log_at must reflect the real sub-hour event time, got {rum['latest_log_at']!r}"
+    )
+
+
+def test_get_sync_status_ducklake_snapshot_cached_split_stats(in_memory_duckdb, fos_source, tmp_path):
+    """When legacy cache/bucket/data does not exist (DuckLake mode where
+    committed data resides on local disk under /app/data/services/{service_id}/ducklake),
+    get_sync_status must probe DuckLake snapshot ID, cache the lake stats in
+    _data_stats_cache, and reuse the cached count without re-querying the lake table."""
+    import backend.core.duckdb as _db_main
+    from backend.core._duckdb_status import get_sync_status
+
+    cache_dir = tmp_path / "cache" / fos_source["bucket"]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    src = {**fos_source, "_cache_dir_override": str(cache_dir)}
+
+    in_memory_duckdb.execute("ATTACH ':memory:' AS lake")
+    in_memory_duckdb.execute("CREATE TABLE lake.logs (timestamp TIMESTAMP)")
+    in_memory_duckdb.execute("INSERT INTO lake.logs VALUES ('2026-10-12 12:00:00'), ('2026-10-12 12:01:00')")
+
+    table_name = _db_main._safe_table_name(src["name"])
+    in_memory_duckdb.execute(f"CREATE VIEW {table_name} AS SELECT * FROM lake.logs")
+
+    with _db_main._data_stats_cache_lock:
+        _db_main._data_stats_cache.pop(src["name"], None)
+
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=42),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out1 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out1["local_rows"] == 2
+    with _db_main._data_stats_cache_lock:
+        cached = _db_main._data_stats_cache.get(src["name"])
+    assert cached is not None
+    assert cached[0] == ("ducklake", 42)
+    assert cached[1] == 2
+
+    # Insert another row into lake.logs without changing snapshot_id; second call hits cache
+    in_memory_duckdb.execute("INSERT INTO lake.logs VALUES ('2026-10-12 12:02:00')")
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=42),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out2 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out2["local_rows"] == 2  # Hit cache!
+
+    # Now bump snapshot_id; cache should miss and re-query
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=43),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out3 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out3["local_rows"] == 3
 
 
 # Silence ruff unused-imports

@@ -3,14 +3,16 @@
 
 Wipes: the cloud Iceberg log table (``iceberg/`` except ``iceberg/meta/``),
 quarantined-file cloud copies (``errors/``), the local DuckDB analytical
-file + cache dir, and the SQLite ingestion ledgers (``ingested_files``,
-``ingested_files_summary``, ``ingest_in_flight``, ``committed_buffers``,
-``local_compacted_files``, ``quarantined_files``).
+file + cache dir, local quarantine evidence, and ingestion metadata
+(``ingested_files``, ``ingested_files_summary``, ``ingest_in_flight``,
+``committed_buffers``, ``local_compacted_files``, ``quarantined_files``,
+``quarantine_evidence``).
 
 Preserves: ``sources``, ``views``, ``alerts``, ``audit_logs``,
 ``scoring_labels``, ``scoring_audit``, ``cron_runs``, ``slow_queries``,
 ``asn_names``, and everything under ``iceberg/meta/`` (admin_state.json,
-scoring_matrix.json). Raw logs under ``raw/`` are left alone by default —
+scoring_matrix.json). Raw request and RUM logs under ``raw/request/`` and
+``raw/rum/`` are left alone by default —
 see the re-ingestion-storm warning below.
 
 See ``local-docs/log_reset_design_plan.md`` for the full design rationale.
@@ -26,6 +28,8 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Generator, Iterator
+
+from backend.core.quarantine import purge_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +171,14 @@ def reset_service_logs(
         cron_sync_cfg = prov.setdefault("cron_sync", {})
         original_cron_sync_enabled = cron_sync_cfg.get("enabled", True)
         if original_cron_sync_enabled:
-            cron_sync_cfg["enabled"] = False
-            svcconfig.save_config(service_id, cfg)
+
+            def _pause_cron_sync(c: dict) -> None:
+                nonlocal original_cron_sync_enabled
+                fresh_cron_sync = c.setdefault("provisioning", {}).setdefault("cron_sync", {})
+                original_cron_sync_enabled = fresh_cron_sync.get("enabled", True)
+                fresh_cron_sync["enabled"] = False
+
+            svcconfig.mutate_config(service_id, _pause_cron_sync)
             paused_cron = True
             if reload_scheduler:
                 try:
@@ -182,7 +192,7 @@ def reset_service_logs(
                 "message": (
                     "Warning: this source keeps raw logs after ingest (delete_after=False). "
                     "Deleting raw cloud logs now means the next full sync has no dedup record "
-                    "left and will re-ingest this service's ENTIRE history from raw/."
+                    "left and will re-ingest this service's ENTIRE request/RUM history."
                 ),
             }
 
@@ -248,21 +258,33 @@ def reset_service_logs(
             yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
 
         if delete_raw_logs:
-            raw_prefix = f"{prefix}/raw/" if prefix else "raw/"
+            raw_prefix = f"{prefix}/raw/request/" if prefix else "raw/request/"
             deleted_raw = yield from _purge_prefix(
-                fos, bucket, raw_prefix, _delete_objects_robust, label="raw object(s) under raw/"
+                fos, bucket, raw_prefix, _delete_objects_robust, label="request raw object(s) under raw/request/"
             )
-            yield {"type": "status", "message": f"Deleted {deleted_raw:,} raw object(s) under raw/."}
+            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+            deleted_rum = yield from _purge_prefix(
+                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
+            )
+            yield {
+                "type": "status",
+                "message": f"Deleted {deleted_raw:,} request and {deleted_rum:,} RUM raw object(s).",
+            }
+
+        yield {"type": "status", "message": "Purging local quarantine evidence..."}
+        purge_evidence(service_id)
 
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)
         con.execute("DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute("DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute(
-            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE 'client_vitals%' AND buffer_filename NOT LIKE 'client_errors%'"
+            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE ? AND buffer_filename NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE 'client_vitals%' AND file_name NOT LIKE 'client_errors%'"
+            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE ? AND file_name NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
         con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
@@ -278,7 +300,10 @@ def reset_service_logs(
         clear_source_caches(service_key)
         iceberg_core.init_iceberg_table(source, create=True)
         con2 = _db.get_connection(source)
-        update_iceberg_view(con2, source, force=True)
+        try:
+            update_iceberg_view(con2, source, force=True)
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,
@@ -287,6 +312,26 @@ def reset_service_logs(
             actor=actor,
         )
 
+        if os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                from backend.core.clickhouse_client import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
+
+                yield {"type": "status", "message": "Purging ClickHouse high-scale tables..."}
+                client = get_clickhouse_client()
+                if client:
+                    for table in CLICKHOUSE_HIGH_SCALE_TABLES:
+                        client.execute(
+                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
+                            {"service_id": service_id},
+                        )
+                    yield {
+                        "type": "status",
+                        "message": f"Cleared data from {len(CLICKHOUSE_HIGH_SCALE_TABLES)} ClickHouse table(s).",
+                    }
+            except Exception as e:
+                logger.error("Failed to purge ClickHouse tables: %s", e)
+                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse tables: {e}"}
+
         yield {
             "type": "done",
             "message": "Log history deleted. New logs from the live edge will begin populating immediately.",
@@ -294,11 +339,14 @@ def reset_service_logs(
     finally:
         if paused_cron:
             try:
-                cfg = svcconfig.load_config(service_id) or {}
-                prov = cfg.setdefault("provisioning", {})
-                cron_sync_cfg = prov.setdefault("cron_sync", {})
-                cron_sync_cfg["enabled"] = original_cron_sync_enabled
-                svcconfig.save_config(service_id, cfg)
+                svcconfig.mutate_config(
+                    service_id,
+                    lambda c: (
+                        c.setdefault("provisioning", {})
+                        .setdefault("cron_sync", {})
+                        .__setitem__("enabled", original_cron_sync_enabled)
+                    ),
+                )
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:
@@ -307,6 +355,33 @@ def reset_service_logs(
             lock.release()
         except RuntimeError:
             pass
+
+
+def _pause_rum_flags(cfg: dict) -> tuple[bool | None, bool] | None:
+    """Disable RUM in ``cfg`` for the duration of a reset; return what to restore, or None if already off.
+
+    Returns ``(original rum.enabled or None when the key was absent, original root rum_enabled)``.
+    """
+    rum_cfg = cfg.setdefault("rum", {})
+    original_rum = rum_cfg.get("enabled")
+    original_root = bool(cfg.get("rum_enabled", False))
+    if not (original_rum or original_root):
+        return None
+    rum_cfg["enabled"] = False
+    cfg["rum_enabled"] = False
+    return original_rum, original_root
+
+
+def _restore_rum_flags(cfg: dict, paused: tuple[bool | None, bool]) -> None:
+    """Undo :func:`_pause_rum_flags`. An absent ``rum.enabled`` is removed again, never written as False:
+    ``is_rum_enabled`` gives that key precedence over the root flag, so a fabricated False disables RUM."""
+    original_rum, original_root = paused
+    rum_cfg = cfg.setdefault("rum", {})
+    if original_rum is None:
+        rum_cfg.pop("enabled", None)
+    else:
+        rum_cfg["enabled"] = original_rum
+    cfg["rum_enabled"] = original_root
 
 
 def reset_service_rum(
@@ -342,8 +417,7 @@ def reset_service_rum(
         raise RuntimeError("Another operation is in progress for this service. Please wait and try again.")
 
     paused_cron = False
-    original_rum_enabled = False
-    original_rum_enabled_root = False
+    paused_flags: tuple[bool | None, bool] | None = None
 
     try:
         if metadata_db.cron_busy(service_id):
@@ -354,14 +428,13 @@ def reset_service_rum(
         # Pause background RUM sync/commit ticks
         yield {"type": "status", "message": "Pausing background RUM sync for this service..."}
         cfg = svcconfig.load_config(service_id) or {}
-        rum_cfg = cfg.setdefault("rum", {})
-        original_rum_enabled = rum_cfg.get("enabled", False)
-        original_rum_enabled_root = cfg.get("rum_enabled", False)
+        if _pause_rum_flags(cfg) is not None:
 
-        if original_rum_enabled or original_rum_enabled_root:
-            rum_cfg["enabled"] = False
-            cfg["rum_enabled"] = False
-            svcconfig.save_config(service_id, cfg)
+            def _pause_rum(c: dict) -> None:
+                nonlocal paused_flags
+                paused_flags = _pause_rum_flags(c)
+
+            svcconfig.mutate_config(service_id, _pause_rum)
             paused_cron = True
             if reload_scheduler:
                 try:
@@ -452,8 +525,11 @@ def reset_service_rum(
 
         # Pre-warm/initialize views on a standard connection
         con2 = _db.get_connection(rum_source)
-        update_iceberg_view(con2, source, force=True, target_table="client_vitals")
-        update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        try:
+            update_iceberg_view(con2, source, force=True, target_table="client_vitals")
+            update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,
@@ -469,11 +545,12 @@ def reset_service_rum(
     finally:
         if paused_cron:
             try:
-                cfg = svcconfig.load_config(service_id) or {}
-                rum_cfg = cfg.setdefault("rum", {})
-                rum_cfg["enabled"] = original_rum_enabled
-                cfg["rum_enabled"] = original_rum_enabled_root
-                svcconfig.save_config(service_id, cfg)
+
+                def _resume_rum(c: dict) -> None:
+                    if paused_flags is not None:
+                        _restore_rum_flags(c, paused_flags)
+
+                svcconfig.mutate_config(service_id, _resume_rum)
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:

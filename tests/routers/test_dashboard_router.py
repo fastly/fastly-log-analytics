@@ -19,6 +19,114 @@ import pytest
 
 
 @pytest.fixture
+def forbidden_clickhouse(monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", "true")
+    adapter = MagicMock(side_effect=AssertionError("archived evaluator reached from dashboard"))
+    client = MagicMock(side_effect=AssertionError("ClickHouse client reached from dashboard"))
+    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_aggregates", adapter)
+    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_clickhouse_client", client)
+    monkeypatch.setattr("backend.core.clickhouse_client.get_clickhouse_client", client)
+    monkeypatch.setattr("backend.core.clickhouse_client.ClickHouseClient.execute", client)
+    yield adapter, client
+    adapter.assert_not_called()
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint", ["aggregates", "bundle"])
+@pytest.mark.parametrize("sections", [None, ["core", "topten"], ["topten"]])
+def test_dashboard_stays_ducklake_when_clickhouse_enabled(
+    client, endpoint, sections, stub_aggregates, stub_top_bots, forbidden_clickhouse
+):
+    body = {
+        "fields": ["country"],
+        "filters": {},
+        "chart_interval": "1 hour",
+        "chart_metric": "requests",
+        "start_time": "2026-09-01T00:00:00Z",
+        "end_time": "2026-09-02T00:00:00Z",
+    }
+    if sections is not None:
+        body["sections"] = sections
+    resp = client.post(
+        f"/api/dashboard/{endpoint}",
+        json=body,
+    )
+    assert resp.status_code == 200, resp.text
+    stub_aggregates.assert_called_once()
+    args = stub_aggregates.call_args.kwargs
+    assert "sections" not in args
+    assert args["include_top_n"] is True
+    for flag in ("include_time_series", "include_conn_requests", "include_map_data"):
+        assert args[flag] is (sections != ["topten"])
+    assert args["fields_filter"] == ["country"]
+    if endpoint == "bundle" and sections is None:
+        stub_top_bots.assert_called_once()
+        assert resp.json()["top_bots"]["bots"] == [{"name": "Googlebot", "request_count": 42}]
+    else:
+        stub_top_bots.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint", ["aggregates", "bundle"])
+def test_ducklake_receives_analyst_clamp_when_clickhouse_enabled(
+    client,
+    monkeypatch,
+    endpoint,
+    stub_aggregates,
+    in_memory_duckdb,
+    test_service_source,
+    forbidden_clickhouse,
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import RequestContext, build_request_context
+    from backend.core.request_telemetry import RequestTelemetry
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    start, end = datetime(2026, 9, 1, 6, tzinfo=UTC), datetime(2026, 9, 1, 8, tzinfo=UTC)
+    ctx = RequestContext(
+        service_id=test_service_source["service_id"],
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        telemetry=RequestTelemetry("POST", f"/api/dashboard/{endpoint}"),
+        analyst_session=SimpleNamespace(service_ids=[test_service_source["service_id"]]),
+        time_bounds=TimeBounds(start=start, end=end),
+    )
+    app.dependency_overrides[build_request_context] = lambda: ctx
+    resp = client.post(
+        f"/api/dashboard/{endpoint}",
+        json={
+            "fields": ["country"],
+            "sections": ["core", "topten"],
+            "filters": {},
+            "chart_interval": "1 hour",
+            "chart_metric": "requests",
+            "start_time": "2026-08-01T00:00:00Z",
+            "end_time": "2026-09-02T00:00:00Z",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    stub_aggregates.assert_called_once()
+    args = stub_aggregates.call_args.kwargs
+    assert datetime.fromisoformat(args["start_time"].replace("Z", "+00:00")) == start
+    assert datetime.fromisoformat(args["end_time"].replace("Z", "+00:00")) == end
+    assert args["src"] is test_service_source
+    assert args["con"] is in_memory_duckdb
+    assert "sections" not in args
+
+
+def test_invalid_filter_rejected_before_dispatch(client, monkeypatch, forbidden_clickhouse):
+    dispatch = MagicMock(side_effect=AssertionError("invalid request dispatched"))
+    monkeypatch.setattr("backend.repositories.dashboard.get_aggregates", dispatch)
+    resp = client.post(
+        "/api/dashboard/aggregates", json={"filters": {"country": {"mode": "invalid", "values": ["US"]}}}
+    )
+    assert resp.status_code == 422
+    dispatch.assert_not_called()
+
+
+@pytest.fixture
 def stub_aggregates(monkeypatch):
     """Replace the repository's get_aggregates with a deterministic stub.
 
@@ -58,7 +166,7 @@ def stub_aggregates(monkeypatch):
 def stub_top_bots(monkeypatch):
     stub = MagicMock(
         return_value={
-            "bots": [{"name": "Googlebot", "count": 42}],
+            "bots": [{"name": "Googlebot", "request_count": 42}],
             "ngwaf_bots": [],
             "section_timings": [{"section": "bots:query", "time_ms": 3.0}],
             "debug_queries": [{"sql": "SELECT bot", "time_ms": 0.5, "rows": 1, "caller": "bots_caller"}],
@@ -297,7 +405,7 @@ def _inject_mask_ips_analyst(in_memory_duckdb, test_service_source):
 
     session = SimpleNamespace(service_ids=[test_service_source["service_id"]], pii_policy={"mask_ips": True})
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source, con=in_memory_duckdb, session=session
+        source=test_service_source, _con_override=in_memory_duckdb, session=session
     )
 
 
@@ -449,7 +557,7 @@ def test_bundle_bots_only_skips_aggregates_branch(client, stub_aggregates, stub_
     stub_top_bots.assert_called_once()
     stub_aggregates.assert_not_called()
     assert body.get("aggregates") is None
-    assert body["top_bots"]["bots"] == [{"name": "Googlebot", "count": 42}]
+    assert body["top_bots"]["bots"] == [{"name": "Googlebot", "request_count": 42}]
 
 
 def test_bundle_multi_section_core_plus_bots_fires_both(client, stub_aggregates, stub_top_bots):
@@ -548,6 +656,49 @@ def test_bundle_gather_uses_return_exceptions_true():
     )
 
 
+def test_bundle_primary_prewarm_is_cancellation_guarded():
+    """Regression for the Local Std 2026-10-02 "pool saturated at 4" leak.
+
+    The primary pooled connection is pre-warmed in a worker thread so the
+    BLOCKING checkout (DuckLake attach + Iceberg view rebuild + lock-retry)
+    stays off the event loop. A BARE ``await asyncio.to_thread(lambda: ctx.con)``
+    is NOT cancellation-safe: when the client disconnects mid-checkout (e.g.
+    the browser closes the page on a slow/503 response), the awaiting
+    coroutine raises ``CancelledError`` immediately while the detached worker
+    thread is still inside ``_ConnectionHolder.__enter__``. The request-context
+    dependency's ``finally`` then races ``__exit__`` against the still-executing
+    checkout generator — the connection is acquired (``in_use += 1``) but never
+    released, permanently stranding a pool slot. Four such leaks exhaust
+    ``DUCKDB_POOL_MAX_SIZE`` and every subsequent request 503s with
+    ``pool for <svc> saturated`` until the backend restarts.
+
+    The runtime race is non-deterministic and the single-connection test
+    fixture never exercises it, so pin the structural invariant at the source
+    level (same approach as ``test_bundle_gather_uses_return_exceptions_true``):
+    the pre-warm must be awaited through the guarded
+    ``create_task`` + ``shield`` + ``except CancelledError: await task``
+    pattern, never a bare ``await asyncio.to_thread(lambda: ctx.con)``.
+    """
+    import inspect
+
+    from backend.routers.dashboard import dashboard_bundle
+
+    src = inspect.getsource(dashboard_bundle)
+    assert "await asyncio.to_thread(lambda: ctx.con)" not in src, (
+        "The primary-connection pre-warm must NOT be a bare "
+        "``await asyncio.to_thread(lambda: ctx.con)`` — cancelled mid-checkout "
+        "it leaks a pool slot (pool-saturated 503 until restart). Wrap it in "
+        "the guarded create_task + shield + await-on-cancel pattern."
+    )
+    # The guarded pre-warm must await the detached checkout task to completion
+    # on cancellation so the holder records the connection for the dependency
+    # ``finally`` to release.
+    assert "ctx.con" in src and "asyncio.shield(" in src, (
+        "dashboard_bundle must pre-warm ctx.con through asyncio.shield so a "
+        "mid-checkout cancellation still completes the checkout before unwind."
+    )
+
+
 # ── Parallel execution & Fallback scenarios ─────────────────────────────
 
 
@@ -612,3 +763,159 @@ def test_bundle_parallel_generic_exception_fallback(client, stub_aggregates, stu
         )
         assert resp.status_code == 200
         mock_checkout.assert_called_once()
+
+
+async def test_bundle_resolves_primary_connection_off_event_loop(monkeypatch):
+    """The first ``ctx.con`` access performs a BLOCKING pool checkout
+    (DuckLake attach + Iceberg view rebuild + up-to-max_wait lock retry).
+    Evaluated as an argument to ``asyncio.to_thread(_run_aggregates,
+    ctx.con)`` it runs ON the asyncio event loop, so under cron-vs-dashboard
+    DuckLake contention it freezes ``/api/health`` and every other request —
+    cascading one slow dashboard query into a fully-"unhealthy" backend
+    (GCE 2026-10-02 py-spy: MainThread blocked in get_connection inside the
+    ASGI request path). ``dashboard_bundle`` must pre-resolve the primary
+    connection in a worker thread so a contended checkout slows only its own
+    request, never the shared event loop.
+    """
+    import asyncio
+    import time as _time
+    from unittest.mock import MagicMock
+
+    import backend.routers.dashboard as dash
+    from backend.core.request_context import RequestContext
+    from backend.models.dashboard import AggregatesRequest
+
+    checkout_block_s = 0.25
+
+    class _BlockingHolder:
+        """Stand-in for ``_ConnectionHolder`` whose ``__enter__`` blocks the
+        calling thread like a real contended pool checkout."""
+
+        def __init__(self, con):
+            self.con = None
+            self._real = con
+            self.enter_calls = 0
+
+        def __enter__(self):
+            self.enter_calls += 1
+            _time.sleep(checkout_block_s)
+            self.con = self._real
+            return self._real
+
+        def __exit__(self, *_a):
+            return False
+
+    holder = _BlockingHolder(MagicMock())
+    ctx = RequestContext(
+        service_id="svc-standard-not-highscale",
+        source={"name": "svc", "service_id": "svc-standard-not-highscale"},
+        telemetry=MagicMock(),
+        _holder=holder,
+    )
+    monkeypatch.setattr(dash.repo, "get_aggregates", lambda **_k: {})
+
+    req = AggregatesRequest(
+        start_time="2026-06-12T00:00:00Z",
+        end_time="2026-06-12T01:00:00Z",
+        filters={},
+        chart_metric="requests",
+        chart_interval="minute",
+        sections=["core"],
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        for _ in range(500):
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    hb = asyncio.create_task(_heartbeat())
+    await dash.dashboard_bundle(req, ctx)
+    hb.cancel()
+
+    assert holder.enter_calls >= 1, "the pool checkout must still happen"
+    # Off-loop, the 5ms heartbeat advances ~45x across the 0.25s checkout.
+    # On-loop (the bug), it cannot tick at all while the loop is blocked.
+    assert ticks >= 10, (
+        f"event loop was blocked during the pool checkout (only {ticks} "
+        "heartbeat ticks observed) — dashboard_bundle must resolve ctx.con "
+        "off the event loop"
+    )
+
+
+async def test_high_scale_bundle_runs_off_event_loop(monkeypatch):
+    """The high-scale dashboard bundle runs a series of BLOCKING ClickHouse
+    aggregate queries (one per field, plus the time series) inside the
+    ``async def dashboard_bundle`` handler. The non-high-scale branch already
+    offloads its blocking work via ``asyncio.to_thread``; the high-scale
+    branch returned ``high_scale_bundle(...)`` synchronously, executing every
+    ClickHouse query ON the asyncio event loop. That froze ``/api/health``,
+    SSE, and every concurrent request for the whole query — the Elevation
+    high-scale 24h "Crunching logs… → Failed to fetch" wedge. The high-scale
+    branch must run off the event loop too.
+    """
+    import asyncio
+    import time as _time
+    from unittest.mock import MagicMock
+
+    import backend.high_scale.dashboard as hsd
+    import backend.high_scale.registry as hsreg
+    import backend.routers.dashboard as dash
+    from backend.core.request_context import RequestContext
+    from backend.models.dashboard import AggregatesRequest
+
+    sentinel_service = object()
+
+    class _Reg:
+        def resolve(self, _sid):
+            return sentinel_service
+
+    monkeypatch.setattr(hsreg, "get_high_scale_service_registry", lambda: _Reg())
+
+    block_s = 0.25
+
+    def _blocking_bundle(service, req, start, end):
+        assert service is sentinel_service
+        _time.sleep(block_s)
+        return {"aggregates": {}, "top_bots": {}}
+
+    monkeypatch.setattr(hsd, "bundle", _blocking_bundle)
+
+    ctx = RequestContext(
+        service_id="svc-highscale",
+        source={"name": "svc", "service_id": "svc-highscale"},
+        telemetry=MagicMock(),
+        _holder=MagicMock(),  # must never be entered on the high-scale path
+    )
+
+    req = AggregatesRequest(
+        start_time="2026-06-12T00:00:00Z",
+        end_time="2026-06-12T01:00:00Z",
+        filters={},
+        chart_metric="requests",
+        chart_interval="minute",
+        sections=["core"],
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        for _ in range(500):
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    hb = asyncio.create_task(_heartbeat())
+    result = await dash.dashboard_bundle(req, ctx)
+    hb.cancel()
+
+    assert result["aggregates"] == {}
+    # Off-loop, the 5ms heartbeat advances ~45x across the 0.25s query.
+    # On-loop (the bug), it cannot tick at all while the loop is blocked.
+    assert ticks >= 10, (
+        f"event loop was blocked during the high-scale bundle (only {ticks} "
+        "heartbeat ticks observed) — the high-scale branch of dashboard_bundle "
+        "must run off the event loop"
+    )

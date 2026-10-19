@@ -88,6 +88,9 @@ vi.mock('@/app/logs/_sections/CronTab', () => ({ CronTab: () => <div data-testid
 vi.mock('@/app/logs/_sections/ServiceHistoryTab', () => ({ ServiceHistoryTab: () => null }))
 vi.mock('@/app/logs/_sections/IngestionTab', () => ({ IngestionTab: () => null }))
 vi.mock('@/app/logs/_sections/SSEModal', () => ({ SSEModal: () => null }))
+vi.mock('@/app/logs/_sections/RawLogsExplorer', () => ({
+  RawLogsExplorer: () => <div data-testid="raw-logs-explorer">Raw Logs Explorer Component</div>,
+}))
 vi.mock('@/components/SyncFromCloudModal/SyncFromCloudModal', () => ({
   SyncFromCloudModal: () => null,
 }))
@@ -106,12 +109,29 @@ afterEach(() => {
   errorSpy.mockRestore()
 })
 
-test('logs page mounts and renders title', () => {
+test('logs page mounts and renders title in cron mode', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LogsClient />
+      <LogsClient initialTab="cron" />
     </QueryClientProvider>,
   )
   expect(screen.getByText('Data Management')).toBeInTheDocument()
+  expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('logs page mounts and renders Raw Logs Explorer in explorer mode', async () => {
+  const { useLogsPageState } = await import('@/app/logs/_state')
+  vi.mocked(useLogsPageState).mockReturnValueOnce({
+    ...vi.mocked(useLogsPageState)(),
+    activeTab: 'explorer',
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <LogsClient initialTab="explorer" />
+    </QueryClientProvider>,
+  )
+  expect(screen.getByText('Raw Logs Explorer')).toBeInTheDocument()
+  expect(screen.getByTestId('raw-logs-explorer')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
 })

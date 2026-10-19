@@ -8,14 +8,13 @@ from backend.main import app
 def test_lake_info_success():
     """Verify that lake-info returns table details correctly."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("backend.core.iceberg.get_table_info") as mock_info,
         patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_table = MagicMock()
-        mock_init.return_value = mock_table
+        mock_exists.return_value = True
 
         mock_info.return_value = {
             "min_timestamp": "2026-05-01T00:00:00Z",
@@ -52,11 +51,11 @@ def test_lake_info_success():
 def test_lake_info_not_found():
     """Verify that lake-info returns table_exists=False if table doesn't exist."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_init.return_value = None
+        mock_exists.return_value = False
 
         client = TestClient(app)
         response = client.post(
@@ -74,13 +73,13 @@ def test_lake_info_not_found():
 def test_lake_info_analyst_location():
     """Verify that lake-info uses the provided metadata location (important for analysts)."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("backend.core.iceberg.get_table_info") as mock_info,
         patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_init.return_value = MagicMock()
+        mock_exists.return_value = True
         mock_info.return_value = {}
         mock_calendar.return_value = {}
 
@@ -97,8 +96,8 @@ def test_lake_info_analyst_location():
             },
         )
 
-        # Check that init_iceberg_table was called with the location in source
-        args, kwargs = mock_init.call_args
+        # Check that ducklake_table_exists was called with the location in source
+        args, kwargs = mock_exists.call_args
         src = args[0]
         assert src["iceberg_metadata_location"] == loc
 
@@ -122,13 +121,16 @@ def test_set_ngwaf_workspace_saves_body_field():
     """
     saved = {}
 
-    def fake_save(sid, cfg):
+    def fake_mutate(sid, fn, **kwargs):
+        cfg = dict(cfg_with_key)
+        fn(cfg)
         saved.update(cfg)
+        return cfg
 
     cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
     with (
         patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=fake_mutate),
         patch("backend.provision._sync_crontab"),
         patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
@@ -154,13 +156,16 @@ def test_set_ngwaf_workspace_query_param_is_ignored():
     """
     saved = {}
 
-    def fake_save(sid, cfg):
+    def fake_mutate(sid, fn, **kwargs):
+        cfg = dict(cfg_with_key)
+        fn(cfg)
         saved.update(cfg)
+        return cfg
 
     cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
     with (
         patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.config.save_config", side_effect=fake_save),
+        patch("backend.config.mutate_config", side_effect=fake_mutate),
         patch("backend.provision._sync_crontab"),
         patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
@@ -565,13 +570,12 @@ def test_check_domain_available_treats_dns_error_as_available():
 
 
 def test_check_fos_returns_ok_when_list_succeeds():
-    """Valid creds → ``{ok: true}``. Pinned because the wizard
-    advances on ``ok: true`` (no other shape variant)."""
+    """Valid creds → list the real ingest prefixes and return ``{ok: true}``."""
     fake_client = MagicMock()
-    fake_client.list_objects_v2.return_value = {"Contents": []}
+    fake_client.list_objects_v2.side_effect = [{"Contents": []}, {"Contents": []}]
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client) as get_client,
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -579,6 +583,41 @@ def test_check_fos_returns_ok_when_list_succeeds():
         )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+    get_client.assert_called_once_with(
+        "ak",
+        "sk",
+        "us-east-1",
+        bucket_name="b",
+        context="provision:check-fos",
+    )
+    assert [call.kwargs["Prefix"] for call in fake_client.list_objects_v2.call_args_list] == [
+        "raw/request/",
+        "raw/rum/",
+    ]
+
+
+def test_check_fos_reads_representative_request_object():
+    """A successful LIST must be paired with a real raw/request GET."""
+    fake_client = MagicMock()
+    fake_client.list_objects_v2.return_value = {
+        "Contents": [{"Key": "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"}]
+    }
+    fake_client.get_object.return_value = {"Body": MagicMock()}
+    with (
+        TestClient(app) as c,
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
+    ):
+        resp = c.post(
+            "/api/provision/check-fos",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    fake_client.get_object.assert_called_once_with(
+        Bucket="b",
+        Key="raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz",
+        Range="bytes=0-0",
+    )
 
 
 def test_check_fos_maps_access_denied_to_friendly_message():
@@ -594,7 +633,7 @@ def test_check_fos_maps_access_denied_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -617,7 +656,7 @@ def test_check_fos_maps_no_such_bucket_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -640,7 +679,7 @@ def test_check_fos_maps_region_mismatch_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -659,7 +698,7 @@ def test_check_fos_maps_endpoint_connection_error_to_friendly_message():
     with (
         TestClient(app) as c,
         patch(
-            "backend.core.duckdb._get_fos_client",
+            "backend.routers.provision._get_fos_s3_client",
             side_effect=RuntimeError("boto3 EndpointConnectionError on x.object.fastlystorage.app"),
         ),
     ):
@@ -956,6 +995,60 @@ def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, m
     assert captured["state"]["rum"]["faro_version"] == "9.9.9"
     assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
     assert captured["state"]["rum"]["faro_fos_etag_md5"] == "existing-etag"
+
+
+def test_ingest_rerun_preserves_existing_cdn_secret_when_body_omits_it(tmp_path, monkeypatch):
+    """Re-running /api/provision/ingest from the admin wizard omits
+    ``cdn_secret``. Preserve the on-disk secret instead of minting a fresh one,
+    or the local config drifts away from the deployed ``cdn_auth`` dictionary
+    and every CDN-backed GET/HEAD 401s."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "cdn_secret": "persisted-cdn-secret",
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
 
 
 def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch):
@@ -2056,3 +2149,27 @@ def test_reconcile_rejects_missing_credentials():
         response = client.post("/api/provision/reconcile", json={})
     assert response.status_code == 400
     mock_reconcile.assert_not_called()
+
+
+def test_lake_info_range_and_calendar_match_producer():
+    """The typed ``range`` / ``calendar`` blocks must serialize exactly as the producer built them."""
+    producer = {
+        "ok": True,
+        "table_exists": True,
+        "info": {"min_timestamp": "2026-05-01T00:00:00", "max_timestamp": "2026-05-02T00:00:00", "snapshots": 3},
+        "calendar": {
+            "2026-05-01": {"data_files": 5, "size_bytes": 512},
+            "unknown": {"data_files": 1, "size_bytes": 0},
+        },
+        "range": {"start": "2026-05-01T00:00:00", "end": None},
+    }
+    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=producer):
+        client = TestClient(app)
+        response = client.post(
+            "/api/provision/lake-info",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk", "prefix": "p/"},
+        )
+
+    assert response.status_code == 200
+    body = {k: v for k, v in response.json().items() if not k.startswith("_")}
+    assert body == producer

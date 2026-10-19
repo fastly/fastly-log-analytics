@@ -13,6 +13,7 @@ import {
   FileCode,
   Archive,
   ClipboardList,
+  FileText,
 } from 'lucide-react'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { useBootstrapResolved } from '@/hooks/useIsDataReady'
@@ -30,6 +31,7 @@ import { CronTab } from './CronTab'
 import { ServiceHistoryTab } from './ServiceHistoryTab'
 import { IngestionTab } from './IngestionTab'
 import { SSEModal } from './SSEModal'
+import { RawLogsExplorer } from './RawLogsExplorer'
 
 // Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
 // are the default landing tabs; the four below only matter when the
@@ -57,8 +59,8 @@ const SchemaTab = dynamic(
   { ssr: false },
 )
 
-export default function LogsClient() {
-  const s = useLogsPageState()
+export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
+  const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
   const bootstrapResolved = useBootstrapResolved()
 
@@ -84,30 +86,35 @@ export default function LogsClient() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Data Management"
-        description="Monitor and manage log ingestion history and active data syncs."
+        title={s.activeTab === 'explorer' ? "Raw Logs Explorer" : "Data Management"}
+        description={s.activeTab === 'explorer' ? "High-throughput, paginated, searchable access to individual Fastly CDN edge access log records." : "Monitor and manage log ingestion history and active data syncs."}
       />
 
-      <QuickActionsBar
-        isAnalyst={s.isAnalyst}
-        status={s.status}
-        activeServiceId={s.activeServiceId}
-        recentCrons={s.recentCrons}
-        cronLogs={s.cronLogs}
-        setSseTitle={s.setSseTitle}
-        setSseDescription={s.setSseDescription}
-        setIsSSEModalOpen={s.setIsSSEModalOpen}
-        setIsSyncModalOpen={s.setIsSyncModalOpen}
-        reset={s.reset}
-        start={s.start}
-        setDisplayedJobs={s.setDisplayedJobs}
-        setSelectedConsoleJobId={s.setSelectedConsoleJobId}
-        setConsoleOpen={s.setConsoleOpen}
-      />
+      {s.activeTab !== 'explorer' && (
+        <QuickActionsBar
+          isAnalyst={s.isAnalyst}
+          status={s.status}
+          activeServiceId={s.activeServiceId}
+          recentCrons={s.recentCrons}
+          cronLogs={s.cronLogs}
+          setSseTitle={s.setSseTitle}
+          setSseDescription={s.setSseDescription}
+          setIsSSEModalOpen={s.setIsSSEModalOpen}
+          setIsSyncModalOpen={s.setIsSyncModalOpen}
+          reset={s.reset}
+          start={s.start}
+          setDisplayedJobs={s.setDisplayedJobs}
+          setSelectedConsoleJobId={s.setSelectedConsoleJobId}
+          setConsoleOpen={s.setConsoleOpen}
+        />
+      )}
 
       <Tabs value={s.activeTab} onValueChange={s.handleTabChange} className="w-full">
         <ScrollArea className="w-full max-w-full overflow-hidden">
           <TabsList className="w-full flex">
+            <TabsTrigger value="explorer" className="flex-1 flex items-center justify-center gap-2 text-xs">
+              <FileText className="h-4 w-4" /> Raw Logs
+            </TabsTrigger>
             <TabsTrigger value="cron" className="flex-1 flex items-center justify-center gap-2 text-xs">
               <History className="h-4 w-4" /> Cron Runs
             </TabsTrigger>
@@ -120,7 +127,7 @@ export default function LogsClient() {
               </TabsTrigger>
             )}
             <TabsTrigger value="iceberg" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <Archive className="h-4 w-4" /> Iceberg Storage
+              <Archive className="h-4 w-4" /> DuckLake Storage
             </TabsTrigger>
             {!s.isAnalyst && (
               <TabsTrigger value="metadata_storage" className="flex-1 flex items-center justify-center gap-2 text-xs">
@@ -138,6 +145,10 @@ export default function LogsClient() {
           </TabsList>
         </ScrollArea>
 
+        <TabsContent value="explorer" className="mt-4">
+          <RawLogsExplorer activeServiceId={s.activeServiceId} isAnalyst={s.isAnalyst} />
+        </TabsContent>
+
         <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <CronTab
             cronColumns={cronColumns}
@@ -150,6 +161,7 @@ export default function LogsClient() {
             statusFilter={s.statusFilter}
             setStatusFilter={s.setStatusFilter}
             isAnalyst={s.isAnalyst}
+            status={s.status}
             activeServiceId={s.activeServiceId}
             setDisplayedJobs={s.setDisplayedJobs}
             setSelectedConsoleJobId={s.setSelectedConsoleJobId}
@@ -239,7 +251,7 @@ export default function LogsClient() {
             s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
             s.setIsSSEModalOpen(true)
             s.reset()
-            s.start(`/api/cron-runs/${(data as any)?.run_id}/stream`)
+            s.start(`/api/cron-runs/${data?.run_id}/stream`)
             cronCacheBust(queryClient, s.activeServiceId)
           } catch (e) {
             console.error(e)

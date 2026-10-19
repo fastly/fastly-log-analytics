@@ -18,23 +18,37 @@ import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CmcdConfigSection } from '@/components/CmcdConfigSection'
+import type { components } from '@/types/api.generated'
 
-export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleField, updateFieldLimit }: any) {
+type Catalog = components['schemas']['LogFieldsCatalogResponse']
+type CatalogGroup = components['schemas']['LogFieldCatalogGroup']
+type LogFieldsConfig = components['schemas']['LogFieldsConfig']
+
+interface CollapsibleGroupProps {
+  group: CatalogGroup
+  catalog: Catalog
+  config: LogFieldsConfig
+  toggleGroup: (groupId: string, checked: boolean) => void
+  toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
+  updateFieldLimit: (fieldId: string, limit?: number) => void
+}
+
+export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleField, updateFieldLimit }: CollapsibleGroupProps) {
   const [isOpen, setIsOpen] = useState(false)
 
   // O(1) id lookups instead of repeated O(n) Array.find scans over the
   // catalog. Field ids are unique, so .get returns the same object .find did.
   const fieldsById = React.useMemo(
-    () => new Map<string, any>((catalog.fields || []).map((f: any) => [f.id, f])),
+    () => new Map((catalog.fields || []).map((f) => [f.id, f] as const)),
     [catalog.fields],
   )
   const groupsById = React.useMemo(
-    () => new Map<string, any>((catalog.groups || []).map((g: any) => [g.id, g])),
+    () => new Map((catalog.groups || []).flatMap((g) => (g.id != null ? [[g.id, g] as const] : []))),
     [catalog.groups],
   )
   const insightsById = React.useMemo(
-    () => new Map<string, any>((catalog?.insights || []).map((ins: any) => [ins.id, ins])),
-    [catalog?.insights],
+    () => new Map((catalog.insights || []).map((ins) => [ins.id, ins] as const)),
+    [catalog.insights],
   )
 
   const enabledGroups = new Set(config.groups)
@@ -42,21 +56,21 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
   const limits = config.field_limits || {}
   const gid = group.id
   const isLocked = group.locked
-  const isEnabled = isLocked || enabledGroups.has(gid)
+  const isEnabled = isLocked || (gid != null && enabledGroups.has(gid))
 
-  const groupFields = group.fields.map((fid: string) => fieldsById.get(fid)).filter(Boolean)
-  const groupBytes = groupFields.reduce((s: number, f: any) => s + (f.typical_bytes || 0), 0)
+  const groupFields = group.fields.flatMap((fid) => fieldsById.get(fid) ?? [])
+  const groupBytes = groupFields.reduce((s, f) => s + (f.typical_bytes || 0), 0)
 
   // Dependency checking
   const requiredGroup = group.requires ? groupsById.get(group.requires) : null
   const isDepSatisfied = !group.requires || enabledGroups.has(group.requires)
 
   const recommendedGroups = group.recommended_with
-    ? group.recommended_with.map((rid: string) => groupsById.get(rid)).filter(Boolean)
+    ? group.recommended_with.flatMap((rid) => groupsById.get(rid) ?? [])
     : []
 
   const handleGroupToggle = (checked: boolean) => {
-    if (isLocked) return
+    if (isLocked || gid == null) return
     toggleGroup(gid, checked)
   }
 
@@ -87,7 +101,7 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
             )}
             {recommendedGroups.length > 0 && (
               <span className="text-[10px] text-muted-foreground font-medium lowercase italic">
-                (best with {recommendedGroups.map((rg: any) => rg.label).join(', ')})
+                (best with {recommendedGroups.map((rg) => rg.label).join(', ')})
               </span>
             )}
             <span className="text-[10px] text-muted-foreground ml-1">+{groupBytes} bytes</span>
@@ -110,7 +124,7 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
             {group.note && <span className="block mt-1.5 text-amber-600 dark:text-amber-500 font-medium italic">⚠ {group.note}</span>}
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-            {groupFields.map((field: any) => {
+            {groupFields.map((field) => {
               const fEnabled = isLocked ? true : (overrides[field.id] !== false && (isEnabled || overrides[field.id] === true))
               const itToggle = !!field.individually_toggleable
               const disabled = isLocked || !itToggle
@@ -135,7 +149,7 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
                           <span className="font-sans text-[10px] text-muted-foreground ml-1 font-normal">(~{field.typical_bytes || 0} B)</span>
                         </Label>
                         {field.has_limit && (
-                          <div className="flex items-center gap-1.5 ml-2" onClick={e => e.stopPropagation()}>
+                          <div className="flex items-center gap-1.5 ml-2">
                             <Label htmlFor={`limit-${field.id}`} className="text-[9px] text-muted-foreground whitespace-nowrap">
                               Max Length
                             </Label>
@@ -159,9 +173,9 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
                       </div>
                       <p className="text-[10px] text-muted-foreground line-clamp-2 leading-tight mt-1" title={field.description}>{field.description}</p>
                       {field.note && <p className="text-[9px] text-amber-600 dark:text-amber-500 mt-0.5">⚠ {field.note}</p>}
-                      {field.required_by?.length > 0 && (
+                      {field.required_by && field.required_by.length > 0 && (
                         <p className="text-[9px] text-muted-foreground mt-0.5">
-                          Used by: {field.required_by.map((id: string) => insightsById.get(id)?.name || id).join(', ')}
+                          Used by: {field.required_by.map((id) => insightsById.get(id)?.title || id).join(', ')}
                         </p>
                       )}
                     </div>
@@ -180,9 +194,9 @@ export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleFi
 }
 
 interface StandardFieldsStepProps {
-  catalog: any
-  config: any
-  setConfig: (cfg: any) => void
+  catalog: Catalog | undefined
+  config: LogFieldsConfig
+  setConfig: (cfg: LogFieldsConfig) => void
   period: string
   setPeriod: (v: string) => void
   sampleRate: number
@@ -272,7 +286,7 @@ export function StandardFieldsStep({
           )}
           {(period === '10' || period === '20') && (
             <p className="text-xs text-muted-foreground mt-1">
-              Dashboard freshness is bounded by the sync cadence (~30s floor); sub-30s log periods produce more files but won't appear faster.
+              Dashboard freshness is bounded by the sync cadence (~30s floor); sub-30s log periods produce more files but won&apos;t appear faster.
             </p>
           )}
         </div>
@@ -330,9 +344,9 @@ export function StandardFieldsStep({
       {catalog?.presets && (
         <div className="flex flex-wrap gap-2 pb-2 items-center">
           <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider py-1.5 mr-2">Presets:</span>
-          {Object.entries(catalog.presets as Record<string, { label: string, description: string, groups?: string[] }>).map(([key, preset]) => {
+          {Object.entries(catalog.presets).map(([key, preset]) => {
             const isMinimal = key === 'minimal'
-            const active = isMinimal || isPresetActive(preset.groups || [])
+            const active = isMinimal || isPresetActive(preset.groups)
             return (
               <Button
                 key={key}
@@ -340,7 +354,7 @@ export function StandardFieldsStep({
                 size="sm"
                 className={cn("h-8 text-xs font-semibold transition-all", active && "ring-2 ring-primary/20", isMinimal && "opacity-80")}
                 title={preset.description}
-                onClick={() => !isMinimal && togglePreset(preset.groups || [])}
+                onClick={() => !isMinimal && togglePreset(preset.groups)}
                 disabled={isMinimal}
               >
                 {preset.label || key}
@@ -367,7 +381,7 @@ export function StandardFieldsStep({
       </div>
 
       <div className="space-y-2">
-        {(catalog?.groups || []).map((group: any) => (
+        {catalog && (catalog.groups || []).map((group) => (
           <CollapsibleGroup
             key={group.id || 'core'}
             group={group}

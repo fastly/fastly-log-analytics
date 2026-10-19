@@ -44,6 +44,8 @@ const API_BASE = 'http://127.0.0.1:8000'
 // receives the setToken(null) call from the response interceptor on
 // admin_token_invalid. ``state`` is mutable so each test can preset and
 // observe.
+type StoreSelector<S> = (s: S) => unknown
+
 const adminState: { token: string | null; setToken: ReturnType<typeof vi.fn> } = {
   token: null,
   setToken: vi.fn((next: string | null) => {
@@ -51,10 +53,10 @@ const adminState: { token: string | null; setToken: ReturnType<typeof vi.fn> } =
   }),
 }
 vi.mock('@/stores/adminTokenStore', () => {
-  const useAdminTokenStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(adminState) : adminState,
+  const useAdminTokenStore = Object.assign(
+    vi.fn((selector?: StoreSelector<typeof adminState>) => (selector ? selector(adminState) : adminState)),
+    { getState: () => adminState },
   )
-  useAdminTokenStore.getState = () => adminState
   return { useAdminTokenStore }
 })
 
@@ -62,10 +64,10 @@ vi.mock('@/stores/adminTokenStore', () => {
 // onRequest reads activeServiceId to set x-service-id.
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: 'svc-test' }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: StoreSelector<typeof state>) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 
@@ -74,8 +76,7 @@ vi.mock('@/stores/serviceStore', () => {
 // try/catch doesn't kick in for unrelated reasons.
 vi.mock('@/stores/debugStore', () => {
   const state = { enabled: false, apiCallsEnabled: false }
-  const useDebugStore: any = vi.fn(() => state)
-  useDebugStore.getState = () => state
+  const useDebugStore = Object.assign(vi.fn(() => state), { getState: () => state })
   return { useDebugStore }
 })
 
@@ -84,16 +85,25 @@ vi.mock('@/stores/debugStore', () => {
 // or must be skipped (admin). Mutable so each test sets the role.
 const sessionRoleState = { isRemoteAnalyst: false }
 vi.mock('@/stores/sessionRoleStore', () => {
-  const useSessionRoleStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(sessionRoleState) : sessionRoleState,
+  const useSessionRoleStore = Object.assign(
+    vi.fn((selector?: StoreSelector<typeof sessionRoleState>) =>
+      selector ? selector(sessionRoleState) : sessionRoleState,
+    ),
+    { getState: () => sessionRoleState },
   )
-  useSessionRoleStore.getState = () => sessionRoleState
   return { useSessionRoleStore }
 })
 
 // Import AFTER mocks so client middleware picks them up.
 import { client } from '@/lib/api'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
+
+async function postAggregates() {
+  const { data } = await client.POST('/api/dashboard/aggregates', {
+    body: { start_time: 't', end_time: 't', filters: {}, chart_interval: '1h', chart_metric: 'requests' },
+  })
+  return data
+}
 
 function wrapper() {
   const qc = createTestQueryClient({ queries: { gcTime: 0 }, mutations: { retry: false } })
@@ -122,10 +132,7 @@ describe('X-Admin-Token request injection', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },
@@ -151,10 +158,7 @@ describe('X-Admin-Token request injection', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },
@@ -186,10 +190,7 @@ describe('admin_token_invalid 401 response handling', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },
@@ -214,10 +215,7 @@ describe('admin_token_invalid 401 response handling', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },
@@ -246,10 +244,7 @@ describe('admin_token_invalid 401 response handling', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },
@@ -294,10 +289,7 @@ describe('non-admin-token 401 → /share-login redirect is analyst-only', () => 
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: { start_time: 't', end_time: 't', filters: [] } as any,
-            } as any)
-            return data
+            return postAggregates()
           },
         }),
       { wrapper: wrapper() },

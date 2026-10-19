@@ -16,7 +16,10 @@ import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { AlertCircle, Loader2, Clock, Activity, ShieldAlert, FileText, CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCount } from '@/lib/format'
+import { statusBadgeClass } from '@/lib/status-style'
 interface CacheCollapseModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
@@ -59,7 +62,7 @@ export function CacheCollapseModal({
 
   // 1. Calculate high-fidelity stats aggregates
   const stats = useMemo(() => {
-    if (!data) return null
+    if (!data || !data.timeline) return null
 
     const totalRequests = data.timeline.reduce((acc, curr) => acc + (curr.total_requests || 0), 0)
     const realHits = data.timeline.reduce((acc, curr) => acc + (curr.real_hits || 0), 0)
@@ -82,7 +85,7 @@ export function CacheCollapseModal({
         type: 'scatter',
         mode: 'lines',
         name: 'Expected HITs',
-        line: { color: '#3b82f6', width: 2, dash: 'dash' },
+        line: { color: CHART_COLORS.info, width: 2, dash: 'dash' },
       },
       {
         x: data.timeline.map((p) => p.bucket),
@@ -90,7 +93,7 @@ export function CacheCollapseModal({
         type: 'scatter',
         mode: 'lines',
         name: 'Real HITs',
-        line: { color: '#ef4444', width: 2 },
+        line: { color: CHART_COLORS.danger, width: 2 },
       },
     ]
   }, [data])
@@ -98,14 +101,6 @@ export function CacheCollapseModal({
   const chartLayout = useMemo(() => ({
     yaxis: { title: { text: 'Hits' } },
   }), [])
-
-  // Helper for HTTP status color badge
-  const getStatusBadgeClass = (status: number | null | undefined) => {
-    if (!status) return 'bg-muted text-muted-foreground'
-    if (status >= 200 && status < 300) return 'bg-green-500/10 text-green-500 border-green-500/20'
-    if (status >= 300 && status < 400) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
-    return 'bg-red-500/10 text-red-500 border-red-500/20'
-  }
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -164,7 +159,7 @@ export function CacheCollapseModal({
                     <Activity className="h-3 w-3" /> Total Requests
                   </div>
                   <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {stats.totalRequests.toLocaleString()}
+                    {formatCount(stats.totalRequests)}
                   </div>
                 </div>
 
@@ -173,7 +168,7 @@ export function CacheCollapseModal({
                     <CheckCircle2 className="h-3 w-3 text-emerald-500" /> Total Cache Hits
                   </div>
                   <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {stats.realHits.toLocaleString()}
+                    {formatCount(stats.realHits)}
                   </div>
                 </div>
               </div>
@@ -191,15 +186,15 @@ export function CacheCollapseModal({
                 </div>
                 <div className="grid grid-cols-3 gap-3 text-center">
                   <div className="p-2 rounded-md bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="font-mono text-lg font-bold text-emerald-500">{data.breakdown.hits.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-emerald-500">{formatCount(data.breakdown?.hits ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Cacheable Hits</div>
                   </div>
                   <div className="p-2 rounded-md bg-red-500/10 border border-red-500/20">
-                    <div className="font-mono text-lg font-bold text-red-500">{data.breakdown.misses.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-red-500">{formatCount(data.breakdown?.misses ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Misses</div>
                   </div>
                   <div className="p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
-                    <div className="font-mono text-lg font-bold text-amber-500">{data.breakdown.passes.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-amber-500">{formatCount(data.breakdown?.passes ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Uncacheable (PASS)</div>
                   </div>
                 </div>
@@ -225,7 +220,7 @@ export function CacheCollapseModal({
                 <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-1.5">
                   <FileText className="h-3.5 w-3.5" /> Recent Cache Misses (Max 50)
                 </h4>
-                {data.recent_misses.length === 0 ? (
+                {(!data.recent_misses || data.recent_misses.length === 0) ? (
                   <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground italic">
                     No cache misses captured for this lookback.
                   </div>
@@ -266,7 +261,7 @@ export function CacheCollapseModal({
                             <td className="py-2 pl-4 text-right whitespace-nowrap">
                               <span className={cn(
                                 "px-1.5 py-0.5 rounded font-mono font-semibold border text-[10px]",
-                                getStatusBadgeClass(e.status)
+                                statusBadgeClass(e.status, 'traffic-light')
                               )}>
                                 {e.status || '—'}
                               </span>

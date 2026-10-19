@@ -72,7 +72,7 @@ def _use_analyst(in_memory_duckdb, source, *, mask_ips: bool):
     we exercise the router's analyst branch via the injected ctx.analyst_session.)"""
     session = SimpleNamespace(service_ids=[source["service_id"]], pii_policy={"mask_ips": mask_ips})
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=source, con=in_memory_duckdb, session=session
+        source=source, _con_override=in_memory_duckdb, session=session
     )
 
 
@@ -301,3 +301,63 @@ def test_field_values_ip_is_masked_by_policy():
     # A non-IP dimension (url) must stay verbatim — even an IP-shaped url value.
     url_body = {"field": "url", "values": [{"value": "/a"}, {"value": "1.2.3.4"}]}
     assert [v["value"] for v in apply_pii_policy(url_body, {"mask_ips": True})["values"]] == ["/a", "1.2.3.4"]
+
+
+# ── range_token & telemetry & resilience tests ──────────────────────────────
+
+
+def test_sessions_with_range_token(client, in_memory_duckdb, test_service_source):
+    """Verify range_token is recognized and resolved server-side on POST /api/sessions."""
+    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.42", n=5)
+    r = client.post(
+        "/api/sessions",
+        headers=_HDR,
+        json={"range_token": "1h"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert "sessions" in data
+    assert any(s["ip"] == "10.0.0.42" for s in data["sessions"])
+
+
+def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_source, monkeypatch):
+    """Verify process_context is captured for sessions:list and sessions:detail."""
+    captured_contexts = []
+    import backend.routers.sessions as sess_mod
+
+    orig_scope = sess_mod.process_context_scope
+
+    def mock_scope(ctx_name):
+        captured_contexts.append(ctx_name)
+        return orig_scope(ctx_name)
+
+    monkeypatch.setattr(sess_mod, "process_context_scope", mock_scope)
+    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.55", n=5)
+
+    r = client.post("/api/sessions", headers=_HDR, json={"range_token": "1h"})
+    assert r.status_code == 200
+    assert "sessions:list" in captured_contexts
+
+    row = r.json()["sessions"][0]
+    token = row["session_token"]
+    r_detail = client.post("/api/sessions/detail", headers=_HDR, json={"session_token": token})
+    assert r_detail.status_code == 200
+    assert "sessions:detail" in captured_contexts
+
+
+def test_sessions_stale_view_retry_wrapped(client, in_memory_duckdb, test_service_source, monkeypatch):
+    """Verify execute_with_stale_view_retry wraps get_sessions in sessions_endpoint."""
+    import backend.routers.sessions as sess_mod
+
+    called = []
+    orig_retry = sess_mod.execute_with_stale_view_retry
+
+    def mock_retry(con, src, fn):
+        called.append(True)
+        return orig_retry(con, src, fn)
+
+    monkeypatch.setattr(sess_mod, "execute_with_stale_view_retry", mock_retry)
+    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.99", n=2)
+    r = client.post("/api/sessions", headers=_HDR, json={})
+    assert r.status_code == 200
+    assert called, "execute_with_stale_view_retry should be called by sessions_endpoint"

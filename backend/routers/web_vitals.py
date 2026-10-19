@@ -31,6 +31,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from backend.core import web_vitals_store
+from backend.models.common import OkResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.date_utils import iso_z_now
 
@@ -59,7 +60,7 @@ class WebVitalsPayload(BaseModel):
     delta: float | None = None
 
 
-@router.post("")
+@router.post("", response_model=OkResponse, response_model_exclude_unset=True)
 def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
     """Record one Web Vitals metric event. Returns ``{"ok": true}``.
 

@@ -29,6 +29,7 @@ class _PrefillRatesBase(BaseResponse):
     cdn_egress_rate_per_gb: float | None = None
     storage_rate_per_gb_month: float | None = None
     min_billed_days: int | None = None
+    billing_zone: str | None = "MBZ200"
 
 
 class PrefillResponse(_PrefillRatesBase):

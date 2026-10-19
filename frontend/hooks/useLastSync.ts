@@ -1,26 +1,25 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from './useSyncStatus'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
+import { useSeededReady } from '@/hooks/useSeededReady'
+import { queryKeys } from '@/lib/query-keys'
 
-type CronRunsResponse = components['schemas']['CronRunsResponse']
+const SEED_KEYS = [queryKeys.lastSync] as const
 
-export interface LastSyncInfo {
-  started_at: string | null
-  status: string | null   // 'running' | 'success' | 'error' | 'partial_success' | null
-  duration_s: number | null
-}
+// status: 'running' | 'success' | 'error' | 'partial_success' | null
+type CronRunEntry = components['schemas']['CronRunEntry']
+export type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
 /**
  * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,
  * surfaced as the "Last Sync: Xs ago" header badge. Refetches whenever
- * ``useAdminEventStream`` sees a ``task === 'sync'`` event arrive —
+ * ``useAdminEventStream`` sees a ``task === 'log_discovery'`` event arrive —
  * primary update path is SSE invalidation, not the 5-minute fallback
  * poll.
  *
@@ -32,27 +31,10 @@ export function useLastSync() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const isAnalyst = useIsAnalyst()
   const bootstrapPending = useBootstrapPending()
-  const queryClient = useQueryClient()
-
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    if (activeServiceId) {
-      const existing = queryClient.getQueryData(['last-sync', activeServiceId])
-      if (existing === undefined) {
-        queryClient.setQueryData(['last-sync', activeServiceId], null)
-      }
-      queueMicrotask(() => {
-        setReady(true)
-      })
-    } else {
-      queueMicrotask(() => {
-        setReady(false)
-      })
-    }
-  }, [activeServiceId, queryClient])
+  const ready = useSeededReady(activeServiceId, SEED_KEYS)
 
   return useQuery({
-    queryKey: ['last-sync', activeServiceId],
+    queryKey: queryKeys.lastSync(activeServiceId),
     queryFn: async ({ signal }) => {
       // Single-row peek — the endpoint already supports task filter
       // + per_page, so this is a tiny query, not a full table dump.
@@ -62,10 +44,10 @@ export function useLastSync() {
         // task=? precount inside the repo — useLastSync only reads
         // entries[0] and never touches `total`, so the count was a
         // 200-330 ms wasted scan per call on a busy service.
-        params: { query: { task: 'sync', per_page: 1, page: 1, skip_total: true } },
-      } as never)
+        params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
+      })
       if (error) throw error
-      const e = (data as CronRunsResponse | undefined)?.entries?.[0]
+      const e = data?.entries?.[0]
       return {
         started_at: e?.started_at ?? null,
         status: e?.status ?? null,

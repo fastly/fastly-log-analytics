@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 import {
   Loader2,
   Copy,
@@ -17,10 +17,66 @@ import {
 import { DateTimeCell } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
-import { CRON_EXPLANATIONS } from './CronExplanations'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 import { LiveTimer } from './CronScheduleBox'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import type { CronRun } from '../_state'
 
-export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
+import { formatCount } from '@/lib/format'
+function CopyTextButton({ text, label, title, className }: { text: string; label: string; title: string; className: string }) {
+  const { copied, copy } = useCopyToClipboard(2000)
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={label}
+      className={className}
+      onClick={(e) => {
+        e.stopPropagation()
+        copy(text)
+      }}
+      title={title}
+    >
+      {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+    </Button>
+  )
+}
+
+const ADMIN_ONLY_COLUMNS: ColumnDef<CronRun>[] = [
+      {
+        accessorKey: 'files_deleted_fos',
+        header: 'Log Files Deleted',
+        cell: ({ row }) => {
+          if (row.original.status === 'running' || row.original.task !== 'log_discovery') {
+             return <span className="text-muted-foreground">—</span>
+          }
+          return (
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">
+              {formatCount(row.original.files_deleted_fos || 0)}
+            </span>
+          )
+        }
+      },
+      {
+        id: 'rows_committed',
+        header: 'Rows Committed',
+        cell: ({ row }) => {
+          if (row.original.status === 'running') {
+             return <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
+          }
+          // For commit tasks, rows_ingested holds the rows committed to Iceberg.
+          // For sync tasks, this field holds rows written to the local buffer.
+          const val = row.original.task === 'commit' ? row.original.rows_ingested : null
+          return (
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">
+              {val != null ? formatCount(val) : <span className="text-muted-foreground">—</span>}
+            </span>
+          )
+        }
+      }
+]
+
+export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
   return React.useMemo(() => [
     {
       accessorKey: 'started_at',
@@ -35,7 +91,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
     {
       id: 'finished_at',
       meta: { label: 'Finished At' },
-      accessorFn: (row: any) => {
+      accessorFn: (row) => {
         if (!row.started_at || row.duration_s == null) return null
         return new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString()
       },
@@ -62,7 +118,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       meta: { label: 'Task' },
       header: 'Task',
       cell: ({ row }) => {
-        const isSync = row.original.task === 'sync' || row.original.task === 'metadata_sync'
+        const isSync = row.original.task === 'log_discovery' || row.original.task === 'metadata_sync'
         const exp = CRON_EXPLANATIONS[row.original.task] || 'Background job.'
         return (
           <div className="flex flex-col gap-1 py-1">
@@ -70,7 +126,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
                <Tooltip>
                  <TooltipTrigger render={
                    <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", isSync ? "bg-blue-500/10 text-blue-600 hover:bg-blue-500/20" : "bg-purple-500/10 text-purple-600 hover:bg-purple-500/20")}>
-                     {row.original.task === 'metadata_sync' ? 'sync' : row.original.task}
+                     {CRON_DISPLAY_NAMES[row.original.task] || row.original.task}
                    </Badge>
                  } />
                  <TooltipContent side="right" className="max-w-[250px] text-xs">
@@ -91,17 +147,6 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       cell: ({ row }) => {
         const val = row.original.status
         const err = row.original.error_message
-        const [copied, setCopied] = useState(false)
-
-        const handleCopy = (e: React.MouseEvent) => {
-          e.stopPropagation()
-          if (err) {
-            navigator.clipboard.writeText(err)
-            setCopied(true)
-            setTimeout(() => setCopied(false), 2000)
-          }
-        }
-
         if (val === 'running') {
           return (
             <Badge variant="outline" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold border-blue-500/30 text-blue-700 dark:text-blue-400 bg-blue-500/10 flex items-center gap-1 w-fit">
@@ -116,7 +161,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         if (val === 'success' && (!row.original.corrupt_rows || row.original.corrupt_rows === 0)) {
           return <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Success</Badge>
         }
-        if (val === 'partial_success' || (val === 'success' && row.original.corrupt_rows > 0)) {
+        if (val === 'partial_success' || (val === 'success' && (row.original.corrupt_rows ?? 0) > 0)) {
           return <Badge variant="warning" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Partial Success</Badge>
         }
         return (
@@ -130,16 +175,12 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
               </TooltipContent>
             </Tooltip>
             {err && (
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Copy full error message"
-                className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                onClick={handleCopy}
+              <CopyTextButton
+                text={err}
+                label="Copy full error message"
                 title="Copy full error message"
-              >
-                {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-              </Button>
+                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+              />
             )}
           </div>
         )
@@ -152,6 +193,9 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       header: 'Duration',
       cell: ({ row }) => {
         const s = row.original.duration_s
+        if (s == null) {
+          return <span className="font-mono text-muted-foreground tabular-nums text-xs">—</span>
+        }
         if (row.original.status === 'running') {
           // Use a simple localized timer component for running jobs
           return <LiveTimer startedAt={row.original.started_at} />
@@ -193,15 +237,17 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           label = 'files merged';
         } else if (task === 'local_compact') {
           label = 'files merged';
-        } else if (task === 'rum_sync') {
+        } else if (task === 'rum_sync' || task === 'rum_discovery') {
           label = 'raw RUM logs';
         } else if (task === 'ngwaf_sync') {
           label = count === 1 ? 'bot record' : 'bot records';
+        } else if (task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer' || task === 'partial_hour_merge') {
+          return <span className="text-muted-foreground">—</span>
         }
 
         return (
           <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
-            {count.toLocaleString()} <span className="text-[10px] text-muted-foreground">{label}</span>
+            {formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span>
           </span>
         )
       }
@@ -215,7 +261,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         }
 
         const task = row.original.task
-        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact') {
+        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact' || task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer' || task === 'partial_hour_merge') {
           return <span className="text-muted-foreground">—</span>
         }
 
@@ -231,13 +277,12 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
 
         const rows = row.original.rows_ingested || 0
         const corrupt = row.original.corrupt_rows || 0
-        const [copiedCorrupt, setCopiedCorrupt] = useState(false)
 
         if (task === 'metadata_sync') {
           if (rows === 0) return <span className="text-muted-foreground">—</span>
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {rows.toLocaleString()}
+              {formatCount(rows)}
             </span>
           )
         }
@@ -245,34 +290,25 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         return (
           <div className="flex items-center gap-2">
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {rows.toLocaleString()}
+              {formatCount(rows)}
             </span>
             {corrupt > 0 && (
               <div className="flex items-center gap-1 group/corrupt">
                 <Tooltip>
                   <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none  text-[10px] font-bold" />}>
-                    {corrupt.toLocaleString()} Skipped
+                    {formatCount(corrupt)} Skipped
                   </TooltipTrigger>
                   <TooltipContent>
                     These lines were skipped due to missing timestamps or invalid JSON structure.
                   </TooltipContent>
                 </Tooltip>
                 {row.original.error_message && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Copy corrupt-line details"
-                    className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      navigator.clipboard.writeText(row.original.error_message)
-                      setCopiedCorrupt(true)
-                      setTimeout(() => setCopiedCorrupt(false), 2000)
-                    }}
+                  <CopyTextButton
+                    text={row.original.error_message}
+                    label="Copy corrupt-line details"
                     title="Copy corrupt lines"
-                  >
-                    {copiedCorrupt ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                  </Button>
+                    className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
+                  />
                 )}
               </div>
             )}
@@ -280,38 +316,6 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         )
       }
     },
-    ...(isAnalyst ? [] : [
-      {
-        accessorKey: 'files_deleted_fos',
-        header: 'Log Files Deleted',
-        cell: ({ row }: any) => {
-          if (row.original.status === 'running' || row.original.task !== 'sync') {
-             return <span className="text-muted-foreground">—</span>
-          }
-          return (
-            <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {(row.original.files_deleted_fos || 0).toLocaleString()}
-            </span>
-          )
-        }
-      },
-      {
-        id: 'rows_committed',
-        header: 'Rows Committed',
-        cell: ({ row }: any) => {
-          if (row.original.status === 'running') {
-             return <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
-          }
-          // For commit tasks, rows_ingested holds the rows committed to Iceberg.
-          // For sync tasks, this field holds rows written to the local buffer.
-          const val = row.original.task === 'commit' ? row.original.rows_ingested : null
-          return (
-            <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {val !== null ? val.toLocaleString() : <span className="text-muted-foreground">—</span>}
-            </span>
-          )
-        }
-      }
-    ])
+    ...(isAnalyst ? [] : ADMIN_ONLY_COLUMNS),
   ], [isAnalyst])
 }

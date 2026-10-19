@@ -332,7 +332,7 @@ def test_network_health_never_raises(seeded_con, filters, start, end):
     blank on any binder-error here."""
     from backend.repositories.network import get_health
 
-    result = get_health(seeded_con, _src, start, end, filters)
+    result = get_health(lambda: seeded_con, _src, start, end, filters)
     assert isinstance(result, dict)
     _assert_all_finite(result)
 
@@ -350,7 +350,7 @@ def test_network_health_required_keys_present(seeded_con, filters):
     by-ASN payload."""
     from backend.repositories.network import get_health
 
-    result = get_health(seeded_con, _src, None, None, filters)
+    result = get_health(lambda: seeded_con, _src, None, None, filters)
     assert "available" in result
     if result["available"] is False:
         assert "reason" in result, "false-available response must explain why"
@@ -368,7 +368,7 @@ def test_network_health_required_keys_present(seeded_con, filters):
 def test_network_get_quality_never_raises(seeded_con, filters, start, end):
     from backend.repositories.network import get_quality
 
-    result = get_quality(seeded_con, _src, start, end, filters)
+    result = get_quality(lambda: seeded_con, _src, start, end, filters)
     assert isinstance(result, dict)
     _assert_all_finite(result)
 

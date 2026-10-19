@@ -6,13 +6,26 @@ import { Button } from '@/components/ui/button'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 import { Row, ReadOnlyValue } from './parts'
-import type { CalcState } from './calc'
+import {
+  type CalcState,
+  type BillingZone,
+  BILLING_ZONE_RATES,
+  BILLING_ZONE_DESCRIPTIONS,
+} from './calc'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 interface PricingProps {
   s: CalcState
+  setZone?: (zone: BillingZone) => void
 }
 
-export function Pricing({ s }: PricingProps) {
+export function Pricing({ s, setZone }: PricingProps) {
   const router = useRouter()
   const activeServiceId = useServiceStore((st) => st.activeServiceId)
   return (
@@ -29,6 +42,52 @@ export function Pricing({ s }: PricingProps) {
             Edit in Admin
           </Button>
         </div>
+
+        {/* Delivery Billing Zone Selector */}
+        <div className="mb-4 space-y-2 p-3 bg-muted/40 rounded-lg border border-border/50">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              Delivery Billing Zone
+            </span>
+            <span className="text-xs font-semibold text-primary">
+              ${s.rateEgress.toFixed(2)} / GB
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 p-1 bg-muted/80 rounded-md">
+            {(['MBZ100', 'MBZ200', 'Global'] as const).map((zone) => {
+              const isSelected = s.billingZone === zone
+              return (
+                <TooltipProvider key={zone}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setZone?.(zone)}
+                        className={cn(
+                          'px-2.5 py-1.5 text-xs font-medium rounded transition-all text-center',
+                          isSelected
+                            ? 'bg-background text-foreground shadow-sm font-semibold'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                        )}
+                        aria-pressed={isSelected}
+                      >
+                        {zone}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-[260px] text-xs">
+                      <p className="font-semibold mb-1">{zone} (${BILLING_ZONE_RATES[zone].toFixed(2)}/GB)</p>
+                      <p>{BILLING_ZONE_DESCRIPTIONS[zone]}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })}
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-normal">
+            {BILLING_ZONE_DESCRIPTIONS[s.billingZone || 'MBZ200']}
+          </p>
+        </div>
+
         <div className='space-y-0'>
           <Row label='Class A rate (writes, lists)'>
             <ReadOnlyValue value={s.rateA} />

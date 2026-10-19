@@ -1,17 +1,19 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings } from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportShell'
+import type { components } from '@/types/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
+import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
+import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useTimezone } from '@/hooks/useTimezone'
 import { formatDate } from '@/lib/date'
@@ -19,7 +21,10 @@ import { buildServiceHref } from '@/lib/navigation'
 import dynamic from 'next/dynamic'
 import { useTickHistory, type MetricsData, type MetricsTick } from './useTickHistory'
 import { RealtimeMetricCard } from './RealtimeMetricCard'
+import { CHART_COLORS } from '@/lib/chart-colors'
+import { useNowMs } from '@/hooks/useNowSeconds'
 
+import { formatCount } from '@/lib/format'
 const RealtimeChart = dynamic(() => import('./RealtimeChart').then((m) => m.RealtimeChart), {
   ssr: false,
 })
@@ -56,6 +61,73 @@ interface RealtimeStreamState {
   rtDown: boolean
 }
 
+interface ErrorEvent {
+  event_id: string
+  timestamp: string
+  status: number
+  url: string
+  pop: string
+  client_ip: string
+}
+
+function parseErrorEvent(line: SSELine): ErrorEvent | null {
+  if (line.event !== 'error_event' && line.type !== 'error_event') return null
+  const data = line.data
+  if (!data || typeof data !== 'object') return null
+  const value = data as Partial<ErrorEvent>
+  if (
+    typeof value.event_id !== 'string' ||
+    typeof value.timestamp !== 'string' ||
+    typeof value.status !== 'number'
+  ) {
+    return null
+  }
+  return {
+    event_id: value.event_id,
+    timestamp: value.timestamp,
+    status: value.status,
+    url: typeof value.url === 'string' ? value.url : '',
+    pop: typeof value.pop === 'string' ? value.pop : '',
+    client_ip: typeof value.client_ip === 'string' ? value.client_ip : '',
+  }
+}
+
+// Permanent streams keep a bounded tail: the consumers only render the last 20
+// error events / last 60 tick-history entries (useTickHistory MAX_ENTRIES).
+const ERROR_STREAM_MAX_LINES = 500
+const REALTIME_STREAM_MAX_LINES = 600
+
+function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
+  const { lines, status, start, reset } = useSSE({ maxLines: ERROR_STREAM_MAX_LINES })
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+
+  useEffect(() => {
+    if (!activeServiceId) return
+    const pageLoadId = getPageLoadId()
+    start(
+      `/api/services/${activeServiceId}/control-room/error-stream`,
+      undefined,
+      pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
+    )
+    return () => reset()
+  }, [activeServiceId, start, reset])
+
+  const events = useMemo(() => {
+    const seen = new Set<string>()
+    return lines
+      .map(parseErrorEvent)
+      .filter((event): event is ErrorEvent => event !== null)
+      .filter((event) => {
+        if (seen.has(event.event_id)) return false
+        seen.add(event.event_id)
+        return true
+      })
+      .slice(-20)
+  }, [lines])
+
+  return { connected: status === 'streaming', events }
+}
+
 function parseMetricsTick(line: SSELine): MetricsTick | null {
   if (line.event !== 'metrics_tick' && line.type !== 'metrics_tick') return null
   const metricsData = line.data as MetricsData | undefined
@@ -70,11 +142,6 @@ function parseMetricsTick(line: SSELine): MetricsTick | null {
   }
 }
 
-function authHeaders(): Record<string, string> {
-  const token = useAdminTokenStore.getState().token
-  return token ? { 'X-Admin-Token': token } : {}
-}
-
 function isTick(t: unknown): t is MetricsTick {
   if (!t || typeof t !== 'object') return false
   const obj = t as Record<string, unknown>
@@ -82,7 +149,7 @@ function isTick(t: unknown): t is MetricsTick {
 }
 
 function useRealtimeStream(): RealtimeStreamState {
-  const { lines, status, start, reset } = useSSE()
+  const { lines, status, start, reset } = useSSE({ maxLines: REALTIME_STREAM_MAX_LINES })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({
     ticks: [],
@@ -95,17 +162,26 @@ function useRealtimeStream(): RealtimeStreamState {
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
-        const res = await fetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal, headers: authHeaders() })
+        const res = await adminJsonResult(
+          '/api/services/{service_id}/realtime-seed',
+          `/api/services/${activeServiceId}/realtime-seed`,
+          { signal: ac.signal },
+        )
         if (res.ok) {
-          const json = await res.json()
-          seedTicks = (json.ticks ?? []).filter(isTick)
+          const rawTicks: unknown[] = res.data.ticks ?? []
+          seedTicks = rawTicks.filter(isTick)
         }
       } catch {
         // Seed is best-effort
       }
       if (!ac.signal.aborted) {
         setSeed({ ticks: seedTicks, timestamps: new Set(seedTicks.map((t) => t.timestamp)) })
-        start(`/api/services/${activeServiceId}/realtime-stream`)
+        const pageLoadId = getPageLoadId()
+        start(
+          `/api/services/${activeServiceId}/realtime-stream`,
+          undefined,
+          pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
+        )
       }
     })()
     return () => {
@@ -124,7 +200,7 @@ function useRealtimeStream(): RealtimeStreamState {
   }, [lines, seed])
 
   const latestTick = allTicks.length > 0 ? allTicks[allTicks.length - 1] : null
-  const lastTickTime = latestTick ? new Date() : null
+  const lastTickTime = latestTick ? new Date(latestTick.timestamp) : null
 
   return {
     connected: status === 'streaming',
@@ -178,12 +254,8 @@ function ConnectionBadge({ connected }: { connected: boolean }) {
 }
 
 function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date | null; timezone: string }) {
-  const [, setTick] = useState(0)
-
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1_000)
-    return () => clearInterval(id)
-  }, [])
+  // Subscribe to the shared 1 Hz ticker so the freshness level re-evaluates.
+  useNowMs()
 
   const level = getFreshnessLevel(lastTickTime)
   const label = lastTickTime
@@ -216,13 +288,9 @@ function RtDownBanner() {
 // Correlator Leaderboard - auto-refresh Top-N from /correlate endpoint
 // ---------------------------------------------------------------------------
 
-interface CorrelatorResult {
-  dimension: string
-  top: Array<{ value: string; count: number }>
-  freshness: { latest_log_at: string | null; lag_seconds: number }
-}
+type CorrelatorResult = components['schemas']['CorrelateResponse']
 
-function CorrelatorLeaderboard({
+export function CorrelatorLeaderboard({
   dimension,
   serviceId,
   refreshInterval = 30_000,
@@ -233,37 +301,25 @@ function CorrelatorLeaderboard({
   refreshInterval?: number
   limit?: number
 }) {
-  const [data, setData] = useState<CorrelatorResult | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  const fetchData = useCallback(async () => {
-    if (!serviceId) return
-    setLoading(true)
-    try {
-      const res = await fetch(`/api/services/${serviceId}/control-room/correlate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ dimension, window_minutes: 60, limit }),
-      })
-      if (res.ok) {
-        setData(await res.json())
-      }
-    } catch {
-      // best-effort
-    } finally {
-      setLoading(false)
-    }
-  }, [serviceId, dimension, limit])
-
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (!cancelled) await fetchData()
-    }
-    run()
-    const id = setInterval(fetchData, refreshInterval)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [fetchData, refreshInterval])
+  const { data, isFetching: loading } = useQuery<CorrelatorResult | null>({
+    queryKey: ['control-room', 'correlate', serviceId, dimension, limit],
+    queryFn: async ({ signal }) => {
+      return adminJson<'/api/services/{service_id}/control-room/correlate', CorrelatorResult, 'post'>(
+        '/api/services/{service_id}/control-room/correlate',
+        `/api/services/${serviceId}/control-room/correlate`,
+        {
+          method: 'POST',
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dimension, window_minutes: 60, limit }),
+        },
+      )
+    },
+    enabled: !!serviceId,
+    refetchInterval: refreshInterval,
+    refetchIntervalInBackground: false,
+    retry: false,
+  })
 
   const maxCount = data?.top?.[0]?.count ?? 1
 
@@ -291,7 +347,7 @@ function CorrelatorLeaderboard({
               <div className="relative flex items-center justify-between px-2 py-1">
                 <span className="truncate text-xs font-mono">{item.value || '(empty)'}</span>
                 <span className="text-xs tabular-nums text-muted-foreground ml-2 shrink-0">
-                  {item.count.toLocaleString()}
+                  {formatCount(item.count)}
                 </span>
               </div>
             </div>
@@ -315,12 +371,18 @@ function OverviewTab({
   historicalHref,
   series,
   rollingAvg,
+  errorEvents,
+  errorsConnected,
+  timezone,
 }: {
   tick: MetricsTick | null
   rtDown: boolean
   historicalHref: string
   series: (extractor: (d: MetricsData) => number) => number[]
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
+  errorEvents: ErrorEvent[]
+  errorsConnected: boolean
+  timezone: string
 }) {
 
   const data = tick?.data
@@ -378,7 +440,7 @@ function OverviewTab({
             {
               y: series((d) => d.total_requests ?? d.requests_per_second),
               name: 'Requests',
-              color: '#3b82f6',
+              color: CHART_COLORS.info,
             },
           ]}
         />
@@ -388,11 +450,11 @@ function OverviewTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.status_breakdown?.status_1xx ?? 0), name: '1xx', color: '#94a3b8' },
+            { y: series((d) => d.status_breakdown?.status_1xx ?? 0), name: '1xx', color: CHART_COLORS.neutral },
             { y: series((d) => d.status_breakdown?.status_2xx ?? 0), name: '2xx', color: '#22c55e' },
-            { y: series((d) => d.status_breakdown?.status_3xx ?? 0), name: '3xx', color: '#3b82f6' },
+            { y: series((d) => d.status_breakdown?.status_3xx ?? 0), name: '3xx', color: CHART_COLORS.info },
             { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: '#ef4444' },
+            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
           ]}
         />
       </div>
@@ -406,7 +468,7 @@ function OverviewTab({
           traces={[
             { y: series((d) => d.total_hits ?? 0), name: 'Hit', color: '#22c55e' },
             { y: series((d) => d.total_miss ?? 0), name: 'Miss', color: '#f97316' },
-            { y: series((d) => d.total_pass ?? 0), name: 'Pass', color: '#94a3b8' },
+            { y: series((d) => d.total_pass ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
           ]}
         />
         <RealtimeChart
@@ -419,7 +481,7 @@ function OverviewTab({
             {
               y: series((d) => d.origin_requests_per_second ?? 0),
               name: 'Origin req/s',
-              color: '#3b82f6',
+              color: CHART_COLORS.info,
             },
             {
               y: series((d) => (d.cache_hit_ratio ?? 0) * 100),
@@ -439,7 +501,7 @@ function OverviewTab({
           traces={[
             { y: series((d) => d.status_detail?.["200"] ?? 0), name: '200', color: '#22c55e' },
             { y: series((d) => d.status_detail?.["204"] ?? 0), name: '204', color: '#86efac' },
-            { y: series((d) => d.status_detail?.["301"] ?? 0), name: '301', color: '#3b82f6' },
+            { y: series((d) => d.status_detail?.["301"] ?? 0), name: '301', color: CHART_COLORS.info },
             { y: series((d) => d.status_detail?.["302"] ?? 0), name: '302', color: '#93c5fd' },
             { y: series((d) => d.status_detail?.["304"] ?? 0), name: '304', color: '#6366f1' },
           ]}
@@ -450,10 +512,10 @@ function OverviewTab({
           stacked
           traces={[
             { y: series((d) => d.status_detail?.["400"] ?? 0), name: '400', color: '#eab308' },
-            { y: series((d) => d.status_detail?.["401"] ?? 0), name: '401', color: '#f59e0b' },
+            { y: series((d) => d.status_detail?.["401"] ?? 0), name: '401', color: CHART_COLORS.warning },
             { y: series((d) => d.status_detail?.["403"] ?? 0), name: '403', color: '#f97316' },
             { y: series((d) => d.status_detail?.["404"] ?? 0), name: '404', color: '#fb923c' },
-            { y: series((d) => d.status_detail?.["429"] ?? 0), name: '429', color: '#ef4444' },
+            { y: series((d) => d.status_detail?.["429"] ?? 0), name: '429', color: CHART_COLORS.danger },
             { y: series((d) => d.status_detail?.["500"] ?? 0), name: '500', color: '#dc2626' },
             { y: series((d) => d.status_detail?.["502"] ?? 0), name: '502', color: '#b91c1c' },
             { y: series((d) => d.status_detail?.["503"] ?? 0), name: '503', color: '#991b1b' },
@@ -462,8 +524,123 @@ function OverviewTab({
         />
       </div>
 
+      <RecentErrorsCard events={errorEvents} connected={errorsConnected} timezone={timezone} />
+
       <HistoricalLink href={historicalHref} label="overview" />
     </div>
+  )
+}
+
+function RecentErrorsCard({
+  events,
+  connected,
+  timezone,
+}: {
+  events: ErrorEvent[]
+  connected: boolean
+  timezone: string
+}) {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  return (
+    <Card className="contain-intrinsic-size-[320px]">
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <CardTitle>Live errors</CardTitle>
+        <Badge variant={connected ? 'success' : 'destructive'}>
+          {connected ? 'Listening' : 'Disconnected'}
+        </Badge>
+      </CardHeader>
+      <CardContent>
+        {events.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            {connected ? 'No recent 4xx/5xx errors.' : 'Listening for errors...'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Recent HTTP errors</caption>
+              <thead className="bg-muted/50 text-left">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Time</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Path</th>
+                  <th className="px-3 py-2 font-medium">PoP</th>
+                  <th className="px-3 py-2 font-medium">Client IP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((event) => (
+                  <tr key={event.event_id} className="border-t">
+                    <td className="whitespace-nowrap px-3 py-2">
+                      {formatDate(event.timestamp, timezone, 'h:mm:ss a')}
+                    </td>
+                    <td className="px-3 py-2">
+                      <Link
+                        className="font-semibold underline decoration-dotted underline-offset-2"
+                        href={buildServiceHref(
+                          `/dashboard?filter_status=${encodeURIComponent(String(event.status))}`,
+                          activeServiceId,
+                        )}
+                        prefetch={false}
+                      >
+                        {event.status}
+                      </Link>
+                    </td>
+                    <td className="max-w-sm truncate px-3 py-2" title={event.url}>
+                      {event.url ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_url=${encodeURIComponent(event.url)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.url}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {event.pop ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_pop=${encodeURIComponent(event.pop)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.pop}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                    <td className="px-3 py-2 font-mono">
+                      {event.client_ip ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_client_ip=${encodeURIComponent(event.client_ip)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.client_ip}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -583,7 +760,7 @@ function PerformanceTab({
           title="Origin Latency Breakdown"
           yAxisSuffix=" req/s"
           traces={[
-            { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: '#3b82f6' },
+            { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
             { y: series((d) => d.pass_requests ?? 0), name: 'Pass', color: '#f97316' },
           ]}
         />
@@ -595,7 +772,7 @@ function PerformanceTab({
         traces={[
           { y: series((d) => d.hit_latency_ms ?? 0), name: 'Hit', color: '#22c55e' },
           { y: series((d) => d.miss_latency_ms ?? 0), name: 'Miss', color: '#f97316' },
-          { y: series((d) => d.pass_latency_ms ?? 0), name: 'Pass', color: '#94a3b8' },
+          { y: series((d) => d.pass_latency_ms ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
         ]}
       />
       <div className="grid gap-6 md:grid-cols-2">
@@ -605,12 +782,12 @@ function PerformanceTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.object_size_distribution?.["1k"] ?? 0), name: '<1KB', color: '#94a3b8' },
-            { y: series((d) => d.object_size_distribution?.["10k"] ?? 0), name: '1-10KB', color: '#3b82f6' },
+            { y: series((d) => d.object_size_distribution?.["1k"] ?? 0), name: '<1KB', color: CHART_COLORS.neutral },
+            { y: series((d) => d.object_size_distribution?.["10k"] ?? 0), name: '1-10KB', color: CHART_COLORS.info },
             { y: series((d) => d.object_size_distribution?.["100k"] ?? 0), name: '10-100KB', color: '#22c55e' },
             { y: series((d) => d.object_size_distribution?.["1m"] ?? 0), name: '100KB-1MB', color: '#eab308' },
             { y: series((d) => d.object_size_distribution?.["10m"] ?? 0), name: '1-10MB', color: '#f97316' },
-            { y: series((d) => d.object_size_distribution?.["100m"] ?? 0), name: '10-100MB', color: '#ef4444' },
+            { y: series((d) => d.object_size_distribution?.["100m"] ?? 0), name: '10-100MB', color: CHART_COLORS.danger },
             { y: series((d) => d.object_size_distribution?.["1g"] ?? 0), name: '100MB-1GB', color: '#8b5cf6' },
             { y: series((d) => d.object_size_distribution?.["other"] ?? 0), name: 'Other', color: '#6b7280' },
           ]}
@@ -623,11 +800,11 @@ function PerformanceTab({
           traces={[
             { y: series((d) => d.miss_histogram?.["10"] ?? 0), name: '<10ms', color: '#22c55e' },
             { y: series((d) => d.miss_histogram?.["20"] ?? 0), name: '10-20ms', color: '#86efac' },
-            { y: series((d) => d.miss_histogram?.["30"] ?? 0), name: '20-30ms', color: '#3b82f6' },
+            { y: series((d) => d.miss_histogram?.["30"] ?? 0), name: '20-30ms', color: CHART_COLORS.info },
             { y: series((d) => d.miss_histogram?.["60"] ?? 0), name: '30-60ms', color: '#93c5fd' },
             { y: series((d) => d.miss_histogram?.["120"] ?? 0), name: '60-120ms', color: '#eab308' },
             { y: series((d) => d.miss_histogram?.["250"] ?? 0), name: '120-250ms', color: '#f97316' },
-            { y: series((d) => d.miss_histogram?.["500"] ?? 0), name: '250-500ms', color: '#ef4444' },
+            { y: series((d) => d.miss_histogram?.["500"] ?? 0), name: '250-500ms', color: CHART_COLORS.danger },
             { y: series((d) => d.miss_histogram?.["1000"] ?? 0), name: '500ms-1s', color: '#dc2626' },
             { y: series((d) => {
               const h = d.miss_histogram ?? {}
@@ -738,7 +915,7 @@ function OriginTab({
         yAxisSuffix=" req/s"
         y2AxisSuffix="%"
         traces={[
-          { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: '#3b82f6' },
+          { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
           { y: series((d) => (d.shield_hit_ratio ?? 0) * 100), name: 'Shield Hit %', color: '#22c55e', yaxis: 'y2' },
         ]}
       />
@@ -748,7 +925,7 @@ function OriginTab({
         yAxisSuffix=" req/s"
         stacked
         traces={[
-          { y: series((d) => d.origin_fetches ?? 0), name: 'Fetches', color: '#3b82f6' },
+          { y: series((d) => d.origin_fetches ?? 0), name: 'Fetches', color: CHART_COLORS.info },
           { y: series((d) => d.origin_revalidations ?? 0), name: 'Revalidations', color: '#22c55e' },
           { y: series((d) => d.origin_cache_fetches ?? 0), name: 'Cache Fetches', color: '#eab308' },
         ]}
@@ -794,7 +971,7 @@ function OriginTab({
         traces={[
           { y: series((d) => d.shield_hit_requests ?? 0), name: 'Hits', color: '#22c55e' },
           { y: series((d) => d.shield_miss_requests ?? 0), name: 'Misses', color: '#f97316' },
-          { y: series((d) => d.shield_revalidations ?? 0), name: 'Revalidations', color: '#3b82f6' },
+          { y: series((d) => d.shield_revalidations ?? 0), name: 'Revalidations', color: CHART_COLORS.info },
         ]}
       />
       <HistoricalLink href={historicalHref} label="origin" />
@@ -876,7 +1053,7 @@ function SecurityTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.waf_blocked ?? 0), name: 'Blocked', color: '#ef4444' },
+            { y: series((d) => d.waf_blocked ?? 0), name: 'Blocked', color: CHART_COLORS.danger },
             { y: series((d) => d.waf_logged ?? 0), name: 'Logged', color: '#eab308' },
             { y: series((d) => d.waf_passed ?? 0), name: 'Passed', color: '#22c55e' },
           ]}
@@ -887,7 +1064,7 @@ function SecurityTab({
           yAxisSuffix=" req/s"
           traces={[
             { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: '#ef4444' },
+            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
           ]}
         />
       </div>
@@ -911,7 +1088,7 @@ function SecurityTab({
         stacked
         traces={[
           { y: series((d) => d.bot_challenges_succeeded ?? 0), name: 'Passed', color: '#22c55e' },
-          { y: series((d) => d.bot_challenges_failed ?? 0), name: 'Failed', color: '#ef4444' },
+          { y: series((d) => d.bot_challenges_failed ?? 0), name: 'Failed', color: CHART_COLORS.danger },
           { y: series((d) => d.bot_detected ?? 0), name: 'Detected', color: '#eab308' },
           { y: series((d) => d.bot_ai_crawlers ?? 0), name: 'AI Crawlers', color: '#8b5cf6' },
         ]}
@@ -930,7 +1107,7 @@ function SecurityTab({
         traces={[
           { y: series((d) => d.ddos_action_blackhole ?? 0), name: 'Blackhole', color: '#1e293b' },
           { y: series((d) => d.ddos_action_tarpit ?? 0), name: 'Tarpit', color: '#7c3aed' },
-          { y: series((d) => d.ddos_action_close ?? 0), name: 'Close', color: '#ef4444' },
+          { y: series((d) => d.ddos_action_close ?? 0), name: 'Close', color: CHART_COLORS.danger },
           { y: series((d) => d.ddos_action_downgrade ?? 0), name: 'Downgrade', color: '#eab308' },
         ]}
       />
@@ -1010,8 +1187,8 @@ function NetworkTab({
         title="PoP Count"
         yAxisSuffix=" PoPs"
         traces={[
-          { y: series((d) => d.pop_count ?? 0), name: 'Active PoPs', color: '#3b82f6' },
-          { y: series((d) => d.degraded_pops?.length ?? 0), name: 'Degraded', color: '#ef4444' },
+          { y: series((d) => d.pop_count ?? 0), name: 'Active PoPs', color: CHART_COLORS.info },
+          { y: series((d) => d.degraded_pops?.length ?? 0), name: 'Degraded', color: CHART_COLORS.danger },
         ]}
       />
 
@@ -1061,9 +1238,9 @@ function NetworkTab({
         yAxisSuffix=" req/s"
         stacked
         traces={[
-          { y: series((d) => d.http2 ?? 0), name: 'HTTP/2', color: '#3b82f6' },
+          { y: series((d) => d.http2 ?? 0), name: 'HTTP/2', color: CHART_COLORS.info },
           { y: series((d) => d.http3 ?? 0), name: 'HTTP/3', color: '#22c55e' },
-          { y: series((d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))), name: 'Other', color: '#94a3b8' },
+          { y: series((d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))), name: 'Other', color: CHART_COLORS.neutral },
         ]}
       />
 
@@ -1184,7 +1361,7 @@ function AdminHealthTab({
           helpText="Execution = Wasm CPU time only. Request = total time including I/O waits. The gap between them is I/O wait (backend fetches, KV lookups). Watch for execution time creep after scorer code changes."
           yAxisSuffix=" ms"
           traces={[
-            { y: series((d) => d.compute_exec_time_ms ?? 0), name: 'Execution', color: '#3b82f6' },
+            { y: series((d) => d.compute_exec_time_ms ?? 0), name: 'Execution', color: CHART_COLORS.info },
             { y: series((d) => d.compute_req_time_ms ?? 0), name: 'Request', color: '#f97316' },
           ]}
         />
@@ -1194,7 +1371,7 @@ function AdminHealthTab({
           yAxisSuffix=" err/s"
           stacked
           traces={[
-            { y: series((d) => d.compute_bereq_errors ?? 0), name: 'Backend', color: '#ef4444' },
+            { y: series((d) => d.compute_bereq_errors ?? 0), name: 'Backend', color: CHART_COLORS.danger },
             { y: series((d) => d.compute_guest_errors ?? 0), name: 'Guest', color: '#eab308' },
             { y: series((d) => d.compute_resource_exceeded ?? 0), name: 'Resource Limit', color: '#8b5cf6' },
           ]}
@@ -1216,10 +1393,10 @@ function AdminHealthTab({
           yAxisSuffix=" ms"
           stacked
           traces={[
-            { y: series((d) => d.vcl_recv_time_ms ?? 0), name: 'recv', color: '#3b82f6' },
+            { y: series((d) => d.vcl_recv_time_ms ?? 0), name: 'recv', color: CHART_COLORS.info },
             { y: series((d) => d.vcl_fetch_time_ms ?? 0), name: 'fetch', color: '#f97316' },
             { y: series((d) => d.vcl_deliver_time_ms ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_time_ms ?? 0), name: 'error', color: '#ef4444' },
+            { y: series((d) => d.vcl_error_time_ms ?? 0), name: 'error', color: CHART_COLORS.danger },
           ]}
         />
         <RealtimeChart
@@ -1228,10 +1405,10 @@ function AdminHealthTab({
           yAxisSuffix=" calls/s"
           stacked
           traces={[
-            { y: series((d) => d.vcl_recv_count ?? 0), name: 'recv', color: '#3b82f6' },
+            { y: series((d) => d.vcl_recv_count ?? 0), name: 'recv', color: CHART_COLORS.info },
             { y: series((d) => d.vcl_fetch_count ?? 0), name: 'fetch', color: '#f97316' },
             { y: series((d) => d.vcl_deliver_count ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_count ?? 0), name: 'error', color: '#ef4444' },
+            { y: series((d) => d.vcl_error_count ?? 0), name: 'error', color: CHART_COLORS.danger },
           ]}
         />
       </div>
@@ -1278,6 +1455,9 @@ function TabContent({
   connected,
   series,
   rollingAvg,
+  errorEvents,
+  errorsConnected,
+  timezone,
 }: {
   tabId: string
   historicalHref: string | null
@@ -1286,11 +1466,22 @@ function TabContent({
   connected: boolean
   series: (extractor: (d: MetricsData) => number) => number[]
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
+  errorEvents: ErrorEvent[]
+  errorsConnected: boolean
+  timezone: string
 }) {
   const commonProps = { tick, rtDown, series, rollingAvg }
   switch (tabId) {
     case 'overview':
-      return <OverviewTab {...commonProps} historicalHref={historicalHref ?? '/dashboard'} />
+      return (
+        <OverviewTab
+          {...commonProps}
+          historicalHref={historicalHref ?? '/dashboard'}
+          errorEvents={errorEvents}
+          errorsConnected={errorsConnected}
+          timezone={timezone}
+        />
+      )
     case 'performance':
       return <PerformanceTab {...commonProps} historicalHref={historicalHref ?? '/performance'} />
     case 'origin':
@@ -1382,6 +1573,7 @@ export default function ControlRoomClient() {
   const isAnalyst = useIsAnalyst()
   const timezone = useTimezone()
   const { connected, lastTickTime, latestTick, allTicks, rtDown } = useRealtimeStream()
+  const { connected: errorsConnected, events: errorEvents } = useErrorStream()
   const { series, rollingAvg } = useTickHistory(allTicks)
 
   const visibleTabs = useMemo(
@@ -1438,6 +1630,9 @@ export default function ControlRoomClient() {
                 connected={connected}
                 series={series}
                 rollingAvg={rollingAvg}
+                errorEvents={errorEvents}
+                errorsConnected={errorsConnected}
+                timezone={timezone}
               />
             </TabsContent>
           ))}

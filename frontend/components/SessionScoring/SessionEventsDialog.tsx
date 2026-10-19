@@ -13,12 +13,13 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { formatLocalDateTime } from '@/lib/date'
+import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { keyByOccurrence } from '@/lib/utils'
 
 type SessionEvent = components['schemas']['ScoringSessionEvent']
-type SessionEventsResponse = components['schemas']['ScoringSessionEventsResponse']
 
 interface SessionEventsDialogProps {
   serviceId: string
@@ -54,16 +55,16 @@ export function SessionEventsDialog({
     enabled: open,
     queryFn: async () => {
       const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/sessions/{sid}/events' as any,
+        '/api/services/{service_id}/scoring/sessions/{sid}/events',
         {
           params: {
             path: { service_id: serviceId, sid },
             query: { since_days: 30 },
           },
-        } as any,
+        },
       )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as SessionEventsResponse
+      if (!response.ok || !data) throw new Error(`status ${response.status}`)
+      return data
     },
     staleTime: 30_000,
   })
@@ -110,9 +111,7 @@ export function SessionEventsDialog({
           {isLoading && (
             <div className="space-y-2" role="status" aria-busy="true">
               <span className="sr-only">Loading session events</span>
-              {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
+              <SkeletonGrid count={6} height="3rem" className="rounded-md" />
             </div>
           )}
 
@@ -135,8 +134,8 @@ export function SessionEventsDialog({
               <div className="text-xs text-muted-foreground mb-2">
                 {data.event_count} event{data.event_count === 1 ? '' : 's'} in last {data.since_days}d
               </div>
-              {data.events.map((ev, i) => (
-                <EventRow key={i} event={ev} index={i} prev={i > 0 ? data.events[i - 1] : null} />
+              {keyByOccurrence(data.events, (ev) => `${ev.ts ?? ''}|${ev.edge_score ?? ''}`).map(({ key, item: ev }, i) => (
+                <EventRow key={key} event={ev} index={i} prev={i > 0 ? data.events[i - 1] : null} />
               ))}
             </div>
           )}
@@ -155,7 +154,7 @@ function EventRow({
   index: number
   prev: SessionEvent | null
 }) {
-  const ts = event.ts ? new Date(event.ts).toLocaleString() : '—'
+  const ts = event.ts ? formatLocalDateTime(event.ts) : '—'
   const score = event.edge_score
   const compliance = event.edge_cookie_compliance
   const reason = event.edge_score_reason
