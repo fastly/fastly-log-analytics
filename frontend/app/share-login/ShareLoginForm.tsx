@@ -86,6 +86,8 @@ export function ShareLoginForm() {
   const [config, setConfig] = React.useState<AuthConfig | null>(null)
   const [configState, setConfigState] = React.useState<'loading' | 'loaded' | 'failed'>('loading')
   const emailInputRef = React.useRef<HTMLInputElement>(null)
+  // Ref (not `busy`) so two submits in the same tick can't both pass the guard.
+  const inFlightRef = React.useRef(false)
   const errorAlertRef = React.useRef<HTMLDivElement>(null)
 
   // Fetch the unauthenticated auth-config on mount to learn which modes to show.
@@ -175,7 +177,8 @@ export function ShareLoginForm() {
   }
 
   const handleLogin = handleSubmit(async ({ email, passcode }) => {
-    if (busy) return
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     setError(null)
     setBusy(true)
     try {
@@ -240,6 +243,7 @@ export function ShareLoginForm() {
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')
     } finally {
+      inFlightRef.current = false
       setBusy(false)
     }
   })
@@ -325,6 +329,7 @@ export function ShareLoginForm() {
 
       {showPasscode && (
         <form
+          method="post"
           onSubmit={handleLogin}
           data-testid="share-login-form"
           className="space-y-4 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
