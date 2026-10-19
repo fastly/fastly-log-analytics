@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ratchet gates for hand-rolled retry loops and inline `COALESCE(` SQL** — `make retry-guard` and `make coalesce-guard` (wired into `make ci` and CI) fail on new copies of either pattern; baselines only go down.
+- **Shared null-default SQL helpers** — `sum_or_zero`, `column_or_default`, `coalesce` and `HIT_STATES` in `metric_expressions`, with golden-string tests per call site.
+- **Single SQL identifier validator** — `backend.core.sql_ident` replaces the private identifier regexes in the DuckLake, buffer and rollup modules.
+- **Shared-helpers documentation** — AGENTS.md, the architecture guide, ADR-09 and the cron docs now describe `cron_run`, `draft_version`, the service-config lock and snapshot helpers, `retry_call`, the cache registry, the date helpers, the error and SSE helpers, and the Postgres busy-connection rule.
+
+### Changed
+
+- **Schema cache is now a bounded TTL cache** — the DuckDB per-source schema cache expires and evicts through `BoundedTTLCache` and is cleared in place, so modules that import it by name no longer read a stale copy after a clear.
+- **Metadata retention cleanup no longer carries a constant Postgres flag** — the `usage_log` table keeps its dedicated statements; behavior is unchanged.
+- **Repository null-default SQL now renders through shared helpers** — rendered SQL is byte-identical.
+
 ## [3.0.0-beta4] - 2026-10-19
 
 ### Fixed

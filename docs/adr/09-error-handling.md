@@ -23,6 +23,8 @@ The codebase classifies operations along two axes: **what kind of failure can it
 | **Self-heal once** | Known transient races between writer and reader (compaction, view staleness) | Dedicated retry primitive with cache invalidation in the rebuild step | [`execute_with_stale_view_retry`](../../backend/core/iceberg/view.py) for "No files found"; outer loop in [backend/routers/query.py:32–71](../../backend/routers/query.py) for "Cannot open file" |
 | **Bounded backoff** | Network / SDK / DB-WAL contention (HTTP 5xx, 429, connection drops, SQLite `database is locked`) | Inline `@tenacity.retry` decorators (e.g. [rdns_cache](../../backend/utils/rdns_cache.py), [cron/jobs/metadata](../../backend/cron/jobs/metadata.py)) and the DB-level `_execute_query_with_retry` / `execute_with_retry` helpers | Fastly API calls, share_db writes, DuckDB httpfs ops |
 
+**The shared primitive.** New bounded-backoff retries use [`retry_call`](../../backend/core/retry.py): an explicit `retry_on` predicate (returning `False` re-raises immediately, so it can never broaden what is retried), `attempts`, exponential `base_delay`/`multiplier`/`max_delay` with optional `jitter`, an optional `max_elapsed` wall-clock budget, a `before_retry` hook for the one specialized recovery step (e.g. busting a view cache), and an injectable `sleep` for tests. It owns retry mechanics only; classification and recovery stay at the call site, which is why it is not a unified executor. A `for`/`while` loop with `try/except` and `sleep` is a hand-rolled retry: `make retry-guard` ratchets them (baseline only goes down). Loops whose timing `retry_call` cannot reproduce (a fixed sleep that also runs after the final attempt, a stepped schedule, status events yielded between attempts) are intentionally left as they are.
+
 **Rules of thumb when adding a new retryable surface:**
 
 - If the existing policy class fits, use it. Don't define a 4th retry decorator.
@@ -62,7 +64,8 @@ What the HTTP layer surfaces to clients:
 - **400-class** for caller-fault: validation, missing required param, unknown service ID, malformed query.
 - **403** for tenancy/permission violations (the canonical surface; the [RequestContext](../../backend/core/request_context.py) gate enforces this structurally).
 - **429** for self-imposed rate limits (e.g., long-running query already in flight for this service).
-- **500-class** for server-fault, with the exception class name in the `detail` field when it doesn't leak sensitive info. **Never** include stack traces, query bodies, or internal paths in the response — those go to structlog only.
+- **500-class** for server-fault, with the exception class name in the `detail` field when it doesn't leak sensitive info. **Never** include stack traces, query bodies, or internal paths in the response — those go to structlog only. At an `except` site whose text could carry DuckDB paths, upstream Fastly bodies or cid-salt material, call `raise_internal(logger, exc, code=...)` ([`router_utils`](../../backend/utils/router_utils.py)): it logs the full exception and returns only a generic code plus an `error_id` (and `request_id` when known) for correlation. Text that does reach an analyst passes through `redact_error_text` ([`error_redaction`](../../backend/utils/error_redaction.py)), which strips absolute server paths and registered salts. Build the envelope with `make_error(code, message=None, **extras)`.
+- A route that needs a service and did not get one answers **400 `service_id_required`** via `require_service_id(...)`, never FastAPI's 422 validation body.
 - **503** for "transient — retry later" when self-heal-once exhausts. Clients with React-Query default behavior will retry; clients without should treat as 5xx-class.
 
 Internal background work (cron, rollups, gap_heal) does not have an HTTP surface. Failures are logged at `error` level with structured fields (`service_id`, `task`, `attempt`) and surface via `/api/admin/health-snapshot` `recent_cron_failures`.
@@ -93,7 +96,7 @@ Don't add request-level retry logic in the frontend on top of React-Query. The b
 | New retry decorator added without ADR amendment | Code review catches; the three tiers in §2.1 (fast-fail / self-heal-once / bounded-backoff) cover everything that's come up. A 4th policy is a smell. |
 | Cron job ships without idempotency contract | The next time the process dies mid-tick, the recovery path either no-ops (good) or duplicates state (bad). Adding tests in `tests/cron/test_*_idempotent_*` is the gate; the CONTRIBUTING.md PR checklist will flag a new cron without one. |
 | Self-heal retry runs in a loop indefinitely | All self-heal primitives are bounded to a single retry. If the second attempt fails, the error surfaces. If you see infinite-retry behavior, the wrapping layer is recursing — read the call chain. |
-| ContextVar isolation regression (cross-tenant leak) | Caught by [security_regression](../../tests/) test marker + the since-removed audit-findings/ verified-fix list. The 2026-06-06 incident is the canonical case; the test floor (24) prevents silent removal of coverage. |
+| ContextVar isolation regression (cross-tenant leak) | Caught by [security_regression](../../tests/) test marker + the since-removed audit-findings/ verified-fix list. The 2026-06-06 incident is the canonical case; the monotonic floor in `scripts/check_security_regression_count.sh` prevents silent removal of coverage. |
 | Compaction-race retry exhausts | "Cannot open file" surfaces to caller. Indicates compaction is mutating files faster than the retry window; investigate compaction cadence + per-service lock contention. |
 | Stale-view retry exhausts | "No files found" surfaces to caller after view rebuild. Indicates the rebuild itself returned an empty view — usually means the writer hasn't committed yet OR a tombstone-grace window edge. ADR-06 §5 covers diagnosis. |
 | SQLite "database is locked" under sustained contention | WAL mode + `synchronous=NORMAL` makes this vanishingly rare; if it happens, log the failing operation and investigate cron overlap. |
@@ -105,7 +108,7 @@ This ADR succeeds if:
 - A new contributor adding a cron job grep-reads this doc, finds the "Pattern A — Mark-before-write" section, and applies it without help.
 - `git log --grep="retry"` over the next year shows additions that fit one of the three tiers; nobody invents a 4th decorator.
 - Production incidents that involve retry behavior cite a specific tier ("self-heal exhausted", "bounded backoff didn't recover") rather than "the retry didn't work."
-- The security_regression test count stays at or above 24 — the floor that prevents regression of audited fixes.
+- The security_regression test count never drops below the floor in `scripts/check_security_regression_count.sh`, which prevents regression of audited fixes.
 
 It fails if the codebase accumulates `try/except`-with-sleep retry loops in router handlers, or if a new cron job ships without an `tests/cron/test_*_idempotent_*` companion.
 

@@ -32,13 +32,31 @@ Storage subsystems live as cohesive packages rather than monoliths:
 
 Each package's `__init__.py` re-exports the full public surface for backward compatibility; the import-shim mechanics are documented in [AGENTS.md](../AGENTS.md) and [MONKEYPATCHES.md](../MONKEYPATCHES.md).
 
+### Shared backend helpers
+Cross-cutting patterns have one owner each; new code uses them instead of re-deriving the pattern (the day-to-day rules and gotchas are in [AGENTS.md, Shared Helpers](../AGENTS.md#shared-helpers)).
+
+| Concern | Owner | What it guarantees |
+|---|---|---|
+| Cron run lifecycle | [`backend/cron/lifecycle.py`](../backend/cron/lifecycle.py) `cron_run`, `record_skip_row`; `CronLeaseHeldError` in [`cron_log.py`](../backend/core/metadata/cron_log.py) | Lease, progress, terminal `cron_runs` row and finalize backstops for every job. A held lease is a clean skip, never an error. |
+| Fastly draft versions | [`backend/provision/draft_version.py`](../backend/provision/draft_version.py) | Clone, mutate, validate, activate, with rollback to the base version on failure. |
+| Service config writes | `backend/config.py` `mutate_config` / `config_lock` / `snapshot_config` / `restore_config` | Cross-process locked read-modify-write, atomic save, write-once cid salt. |
+| SQL literals and identifiers | `utils/sql_validator.escape_sql_literal`, `core/sql_ident`, `core/metric_expressions` | One quote-escaping routine, one bare-identifier validator, byte-identical null-default and metric fragments with golden tests. |
+| Retry | [`backend/core/retry.py`](../backend/core/retry.py) `retry_call` | Bounded exponential backoff with an explicit retryable predicate; mechanics only (see [ADR-09](adr/09-error-handling.md)). |
+| Caches | `utils/bounded_cache.BoundedTTLCache`, `utils/cache_registry.CacheRegistry` | Thread-safe LRU+TTL caches, drained between tests through the registry. |
+| Dates | `utils/date_utils` | UTC-aware parsing of ISO strings and `YYYY-MM-DD[-HH]` partition keys; raw parsing is ratcheted by `make dateparse-guard`. |
+| HTTP layer | `utils/router_utils` (`make_error`, `raise_internal`, `require_service_id`), `utils/error_redaction`, `utils/sse.sse_response`, `utils/log_throttle.log_once_per`, `models/_base` (`WireSafeModel`, `PassthroughModel`, `JsonRows`) | Unified error envelope with redaction, 400 `service_id_required`, SSE framing, throttled logging, typed responses with an unchanged wire shape. |
+
+Ratchet gates keep these honest: `make retry-guard`, `coalesce-guard`, `dateparse-guard` and `urllib-guard` allow only a per-file baseline of pre-existing sites, and the baselines only go down.
+
 ### The Unified Logs View
 To provide real-time query speed without waiting for a commit, the DuckDB `logs` view dynamically stitches the committed DuckLake table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
 
 ### Service Config Locking & the cid Salt
-Service configs are plain JSON files under the configs volume. Every read-modify-write goes through `backend.config.mutate_config` (fresh read, mutate in place, atomic save), which holds a per-service `flock` sidecar lock so uvicorn workers, Celery workers and pods sharing the volume serialize. Lock acquisition is non-blocking with bounded backoff (5 s, then `ConfigLockTimeout`), re-entrant per thread (a `mutate` callback may call `save_config`/`mutate_config` for the same service; the outer save lands last), and `delete_config` takes the same lock. If the lock cannot be taken at all (read-only filesystem, no `fcntl`) writes proceed unlocked, an error is logged once per process, and `/api/admin/health` reports `config_lock_degraded: true`.
+Service configs are plain JSON files under the configs volume. Every read-modify-write goes through `backend.config.mutate_config` (fresh read, mutate in place, atomic save; routers use `backend.utils.router_utils.mutate_service_config`, which maps a missing config to the standard 404), which holds a per-service `flock` sidecar lock so uvicorn workers, Celery workers and pods sharing the volume serialize. Lock acquisition is non-blocking with bounded backoff (5 s, then `ConfigLockTimeout`), re-entrant per thread (a `mutate` callback may call `save_config`/`mutate_config` for the same service; the outer save lands last), and `delete_config` takes the same lock. If the lock cannot be taken at all (read-only filesystem, no `fcntl`) writes proceed unlocked, an error is logged once per process, and `/api/admin/health` reports `config_lock_degraded: true`.
 
 The pseudonymous-client-id (`cid`) salt is **write-once**. `save_config` re-adopts the persisted salt on every write, so a stale writer or a hand-edited payload cannot re-key every cid. If the config file exists but cannot be read, the save is aborted (`CidSaltReadError`) rather than minting a new salt. Rotation is therefore intentionally impossible through `save_config`; it requires the explicit, audited admin helper `backend.core.duckdb.rotate_cid_salt(service_id)`, which writes a `cid_salt_rotated` audit entry and is not exposed as a route. Rotating changes every cid hash from that point on (historical rows keep the old hashes), so treat it as a deliberate privacy reset.
+
+Multi-step changes that must be undone as a unit (the declarative IaC reconcile) capture `snapshot_config(service_id)` and put it back with `restore_config(service_id, snapshot)` under the same lock. `restore_config` re-adopts the currently persisted cid salt, so a rollback can never undo a salt rotation or first-mint that landed after the snapshot. Nothing writes a service config with a raw `write_text`.
 
 ---
 

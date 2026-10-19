@@ -25,10 +25,15 @@ Every scheduled background job in this system must adhere to these non-negotiabl
 5. **Local-Only Safety Gate (`FLA_DEV_NO_CRONS=1`):**
    - Development environments and AI test sessions must be capable of running safely without racing production FOS buckets or generating external write costs.
    - When `FLA_DEV_NO_CRONS=1` is set, all cloud-writing jobs (`log_discovery`, `commit`, `optimize`, `expire`, `full_sync`, `gap_heal`) are completely bypassed. Only local-safe jobs (`local_compact`, `rollup_compact`, `rollup_heal`, `partial_hour_merge`, `duckdb_recycle`, `metric_snapshot`) are permitted to run.
-6. **Graceful Degradation & Autonomous Recovery:**
+6. **Shared Run Lifecycle (`cron_run`):**
+   - Every job body wraps its per-run work in `cron_run(service_id, task, ...)` ([`backend/cron/lifecycle.py`](../../backend/cron/lifecycle.py)), which acquires the `(service_id, task)` lease through `start_cron_run`, starts and ends progress, writes the terminal `cron_runs` row (duration, status, serialized exception) and runs the `finalize_*` backstops in a `finally`. A body must always leave a terminal status; a missing one leaves a `running` row that stalls ingestion and trips the deep health check.
+   - `CronLeaseHeldError` ([`cron_log.py`](../../backend/core/metadata/cron_log.py)) means another run holds the lease: `cron_run` records a clean skip (`run.skipped`), never an error.
+   - `record_skip_row(source, task, summary, ...)` records a pre-flight skip that never takes the lease (nothing to evaluate, disk too full) as one terminal row.
+   - HTTP-triggered thread spawns own a run id and pass it in with `cron_run(run_id=...)`; that is the only other sanctioned lifecycle.
+7. **Graceful Degradation & Autonomous Recovery:**
    - Background tasks must be idempotent. Re-running a job on the same data must never produce duplicate rows or corrupt catalog state.
    - Distributed pipelines must include automated crash-net sweeps (`ledger_sweep`, `ledger_rum_sweep`) to recover orphaned worker claims.
-7. **Interactive Clarification & Inquiry Mandate (Never Guess):**
+8. **Interactive Clarification & Inquiry Mandate (Never Guess):**
    - Before working on, modifying, or testing any background job or its scheduler registration, the AI agent must read the specific job specification (`docs/cron/jobs/{job}.md`) and supporting architecture docs, and proactively ask the operator clarifying questions regarding scheduling, backpressure, failure handling, or role constraints.
    - Any clarifications or design decisions must be updated in the job specification before executing tests or applying code changes.
 
