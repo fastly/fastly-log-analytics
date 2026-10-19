@@ -1,11 +1,9 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
-import { resolveRangeWire } from '@/lib/range-wire'
-import { keepPreviousWithinService } from '@/lib/query-placeholder'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import type { FiltersPayload } from '@/types/filters'
 import type { ChartMetric } from '@/types/api'
 import type { components } from '@/types/api.generated'
@@ -90,12 +88,13 @@ export function useDashboardBundle({
   // (rangeKey, anchor) so the SSR seed in app/dashboard/page.tsx byte-matches and
   // paints from the dehydrated cache on first paint. Custom-absolute mode keys on
   // an "abs:<start>|<end>" identity so distinct custom ranges don't collide.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const bundleKey = ['dashboard', 'bundle', activeServiceId, rangeKey, anchor, filterPayload, metric, interval, fields, sections]
-
-  return useQuery({
-    queryKey: bundleKey,
-    queryFn: async ({ signal }) => {
+  return useAnalyticsReportQuery({
+    namespace: ['dashboard', 'bundle'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: [metric, interval, fields, sections],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data, error } = await client.POST('/api/dashboard/bundle', {
         signal,
         body: {
@@ -129,9 +128,10 @@ export function useDashboardBundle({
       }
       return body
     },
-    enabled,
-    placeholderData: keepPreviousWithinService(bundleKey),
-    ...STALE_VIEW_RETRY_OPTIONS,
-    refetchIntervalInBackground: false,
+    queryOptions: {
+      enabled,
+      ...STALE_VIEW_RETRY_OPTIONS,
+      refetchIntervalInBackground: false,
+    },
   })
 }
