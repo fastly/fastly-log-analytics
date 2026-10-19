@@ -45,10 +45,10 @@ def iceberg_calendar_endpoint(
 ):
     """Return per-date data file counts from Iceberg partition metadata."""
     from backend.core import iceberg as db_iceberg
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
     result = db_iceberg.get_snapshot_calendar(source, table_name=table_name)
-    return {**result, "_debug_calls": get_tracked_calls()}
+    return debug_envelope(result, gated=True, is_cached=None, inject_calls=True)
 
 
 @router.post(

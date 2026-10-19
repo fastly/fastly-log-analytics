@@ -135,7 +135,7 @@ def provision_validate(body: ProvisionValidateRequest):
     if not token or not service_id:
         raise HTTPException(status_code=400, detail={"error": "Token and Service ID are required"})
 
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
     try:
         # Check token info
@@ -158,22 +158,26 @@ def provision_validate(body: ProvisionValidateRequest):
         safe_service_id = re.sub(r"-+", "-", safe_service_id).strip("-")
         safe_service_id_lower = safe_service_id.lower()
 
-        return {
-            "service_name": svc_name,
-            "token_info": token_info,
-            "defaults": {
-                "endpoint_name": "Fastly Object Storage Logs",
-                "fos_region": "us-east-1",
-                "fos_bucket_name": f"fos-{safe_service_id_lower}-logs",
-                "fos_prefix": "",
-                "sample_rate": 100,
-                "edge_only": True,
-                "log_period": "1 minute",
-                "cdn_service_name": f"Log Analysis CDN Service for {service_id}",
-                "cdn_prefix": f"fos-{safe_service_id}-logs",
+        return debug_envelope(
+            {
+                "service_name": svc_name,
+                "token_info": token_info,
+                "defaults": {
+                    "endpoint_name": "Fastly Object Storage Logs",
+                    "fos_region": "us-east-1",
+                    "fos_bucket_name": f"fos-{safe_service_id_lower}-logs",
+                    "fos_prefix": "",
+                    "sample_rate": 100,
+                    "edge_only": True,
+                    "log_period": "1 minute",
+                    "cdn_service_name": f"Log Analysis CDN Service for {service_id}",
+                    "cdn_prefix": f"fos-{safe_service_id}-logs",
+                },
             },
-            "_debug_calls": get_tracked_calls(),
-        }
+            gated=True,
+            is_cached=None,
+            inject_calls=True,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -202,14 +206,13 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
                 "reason": "Prefix must be alphanumeric and may contain hyphens (cannot start/end with hyphen)",
             }
         domain = f"{prefix}.global.ssl.fastly.net"
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
     available, reason = _check_domain_available(domain)
     result: dict = {"available": available}
     if reason:
         result["reason" if not available else "note"] = reason
-    result["_debug_calls"] = get_tracked_calls()
-    return result
+    return debug_envelope(result, gated=True, is_cached=None, inject_calls=True)
 
 
 @router.post("/check-fos", response_model=ProvisionCheckFosResponse, response_model_exclude_unset=True)
@@ -221,7 +224,7 @@ def provision_check_fos(req: CheckFosRequest):
     secret_key = req.secret_key
     import botocore.exceptions
 
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
     try:
         # This endpoint receives credentials that are not yet persisted in a
@@ -254,7 +257,7 @@ def provision_check_fos(req: CheckFosRequest):
             prefix,
             key or "<none>",
         )
-        return {"ok": True, "_debug_calls": get_tracked_calls()}
+        return debug_envelope({"ok": True}, gated=True, is_cached=None, inject_calls=True)
     except Exception as e:
         err_msg = str(e)
         logger.warning(
@@ -277,7 +280,7 @@ def provision_check_fos(req: CheckFosRequest):
         if "EndpointConnectionError" in err_msg:
             err_msg = "Connection failed. Please verify the FOS Region is correct."
 
-        return {"ok": False, "error": err_msg, "_debug_calls": get_tracked_calls()}
+        return debug_envelope({"ok": False, "error": err_msg}, gated=True, is_cached=None, inject_calls=True)
 
 
 def _require_json_content_type(req: Request) -> None:

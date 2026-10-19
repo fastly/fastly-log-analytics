@@ -22,7 +22,7 @@ def api_audit_logs(
     sort: str = Query(default="timestamp"),
     dir: str = Query(default="DESC"),
 ):
-    from backend.utils.telemetry import get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
     try:
         total, entries = metadata_db.get_audit_logs(
@@ -34,12 +34,11 @@ def api_audit_logs(
             sort_dir=dir,
         )
 
-        return {
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "entries": entries,
-            "_debug_calls": get_tracked_calls(),
-        }
+        return debug_envelope(
+            {"total": total, "page": page, "per_page": per_page, "entries": entries},
+            gated=True,
+            is_cached=None,
+            inject_calls=True,
+        )
     except Exception as e:
         raise_internal(logger, e, code="audit_logs_read_failed")

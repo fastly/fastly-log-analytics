@@ -208,6 +208,19 @@ def _debug_responses_enabled() -> bool:
     return _os.getenv("DEBUG_RESPONSES", "").lower() in ("1", "true", "yes")
 
 
+# Both spellings of every envelope key: the serialization aliases and the bare field names.
+_DEBUG_ENVELOPE_KEYS = (
+    "_debug_queries",
+    "_debug_calls",
+    "_debug_sqlite",
+    "_debug_postgres",
+    "debug_queries",
+    "debug_calls",
+    "debug_sqlite",
+    "debug_postgres",
+)
+
+
 class BaseResponse(BaseModel):
     """Base response that automatically includes telemetry if present."""
 
@@ -229,14 +242,8 @@ class BaseResponse(BaseModel):
     def _strip_debug_when_disabled(self, handler):
         data = handler(self)
         if not _debug_responses_enabled():
-            data.pop("_debug_queries", None)
-            data.pop("_debug_calls", None)
-            data.pop("_debug_sqlite", None)
-            data.pop("_debug_postgres", None)
-            data.pop("debug_queries", None)
-            data.pop("debug_calls", None)
-            data.pop("debug_sqlite", None)
-            data.pop("debug_postgres", None)
+            for key in _DEBUG_ENVELOPE_KEYS:
+                data.pop(key, None)
         return data
 
     @classmethod

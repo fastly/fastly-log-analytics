@@ -62,10 +62,12 @@ _ANALYST_STRIPPED_ENVELOPE_KEYS = (
     "_debug_queries",
     "_debug_calls",
     "_debug_sqlite",
+    "_debug_postgres",
     "_is_cached",
     "debug_queries",
     "debug_calls",
     "debug_sqlite",
+    "debug_postgres",
 )
 
 # Cap on how many bytes of a POST body the middleware will buffer to
@@ -827,7 +829,16 @@ async def _strip_analyst_envelope(response: Response, analyst_session: object | 
 
         to_strip: list[str] = []
         if not analyst_query_enabled:
-            to_strip.extend(("_debug_queries", "debug_queries", "_debug_sqlite", "debug_sqlite"))
+            to_strip.extend(
+                (
+                    "_debug_queries",
+                    "debug_queries",
+                    "_debug_sqlite",
+                    "debug_sqlite",
+                    "_debug_postgres",
+                    "debug_postgres",
+                )
+            )
         if not analyst_api_enabled:
             to_strip.extend(("_debug_calls", "debug_calls"))
         if not (analyst_query_enabled or analyst_api_enabled):

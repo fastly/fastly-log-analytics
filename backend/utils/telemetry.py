@@ -396,17 +396,21 @@ def get_sqlite_queries() -> list[dict]:
     return res
 
 
-def debug_envelope(res: dict, *, gated: bool, is_cached: bool = False) -> dict:
+def debug_envelope(res: dict, *, gated: bool, is_cached: bool | None = False, inject_calls: bool = False) -> dict:
     """Attach the ``_debug_*`` / ``_is_cached`` envelope to a plain-dict response.
 
     Two gating semantics exist on purpose (each caller keeps its own):
 
     * ``gated=False`` (RUM): ALWAYS inject ``_debug_queries``, ``_debug_sqlite`` and
       ``_debug_calls`` from the request's collectors, mutating ``res`` in place.
-    * ``gated=True`` (session scoring): never injects. Returns a copy with
-      ``_is_cached`` set and, unless ``DEBUG_RESPONSES`` is on, any ``_debug_queries`` /
-      ``_debug_calls`` already present dropped (mirrors
-      ``BaseResponse._strip_debug_when_disabled``).
+    * ``gated=True``: returns a copy; ``_is_cached`` is set unless ``is_cached`` is ``None``
+      and, unless ``DEBUG_RESPONSES`` is on, any ``_debug_queries`` / ``_debug_calls`` already
+      present are dropped (mirrors ``BaseResponse._strip_debug_when_disabled``). Session scoring
+      uses this alone: its stored value already carries the envelope. Admin routes that only
+      trace Fastly calls pass ``inject_calls=True`` to also attach ``_debug_calls`` from the
+      request's collector when ``DEBUG_RESPONSES`` is on, so the envelope never goes out
+      with the flag off. The analyst-facing strip in ``RemoteAccessMiddleware`` is a separate,
+      independent guard.
     """
     if not gated:
         res["_debug_queries"] = get_queries()
@@ -418,10 +422,13 @@ def debug_envelope(res: dict, *, gated: bool, is_cached: bool = False) -> dict:
     from backend.models.common import _debug_responses_enabled
 
     out = dict(res)
-    out["_is_cached"] = is_cached
+    if is_cached is not None:
+        out["_is_cached"] = is_cached
     if not _debug_responses_enabled():
         out.pop("_debug_queries", None)
         out.pop("_debug_calls", None)
+    elif inject_calls:
+        out["_debug_calls"] = get_tracked_calls()
     return out
 
 

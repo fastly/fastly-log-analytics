@@ -672,17 +672,13 @@ def api_service_log_fields_get(service_id: str):
     except Exception:
         logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
 
-    from backend.utils.telemetry import get_tracked_calls
-
-    return {
-        "log_fields": log_fields_config,
-        "waf_warning": waf_warning,
-        "history": history,
-        "estimate": lf.estimate_log_line_bytes(log_fields_config),
-        "line_budget_warning": lf.check_log_line_budget(log_fields_config),
-        "_debug_queries": [],
-        "_debug_calls": get_tracked_calls(),
-    }
+    return LogFieldsResponse.with_telemetry(
+        log_fields=log_fields_config,
+        waf_warning=waf_warning,
+        history=history,
+        estimate=lf.estimate_log_line_bytes(log_fields_config),
+        line_budget_warning=lf.check_log_line_budget(log_fields_config),
+    )
 
 
 @router.post(
@@ -928,7 +924,6 @@ from backend.models.services import AnalystInvite
 @router.post("/services/{service_id}/generate-viewer-key", response_model=AnalystInvite)
 def api_invite_analyst(service_id: str):
     from backend.provision import generate_analyst_invite
-    from backend.utils.telemetry import get_tracked_calls
 
     try:
         result = generate_analyst_invite(service_id)
@@ -942,8 +937,7 @@ def api_invite_analyst(service_id: str):
             raise HTTPException(status_code=409, detail={"error": msg})
         raise HTTPException(status_code=400, detail={"error": msg})
 
-    result["_debug_calls"] = get_tracked_calls()
-    return result
+    return AnalystInvite.with_telemetry(**result)
 
 
 # response_model intentionally omitted: SSE progress stream.
