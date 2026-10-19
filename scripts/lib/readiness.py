@@ -13,9 +13,11 @@ import re
 import sys
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.request import Request
 
 # Keep direct `python scripts/lib/readiness.py` invocations working.
 if __package__ in (None, ""):
@@ -41,15 +43,82 @@ def pyproject_version(path: Path = ROOT / "pyproject.toml") -> str:
         return tomllib.load(handle)["project"]["version"]
 
 
-def _get(url: str, timeout: float, limit: int) -> tuple[int, str, bytes]:
+@dataclass(frozen=True)
+class ProbeResult:
+    """Outcome of one bounded HTTP probe; never raises for network failures.
+
+    ``status`` is None only for transport failures; ``error`` is set for every
+    failure (``str(exc)``, including HTTP >= 400, which keeps ``status`` and the
+    bounded error ``body``). ``latency_ms`` is time to response headers.
+    """
+
+    status: int | None
+    latency_ms: float
+    content_type: str = ""
+    body: bytes = b""
+    error: str | None = None
+    reason: str = ""
+    exc: BaseException | None = field(default=None, repr=False)
+
+    @property
+    def failed(self) -> bool:
+        return self.error is not None
+
+    @property
+    def http_error(self) -> bool:
+        return self.error is not None and self.status is not None
+
+    def json(self) -> object:
+        return json.loads(self.body)
+
+
+def probe(
+    url: str,
+    *,
+    timeout: float,
+    headers: Mapping[str, str] | None = None,
+    method: str | None = None,
+    data: bytes | None = None,
+    limit: int = _MAX_JSON_BYTES,
+) -> ProbeResult:
+    """One request through ``admin_urlopen`` (mTLS only for a configured origin).
+
+    At most ``limit + 1`` body bytes are read so callers can detect oversize.
+    """
+    request = Request(url, data=data, headers=dict(headers or {}), method=method)
+    start = time.perf_counter()
     try:
-        with admin_urlopen(url, timeout=timeout) as response:
-            return response.status, response.headers.get("Content-Type", ""), response.read(limit + 1)
+        with admin_urlopen(request, timeout=timeout) as response:
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            return ProbeResult(
+                status=response.status,
+                latency_ms=latency_ms,
+                content_type=response.headers.get("Content-Type", ""),
+                body=response.read(limit + 1),
+            )
     except HTTPError as exc:
+        latency_ms = (time.perf_counter() - start) * 1000.0
         try:
-            return exc.code, "", b""
+            try:
+                body = exc.read(limit + 1)
+            except OSError:
+                body = b""
+            return ProbeResult(exc.code, latency_ms, body=body, error=str(exc), reason=str(exc.reason), exc=exc)
         finally:
             exc.close()
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        return ProbeResult(None, latency_ms, error=str(exc), exc=exc)
+
+
+def _get(url: str, timeout: float, limit: int) -> tuple[int, str, bytes]:
+    result = probe(url, timeout=timeout, limit=limit)
+    if result.status is None:
+        assert result.exc is not None
+        raise result.exc
+    if result.http_error:
+        return result.status, "", b""
+    return result.status, result.content_type, result.body
 
 
 def _safe(value: object, limit: int = 40) -> str:

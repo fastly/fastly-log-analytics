@@ -13,9 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +26,7 @@ from scripts.lib.environments import (  # noqa: E402
     remediation_command,
     service_id,
 )
+from scripts.lib.readiness import probe  # noqa: E402
 
 # Load local overrides from .env (python-dotenv, override=False).
 load_dotenv()
@@ -87,113 +85,84 @@ class RbacResult:
 
 
 def check_backend_health(target: EnvironmentTarget, timeout_s: float = 3.0) -> HealthResult:
-    url = f"{target.backend_url}/api/health"
-    start = time.perf_counter()
+    result = probe(
+        f"{target.backend_url}/api/health",
+        timeout=timeout_s,
+        headers={"User-Agent": "FLA-HealthCheck/1.0", "Accept": "application/json", "Connection": "close"},
+    )
+    if result.http_error:
+        return HealthResult(
+            target=target,
+            backend_ok=False,
+            status_code=result.status,
+            latency_ms=result.latency_ms,
+            version=None,
+            error=f"HTTPError {result.status}: {result.reason}",
+        )
+    if result.failed:
+        return HealthResult(target, False, None, result.latency_ms, None, result.error)
     try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "FLA-HealthCheck/1.0",
-                "Accept": "application/json",
-                "Connection": "close",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            status_code = resp.status
-            body = resp.read().decode("utf-8")
-            data = json.loads(body)
-            version = data.get("version")
-            is_ok = status_code == 200 and data.get("status") == "ok"
-            return HealthResult(
-                target=target,
-                backend_ok=is_ok,
-                status_code=status_code,
-                latency_ms=elapsed_ms,
-                version=version,
-                error=None if is_ok else f"Unexpected payload: {body[:100]}",
-            )
-    except urllib.error.HTTPError as e:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        return HealthResult(
-            target=target,
-            backend_ok=False,
-            status_code=e.code,
-            latency_ms=elapsed_ms,
-            version=None,
-            error=f"HTTPError {e.code}: {e.reason}",
-        )
-    except Exception as e:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        return HealthResult(
-            target=target,
-            backend_ok=False,
-            status_code=None,
-            latency_ms=elapsed_ms,
-            version=None,
-            error=str(e),
-        )
+        data = json.loads(result.body.decode("utf-8"))
+        version = data.get("version")
+        is_ok = result.status == 200 and data.get("status") == "ok"
+    except (ValueError, AttributeError) as e:
+        return HealthResult(target, False, None, result.latency_ms, None, str(e))
+    return HealthResult(
+        target=target,
+        backend_ok=is_ok,
+        status_code=result.status,
+        latency_ms=result.latency_ms,
+        version=version,
+        error=None if is_ok else f"Unexpected payload: {result.body.decode('utf-8')[:100]}",
+    )
 
 
 def check_tenancy(target: EnvironmentTarget, timeout_s: float = 5.0) -> TenancyResult:
     """Verifies service resolution and negative tenancy rejection."""
     # 1. Resolve configured service via /api/bootstrap
+    bootstrap = probe(
+        f"{target.backend_url}/api/bootstrap",
+        timeout=timeout_s,
+        headers={"User-Agent": "FLA-TenancyCheck/1.0", "Accept": "application/json", "Connection": "close"},
+    )
     resolved_id: str | None = None
-    try:
-        req = urllib.request.Request(
-            f"{target.backend_url}/api/bootstrap",
-            headers={
-                "User-Agent": "FLA-TenancyCheck/1.0",
-                "Accept": "application/json",
-                "Connection": "close",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            resolved_id = data.get("active_service_id")
-    except Exception as e:
+    fetch_error = bootstrap.error
+    if not bootstrap.failed:
+        try:
+            resolved_id = json.loads(bootstrap.body.decode("utf-8")).get("active_service_id")
+        except (ValueError, AttributeError) as e:
+            fetch_error = str(e)
+    if fetch_error is not None:
         return TenancyResult(
             target=target,
             resolved_service_id=None,
             service_match=False,
             rejection_ok=False,
             rejection_code=None,
-            error=f"Failed to fetch bootstrap: {e}",
+            error=f"Failed to fetch bootstrap: {fetch_error}",
         )
 
     service_match = resolved_id == target.fastly_service_id
 
     # 2. Test negative tenancy isolation: fake service ID must be rejected
-    fake_url = f"{target.backend_url}/api/dashboard/bundle?service_id=nonexistent_tenant_xyz"
-    rejection_code: int | None = None
-    rejection_ok = False
-    try:
-        req = urllib.request.Request(
-            fake_url,
-            data=json.dumps({"time_range": "24h"}).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "FLA-TenancyCheck/1.0",
-                "Connection": "close",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            # 200 OK for a nonexistent tenant is a security violation!
-            rejection_code = resp.status
-            rejection_ok = False
-    except urllib.error.HTTPError as e:
-        rejection_code = e.code
-        # 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found are safe rejections
-        rejection_ok = e.code in (400, 401, 403, 404)
-    except Exception as e:
+    rejection = probe(
+        f"{target.backend_url}/api/dashboard/bundle?service_id=nonexistent_tenant_xyz",
+        timeout=timeout_s,
+        data=json.dumps({"time_range": "24h"}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "FLA-TenancyCheck/1.0", "Connection": "close"},
+    )
+    if rejection.status is None:
         return TenancyResult(
             target=target,
             resolved_service_id=resolved_id,
             service_match=service_match,
             rejection_ok=False,
             rejection_code=None,
-            error=f"Unexpected error during tenancy isolation probe: {e}",
+            error=f"Unexpected error during tenancy isolation probe: {rejection.error}",
         )
+    rejection_code = rejection.status
+    # 200 OK for a nonexistent tenant is a security violation; 400/401/403/404 are safe rejections.
+    rejection_ok = rejection.http_error and rejection_code in (400, 401, 403, 404)
 
     err = None
     if not service_match:
@@ -214,22 +183,25 @@ def check_tenancy(target: EnvironmentTarget, timeout_s: float = 5.0) -> TenancyR
 def check_rbac(target: EnvironmentTarget, timeout_s: float = 5.0) -> RbacResult:
     """Verifies public auth endpoints and RBAC boundaries."""
     # 1. /api/share/auth-config must be accessible (200 OK with passcode_enabled)
+    result = probe(
+        f"{target.backend_url}/api/share/auth-config",
+        timeout=timeout_s,
+        headers={"User-Agent": "FLA-RbacCheck/1.0", "X-Remote-Analyst": "1", "Connection": "close"},
+    )
     auth_config_ok = False
-    try:
-        req_cfg = urllib.request.Request(
-            f"{target.backend_url}/api/share/auth-config",
-            headers={"User-Agent": "FLA-RbacCheck/1.0", "X-Remote-Analyst": "1", "Connection": "close"},
-        )
-        with urllib.request.urlopen(req_cfg, timeout=timeout_s) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            auth_config_ok = resp.status == 200 and "passcode_enabled" in data
-    except Exception as e:
+    error = result.error
+    if not result.failed:
+        try:
+            auth_config_ok = result.status == 200 and "passcode_enabled" in json.loads(result.body.decode("utf-8"))
+        except ValueError as e:
+            error = str(e)
+    if error is not None:
         return RbacResult(
             target=target,
             auth_config_ok=False,
             unauth_analyst_blocked=False,
             unauth_analyst_code=None,
-            error=f"Failed to query /api/share/auth-config: {e}",
+            error=f"Failed to query /api/share/auth-config: {error}",
         )
 
     return RbacResult(

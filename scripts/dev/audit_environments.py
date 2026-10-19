@@ -31,7 +31,6 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -41,10 +40,11 @@ from typing import Any
 # Direct path invocation and python -m both resolve the shared project helper.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
+from scripts.lib.admin_tls import admin_origin, is_admin_url, validate_admin_tls_config  # noqa: E402
 from scripts.lib.cli import add_common_args  # noqa: E402
 from scripts.lib.environments import ENVIRONMENT_SPECS, load_dotenv  # noqa: E402
 from scripts.lib.environments import service_id as _registry_service_id  # noqa: E402
+from scripts.lib.readiness import ProbeResult, probe  # noqa: E402
 
 # ANSI Color codes for clean terminal output
 RESET = "\033[0m"
@@ -108,18 +108,14 @@ def auto_resolve_remote_admin_token() -> str | None:
             return val
 
     # Try discovering token from local SSH tunnel to remote-standard backend
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:8001/api/bootstrap", headers={"User-Agent": "audit_environments"}
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode("utf-8"))
-                tok = data.get("settings", {}).get("admin_token")
-                if tok:
-                    return tok
-    except Exception:
-        pass
+    result = probe("http://127.0.0.1:8001/api/bootstrap", timeout=3, headers={"User-Agent": "audit_environments"})
+    if result.status == 200 and not result.failed:
+        try:
+            tok = json.loads(result.body.decode("utf-8")).get("settings", {}).get("admin_token")
+        except (ValueError, AttributeError):
+            tok = None
+        if tok:
+            return str(tok)
 
     # Try resolving via configured shell command
     resolve_cmd = os.getenv("REMOTE_ADMIN_TOKEN_RESOLVE_CMD")
@@ -206,6 +202,18 @@ class AuditResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _decode(result: ProbeResult) -> tuple[int, Any]:
+    """Probe result -> (status, parsed JSON); transport/parse failures -> (0, {"error": ...})."""
+    if result.status is None:
+        return 0, {"error": result.error}
+    try:
+        return result.status, json.loads(result.body.decode("utf-8"))
+    except Exception as e:
+        if result.http_error:
+            return result.status, {"error": result.error}
+        return 0, {"error": str(e)}
+
+
 def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0) -> tuple[int, Any]:
     req_headers = {
         "User-Agent": "FLA-AuditTool/1.0",
@@ -214,19 +222,7 @@ def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: floa
     }
     if headers:
         req_headers.update(headers)
-    req = urllib.request.Request(url, headers=req_headers)
-    try:
-        with admin_urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return resp.status, data
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = json.loads(e.read().decode("utf-8"))
-            return e.code, err_body
-        except Exception:
-            return e.code, {"error": str(e)}
-    except Exception as e:
-        return 0, {"error": str(e)}
+    return _decode(probe(url, timeout=timeout, headers=req_headers))
 
 
 def http_post_json(
@@ -241,26 +237,11 @@ def http_post_json(
     if headers:
         req_headers.update(headers)
     body = json.dumps(payload if payload is not None else {}).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    for attempt in range(2):
-        try:
-            with admin_urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return resp.status, data
-        except urllib.error.HTTPError as e:
-            try:
-                err_body = json.loads(e.read().decode("utf-8"))
-                return e.code, err_body
-            except Exception:
-                return e.code, {"error": str(e)}
-        except (ConnectionResetError, urllib.error.URLError) as e:
-            if attempt == 0:
-                time.sleep(0.5)
-                continue
-            return 0, {"error": str(e)}
-        except Exception as e:
-            return 0, {"error": str(e)}
-    return 0, {"error": "request failed"}
+    result = probe(url, timeout=timeout, headers=req_headers, data=body, method="POST")
+    if isinstance(result.exc, (ConnectionResetError, urllib.error.URLError)) and not result.http_error:
+        time.sleep(0.5)
+        result = probe(url, timeout=timeout, headers=req_headers, data=body, method="POST")
+    return _decode(result)
 
 
 def parse_timestamp_age(ts_str: str | None) -> float | None:
