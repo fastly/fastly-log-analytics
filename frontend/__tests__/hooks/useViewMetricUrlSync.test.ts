@@ -9,7 +9,8 @@
  * pre-render: async ?view=<id> loading and ?metric=<val>. The legacy
  * tests for filter_/start_time/end_time hydration moved with the code.
  */
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
+import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 const mockAddFilter = vi.fn()
@@ -18,6 +19,8 @@ const mockSetRange = vi.fn()
 const mockSetMetric = vi.fn()
 const mockClientGet = vi.fn()
 const mockGetQueryData = vi.fn()
+// Stable identity like the real QueryClient (it is an effect dependency).
+const mockQueryClient = { getQueryData: mockGetQueryData }
 
 // The hook uses selector form — `useFilterStore(s => s.addFilter)` etc.
 // Apply the selector to the mock store so each call returns the right
@@ -46,7 +49,7 @@ vi.mock('@/stores/filterStore', () => ({
 // no longer needs a real QueryClientProvider in tests — we just stub the
 // hook to return a query client with the methods we exercise.
 vi.mock('@tanstack/react-query', () => ({
-  useQueryClient: vi.fn(() => ({ getQueryData: mockGetQueryData })),
+  useQueryClient: vi.fn(() => mockQueryClient),
 }))
 
 vi.mock('@/hooks/useActiveService', () => ({
@@ -61,8 +64,9 @@ vi.mock('@/lib/api', () => ({
   client: { GET: mockClientGet },
 }))
 
-function setSearch(search: string) {
-  window.history.pushState({}, '', search ? `?${search}` : '/')
+const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
+function adapter(search = '') {
+  return { wrapper: withNuqsTestingAdapter({ searchParams: search, hasMemory: true, onUrlUpdate, resetUrlUpdateQueueOnMount: false }) }
 }
 
 describe('useViewMetricUrlSync', () => {
@@ -77,24 +81,23 @@ describe('useViewMetricUrlSync', () => {
 
   it('does nothing when there are no URL params', async () => {
     const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync())
+    renderHook(() => useViewMetricUrlSync(), adapter())
     expect(mockAddFilter).not.toHaveBeenCalled()
     expect(mockSetRange).not.toHaveBeenCalled()
     expect(mockSetMetric).not.toHaveBeenCalled()
   })
 
   it('parses metric param and calls setMetric', async () => {
-    setSearch('metric=bandwidth')
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync())
+        const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync(), adapter('?metric=bandwidth'))
     expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
   })
 
   it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
-    setSearch('metric=requests&other=keep')
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync())
-    const remaining = new URLSearchParams(window.location.search)
+        const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync(), adapter('?metric=requests&other=keep'))
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
+    const remaining = onUrlUpdate.mock.calls.at(-1)![0].searchParams
     expect(remaining.get('metric')).toBeNull()
     expect(remaining.get('other')).toBe('keep')
   })
@@ -110,14 +113,14 @@ describe('useViewMetricUrlSync', () => {
         },
       ],
     })
-    setSearch('view=view-123')
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync())
+        const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync(), adapter('?view=view-123'))
     // Give the async loadView a tick to run
     await new Promise(r => setTimeout(r, 0))
     expect(mockClientGet).toHaveBeenCalled()
     expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
     expect(mockAddFilter).toHaveBeenCalledWith('status', '404', 'include')
-    expect(new URLSearchParams(window.location.search).get('view')).toBeNull()
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
+    expect(onUrlUpdate.mock.calls.at(-1)![0].searchParams.get('view')).toBeNull()
   })
 })

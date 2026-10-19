@@ -1,3 +1,4 @@
+import { withNuqsTestingAdapter } from 'nuqs/adapters/testing'
 import { render, screen, waitFor } from '@testing-library/react'
 import { expect, test, vi } from 'vitest'
 // app/dashboard/page.tsx is now an async RSC shell that SSR-prefetches the
@@ -76,7 +77,8 @@ test('renders dashboard and fetches data', async () => {
   render(
     <QueryClientProvider client={queryClient}>
       <DashboardClient />
-    </QueryClientProvider>
+    </QueryClientProvider>,
+    { wrapper: withNuqsTestingAdapter() },
   )
 
   expect(screen.getByText('Dashboard')).toBeInTheDocument()

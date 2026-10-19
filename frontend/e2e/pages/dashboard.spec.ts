@@ -304,4 +304,11 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     // Zero error cards on dashboard
     await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
   })
+
+  test('Deep link ?metric= is consumed from the URL while unrelated params survive', async ({ page }) => {
+    await page.goto('/dashboard?metric=bandwidth&keep=1')
+    await expect(page.locator('main').first()).toBeVisible({ timeout: 30_000 })
+    await expect.poll(() => new URL(page.url()).searchParams.get('metric'), { timeout: 15_000 }).toBeNull()
+    expect(new URL(page.url()).searchParams.get('keep')).toBe('1')
+  })
 })

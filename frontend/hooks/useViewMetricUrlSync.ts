@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { parseAsString, useQueryStates } from 'nuqs'
 import { useFilterStore } from '@/stores/filterStore'
 import { useReportConfig } from './useReportConfig'
 import { useActiveService } from './useActiveService'
@@ -20,7 +21,13 @@ import type { FilterPill } from '@/types/filters'
 //
 // Anything else in the URL has already been consumed and stripped by
 // the time this effect runs.
+const viewMetricParsers = { view: parseAsString, metric: parseAsString }
+// Hoisted so nuqs hands back a stable setter and the effect below doesn't re-fire per render.
+const viewMetricOptions = { history: 'replace', shallow: true } as const
+
 export function useViewMetricUrlSync() {
+  // Consume-and-strip params: read once, apply, then clear from the URL.
+  const [{ view: viewId, metric: urlMetric }, setUrlParams] = useQueryStates(viewMetricParsers, viewMetricOptions)
   const addFilter = useFilterStore(s => s.addFilter)
   const clearFilters = useFilterStore(s => s.clearFilters)
   const setRange = useFilterStore(s => s.setRange)
@@ -41,11 +48,7 @@ export function useViewMetricUrlSync() {
   })
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !activeServiceId) return
-
-    const params = new URLSearchParams(window.location.search)
-    const viewId = params.get('view')
-    const urlMetric = params.get('metric')
+    if (!activeServiceId) return
 
     const loadView = async (id: string) => {
       // Prefer the views cache (seeded by /api/bootstrap or warmed by
@@ -101,9 +104,7 @@ export function useViewMetricUrlSync() {
           pills.forEach((f: FilterPill) => addFilter(f.column, f.value, f.mode))
         }
 
-        const url = new URL(window.location.href)
-        url.searchParams.delete('view')
-        window.history.replaceState({}, '', url.toString())
+        void setUrlParams({ view: null })
       }
     }
 
@@ -114,14 +115,12 @@ export function useViewMetricUrlSync() {
 
     if (urlMetric) {
       setMetric(urlMetric)
-      const url = new URL(window.location.href)
-      url.searchParams.delete('metric')
-      window.history.replaceState({}, '', url.toString())
+      void setUrlParams({ metric: null })
     }
     // addFilter/setRange/setMetric/clearFilters are Zustand store methods —
     // their identities are stable across renders (Zustand returns the same
     // function refs), so listing them in deps documents the dependency
     // without re-firing the effect. The exhaustive-deps lint is happy and
     // a future reader sees the full data flow.
-  }, [activeServiceId, addFilter, setRange, setRelativeRange, toggleEdgeOnly, toggleCompareMode, setCompareRange, setMetric, clearFilters, currentEdgeOnly, currentCompareMode, queryClient])
+  }, [activeServiceId, addFilter, setRange, setRelativeRange, toggleEdgeOnly, toggleCompareMode, setCompareRange, setMetric, clearFilters, currentEdgeOnly, currentCompareMode, queryClient, viewId, urlMetric, setUrlParams])
 }
