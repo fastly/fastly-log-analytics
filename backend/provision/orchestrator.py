@@ -93,174 +93,186 @@ def write_service_config(state: dict):
         raise ValueError("ingest state missing logging_service_id / service_id")
     db_path = svcconfig.duckdb_path(service_id)
 
-    # Snapshot the existing on-disk cfg so we can preserve code-managed
-    # keys that the request body doesn't carry. None on first-ever ingest
-    # (which is fine — there's nothing to preserve).
-    existing_cfg = svcconfig.load_config(service_id) or {}
+    def _build_cfg(existing_cfg: dict) -> dict:
+        # ``existing_cfg`` is the stored config at write time; code-managed keys the request
+        # body does not carry are re-adopted from it below.
 
-    fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
-    fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
-    bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
-    fos_prefix = ""
-    # The v3 bucket is dedicated to this service; raw objects always start at
-    # the fixed request/RUM roots.
-    _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
-    region = state.get("fos_region", "us-east-1")
-    cdn_url = state.get("cdn_url", "")
+        fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
+        fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
+        bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
+        fos_prefix = ""
+        # The v3 bucket is dedicated to this service; raw objects always start at
+        # the fixed request/RUM roots.
+        _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
+        region = state.get("fos_region", "us-east-1")
+        cdn_url = state.get("cdn_url", "")
 
-    # Build log_fields: prefer the request body, but if the request body
-    # omits custom_fields (or sends an empty list) AND we have existing
-    # custom_fields on disk, preserve them. System fields (CMCD, Scoring)
-    # are generated on-demand by FeatureState.from_config() and are NOT
-    # persisted in the config file.
-    incoming_lf = dict(state.get("log_fields") or {})
-    incoming_custom = incoming_lf.get("custom_fields")
-    existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
-    if not incoming_custom and existing_custom:
-        # Filter out system fields from existing custom_fields
-        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
-    else:
-        # Filter out system fields from incoming custom_fields
-        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
+        # Build log_fields: prefer the request body, but if the request body
+        # omits custom_fields (or sends an empty list) AND we have existing
+        # custom_fields on disk, preserve them. System fields (CMCD, Scoring)
+        # are generated on-demand by FeatureState.from_config() and are NOT
+        # persisted in the config file.
+        incoming_lf = dict(state.get("log_fields") or {})
+        incoming_custom = incoming_lf.get("custom_fields")
+        existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
+        if not incoming_custom and existing_custom:
+            # Filter out system fields from existing custom_fields
+            incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
+        else:
+            # Filter out system fields from incoming custom_fields
+            incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
 
-    import datetime as _dt
-
-    created_at = existing_cfg.get("created_at") or _dt.datetime.now(_dt.UTC).isoformat()
-
-    cfg = {
-        "service_id": service_id,
-        "name": state.get("name") or state.get("service_name") or service_id,
-        "created_at": created_at,
-        "access_level": state.get("access_level", "read_write"),
-        "storage_mode": state.get("storage_mode", "cloud"),
-        "fos_endpoint": region_endpoint(region),
-        "fos_access_key_id": fos_key,
-        "fos_secret_access_key": fos_secret,
-        "fos_bucket": bucket,
-        "fos_prefix": fos_prefix,
-        "raw_layout_version": 3,
-        "fos_region": region,
-        "cdn_url": cdn_url,
-        "cdn_secret": state.get("cdn_secret", ""),
-        "cdn_service_id": state.get("cdn_service_id", ""),
-        "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
-        "log_retention_days": int(state.get("log_retention_days", 30)),
-        "duckdb_path": db_path,
-        "log_fields": incoming_lf,
-    }
-
-    # Preserve code-managed top-level keys that the request body doesn't
-    # carry — primarily ``scoring`` (set by enable_scoring) and
-    # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
-    # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
-        if preserved_key not in state and preserved_key in existing_cfg:
-            cfg[preserved_key] = existing_cfg[preserved_key]
-        elif preserved_key in state:
-            cfg[preserved_key] = state[preserved_key]
-
-    # Resolve features selection (logging_enabled, rum_enabled)
-    logging_enabled = state.get("logging_enabled")
-    if logging_enabled is None:
-        logging_enabled = existing_cfg.get("logging_enabled", True)
-
-    rum_enabled = state.get("rum_enabled")
-    if rum_enabled is None:
-        rum_enabled = existing_cfg.get("rum_enabled", False)
-
-    cfg["logging_enabled"] = bool(logging_enabled)
-    cfg["rum_enabled"] = bool(rum_enabled)
-
-    if cfg["rum_enabled"] and not cfg.get("rum"):
         import datetime as _dt
 
-        cfg["rum"] = {
-            "enabled": True,
-            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        created_at = existing_cfg.get("created_at") or _dt.datetime.now(_dt.UTC).isoformat()
+
+        cfg = {
+            "service_id": service_id,
+            "name": state.get("name") or state.get("service_name") or service_id,
+            "created_at": created_at,
+            "access_level": state.get("access_level", "read_write"),
+            "storage_mode": state.get("storage_mode", "cloud"),
+            "fos_endpoint": region_endpoint(region),
+            "fos_access_key_id": fos_key,
+            "fos_secret_access_key": fos_secret,
+            "fos_bucket": bucket,
+            "fos_prefix": fos_prefix,
+            "raw_layout_version": 3,
+            "fos_region": region,
+            "cdn_url": cdn_url,
+            "cdn_secret": state.get("cdn_secret", ""),
+            "cdn_service_id": state.get("cdn_service_id", ""),
+            "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
+            "log_retention_days": int(state.get("log_retention_days", 30)),
+            "duckdb_path": db_path,
+            "log_fields": incoming_lf,
         }
 
-    if "log_period" in state:
-        cfg["log_period"] = state["log_period"]
-    elif "log_period" in state.get("provisioning", {}):
-        cfg["log_period"] = state["provisioning"]["log_period"]
+        # Preserve code-managed top-level keys that the request body doesn't
+        # carry — primarily ``scoring`` (set by enable_scoring) and
+        # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
+        # the existing cfg has that the wizard body lacks survives the rewrite.
+        for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
+            if preserved_key not in state and preserved_key in existing_cfg:
+                cfg[preserved_key] = existing_cfg[preserved_key]
+            elif preserved_key in state:
+                cfg[preserved_key] = state[preserved_key]
 
-    # Honor the operator's chosen log_period as the sync cadence, with a hard
-    # 5s floor — matching the scheduler's own ``max(5, …)`` clamp and the
-    # settings-PATCH writer (which never applied a 30s floor). Picking a sub-30s
-    # period is an explicit operator choice trading extra FOS LIST/GET cost for
-    # dashboard freshness; it is no longer silently rounded up to 30s.
-    log_period_secs = int(cfg.get("log_period", 120))
-    sync_interval_seconds = max(5, log_period_secs)
-    commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
+        # Resolve features selection (logging_enabled, rum_enabled)
+        logging_enabled = state.get("logging_enabled")
+        if logging_enabled is None:
+            logging_enabled = existing_cfg.get("logging_enabled", True)
 
-    # Account-level edge rate-limiting entitlement (set by ensure_cdn_service's
-    # proactive probe). Prefer the freshly-detected state, then the carried-over
-    # request provisioning block, then the on-disk value, defaulting True so the
-    # cli.py:handle_update_cdn reader and reactive fallback behave as before when
-    # never detected.
-    _rate_limiting = state.get("rate_limiting")
-    if _rate_limiting is None:
-        _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
-    if _rate_limiting is None:
-        _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
-    rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
+        rum_enabled = state.get("rum_enabled")
+        if rum_enabled is None:
+            rum_enabled = existing_cfg.get("rum_enabled", False)
 
-    cfg["provisioning"] = {
-        "endpoint_name": state.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs"),
-        "cdn_service_id": state.get("cdn_service_id", state.get("provisioning", {}).get("cdn_service_id", "")),
-        "cdn_url": cdn_url,
-        "cdn_shield": state.get("cdn_shield", state.get("provisioning", {}).get("cdn_shield", "")),
-        "sample_rate": state.get("sample_rate", state.get("provisioning", {}).get("sample_rate", "100")),
-        "edge_only": state.get("edge_only", state.get("provisioning", {}).get("edge_only", True)),
-        "custom_condition": state.get("custom_condition", state.get("provisioning", {}).get("custom_condition", "")),
-        "rate_limiting": rate_limiting_val,
-        "cron_sync": {
-            "enabled": state.get(
-                "enable_cron_sync", state.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
+        cfg["logging_enabled"] = bool(logging_enabled)
+        cfg["rum_enabled"] = bool(rum_enabled)
+
+        if cfg["rum_enabled"] and not cfg.get("rum"):
+            import datetime as _dt
+
+            cfg["rum"] = {
+                "enabled": True,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            }
+
+        if "log_period" in state:
+            cfg["log_period"] = state["log_period"]
+        elif "log_period" in state.get("provisioning", {}):
+            cfg["log_period"] = state["provisioning"]["log_period"]
+
+        # Honor the operator's chosen log_period as the sync cadence, with a hard
+        # 5s floor — matching the scheduler's own ``max(5, …)`` clamp and the
+        # settings-PATCH writer (which never applied a 30s floor). Picking a sub-30s
+        # period is an explicit operator choice trading extra FOS LIST/GET cost for
+        # dashboard freshness; it is no longer silently rounded up to 30s.
+        log_period_secs = int(cfg.get("log_period", 120))
+        sync_interval_seconds = max(5, log_period_secs)
+        commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
+
+        # Account-level edge rate-limiting entitlement (set by ensure_cdn_service's
+        # proactive probe). Prefer the freshly-detected state, then the carried-over
+        # request provisioning block, then the on-disk value, defaulting True so the
+        # cli.py:handle_update_cdn reader and reactive fallback behave as before when
+        # never detected.
+        _rate_limiting = state.get("rate_limiting")
+        if _rate_limiting is None:
+            _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
+        if _rate_limiting is None:
+            _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
+        rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
+
+        cfg["provisioning"] = {
+            "endpoint_name": state.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs"),
+            "cdn_service_id": state.get("cdn_service_id", state.get("provisioning", {}).get("cdn_service_id", "")),
+            "cdn_url": cdn_url,
+            "cdn_shield": state.get("cdn_shield", state.get("provisioning", {}).get("cdn_shield", "")),
+            "sample_rate": state.get("sample_rate", state.get("provisioning", {}).get("sample_rate", "100")),
+            "edge_only": state.get("edge_only", state.get("provisioning", {}).get("edge_only", True)),
+            "custom_condition": state.get(
+                "custom_condition", state.get("provisioning", {}).get("custom_condition", "")
             ),
-            "delete_after": state.get(
-                "delete_after", state.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
-            ),
-            "interval_seconds": sync_interval_seconds,
-            "commit_interval_mins": commit_interval_mins,
-            "log_enabled": True,
-            "log_retention_days": int(state.get("log_retention_days", 30)),
-            "data_retention_days": int(
-                state.get(
-                    "data_retention_days",
-                    state.get("provisioning", {}).get("cron_sync", {}).get("data_retention_days", 30),
-                )
-            ),
-            "rum_retention_days": int(
-                state.get(
-                    "rum_retention_days",
-                    state.get("provisioning", {}).get("cron_sync", {}).get("rum_retention_days", 30),
-                )
-            ),
-            "cache_retention_days": int(
-                state.get(
-                    "cache_retention_days",
-                    state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90),
-                )
-            ),
-            "rollup_retention_months": int(
-                state.get(
-                    "rollup_retention_months",
-                    state.get("provisioning", {}).get("cron_sync", {}).get("rollup_retention_months", 12),
-                )
-            ),
-        },
-        "cron_compact": {
-            "enabled": state.get(
-                "enable_cron_compact", state.get("provisioning", {}).get("cron_compact", {}).get("enabled", True)
-            ),
-            "interval_mins": 1440,
-            "log_enabled": True,
-            "log_retention_days": int(state.get("log_retention_days", 30)),
-        },
-        "temp_admin_key_id": state.get("temp_admin_key_id", state.get("provisioning", {}).get("temp_admin_key_id")),
-    }
-    svcconfig.save_config(service_id, cfg)
+            "rate_limiting": rate_limiting_val,
+            "cron_sync": {
+                "enabled": state.get(
+                    "enable_cron_sync", state.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
+                ),
+                "delete_after": state.get(
+                    "delete_after", state.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
+                ),
+                "interval_seconds": sync_interval_seconds,
+                "commit_interval_mins": commit_interval_mins,
+                "log_enabled": True,
+                "log_retention_days": int(state.get("log_retention_days", 30)),
+                "data_retention_days": int(
+                    state.get(
+                        "data_retention_days",
+                        state.get("provisioning", {}).get("cron_sync", {}).get("data_retention_days", 30),
+                    )
+                ),
+                "rum_retention_days": int(
+                    state.get(
+                        "rum_retention_days",
+                        state.get("provisioning", {}).get("cron_sync", {}).get("rum_retention_days", 30),
+                    )
+                ),
+                "cache_retention_days": int(
+                    state.get(
+                        "cache_retention_days",
+                        state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90),
+                    )
+                ),
+                "rollup_retention_months": int(
+                    state.get(
+                        "rollup_retention_months",
+                        state.get("provisioning", {}).get("cron_sync", {}).get("rollup_retention_months", 12),
+                    )
+                ),
+            },
+            "cron_compact": {
+                "enabled": state.get(
+                    "enable_cron_compact", state.get("provisioning", {}).get("cron_compact", {}).get("enabled", True)
+                ),
+                "interval_mins": 1440,
+                "log_enabled": True,
+                "log_retention_days": int(state.get("log_retention_days", 30)),
+            },
+            "temp_admin_key_id": state.get("temp_admin_key_id", state.get("provisioning", {}).get("temp_admin_key_id")),
+        }
+        return cfg
+
+    def _apply(target: dict) -> None:
+        # Merge, don't replace: stored keys the wizard does not own (status, fos_proxy,
+        # last_activated_version, rum_vcl_sha, ...) survive a re-run.
+        target.update(_build_cfg(target))
+
+    with svcconfig.config_lock(service_id):
+        if svcconfig.mutate_config(service_id, _apply) is None:
+            first_cfg: dict = {}
+            _apply(first_cfg)
+            svcconfig.save_config(service_id, first_cfg)
     ok(f"Service config written → configs/{service_id}.json")
 
 

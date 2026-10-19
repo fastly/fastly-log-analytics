@@ -1551,7 +1551,9 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
 
     with (
         patch("backend.config.load_config", return_value=existing_cfg),
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch(
+            "backend.config._save_config_unlocked", side_effect=lambda sid, cfg, **_kw: saved_cfgs.append((sid, cfg))
+        ),
         patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ):
         # Re-ingest with a body that has no awareness of scoring or ngwaf
