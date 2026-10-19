@@ -177,8 +177,6 @@ export function ShareLoginForm() {
   }
 
   const handleLogin = handleSubmit(async ({ email, passcode }) => {
-    if (inFlightRef.current) return
-    inFlightRef.current = true
     setError(null)
     setBusy(true)
     try {
@@ -243,7 +241,6 @@ export function ShareLoginForm() {
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')
     } finally {
-      inFlightRef.current = false
       setBusy(false)
     }
   })
@@ -330,7 +327,18 @@ export function ShareLoginForm() {
       {showPasscode && (
         <form
           method="post"
-          onSubmit={handleLogin}
+          onSubmit={async (e) => {
+            if (inFlightRef.current) {
+              e.preventDefault()
+              return
+            }
+            inFlightRef.current = true
+            try {
+              await handleLogin(e)
+            } finally {
+              inFlightRef.current = false
+            }
+          }}
           data-testid="share-login-form"
           className="space-y-4 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
         >
