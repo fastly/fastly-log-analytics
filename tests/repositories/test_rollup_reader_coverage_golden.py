@@ -776,6 +776,19 @@ def _compact(v: Any) -> Any:
     return v
 
 
+_GOLDEN_NOW = datetime(2026, 6, 17, 22, 30, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_golden_clock():
+    """The scenarios anchor on "now" (hour start / day start); without a pinned clock the 15-vs-16 hour
+    window arithmetic changes with the time of day and the snapshot flips (it failed at 23:17 UTC); the snapshot was recorded at 22:xx UTC, so pin to that hour."""
+    import time_machine
+
+    with time_machine.travel(_GOLDEN_NOW, tick=False):
+        yield
+
+
 def _anchors() -> dict[str, datetime]:
     now = datetime.now(UTC)
     return {
