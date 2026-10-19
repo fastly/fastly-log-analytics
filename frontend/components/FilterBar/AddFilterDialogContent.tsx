@@ -1,6 +1,9 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
+import { useForm, useWatch } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { Plus, Filter, Search, Loader2, Check, X } from 'lucide-react'
 import {
   DialogContent,
@@ -34,6 +37,14 @@ const COMMON_FIELD_IDS = [
   'backend', 'proto', 'tls', 'referer', 'waf', 'waf_resp',
 ]
 
+const addFilterSchema = z.object({
+  field: z.string().min(1),
+  value: z.string().min(1),
+  mode: z.enum(['include', 'exclude']),
+})
+
+type AddFilterValues = z.infer<typeof addFilterSchema>
+
 /**
  * The data-bound body of the Add-Filter dialog. Split out of
  * AddFilterDialog so it is only mounted once the dialog is opened
@@ -53,9 +64,12 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
   // PII: masking analysts can't filter by client IP, so the field list drops
   // the IP-family entries and the default field falls back to `url`.
   const maskIps = useMaskIps()
-  const [field, setField] = useState(maskIps ? 'url' : 'ip')
-  const [value, setValue] = useState('')
-  const [mode, setMode] = useState<'include' | 'exclude'>('include')
+  const { register, handleSubmit, setValue, control, formState: { isValid } } = useForm<AddFilterValues>({
+    resolver: zodResolver(addFilterSchema),
+    mode: 'onChange',
+    defaultValues: { field: maskIps ? 'url' : 'ip', value: '', mode: 'include' },
+  })
+  const { field, value, mode } = useWatch({ control }) as AddFilterValues
   const debouncedValue = useDebounce(value)
 
   const { data: catalog } = useLogFieldsCatalog()
@@ -77,17 +91,14 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
     enabled: debouncedValue.length > 0,
   })
 
-  const handleAdd = (e?: React.FormEvent) => {
-    e?.preventDefault()
-    if (field && value) {
-      addFilter(field, value, mode)
-      setValue('')
-      onClose()
-    }
-  }
+  const handleAdd = handleSubmit((values) => {
+    addFilter(values.field, values.value, values.mode)
+    setValue('value', '')
+    onClose()
+  })
 
   const handleSelectSuggestion = (val: unknown) => {
-    setValue(String(val))
+    setValue('value', String(val), { shouldValidate: true })
     // We don't automatically add, let the user confirm or edit
   }
 
@@ -110,7 +121,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
             <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               Filter Type
             </Label>
-            <Tabs value={mode} onValueChange={(v) => { if (v === 'include' || v === 'exclude') setMode(v) }} className="w-full">
+            <Tabs value={mode} onValueChange={(v) => { if (v === 'include' || v === 'exclude') setValue('mode', v) }} className="w-full">
               <TabsList className="grid w-full grid-cols-2 h-9">
                 <TabsTrigger value="include" className="text-xs gap-1.5">
                   <Check className="h-3 w-3 text-green-500" /> Include
@@ -126,7 +137,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
             <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               Field
             </Label>
-            <Select value={field} onValueChange={val => val && setField(val)}>
+            <Select value={field} onValueChange={val => val && setValue('field', val)}>
               <SelectTrigger className="bg-background shadow-sm h-10 w-full justify-between pr-3">
                 <SelectValue placeholder="Select field">
                   {(val) => {
@@ -153,8 +164,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
               </div>
               <Input
                 placeholder={`Type a ${field} value...`}
-                value={value}
-                onChange={e => setValue(e.target.value)}
+                {...register('value')}
                 className="bg-background shadow-sm h-10 pl-9"
                 autoFocus
                 autoComplete="off"
@@ -198,7 +208,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="p-4 bg-background border-t flex justify-end">
-          <Button type="submit" disabled={!value} className="w-full sm:w-auto shadow-md gap-2 h-10 px-6">
+          <Button type="submit" disabled={!isValid} className="w-full sm:w-auto shadow-md gap-2 h-10 px-6">
             <Plus className="h-4 w-4" />
             Apply Filter
           </Button>
