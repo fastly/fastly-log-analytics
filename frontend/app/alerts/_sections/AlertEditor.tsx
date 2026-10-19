@@ -2,6 +2,9 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useForm, useWatch } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { client, extractApiError } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -68,6 +71,35 @@ const METRICS_BY_CATEGORY: Record<Category, { value: Metric; label: string }[]> 
 }
 const ALL_METRICS: readonly Metric[] = Object.values(METRICS_BY_CATEGORY).flatMap((ms) => ms.map((m) => m.value))
 
+const alertFormSchema = z
+  .object({
+    name: z.string(),
+    category: z.custom<Category>(),
+    metric: z.custom<Metric>(),
+    evalType: z.custom<EvalType>(),
+    evalScope: z.custom<EvalScope>(),
+    operator: z.custom<Operator>(),
+    threshold: z.string(),
+    windowMin: z.string(),
+    compPeriodMin: z.string(),
+    statusCodesStr: z.string(),
+    webhookUrl: z.string(),
+    zscoreThreshold: z.string(),
+    baselinePeriodDays: z.string(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.name.trim() === '') {
+      ctx.addIssue({ code: 'custom', path: ['name'], message: 'Name is required.' })
+    }
+    // Z-score alerts take their threshold from a different input.
+    const thresholdField = v.evalType === 'anomaly_zscore' ? 'zscoreThreshold' : 'threshold'
+    if (v[thresholdField].trim() === '') {
+      ctx.addIssue({ code: 'custom', path: [thresholdField], message: 'Threshold is required.' })
+    }
+  })
+
+type AlertFormValues = z.infer<typeof alertFormSchema>
+
 function LabelWithInfo({ htmlFor, children, tooltip }: { htmlFor?: string; children: React.ReactNode; tooltip: React.ReactNode }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -96,19 +128,31 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const isAnalyst = useIsAnalyst()
   const queryClient = useQueryClient()
 
-  const [name, setName] = React.useState(initialAlert?.name || '')
-  const [category, setCategory] = React.useState<Category>(initialAlert?.category ?? 'traffic')
-  const [metric, setMetric] = React.useState<Metric>(initialAlert?.metric ?? 'requests')
-  const [evalType, setEvalType] = React.useState<EvalType>(initialAlert?.evaluation_type ?? 'absolute')
-  const [evalScope, setEvalScope] = React.useState<EvalScope>(initialAlert?.evaluation_scope ?? 'all')
-  const [operator, setOperator] = React.useState<Operator>(initialAlert?.operator ?? '>')
-  const [threshold, setThreshold] = React.useState(initialAlert?.threshold?.toString() || '')
-  const [windowMin, setWindowMin] = React.useState(initialAlert?.window_min?.toString() || '5')
-  const [compPeriodMin, setCompPeriodMin] = React.useState(initialAlert?.comparison_period_min?.toString() || '60')
-  const [statusCodesStr, setStatusCodesStr] = React.useState(initialAlert?.status_codes?.join(', ') || '')
-  const [webhookUrl, setWebhookUrl] = React.useState(initialAlert?.webhook_url || '')
-  const [zscoreThreshold, setZscoreThreshold] = React.useState(initialAlert?.zscore_threshold?.toString() || '3.0')
-  const [baselinePeriodDays, setBaselinePeriodDays] = React.useState(initialAlert?.baseline_period_days?.toString() || '7')
+  // Errors only surface after blur (onTouched) or a submit attempt, so required
+  // fields don't shout on first render.
+  const { register, handleSubmit, setValue, control, formState: { errors, isValid } } = useForm<AlertFormValues>({
+    resolver: zodResolver(alertFormSchema),
+    mode: 'onTouched',
+    defaultValues: {
+      name: initialAlert?.name || '',
+      category: initialAlert?.category ?? 'traffic',
+      metric: initialAlert?.metric ?? 'requests',
+      evalType: initialAlert?.evaluation_type ?? 'absolute',
+      evalScope: initialAlert?.evaluation_scope ?? 'all',
+      operator: initialAlert?.operator ?? '>',
+      threshold: initialAlert?.threshold?.toString() || '',
+      windowMin: initialAlert?.window_min?.toString() || '5',
+      compPeriodMin: initialAlert?.comparison_period_min?.toString() || '60',
+      statusCodesStr: initialAlert?.status_codes?.join(', ') || '',
+      webhookUrl: initialAlert?.webhook_url || '',
+      zscoreThreshold: initialAlert?.zscore_threshold?.toString() || '3.0',
+      baselinePeriodDays: initialAlert?.baseline_period_days?.toString() || '7',
+    },
+  })
+  const {
+    name, category, metric, evalType, evalScope, operator, threshold,
+    windowMin, compPeriodMin, statusCodesStr, webhookUrl, zscoreThreshold, baselinePeriodDays,
+  } = useWatch({ control }) as AlertFormValues
   const [channels, setChannels] = React.useState<AlertChannel[]>(initialAlert?.channels || [])
   const [newChannelType, setNewChannelType] = React.useState<ChannelType>('slack')
   const [newChannelUrl, setNewChannelUrl] = React.useState('')
@@ -117,18 +161,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const [isPreviewLoading, setIsPreviewLoading] = React.useState(false)
   const [lookbackHours, setLookbackHours] = React.useState(24)
 
-  // Per-field "touched" state so required-field errors only appear after
-  // the user has interacted with the field (don't yell at them on first
-  // render). Submit also flips all touched flags so a click on Create with
-  // empty required fields surfaces the inline errors instead of silently
-  // early-returning.
-  const [touchedName, setTouchedName] = React.useState(false)
-  const [touchedThreshold, setTouchedThreshold] = React.useState(false)
-  const nameTrimmed = name.trim()
-  const thresholdTrimmed = evalType === 'anomaly_zscore' ? zscoreThreshold.trim() : threshold.trim()
-  const nameError = touchedName && nameTrimmed === '' ? 'Name is required.' : null
-  const thresholdError = touchedThreshold && thresholdTrimmed === '' ? 'Threshold is required.' : null
-  const formInvalid = nameTrimmed === '' || thresholdTrimmed === ''
+  const nameError = errors.name?.message ?? null
+  const thresholdError = errors.threshold?.message ?? null
 
   const handleAddChannel = () => {
     if (!newChannelUrl.trim()) return
@@ -189,32 +223,25 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const handleCategoryChange = (val: string | null) => {
     const next = val ? oneOf(CATEGORIES, val) : undefined
     if (!next) return
-    setCategory(next)
-    setMetric(METRICS_BY_CATEGORY[next][0].value)
+    setValue('category', next)
+    setValue('metric', METRICS_BY_CATEGORY[next][0].value)
   }
 
   // Handle eval type change -> reset operator
   const handleEvalTypeChange = (val: string | null) => {
     const next = val ? oneOf(EVAL_TYPES, val) : undefined
     if (!next) return
-    setEvalType(next)
+    setValue('evalType', next, { shouldValidate: true })
     if (val === 'anomaly_zscore') {
-      setOperator('>')
+      setValue('operator', '>')
     } else if (val !== 'absolute') {
-      setOperator('>') // Relatives are usually increases
+      setValue('operator', '>') // Relatives are usually increases
     }
   }
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault()
-    // Surface inline errors instead of silently early-returning. Flipping
-    // touched flags on submit means a user who clicks Create without ever
-    // focusing the required fields still sees the red error text.
-    if (!activeServiceId || formInvalid) {
-      setTouchedName(true)
-      setTouchedThreshold(true)
-      return
-    }
+  const handleSave = handleSubmit(async () => {
+    // Invalid submits never get here: handleSubmit surfaces the inline errors.
+    if (!activeServiceId) return
 
     let parsedCodes: number[] | undefined = undefined
     if ((metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr) {
@@ -264,7 +291,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     } finally {
       setIsSaving(false)
     }
-  }
+  })
 
   return (
     <form onSubmit={handleSave} className="flex flex-col overflow-hidden">
@@ -278,9 +305,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <Input
               id="alert-name"
               placeholder="e.g. High 5xx Error Rate"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              onBlur={() => setTouchedName(true)}
+              {...register('name')}
               aria-invalid={nameError !== null}
               aria-describedby={nameError ? 'alert-name-error' : undefined}
               required
@@ -313,7 +338,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <LabelWithInfo tooltip="The specific data point to measure. Rate metrics represent a percentage of total traffic.">
                 Metric
               </LabelWithInfo>
-              <Select value={metric} onValueChange={(v) => { const m = v ? oneOf(ALL_METRICS, v) : undefined; if (m) setMetric(m) }}>
+              <Select value={metric} onValueChange={(v) => { const m = v ? oneOf(ALL_METRICS, v) : undefined; if (m) setValue('metric', m) }}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -334,8 +359,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                <Input
                  id="status-codes"
                  placeholder="e.g. 503, 504"
-                 value={statusCodesStr}
-                 onChange={e => setStatusCodesStr(e.target.value)}
+                 {...register('statusCodesStr')}
                  required
                />
                <p className="text-[10px] text-muted-foreground">Comma-separated list of HTTP status codes to track.</p>
@@ -347,7 +371,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <LabelWithInfo tooltip="Restricts the alert to a specific traffic scope. 'Edge Only' filters for edge responses. 'Origin Only' filters for requests that went to your origin.">
                 Evaluation Scope
               </LabelWithInfo>
-              <Select value={evalScope} onValueChange={(v) => { const sc = v ? oneOf(EVAL_SCOPES, v) : undefined; if (sc) setEvalScope(sc) }}>
+              <Select value={evalScope} onValueChange={(v) => { const sc = v ? oneOf(EVAL_SCOPES, v) : undefined; if (sc) setValue('evalScope', sc) }}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -381,7 +405,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <LabelWithInfo tooltip="How far back to look for the baseline. If comparing the last 5m to 1 hour ago, it measures against the 5-minute window that ended 60 minutes ago.">
                 Baseline Comparison Period
               </LabelWithInfo>
-              <Select value={compPeriodMin} onValueChange={v => v && setCompPeriodMin(v)}>
+              <Select value={compPeriodMin} onValueChange={v => v && setValue('compPeriodMin', v)}>
                  <SelectTrigger>
                    <SelectValue />
                  </SelectTrigger>
@@ -408,9 +432,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                   step="0.1"
                   min="0"
                   placeholder="e.g. 3.0"
-                  value={zscoreThreshold}
-                  onChange={e => setZscoreThreshold(e.target.value)}
-                  onBlur={() => setTouchedThreshold(true)}
+                  {...register('zscoreThreshold')}
                   required
                 />
               </div>
@@ -418,7 +440,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 <LabelWithInfo tooltip="The length of the rolling historical baseline period to compute standard deviation and mean over.">
                   Baseline Period (Days)
                 </LabelWithInfo>
-                <Select value={baselinePeriodDays} onValueChange={v => v && setBaselinePeriodDays(v)}>
+                <Select value={baselinePeriodDays} onValueChange={v => v && setValue('baselinePeriodDays', v)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -436,7 +458,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 <LabelWithInfo tooltip="The mathematical condition to trigger the alert.">
                   Operator
                 </LabelWithInfo>
-                <Select value={operator} onValueChange={(v) => { const op = v ? oneOf(OPERATORS, v) : undefined; if (op) setOperator(op) }}>
+                <Select value={operator} onValueChange={(v) => { const op = v ? oneOf(OPERATORS, v) : undefined; if (op) setValue('operator', op) }}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -457,9 +479,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                   type="number"
                   step="any"
                   placeholder={evalType !== 'absolute' ? "e.g. 50 (for 50% increase)" : "e.g. 100"}
-                  value={threshold}
-                  onChange={e => setThreshold(e.target.value)}
-                  onBlur={() => setTouchedThreshold(true)}
+                  {...register('threshold')}
                   aria-invalid={thresholdError !== null}
                   aria-describedby={thresholdError ? 'threshold-error' : undefined}
                   required
@@ -477,7 +497,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <LabelWithInfo htmlFor="window" tooltip="The length of time to aggregate data over before evaluating the threshold. A longer window prevents flapping on brief spikes.">
               Evaluation Window
             </LabelWithInfo>
-            <Select value={windowMin} onValueChange={(v) => v && setWindowMin(v)}>
+            <Select value={windowMin} onValueChange={(v) => v && setValue('windowMin', v)}>
               <SelectTrigger id="window">
                 <SelectValue />
               </SelectTrigger>
@@ -565,8 +585,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <Input
               id="webhook"
               placeholder="https://hooks.slack.com/services/..."
-              value={webhookUrl}
-              onChange={e => setWebhookUrl(e.target.value)}
+              {...register('webhookUrl')}
             />
             <p className="text-[10px] text-muted-foreground italic">
               Legacy fallback endpoint. We recommend using the dedicated notification channels configured above.
@@ -590,8 +609,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
         <Button type="button" variant="outline" onClick={onSuccess}>Cancel</Button>
         <Button
           type="submit"
-          disabled={isSaving || formInvalid}
-          title={formInvalid ? 'Fill in Name and Threshold to enable submit.' : undefined}
+          disabled={isSaving || !isValid}
+          title={!isValid ? 'Fill in Name and Threshold to enable submit.' : undefined}
         >
           {isSaving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
           {initialAlert ? 'Save Changes' : 'Create Alert'}
