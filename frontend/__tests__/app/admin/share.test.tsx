@@ -20,6 +20,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../../helpers/query'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
+import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
 import { server } from '../../../tests/msw/server'
 import { getApiBase } from '@/lib/api'
@@ -124,6 +125,7 @@ describe('admin/share page', () => {
       <QueryClientProvider client={client}>
         <ShareDashboardPage />
       </QueryClientProvider>,
+      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
     )
 
     await waitFor(() => {
@@ -174,6 +176,7 @@ describe('admin/share page', () => {
       <QueryClientProvider client={client}>
         <ShareDashboardPage />
       </QueryClientProvider>,
+      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
     )
 
     await waitFor(() => {
@@ -207,6 +210,7 @@ describe('admin/share page', () => {
       <QueryClientProvider client={client}>
         <ShareDashboardPage />
       </QueryClientProvider>,
+      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
     )
 
     await waitFor(() => {
@@ -232,10 +236,45 @@ describe('admin/share page', () => {
       <QueryClientProvider client={client}>
         <ShareDashboardPage />
       </QueryClientProvider>,
+      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
     )
 
     await waitFor(() => {
       expect(screen.getByTestId('admin-share-status-error')).toBeTruthy()
     })
+  })
+
+  test('an unknown ?tab= falls back to invites; tab clicks write and clear ?tab= (replace)', async () => {
+    mockSearchParamsString = 'tab=bogus'
+    const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
+
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => HttpResponse.json(buildMockShareStatus())),
+      http.get(`${API_BASE}/api/admin/share/live`, () => HttpResponse.json({})),
+    )
+
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ShareDashboardPage />
+      </QueryClientProvider>,
+      {
+        wrapper: withNuqsTestingAdapter({
+          searchParams: mockSearchParamsString,
+          hasMemory: true,
+          onUrlUpdate,
+          resetUrlUpdateQueueOnMount: false,
+        }),
+      },
+    )
+
+    await waitFor(() => expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy())
+    expect(screen.getByTestId('admin-share-tab-invites').getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.click(screen.getByTestId('admin-share-tab-sessions'))
+    await waitFor(() => expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.get('tab')).toBe('sessions'))
+    expect(onUrlUpdate.mock.calls.at(-1)?.[0].options.history).toBe('replace')
+
+    fireEvent.click(screen.getByTestId('admin-share-tab-invites'))
+    await waitFor(() => expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.has('tab')).toBe(false))
   })
 })

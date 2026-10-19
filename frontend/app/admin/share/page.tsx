@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, RefreshCw, ShieldAlert } from 'lucide-react'
 import dynamic from 'next/dynamic'
 import { useSearchParams } from 'next/navigation'
+import { parseAsStringLiteral, useQueryState } from 'nuqs'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
@@ -22,7 +23,14 @@ import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import Loading from './loading'
 
-const VALID_SHARE_TABS = new Set(['invites', 'sessions', 'audit'])
+const SHARE_TABS = ['invites', 'sessions', 'audit'] as const
+type ShareTab = (typeof SHARE_TABS)[number]
+const VALID_SHARE_TABS: ReadonlySet<string> = new Set(SHARE_TABS)
+
+// `?tab=` is the shareable deep-link; the default tab is omitted from the URL.
+const shareTabParser = parseAsStringLiteral(SHARE_TABS)
+  .withDefault('invites')
+  .withOptions({ clearOnDefault: true, history: 'replace', shallow: true })
 
 // InvitationsPanel is the default tab on cold load — static-importing it
 // keeps the initial paint off the dynamic-chunk fetch path.
@@ -68,38 +76,25 @@ type ShareLiveFields = Partial<
   >
 >
 
-function normalizeShareTab(raw: string | null | undefined): string {
-  return raw && VALID_SHARE_TABS.has(raw) ? raw : 'invites'
+function normalizeShareTab(raw: string | null | undefined): ShareTab {
+  return raw && VALID_SHARE_TABS.has(raw) ? (raw as ShareTab) : 'invites'
 }
 
 function ShareDashboardPageContent() {
   const queryClient = useQueryClient()
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
-  const tabParam = searchParams?.get('tab')
 
   const [actionError, setActionError] = React.useState('')
-  const [activeTab, setActiveTab] = React.useState(() => normalizeShareTab(tabParam))
+  const [activeTab, setActiveTab] = useQueryState('tab', shareTabParser)
   const [auditEmailFilter, setAuditEmailFilter] = React.useState('')
 
-  React.useEffect(() => {
-    const normalized = normalizeShareTab(tabParam)
-    setActiveTab((prev) => (prev === normalized ? prev : normalized))
-  }, [tabParam])
-
-  const handleTabChange = React.useCallback((nextTab: string) => {
-    const normalized = normalizeShareTab(nextTab)
-    setActiveTab(normalized)
-    if (typeof window !== 'undefined') {
-      const url = new URL(window.location.href)
-      if (normalized === 'invites') {
-        url.searchParams.delete('tab')
-      } else {
-        url.searchParams.set('tab', normalized)
-      }
-      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
-    }
-  }, [])
+  const handleTabChange = React.useCallback(
+    (nextTab: string) => {
+      void setActiveTab(normalizeShareTab(nextTab))
+    },
+    [setActiveTab],
+  )
 
   // /status carries the full mount-time payload — services, invites,
   // sessions, audit logs (~11 KB). Mutations refetch this. No
