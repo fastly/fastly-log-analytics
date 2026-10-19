@@ -5,6 +5,7 @@ import * as React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { denseTimeGrid } from '@/lib/chart-helpers'
+import { denseBarTrace } from '@/lib/chart-builders'
 import type { PlotlyTrace } from '@/types/plotly'
 
 interface HourlyRow {
@@ -65,19 +66,17 @@ export function StackedHourlyBarChart<R extends HourlyRow>({
     const cats =
       categoryOrder ??
       Array.from(new Set(rows.map((r) => String(r[categoryKey]))))
-    return cats.map((cat) => {
-      const byMs = new Map<number, number>()
-      for (const r of rows) {
-        if (String(r[categoryKey]) === cat) byMs.set(Date.parse(r.hour), r.count)
-      }
-      return {
-        type: 'bar' as const,
+    return cats.map((cat) =>
+      denseBarTrace({
         name: cat,
-        x: xGrid,
-        y: xGrid.map((h) => byMs.get(Date.parse(h)) ?? 0),
-        marker: { color: colors[cat] ?? '#64748b' },
-      }
-    })
+        rows: rows.filter((r) => String(r[categoryKey]) === cat),
+        getTime: (r) => r.hour,
+        getValue: (r) => r.count,
+        intervalSeconds: 3600,
+        color: colors[cat] ?? '#64748b',
+        grid: xGrid,
+      }),
+    )
   }, [rows, categoryKey, colors, categoryOrder])
 
   return (
