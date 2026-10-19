@@ -43,6 +43,7 @@ const ROUTES = [
   '/network',
   '/origin',
   '/performance',
+  '/rum',
   '/usage',
   '/alerts',
   '/logs',

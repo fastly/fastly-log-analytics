@@ -1,11 +1,13 @@
 'use client';
 
 import { Radio, BookOpen, Copy, Check } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { ReportLayout } from '@/components/ReportLayout';
 import { RumClient } from './RumClient';
 import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
+import { useFilterStore } from '@/stores/filterStore';
+import { quantizeAnchor } from '@/lib/time-window';
 import {
   Dialog,
   DialogContent,
@@ -37,6 +39,10 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
   const [activeServiceId, setActiveServiceId] = useState<string | null>(initialServiceId || null);
   const { copied, copy } = useCopyToClipboard(2000);
   const isAnalyst = useIsAnalyst();
+  const relativeRange = useFilterStore((s) => s.relativeRange);
+  const isAutoRange = useFilterStore((s) => s.isAutoRange);
+  const storeEndTime = useFilterStore((s) => s.endTime);
+  const anchor = useMemo(() => quantizeAnchor(storeEndTime), [storeEndTime]);
 
   const scriptTag = '<script src="/js/rum.js"></script>';
 
@@ -73,6 +79,9 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
                 startTime={startTime}
                 endTime={endTime}
                 filterPayload={filterPayload}
+                relativeRange={relativeRange}
+                isAutoRange={isAutoRange}
+                anchor={anchor}
               />
             </>
           );

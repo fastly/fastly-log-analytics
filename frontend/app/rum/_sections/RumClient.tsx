@@ -3,6 +3,7 @@
 
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 
@@ -17,6 +18,7 @@ import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
 import type { WithRequired, components } from '@/types/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
+import type { RangeWireArgs } from '@/lib/range-wire';
 import {
   Dialog,
   DialogContent,
@@ -32,7 +34,7 @@ import { useRumStatus } from '@/hooks/useRumStatus';
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 import { formatCount } from '@/lib/format'
-interface RumClientProps {
+interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   serviceId: string | null;
   startTime: string | null;
   endTime: string | null;
@@ -178,7 +180,15 @@ function getInpColors(p75: number | null | undefined): CwvColors {
   }
 }
 
-export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
+export function RumClient({
+  serviceId,
+  startTime,
+  endTime,
+  filterPayload,
+  relativeRange,
+  isAutoRange,
+  anchor,
+}: RumClientProps) {
   const timezone = useTimezone();
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
 
@@ -340,13 +350,17 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId);
 
   // Fetch analytics
-  const { data: analytics, isLoading } = useQuery({
-    queryKey: ['rum-analytics', serviceId, startTime, endTime, filterPayload],
-    queryFn: async () => {
+  const { data: analytics, isLoading } = useAnalyticsReportQuery<RumAnalytics | null>({
+    namespace: ['rum-analytics'],
+    serviceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    queryFn: async ({ rangeBody }) => {
       if (!serviceId) return null;
       const params = new URLSearchParams();
-      if (startTime) params.append('start_time', startTime);
-      if (endTime) params.append('end_time', endTime);
+      for (const [k, v] of Object.entries(rangeBody)) {
+        if (v) params.append(k, v);
+      }
       if (filterPayload && Object.keys(filterPayload).length > 0) {
         params.append('filters', JSON.stringify(filterPayload));
       }
@@ -358,8 +372,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       );
       return res.ok ? recordOrNull(res.data) : null;
     },
-    enabled: !!serviceId && !!status?.enabled,
-    refetchInterval: false,
+    queryOptions: { enabled: !!serviceId && !!status?.enabled, refetchInterval: false },
   });
 
   const formattedTimestamps = React.useMemo(() => {

@@ -196,3 +196,36 @@ describe('RumClient — worst pages table', () => {
     expect(screen.getByText('/home')).toBeInTheDocument()
   })
 })
+
+describe('RumClient — range wire', () => {
+  it('sends range_token+anchor on the default window and keys the query [rum-analytics, svc, token, anchor, filters]', async () => {
+    useServiceStore.setState({
+      activeServiceId: SVC,
+      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+      isInitialized: true,
+    })
+    mockRumEndpoints()
+    let seen: URLSearchParams | null = null
+    server.use(
+      http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+        seen = new URL(request.url).searchParams
+        return HttpResponse.json(analytics())
+      }),
+    )
+
+    const qc = createTestQueryClient()
+    render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
+    expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+
+    const params = seen as URLSearchParams | null
+    expect(params?.get('range_token')).toBe('24h')
+    expect(params?.get('anchor')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$/)
+
+    const key = qc
+      .getQueryCache()
+      .getAll()
+      .map((q) => q.queryKey as unknown[])
+      .find((k) => k[0] === 'rum-analytics')
+    expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
+  })
+})
