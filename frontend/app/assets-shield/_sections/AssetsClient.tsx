@@ -3,10 +3,9 @@
 import React from 'react'
 import Link from 'next/link'
 import { client } from '@/lib/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useFilterStore } from '@/stores/filterStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText, Loader2 } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
@@ -36,10 +35,12 @@ export function AssetsReportContent({
   isAutoRange,
   anchor,
 }: AssetsReportContentProps) {
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const bundle = useServiceQuery<AssetsAggregates | undefined>(
-    ['assets', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
-    async ({ signal }) => {
+  const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
+    namespace: ['assets', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    queryFn: async ({ rangeBody, signal }) => {
       const { data } = await client.POST('/api/assets/aggregates', {
         signal,
         body: {
@@ -49,7 +50,7 @@ export function AssetsReportContent({
       })
       return data
     },
-  )
+  })
 
   const isLoading = bundle.isLoading
   const isFetching = bundle.isFetching

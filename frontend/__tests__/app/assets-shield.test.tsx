@@ -258,3 +258,36 @@ test('assets-shield refetches when only the custom range start changes', async (
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2))
   expect(mockPost.mock.calls[1][1].body.start_time).toBe('2026-08-19T11:00:00Z')
 })
+
+test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', async () => {
+  const { resolveRangeWire } = await import('@/lib/range-wire')
+  const { quantizeAnchor } = await import('@/lib/time-window')
+  const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
+  const { rangeKey } = resolveRangeWire({
+    relativeRange: null,
+    isAutoRange: false,
+    startTime: '2026-08-19T12:00:00Z',
+    endTime: '2026-08-19T13:00:00Z',
+    anchor,
+  })
+  const seedClient = createTestQueryClient({ queries: { staleTime: 60_000 } })
+  seedClient.setQueryData(['assets', 'aggregates', 'test-service-id', rangeKey, anchor, {}], MOCK_ASSETS_DATA)
+  mockPost.mockReturnValue(new Promise(() => {}))
+
+  render(
+    <QueryClientProvider client={seedClient}>
+      <AssetsReportContent
+        startTime="2026-08-19T12:00:00Z"
+        endTime="2026-08-19T13:00:00Z"
+        activeServiceId="test-service-id"
+        filterPayload={{}}
+        relativeRange={null}
+        isAutoRange={false}
+        anchor={anchor}
+      />
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
+  expect(mockPost).not.toHaveBeenCalled()
+})
