@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from backend.repositories.top_n_rollups import fold_rows, live_topn_fields, truncate_top_n
+from backend.repositories.top_n_rollups import (
+    TopNPaths,
+    build_rolled_sql,
+    fold_rows,
+    live_topn_fields,
+    qualify_limit_expr,
+    truncate_top_n,
+)
 
 SKIP = frozenset({"rid", "ttfb"})
 
@@ -60,3 +67,45 @@ class TestTruncateTopN:
     def test_ties_keep_insertion_order_when_not_truncated(self) -> None:
         rows, _ = truncate_top_n({"a": {"x": 1, "y": 1}}, ["a"], 5, None)
         assert [r[1] for r in rows] == ["x", "y"]
+
+
+class TestQualifyLimitExpr:
+    def test_plain_limit(self) -> None:
+        assert qualify_limit_expr(["a", "b"], 10, None) == "10"
+
+    def test_case_only_for_requested_fields(self) -> None:
+        got = qualify_limit_expr(["a", "b"], 10, {"a": 500, "ghost": 9})
+        assert got == "CASE field WHEN 'a' THEN 500 ELSE 10 END"
+
+    def test_overrides_for_unread_fields_collapse_to_plain_limit(self) -> None:
+        assert qualify_limit_expr(["a"], 3, {"ghost": 9}) == "3"
+
+    def test_quote_in_field_is_doubled(self) -> None:
+        assert "WHEN 'o''k' THEN 5" in qualify_limit_expr(["o'k"], 1, {"o'k": 5})
+
+
+class TestBuildRolledSql:
+    def test_nothing_to_read(self) -> None:
+        assert build_rolled_sql(TopNPaths(), ["a"], 10, None) is None
+        assert not TopNPaths()
+
+    def test_each_source_shape_is_its_own_branch_in_order(self) -> None:
+        paths = TopNPaths(["/d.parquet"], ["/h.parquet"], ["/bh.parquet"], ["/bd.parquet"])
+        sql = build_rolled_sql(paths, ["a", "b"], 10, None)
+        assert sql is not None
+        assert sql.count(" UNION ALL ") == 3
+        order = [sql.index(p) for p in ("/d.parquet", "/h.parquet", "/bh.parquet", "/bd.parquet")]
+        assert order == sorted(order)
+        assert sql.count("hive_partitioning=1") == 2
+        assert sql.count("hive_partitioning=0") == 2
+
+    def test_only_bundles_are_field_filtered(self) -> None:
+        sql = build_rolled_sql(TopNPaths(["/d.parquet"], [], ["/bh.parquet"], []), ["a", "o'k"], 10, None)
+        assert sql is not None
+        assert sql.count("WHERE field IN ('a', 'o''k')") == 1
+        assert sql.index("WHERE field IN") > sql.index("/bh.parquet")
+
+    def test_qualify_uses_per_field_case(self) -> None:
+        sql = build_rolled_sql(TopNPaths(["/d.parquet"]), ["a", "b"], 10, {"a": 50})
+        assert sql is not None
+        assert sql.endswith("<= CASE field WHEN 'a' THEN 50 ELSE 10 END")

@@ -34,6 +34,8 @@ from backend.repositories.rollup_coverage import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+from backend.repositories.top_n_rollups import TopNPaths as _TopNPaths
+from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
 from backend.repositories.top_n_rollups import fold_rows as _fold_rows
 from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
 from backend.repositories.top_n_rollups import truncate_top_n as _truncate_top_n
@@ -1662,87 +1664,16 @@ class QueryRunner:
         _phase("dir_enum:n_bundled_day_files", float(len(bundled_day_paths)))
 
         _t_rolled = time.perf_counter()
-        if not day_paths and not hour_paths and not bundled_hour_paths and not bundled_day_paths:
-            rolled_res: list = []
-        else:
-            # Inline each path list as its OWN read_parquet call and
-            # UNION ALL the results so SUM(count) aggregates across
-            # both sources. ``CAST(count AS BIGINT)`` normalises the
-            # type — per-hour files store count as BIGINT but the
-            # compaction COPY writes DOUBLE (DuckDB SUM(BIGINT) →
-            # DOUBLE in some configurations); UNION ALL requires
-            # matching types per column.
-            branches = []
-            # Bundled files carry EVERY field's rows (the bundler folds the
-            # whole per-field tree into one parquet), while the per-field
-            # branches below are already field-scoped by the directory
-            # enumeration above. Without this IN-list a single-field caller
-            # (e.g. the security UA-rollup read) pays the GROUP BY + window
-            # sort over every field in the bundle — 217ms of the 2026-07-06
-            # trace vs the one field it consumed. The filter can't prune
-            # bundle IO (rows aren't sorted by field) but it collapses the
-            # aggregation hash table and the QUALIFY partitions to just the
-            # requested fields. safe_fields is _is_safe_ident-validated;
-            # quotes escaped anyway (defense-in-depth, see the note above).
-            field_in_list = ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields)
-            if day_paths:
-                paths_sql = quote_path_list(day_paths)
-                branches.append(
-                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=1)"
-                )
-            if hour_paths:
-                paths_sql = quote_path_list(hour_paths)
-                branches.append(
-                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=1)"
-                )
-            if bundled_hour_paths:
-                # Bundled parquets have `field` as a column already (the
-                # bundler SELECTs it from the per-field source files).
-                # hive_partitioning=0 because the only hive segment here
-                # is `hour=...` which we don't need for the projection.
-                paths_sql = quote_path_list(bundled_hour_paths)
-                branches.append(
-                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
-                    f"WHERE field IN ({field_in_list})"
-                )
-            if bundled_day_paths:
-                # Same shape as bundled_hour (field/value/count as
-                # columns, no hive partitioning on the projection).
-                paths_sql = quote_path_list(bundled_day_paths)
-                branches.append(
-                    f"SELECT field, value, CAST(count AS BIGINT) AS count "
-                    f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
-                    f"WHERE field IN ({field_in_list})"
-                )
-            # Per-field QUALIFY cutoff: a CASE keyed on `field` so a caller's
-            # per_field_limits override (e.g. {"country": 500} for the
-            # choropleth) only widens the ONE field it targets. Collapsing
-            # to a single max(limit, *per_field_limits.values()) applied to
-            # every branch — the prior behavior — made every other field's
-            # QUALIFY <= 500 too, tripling this query's cost for no reason
-            # (2026-08-03 perf investigation: 19KB SQL, 3.4s, QUALIFY <= 500
-            # on ~20 fields that should have stayed at the default top-10).
-            # Field names are drawn from safe_fields (_is_safe_ident-
-            # validated above); quotes escaped anyway, defense-in-depth.
-            _pfl_rolled = {f: v for f, v in (per_field_limits or {}).items() if f in safe_fields}
-            if _pfl_rolled:
-                _case_whens = " ".join(
-                    f"WHEN '{f.replace(chr(39), chr(39) * 2)}' THEN {int(v)}" for f, v in _pfl_rolled.items()
-                )
-                _qualify_limit_expr = f"CASE field {_case_whens} ELSE {int(limit)} END"
-            else:
-                _qualify_limit_expr = str(int(limit))
-            q = (
-                "SELECT field, value, SUM(count) AS c FROM ("
-                + " UNION ALL ".join(branches)
-                + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER "
-                f"(PARTITION BY field ORDER BY c DESC) <= {_qualify_limit_expr}"
-            )
+        rolled_q = _build_rolled_sql(
+            _TopNPaths(day_paths, hour_paths, bundled_hour_paths, bundled_day_paths),
+            safe_fields,
+            limit,
+            per_field_limits,
+        )
+        rolled_res: list = []
+        if rolled_q is not None:
             try:
-                rolled_res = self.execute(q).fetchall()
+                rolled_res = self.execute(rolled_q).fetchall()
             except Exception:
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
