@@ -22,6 +22,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { DataTable } from '@/components/DataTable/DataTable'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import type { ColumnDef } from '@tanstack/react-table'
 
 vi.mock('@tanstack/react-virtual', () => {
@@ -172,5 +173,23 @@ describe('DataTable', () => {
     expect(screen.getByText('ID')).toBeTruthy()
     expect(screen.getByText('Name')).toBeTruthy()
     expect(screen.getByText('Status')).toBeTruthy()
+  })
+})
+
+describe('showPagination={false}', () => {
+  const MANY: Row[] = Array.from({ length: 120 }, (_, i) => ({ id: i, name: `row-${i}`, status: 200 }))
+
+  it.each([
+    ['DataTable', DataTable],
+    ['DataTableReadonly', DataTableReadonly],
+  ] as const)('%s hands every row to the virtualizer instead of truncating at 50', (_n, Table) => {
+    render(<Table columns={COLUMNS} data={MANY} hideToolbar showPagination={false} />)
+    expect(screen.getByText('row-119')).toBeTruthy()
+  })
+
+  it('still pages at 50 when the pager is shown', () => {
+    render(<DataTableReadonly columns={COLUMNS} data={MANY} hideToolbar />)
+    expect(screen.queryByText('row-119')).toBeNull()
+    expect(screen.getByText('row-49')).toBeTruthy()
   })
 })

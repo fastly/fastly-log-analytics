@@ -236,7 +236,9 @@ function DataTableImpl<TData, TValue>({
     onPaginationChange: setPagination,
     onColumnOrderChange: setColumnOrder,
     getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
+    // No pager UI => no page slicing; the row virtualizer windows all rows
+    // (otherwise showPagination={false} silently drops rows past 50).
+    getPaginationRowModel: showPagination ? getPaginationRowModel() : undefined,
     getSortedRowModel: isSortingControlled ? undefined : getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
