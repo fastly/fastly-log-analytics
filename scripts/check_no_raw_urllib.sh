@@ -4,7 +4,8 @@
 # All Fastly API traffic must go through backend/core/fastly/client.py (the
 # central `fastly()` wrapper: pinned host + Fastly-Key auth + retries +
 # telemetry); other external fetches go through backend/utils/http.py
-# (`http_get_text`). A hand-rolled `urllib.request` / `urlopen` bypasses both,
+# (`http_get_text`); shared httpx clients (RT poller, RUM FOS assets, OAuth
+# discovery) come from `make_client` there too. A hand-rolled `urllib.request` / `urlopen` bypasses both,
 # losing auth threading, retries, telemetry, and the single choke point — which
 # is exactly how NGWAF + bot-source fetches drifted off the client (finding
 # B12). This is a baseline ratchet: the allowlist below is the set of

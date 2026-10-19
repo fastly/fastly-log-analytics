@@ -64,7 +64,7 @@ def mock_fos(monkeypatch):
     """Return a callable that installs a MockTransport-backed httpx.Client."""
 
     def install(handler):
-        monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+        monkeypatch.setattr(httpx, "Client", _mock_client_factory(handler))
 
     return install
 
@@ -574,7 +574,7 @@ def test_upload_rum_tracker_js_skips_publish_when_no_faro_version_pinned(monkeyp
             put_calls.append(str(request.url))
         raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
 
-    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+    monkeypatch.setattr(httpx, "Client", _mock_client_factory(handler))
 
     result = upload_rum_tracker_js("svc_test", "tok")
 
@@ -599,7 +599,7 @@ def test_upload_rum_tracker_js_skips_publish_when_pinned_but_bundle_missing(monk
             return httpx.Response(404)
         raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
 
-    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+    monkeypatch.setattr(httpx, "Client", _mock_client_factory(handler))
 
     result = upload_rum_tracker_js("svc_test", "tok")
 
@@ -630,7 +630,7 @@ def test_upload_rum_tracker_js_publishes_when_pinned_and_bundle_present(monkeypa
             return httpx.Response(200)
         raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
 
-    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+    monkeypatch.setattr(httpx, "Client", _mock_client_factory(handler))
 
     result = upload_rum_tracker_js("svc_test", "tok")
 

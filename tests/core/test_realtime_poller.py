@@ -338,10 +338,12 @@ async def test_poller_starts_and_suspends(monkeypatch):
     p = poller_mod.RealtimePoller()
     p.ensure_polling("test-svc")
 
-    await asyncio.sleep(0.3)
-
     state = p._services.get("test-svc")
     assert state is not None
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if state.thread is None or not state.thread.is_alive():
+            break
     assert state.thread is None or not state.thread.is_alive()
     assert fetch_count >= 1
 

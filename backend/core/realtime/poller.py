@@ -7,7 +7,7 @@ on the next ``ensure_polling()`` call.
 
 The poller runs in a dedicated daemon thread per service — not on the
 FastAPI event loop — so DuckDB queries and cron work cannot starve the
-1-second cadence. ``requests.Session`` provides HTTP keep-alive so each
+1-second cadence. A pooled ``httpx.Client`` (``utils.http.make_client``) provides HTTP keep-alive so each
 poll reuses the TLS connection (~100ms vs ~800ms per request).
 """
 
@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-import requests as req_lib
+import httpx
 
 from backend.core.realtime.publisher import publisher
 from backend.core.realtime.transform import (
@@ -29,6 +29,7 @@ from backend.core.realtime.transform import (
     transform_single_second,
 )
 from backend.core.retry import retry_call
+from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,9 @@ def _retry_sleep(seconds: float) -> None:
 
 
 def _is_retryable_fetch_error(exc: BaseException) -> bool:
-    if isinstance(exc, req_lib.HTTPError):
-        resp = exc.response
-        return resp is not None and resp.status_code in _RETRYABLE_STATUS
-    return isinstance(exc, req_lib.ConnectionError | req_lib.Timeout)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS
+    return isinstance(exc, httpx.TransportError)
 
 
 @dataclass
@@ -91,8 +91,7 @@ class RealtimePoller:
 
     def _poll_loop(self, service_id: str, state: _ServiceState) -> None:
         idle_cycles = 0
-        session = req_lib.Session()
-        session.headers["Fastly-Key"] = ""
+        session = make_client()
 
         # Setup redis for leader election if valkey is active
         redis_client = None
@@ -190,7 +189,7 @@ class RealtimePoller:
             if redis_client:
                 redis_client.close()
 
-    def _fetch_realtime(self, session: req_lib.Session, service_id: str, cursor: int) -> dict | None:
+    def _fetch_realtime(self, session: httpx.Client, service_id: str, cursor: int) -> dict | None:
         from backend import config
 
         api_key = config.get_fastly_api_key(service_id)
@@ -203,20 +202,18 @@ class RealtimePoller:
         else:
             path = f"/v1/channel/{fastly_service_id}/ts/{cursor}"
 
-        session.headers["Fastly-Key"] = api_key
         url = RT_BASE + path
+        headers = {"Fastly-Key": api_key}
         is_longpoll = cursor != 0
-        timeout: float | tuple[float, float] = (3, LONGPOLL_READ_TIMEOUT) if is_longpoll else 10
+        timeout = httpx.Timeout(10.0, connect=3.0, read=LONGPOLL_READ_TIMEOUT) if is_longpoll else httpx.Timeout(10.0)
 
         def _attempt() -> dict:
             try:
-                resp = session.get(url, timeout=timeout)
-            except req_lib.ReadTimeout:
+                resp = session.get(url, headers=headers, timeout=timeout)
+            except httpx.ReadTimeout:
                 if is_longpoll:
                     raise _LongPollTimeout from None
                 raise
-            if resp.status_code in _RETRYABLE_STATUS:
-                raise req_lib.HTTPError(response=resp)
             resp.raise_for_status()
             return resp.json()
 

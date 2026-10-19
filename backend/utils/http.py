@@ -10,6 +10,8 @@ app modules don't hand-roll a low-level stdlib HTTP client (banned by
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 _DEFAULT_UA = "fastly-log-analysis/1.0"
@@ -30,3 +32,26 @@ def http_get_text(url: str, *, headers: dict[str, str] | None = None, timeout: f
     resp = httpx.get(url, headers=hdrs, timeout=timeout, follow_redirects=True)
     resp.raise_for_status()
     return resp.content.decode()
+
+
+def make_client(
+    timeout: float | httpx.Timeout | None = 5.0,
+    *,
+    verify: Any = None,
+    transport: httpx.BaseTransport | None = None,
+    **kwargs: Any,
+) -> httpx.Client:
+    """Build the shared sync ``httpx.Client`` used by outbound HTTP call sites.
+
+    One construction point so TLS verification (httpx's default certifi bundle
+    unless ``verify`` overrides it) and the default timeout (httpx's 5 s, matching
+    the pre-factory call sites) are uniform.
+    ``transport`` is the injectable test seam. Callers own the lifecycle
+    (use as a context manager). Never put credentials in the client defaults
+    that would be logged; pass auth headers per request or via ``headers=``.
+    """
+    if verify is not None:
+        kwargs["verify"] = verify
+    if transport is not None:
+        kwargs["transport"] = transport
+    return httpx.Client(timeout=timeout, **kwargs)

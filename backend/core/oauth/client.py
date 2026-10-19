@@ -44,6 +44,7 @@ from joserfc.jwk import KeySet
 
 from backend.core.oauth.registry import OAuthProvider
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def _lock_for(key: str) -> threading.Lock:
 
 
 def _http_client() -> httpx.Client:
-    return httpx.Client(timeout=httpx.Timeout(_TIMEOUT_S), transport=_test_transport)
+    return make_client(httpx.Timeout(_TIMEOUT_S), transport=_test_transport)
 
 
 def _fetch_json(url: str) -> dict:

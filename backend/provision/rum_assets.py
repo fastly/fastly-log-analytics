@@ -8,13 +8,11 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote
 
-import certifi
-import httpx
-
 from backend import config as svcconfig
 from backend.core.faro_versions import fetch_faro_bundle
 from backend.core.fastly.utils import region_endpoint
 from backend.utils.fos_signing import sign_fos_request
+from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +92,7 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
             secret_access_key=secret_key,
             region=region,
         )
-        with httpx.Client(verify=certifi.where()) as client:
+        with make_client() as client:
             response = client.head(fos_url, headers=headers, timeout=10.0)
         if response.status_code != 200:
             return False
@@ -533,7 +531,7 @@ def upload_rum_tracker_js(
     if bucket != "mock_bucket":
         try:
             # Check if file already exists and is up to date via HEAD request
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 head_headers = sign_fos_request(
                     method="HEAD",
                     url=fos_url,
@@ -593,7 +591,7 @@ def upload_rum_tracker_js(
             )
 
             # Upload to FOS
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 response = client.put(
                     fos_url,
                     content=js_bytes,
@@ -667,7 +665,7 @@ def delete_rum_tracker_js(
             region=region,
         )
 
-        with httpx.Client(verify=certifi.where()) as client:
+        with make_client() as client:
             response = client.delete(
                 fos_url,
                 headers=signed_headers,
@@ -799,7 +797,7 @@ async def download_and_upload_faro(
                 region=region,
             )
 
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 response = client.put(
                     fos_url,
                     content=bundle,
@@ -919,7 +917,7 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
         fos_host = region_endpoint(region)
         list_url = f"https://{fos_host}/{bucket}?list-type=2&prefix={quote(FARO_KEY_PREFIX, safe='')}"
 
-        with httpx.Client(verify=certifi.where()) as client:
+        with make_client() as client:
             list_headers = sign_fos_request(
                 method="GET",
                 url=list_url,
