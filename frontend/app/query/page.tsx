@@ -1,12 +1,13 @@
 'use client'
 
 import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallback } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
 import type { ColumnDef, SortingState } from '@tanstack/react-table'
 import { client } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
+import { queryPageUrlParsers } from './_url-state'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
@@ -55,12 +56,9 @@ const HISTORY_KEY = 'fastly_qe_history'
  * (``?start_time`` + ``?end_time`` and/or ``?filters=<json>``) into the filter store.
  * Returns whether anything was applied — a deep-link landing is an explicit intent to run.
  */
-function applyDeepLinkToFilterStore(): boolean {
+function applyDeepLinkToFilterStore(qsStart: string | null, qsEnd: string | null, qsFilters: string | null): boolean {
+  // Never touch the (module-level, cross-request) store during SSR.
   if (typeof window === 'undefined') return false
-  const params = new URLSearchParams(window.location.search)
-  const qsStart = params.get('start_time')
-  const qsEnd = params.get('end_time')
-  const qsFilters = params.get('filters')
   const { setRange, clearFilters, addFilter } = useFilterStore.getState()
 
   let mutated = false
@@ -100,8 +98,7 @@ function parseHistory(raw: string | null): { sql: string; ts: number }[] {
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
+  const [urlParams, setUrlParams] = useQueryStates(queryPageUrlParsers, { history: 'replace', shallow: true })
   // Read via the bootstrap-aware fallback so a cold load (empty
   // localStorage) doesn't flash NoServiceSelected before useBootstrap
   // populates the persisted store.
@@ -112,16 +109,17 @@ function QueryPageInner() {
 
   // Mode comes from ?mode=raw (or ?q=...); defaults to structured. AppLayout's
   // RawQueryModeProbe reads the same param to toggle the global FilterBar.
-  const urlQueryParam = searchParams.get('q')
-  const urlMode: QueryMode =
-    searchParams.get('mode') === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
+  const urlQueryParam = urlParams.q
+  const urlMode: QueryMode = urlParams.mode === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
   // Local mode follows the URL when it changes underneath us (e.g. back/forward).
   const [mode, setMode] = useDerivedState<QueryMode>(urlMode)
 
   // One-shot deep-link hydration, applied BEFORE this component reads the filter store below
   // (a lazy initializer, like QueryProvider's URL hydration). A deep-link landing marks the
   // first run as wanted.
-  const [deepLinked] = useState(applyDeepLinkToFilterStore)
+  const [deepLinked] = useState(() =>
+    applyDeepLinkToFilterStore(urlParams.start_time, urlParams.end_time, urlParams.filters),
+  )
 
   // Filter store drives Structured Mode. We pull primitives so we can compose
   // the generated SQL purely from filter-bar state.
@@ -381,19 +379,14 @@ function QueryPageInner() {
   // visibility (driven by ?mode=raw) stays in sync without a hard reload.
   const handleModeChange = useCallback((next: QueryMode) => {
     setMode(next)
-    const params = new URLSearchParams(window.location.search)
     if (next === 'raw') {
-      params.set('mode', 'raw')
       // Seed the raw editor with whatever the structured view currently
       // resolves to, so toggling to "Edit Raw SQL" gives the user a usable
       // starting point rather than the stale placeholder.
       setRawSql(prev => (prev === 'SELECT * FROM logs LIMIT 100' ? structuredSql : prev))
-    } else {
-      params.delete('mode')
     }
-    const qs = params.toString()
-    router.replace(qs ? `/query?${qs}` : '/query')
-  }, [router, structuredSql, setMode])
+    void setUrlParams({ mode: next === 'raw' ? 'raw' : null })
+  }, [setUrlParams, structuredSql, setMode])
 
   const resultColumns = queryMutation.data?.columns
   const columns: ColumnDef<Record<string, unknown>>[] = useMemo(() => {

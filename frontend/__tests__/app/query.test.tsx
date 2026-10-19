@@ -11,6 +11,7 @@ import {
   hydrateFilterStoreFromUrl,
 } from '@/lib/urlFilterHydration'
 import React from 'react'
+import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
 type ApiStub = { data?: unknown; error?: unknown }
 const { mockGet, mockPost } = vi.hoisted(() => ({
@@ -66,6 +67,13 @@ vi.mock('@/lib/api', () => ({
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
+// nuqs needs an adapter; seed it from the jsdom URL so tests that
+// history.replaceState() a deep link before rendering keep working.
+const renderWithNuqs = (ui: React.ReactElement, onUrlUpdate?: OnUrlUpdateFunction) =>
+  render(ui, {
+    wrapper: withNuqsTestingAdapter({ searchParams: window.location.search, hasMemory: true, onUrlUpdate }),
+  })
+
 beforeEach(() => {
   vi.clearAllMocks()
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
@@ -100,7 +108,7 @@ test('renders query page and executes a query', async () => {
     }
   })
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>
@@ -155,7 +163,7 @@ test('/query keeps ?filters= in the URL after a filter mutation', async () => {
   expect(useFilterStore.getState().filters.map(f => [f.column, f.value, f.mode]))
     .toEqual([['status', '200', 'include']])
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -191,7 +199,7 @@ test('renders engine initializing skeleton when service is not yet initialized',
   useServiceStore.setState({ activeServiceId: null, isInitialized: false })
   mockGet.mockImplementation(() => new Promise<ApiStub>(() => {}))
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -217,7 +225,7 @@ test('enforces zero-CLS layout reservations and renders schema sidebar in Raw SQ
     return { data: { fields: [] } }
   })
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -249,7 +257,7 @@ test('displays user-friendly error alert when mutating SQL is rejected by AST va
     }),
   })
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -281,7 +289,7 @@ test('renders CSV export button and virtualized results table after query execut
     },
   })
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -300,7 +308,7 @@ test('hydrates Raw SQL mode when ?q= URL parameter is provided', async () => {
   mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
   window.history.replaceState({}, '', '/query?q=' + encodeURIComponent('SELECT count(*) FROM logs'))
 
-  render(
+  renderWithNuqs(
     <QueryClientProvider client={queryClient}>
       <QueryPage />
     </QueryClientProvider>,
@@ -308,4 +316,86 @@ test('hydrates Raw SQL mode when ?q= URL parameter is provided', async () => {
 
   const editor = await screen.findByTestId('mock-editor')
   expect((editor as HTMLTextAreaElement).value).toBe('SELECT count(*) FROM logs')
+})
+
+test('deep link ?mode=raw opens the Raw SQL editor', async () => {
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  window.history.replaceState({}, '', '/query?mode=raw')
+
+  renderWithNuqs(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByTestId('mock-editor')).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /edit raw sql/i })).toHaveAttribute('aria-selected', 'true')
+})
+
+test('an unrecognised ?mode= value stays in structured mode', async () => {
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  window.history.replaceState({}, '', '/query?mode=bogus')
+
+  renderWithNuqs(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByRole('tab', { name: /edit raw sql/i })).toHaveAttribute('aria-selected', 'false')
+  expect(screen.queryByTestId('mock-editor')).not.toBeInTheDocument()
+})
+
+test('switching modes writes and clears ?mode=raw while preserving other params', async () => {
+  const user = userEvent.setup()
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  window.history.replaceState({}, '', '/query?start_time=2026-01-01T00:00:00Z&end_time=2026-01-01T01:00:00Z')
+  const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
+
+  renderWithNuqs(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+    onUrlUpdate,
+  )
+
+  await user.click(await screen.findByRole('tab', { name: /edit raw sql/i }))
+  await waitFor(() => {
+    const last = onUrlUpdate.mock.calls.at(-1)?.[0]
+    expect(last?.searchParams.get('mode')).toBe('raw')
+    expect(last?.searchParams.get('start_time')).toBe('2026-01-01T00:00:00Z')
+    expect(last?.options.history).toBe('replace')
+  })
+
+  await user.click(screen.getByRole('tab', { name: /structured/i }))
+  await waitFor(() => {
+    const last = onUrlUpdate.mock.calls.at(-1)?.[0]
+    expect(last?.searchParams.has('mode')).toBe(false)
+    expect(last?.searchParams.get('end_time')).toBe('2026-01-01T01:00:00Z')
+  })
+})
+
+test('dashboard "See Raw Logs" deep link (?start_time&end_time&filters) hydrates the filter store', async () => {
+  mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
+  const filters = { status_2: { values: ['500', '503'], mode: 'exclude' } }
+  window.history.replaceState(
+    {},
+    '',
+    `/query?start_time=2026-02-01T00:00:00Z&end_time=2026-02-01T06:00:00Z&filters=${encodeURIComponent(JSON.stringify(filters))}`,
+  )
+
+  renderWithNuqs(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  await screen.findByText('Query Explorer')
+  const state = useFilterStore.getState()
+  expect(state.startTime).toBe('2026-02-01T00:00:00Z')
+  expect(state.endTime).toBe('2026-02-01T06:00:00Z')
+  expect(state.filters.map((f) => [f.column, f.value, f.mode])).toEqual([
+    ['status', '500', 'exclude'],
+    ['status', '503', 'exclude'],
+  ])
 })

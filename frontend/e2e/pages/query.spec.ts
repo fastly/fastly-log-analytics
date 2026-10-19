@@ -210,4 +210,17 @@ test.describe('SQL Query Pad Page Contract (/query)', () => {
     console.log(`[TELEMETRY /query] Captured ${queries.length} queries`)
     expect(queries.length).toBeGreaterThan(0)
   })
+
+  test('9. ?mode=raw deep link opens Raw SQL and the mode toggle round-trips through the URL', async ({ page }) => {
+    await page.goto('/query?mode=raw&start_time=2026-01-01T00:00:00Z&end_time=2026-01-02T00:00:00Z')
+    const rawTab = page.getByRole('tab', { name: /Edit Raw SQL/i })
+    await expect(rawTab).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 })
+
+    await page.getByRole('tab', { name: /Structured/i }).click()
+    await expect.poll(() => new URL(page.url()).searchParams.get('mode')).toBeNull()
+    expect(new URL(page.url()).searchParams.get('start_time')).toBe('2026-01-01T00:00:00Z')
+
+    await rawTab.click()
+    await expect.poll(() => new URL(page.url()).searchParams.get('mode')).toBe('raw')
+  })
 })
