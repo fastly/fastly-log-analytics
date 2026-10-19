@@ -1,11 +1,22 @@
 """Tests for RUM orchestration using declarative reconciliation."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend import config as svcconfig
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint, upgrade_faro_version
+
+
+def _seed(cfg: dict) -> None:
+    svcconfig.save_config(cfg["service_id"], dict(cfg))
+
+
+def _disk(service_id: str = "srv_test") -> dict:
+    return json.loads(svcconfig.config_path(service_id).read_text())
+
 
 _FOS_CFG = {
     "fos_bucket": "my-bucket",
@@ -115,46 +126,30 @@ class TestEnableRumRollbackOnBucketFailure:
         roll back and never reach reconcile.
         """
         service_id = "srv_test"
-        cfg = {
-            "service_id": service_id,
-            "rum_enabled": False,
-            "fos_bucket": "my-bucket",
-            "fos_region": "us-east-1",
-            "fos_access_key_id": "test_access_key",
-            "fos_secret_access_key": "test_secret_key",
-            "last_activated_version": 1,
-        }
+        _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
 
-        with patch("backend.config.load_config") as mock_load:
-            with patch("backend.config.save_config") as mock_save:
-                with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket") as mock_bucket:
-                    with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                        with patch(
-                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                            new_callable=AsyncMock,
-                            side_effect=RuntimeError("Faro bundle upload failed"),
-                        ):
-                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                                # Setup
-                                mock_load.return_value = cfg.copy()
-                                mock_bucket.return_value = True
-                                mock_reconcile.return_value = MagicMock(activated_version=2)
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload,
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("Faro bundle upload failed"),
+            ),
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile,
+        ):
+            mock_reconcile.return_value = MagicMock(activated_version=2)
 
-                                # Call and expect exception
-                                with pytest.raises(RuntimeError, match="Faro bundle upload failed"):
-                                    enable_rum(service_id, "test_token")
+            with pytest.raises(RuntimeError, match="Faro bundle upload failed"):
+                enable_rum(service_id, "test_token")
 
-                                # Verify config was rolled back
-                                assert mock_save.call_count == 2
-                                second_save_call = mock_save.call_args_list[1]
-                                saved_cfg = second_save_call[0][1]
-                                assert saved_cfg["rum_enabled"] is False
+            # Verify reconcile was NOT called, and the tracker JS was never
+            # uploaded (it only runs after a successful reconcile)
+            mock_reconcile.assert_not_called()
+            mock_upload.assert_not_called()
 
-                                # Verify reconcile was NOT called, and the
-                                # tracker JS was never uploaded (it only
-                                # runs after a successful reconcile)
-                                mock_reconcile.assert_not_called()
-                                mock_upload.assert_not_called()
+        saved = _disk(service_id)
+        assert saved["rum_enabled"] is False
+        assert "rum_vcl_sha" not in saved
 
     def test_enable_rum_tracker_upload_failure_after_reconcile_is_non_blocking(self):
         """Verify a tracker-JS upload failure AFTER a successful reconcile does
@@ -168,42 +163,30 @@ class TestEnableRumRollbackOnBucketFailure:
         reconcile/cron tick.
         """
         service_id = "srv_test"
-        cfg = {
-            "service_id": service_id,
-            "rum_enabled": False,
-            "fos_bucket": "my-bucket",
-            "fos_region": "us-east-1",
-            "fos_access_key_id": "test_access_key",
-            "fos_secret_access_key": "test_secret_key",
-            "last_activated_version": 1,
-        }
+        _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
 
-        with patch("backend.config.load_config") as mock_load:
-            with patch("backend.config.save_config") as mock_save:
-                with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
-                    with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                        with patch(
-                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                            new_callable=AsyncMock,
-                            return_value={"version": "2.9.0"},
-                        ):
-                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                                mock_load.return_value = cfg.copy()
-                                mock_upload.side_effect = RuntimeError("FOS unreachable")
-                                mock_reconcile.return_value = MagicMock(activated_version=2, draft_version=None)
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload,
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                new_callable=AsyncMock,
+                return_value={"version": "2.9.0"},
+            ),
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile,
+        ):
+            mock_upload.side_effect = RuntimeError("FOS unreachable")
+            mock_reconcile.return_value = MagicMock(activated_version=2, draft_version=None)
 
-                                # Must NOT raise.
-                                result = enable_rum(service_id, "test_token")
+            # Must NOT raise.
+            result = enable_rum(service_id, "test_token")
 
-                                mock_reconcile.assert_called_once()
-                                mock_upload.assert_called_once()
+            mock_reconcile.assert_called_once()
+            mock_upload.assert_called_once()
 
-                                # Config save count is exactly 1 (the initial
-                                # enable) — no rollback save was made.
-                                assert mock_save.call_count == 1
-
-                                assert result["activated"] is True
-                                assert result["logging_service_active_version"] == 2
+        # No rollback: config still says enabled.
+        assert _disk(service_id)["rum_enabled"] is True
+        assert result["activated"] is True
+        assert result["logging_service_active_version"] == 2
 
     def test_enable_rum_no_config_raises_error(self):
         """Verify RuntimeError is raised if service config not found."""
@@ -424,41 +407,31 @@ class TestDisableRumContinuesOnDeleteFailure:
     def test_disable_rum_continues_on_delete_failure(self):
         """Verify that if JS deletion fails, VCL reconciliation still proceeds."""
         service_id = "srv_test"
-        cfg = {
-            "service_id": service_id,
-            "rum_enabled": True,
-            "fos_bucket": "my-bucket",
-            "fos_region": "us-east-1",
-            "fos_access_key_id": "test_access_key",
-            "fos_secret_access_key": "test_secret_key",
-            "last_activated_version": 5,
-        }
+        _seed({"service_id": service_id, "rum_enabled": True, "last_activated_version": 5, **_FOS_CFG})
 
-        with patch("backend.config.load_config") as mock_load:
-            with patch("backend.config.save_config") as mock_save:
-                with patch("backend.provision.rum_assets.delete_rum_tracker_js") as mock_delete:
-                    with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                        # Setup: delete fails but reconcile still succeeds
-                        mock_load.return_value = cfg
-                        mock_delete.side_effect = RuntimeError("FOS bucket unreachable")
-                        mock_reconcile.return_value = MagicMock(activated_version=6)
+        with (
+            patch("backend.provision.rum_assets.delete_rum_tracker_js") as mock_delete,
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile,
+        ):
+            # Setup: delete fails but reconcile still succeeds
+            mock_delete.side_effect = RuntimeError("FOS bucket unreachable")
+            mock_reconcile.return_value = MagicMock(activated_version=6)
 
-                        # Call and expect NO exception (non-blocking)
-                        result = disable_rum(service_id, "test_token")
+            # Call and expect NO exception (non-blocking)
+            result = disable_rum(service_id, "test_token")
 
-                        # Verify delete was called (and failed)
-                        mock_delete.assert_called_once()
+            # Verify delete was called (and failed)
+            mock_delete.assert_called_once()
 
-                        # Verify reconcile was STILL called (non-blocking)
-                        mock_reconcile.assert_called_once()
+            # Verify reconcile was STILL called (non-blocking)
+            mock_reconcile.assert_called_once()
 
-                        # Verify result is valid (didn't rollback)
-                        assert result["logging_service_active_version"] == 6
-                        assert result["deactivated"] is True
+            # Verify result is valid (didn't rollback)
+            assert result["logging_service_active_version"] == 6
+            assert result["deactivated"] is True
 
-                        # Verify config was NOT rolled back (non-blocking)
-                        # config save count: 1 for disabling rum_enabled
-                        assert mock_save.call_count == 1
+        # Config was NOT rolled back (non-blocking): it stays disabled.
+        assert _disk(service_id)["rum_enabled"] is False
 
 
 class TestRumOrchestratorBypassActivation:
@@ -581,30 +554,23 @@ class TestEnableRumWithFaroVersion:
         """Verify cfg["rum"]["faro_version"] is on disk by the time reconcile_vcl_state
         runs, since the generator reads it from the saved config."""
         service_id = "srv_test"
-        cfg = self._cfg(service_id)
-        saved_snapshots = []
-
-        def mock_save(_service_id, saved_cfg):
-            saved_snapshots.append(dict(saved_cfg))
+        _seed(self._cfg(service_id))
 
         def mock_reconcile(*args, **kwargs):
-            # At the moment reconcile runs, the most recent save must already
-            # have persisted the pinned version.
-            assert saved_snapshots[-1]["rum"]["faro_version"] == "2.9.0"
+            # At the moment reconcile runs, the pinned version must already be persisted.
+            assert _disk(service_id)["rum"]["faro_version"] == "2.9.0"
             return MagicMock(activated_version=2, draft_version=None)
 
-        with patch("backend.config.load_config", return_value=cfg):
-            with patch("backend.config.save_config", side_effect=mock_save):
-                with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
-                    with patch(
-                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                        new_callable=AsyncMock,
-                        return_value={"version": "2.9.0"},
-                    ):
-                        with patch(
-                            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state", side_effect=mock_reconcile
-                        ):
-                            enable_rum(service_id, "test_token", faro_version="2.9.0")
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"),
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                new_callable=AsyncMock,
+                return_value={"version": "2.9.0"},
+            ),
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state", side_effect=mock_reconcile),
+        ):
+            enable_rum(service_id, "test_token", faro_version="2.9.0")
 
     def test_enable_rum_invalid_faro_version_rejected_before_any_work(self):
         """Verify a malformed faro_version is rejected before config is even loaded."""
@@ -615,67 +581,59 @@ class TestEnableRumWithFaroVersion:
 
     def test_enable_rum_faro_upload_failure_restores_previous_faro_version(self):
         """Verify config is rolled back to the pre-attempt faro_version (and
-        rum_enabled=False) if the Faro bundle upload fails.
-
-        Uses two DISTINCT config objects for the initial load vs. the
-        rollback's reload (rather than one shared object returned twice) so
-        this actually exercises "reload from disk before restoring" instead
-        of silently passing via object-identity aliasing — a real disk read
-        never returns the same object twice."""
+        rum_enabled=False) if the Faro bundle upload fails, without erasing a
+        key another writer added while the upload was in flight."""
         service_id = "srv_test"
-        cfg_initial = self._cfg(service_id, rum={"faro_version": "1.0.0"})
-        # Distinct object representing what's actually on disk by the time
-        # the rollback reloads it (mirrors upgrade_faro_version's own reload).
-        cfg_on_disk_at_rollback = dict(cfg_initial)
-        cfg_on_disk_at_rollback["unrelated_marker"] = "present-after-reload"
+        _seed(self._cfg(service_id, rum={"faro_version": "1.0.0"}))
 
-        with patch("backend.config.load_config", side_effect=[cfg_initial, cfg_on_disk_at_rollback]):
-            with patch("backend.config.save_config") as mock_save:
-                with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
-                    with patch(
-                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                        new_callable=AsyncMock,
-                        side_effect=RuntimeError("unpkg unreachable"),
-                    ):
-                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                            with pytest.raises(RuntimeError, match="unpkg unreachable"):
-                                enable_rum(service_id, "test_token", faro_version="2.0.0")
-                            mock_reconcile.assert_not_called()
+        async def _fail_after_concurrent_write(*_a, **_kw):
+            svcconfig.mutate_config(service_id, lambda c: c.update(unrelated_marker="present-after-reload"))
+            raise RuntimeError("unpkg unreachable")
 
-        last_saved = mock_save.call_args_list[-1][0][1]
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"),
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                side_effect=_fail_after_concurrent_write,
+            ),
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile,
+        ):
+            with pytest.raises(RuntimeError, match="unpkg unreachable"):
+                enable_rum(service_id, "test_token", faro_version="2.0.0")
+            mock_reconcile.assert_not_called()
+
+        last_saved = _disk(service_id)
         assert last_saved["rum_enabled"] is False
         assert last_saved["rum"]["faro_version"] == "1.0.0"
-        # Only present if the rollback actually reloaded from disk.
         assert last_saved["unrelated_marker"] == "present-after-reload"
 
     def test_enable_rum_faro_reconcile_failure_restores_previous_faro_version(self):
         """Verify config is rolled back to the pre-attempt faro_version if
-        reconcile_vcl_state fails after the bundle was already uploaded.
-
-        Same two-distinct-objects setup as the upload-failure test above, to
-        prove the rollback reloads fresh disk state rather than reusing the
-        stale in-memory cfg (Minor 1 from the task-6 review)."""
+        reconcile_vcl_state fails after the bundle was already uploaded,
+        keeping a concurrent writer's key."""
         service_id = "srv_test"
-        cfg_initial = self._cfg(service_id, rum={"faro_version": "1.0.0"})
-        cfg_on_disk_at_rollback = dict(cfg_initial)
-        cfg_on_disk_at_rollback["unrelated_marker"] = "present-after-reload"
+        _seed(self._cfg(service_id, rum={"faro_version": "1.0.0"}))
 
-        with patch("backend.config.load_config", side_effect=[cfg_initial, cfg_on_disk_at_rollback]):
-            with patch("backend.config.save_config") as mock_save:
-                with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
-                    with patch(
-                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                        new_callable=AsyncMock,
-                        return_value={"version": "2.0.0"},
-                    ):
-                        with patch(
-                            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
-                            side_effect=RuntimeError("VCL validation failed"),
-                        ):
-                            with pytest.raises(RuntimeError, match="VCL validation failed"):
-                                enable_rum(service_id, "test_token", faro_version="2.0.0")
+        def _fail_after_concurrent_write(*_a, **_kw):
+            svcconfig.mutate_config(service_id, lambda c: c.update(unrelated_marker="present-after-reload"))
+            raise RuntimeError("VCL validation failed")
 
-        last_saved = mock_save.call_args_list[-1][0][1]
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"),
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                new_callable=AsyncMock,
+                return_value={"version": "2.0.0"},
+            ),
+            patch(
+                "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+                side_effect=_fail_after_concurrent_write,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="VCL validation failed"):
+                enable_rum(service_id, "test_token", faro_version="2.0.0")
+
+        last_saved = _disk(service_id)
         assert last_saved["rum_enabled"] is False
         assert last_saved["rum"]["faro_version"] == "1.0.0"
         assert last_saved["unrelated_marker"] == "present-after-reload"
@@ -720,31 +678,31 @@ class TestEnableRumWithFaroVersion:
         the tracker JS unconditionally loads /js/faro-sdk.js with no CDN
         fallback, so enabling RUM must always pin and upload a bundle."""
         service_id = "srv_test"
-        cfg = self._cfg(service_id)
-        saved_snapshots = []
+        _seed(self._cfg(service_id))
+        pinned_at_reconcile = []
 
-        def mock_save(_service_id, saved_cfg):
-            saved_snapshots.append(dict(saved_cfg))
+        def mock_reconcile(*args, **kwargs):
+            pinned_at_reconcile.append(_disk(service_id)["rum"]["faro_version"])
+            return MagicMock(activated_version=2, draft_version=None)
 
-        with patch("backend.config.load_config", return_value=cfg):
-            with patch("backend.config.save_config", side_effect=mock_save):
-                with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
-                    with patch(
-                        "backend.core.faro_versions.fetch_available_faro_versions",
-                        new_callable=AsyncMock,
-                        return_value=[DEFAULT_FARO_VERSION],
-                    ):
-                        with patch(
-                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                            new_callable=AsyncMock,
-                            return_value={"version": DEFAULT_FARO_VERSION},
-                        ) as mock_download_upload:
-                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                                mock_reconcile.return_value = MagicMock(activated_version=2, draft_version=None)
-                                enable_rum(service_id, "test_token")
+        with (
+            patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"),
+            patch(
+                "backend.core.faro_versions.fetch_available_faro_versions",
+                new_callable=AsyncMock,
+                return_value=[DEFAULT_FARO_VERSION],
+            ),
+            patch(
+                "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                new_callable=AsyncMock,
+                return_value={"version": DEFAULT_FARO_VERSION},
+            ) as mock_download_upload,
+            patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state", side_effect=mock_reconcile),
+        ):
+            enable_rum(service_id, "test_token")
 
         mock_download_upload.assert_called_once_with(service_id, DEFAULT_FARO_VERSION, "test_token", status_cb=None)
-        assert saved_snapshots[0]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
+        assert pinned_at_reconcile == [DEFAULT_FARO_VERSION]
 
 
 class TestUpgradeFaroVersion:
@@ -843,27 +801,27 @@ class TestUpgradeFaroVersion:
         """Verify config is rolled back to the previous faro_version (and its
         content hash) if reconcile fails after the new bundle was uploaded."""
         service_id = "srv_test"
-        cfg_before = self._cfg(service_id, faro_version="1.0.0")
-        # Simulate download_and_upload_faro having already persisted the new
-        # version by the time the post-failure reload happens.
-        cfg_after_upload = self._cfg(service_id, faro_version="2.0.0")
-        cfg_after_upload["rum"]["faro_content_hash"] = "new-hash"
+        _seed(self._cfg(service_id, faro_version="1.0.0"))
 
-        with patch("backend.config.load_config", side_effect=[cfg_before, cfg_after_upload]):
-            with patch("backend.config.save_config") as mock_save:
-                with patch(
-                    "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
-                    new_callable=AsyncMock,
-                    return_value={"version": "2.0.0"},
-                ):
-                    with patch(
-                        "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
-                        side_effect=RuntimeError("VCL validation failed"),
-                    ):
-                        with pytest.raises(RuntimeError, match="VCL validation failed"):
-                            upgrade_faro_version(service_id, "2.0.0", "test_token")
+        async def _persist_new_pin(*_a, **_kw):
+            # download_and_upload_faro persists the new pin itself on success.
+            def _apply(c):
+                c["rum"].update(faro_version="2.0.0", faro_content_hash="new-hash")
 
-        saved_cfg = mock_save.call_args_list[-1][0][1]
+            svcconfig.mutate_config(service_id, _apply)
+            return {"version": "2.0.0"}
+
+        with (
+            patch("backend.provision.rum_orchestrator_v2.download_and_upload_faro", side_effect=_persist_new_pin),
+            patch(
+                "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+                side_effect=RuntimeError("VCL validation failed"),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="VCL validation failed"):
+                upgrade_faro_version(service_id, "2.0.0", "test_token")
+
+        saved_cfg = _disk(service_id)
         assert saved_cfg["rum"]["faro_version"] == "1.0.0"
         assert saved_cfg["rum"]["faro_content_hash"] == "abc123"
 

@@ -323,6 +323,24 @@ def _set_faro_version(cfg: dict[str, Any], version: str | None) -> None:
     cfg["rum"] = rum_cfg
 
 
+_FARO_PIN_KEYS = ("faro_version", "faro_content_hash", "faro_fos_etag_md5")
+
+
+def _restore_faro_pin(cfg: dict[str, Any], previous_rum_cfg: dict[str, Any]) -> None:
+    """Put back only the Faro pin keys (``_FARO_PIN_KEYS``) from ``previous_rum_cfg``, in place.
+
+    The other ``cfg["rum"]`` keys (notably the write-once ``cid_salt``) belong to other writers
+    and are left exactly as found.
+    """
+    rum_cfg = dict(cfg.get("rum") or {})
+    for key in _FARO_PIN_KEYS:
+        if key in previous_rum_cfg:
+            rum_cfg[key] = previous_rum_cfg[key]
+        else:
+            rum_cfg.pop(key, None)
+    cfg["rum"] = rum_cfg
+
+
 def _purge_faro_surrogate_key(logging_service_id: str, token: str) -> None:
     """Fire-and-forget surrogate-key purge on the logging service after a Faro bundle upload.
 
@@ -463,9 +481,7 @@ def enable_rum(
 
     # Step 3: Update config to enable RUM (+ pin faro_version if given)
     previous_rum_cfg = dict(cfg.get("rum") or {})
-
-    cfg["rum_enabled"] = True
-    cfg["rum_enabled_at"] = _dt.datetime.now(_dt.UTC).isoformat()
+    enabled_at = _dt.datetime.now(_dt.UTC).isoformat()
 
     # Persist the pinned version BEFORE reconciling so the generator (which
     # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
@@ -473,32 +489,30 @@ def enable_rum(
     # version that isn't actually deployed. Always pinned now — there is no
     # more "enabled but unpinned" state, since the tracker's unconditional
     # /js/faro-sdk.js load requires a bundle to always be behind that path.
-    _set_faro_version(cfg, resolved_faro_version)
+    def _apply_enable(target: dict[str, Any]) -> None:
+        target["rum_enabled"] = True
+        target["rum_enabled_at"] = enabled_at
+        _set_faro_version(target, resolved_faro_version)
+        # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
+        # depends on the pinned version (F-4 fix), so it must be derived from
+        # the state about to be deployed, not a read from before the version was set.
+        target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
-    # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
-    # depends on the pinned version (F-4 fix), so it must be derived from
-    # THIS in-memory cfg (not a stale on-disk read from before the version
-    # was set) to reflect the state about to be deployed.
-    cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-
-    # Save updated config
-    svcconfig.save_config(logging_service_id, cfg)
+    # Only the keys this flow owns are written, on a fresh read under the config lock.
+    if svcconfig.mutate_config(logging_service_id, _apply_enable) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
     ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
 
     def _rollback_config() -> None:
-        # Reload from disk first (mirrors upgrade_faro_version's rollback):
-        # a step between here and the save above (e.g. download_and_upload_faro)
-        # may have written its own config changes that the stale in-memory
-        # `cfg` wouldn't reflect. Mutate `cfg` in place (rather than rebind it)
-        # so its declared type stays non-Optional for mypy's benefit.
-        latest = svcconfig.load_config(logging_service_id)
-        if latest is not None:
-            cfg.clear()
-            cfg.update(latest)
-        cfg["rum_enabled"] = False
-        cfg.pop("rum_vcl_sha", None)
-        cfg["rum"] = dict(previous_rum_cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        # Undo only what _apply_enable wrote. A step between the save above and here
+        # (download_and_upload_faro) or a concurrent writer may have changed other
+        # keys, which a whole-config restore would erase.
+        def _undo(target: dict[str, Any]) -> None:
+            target["rum_enabled"] = False
+            target.pop("rum_vcl_sha", None)
+            _restore_faro_pin(target, previous_rum_cfg)
+
+        svcconfig.mutate_config(logging_service_id, _undo)
 
     # Step 4: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
@@ -568,7 +582,7 @@ def enable_rum(
 
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
-        "enabled_at": cfg.get("rum_enabled_at", ""),
+        "enabled_at": enabled_at,
         "activated": result.activated_version is not None,
     }
 
@@ -655,9 +669,7 @@ def upgrade_faro_version(
         # config must not claim a version whose VCL isn't actually deployed.
         # Restore the whole previous rum block (not just faro_version) so a
         # stale faro_content_hash from the failed upgrade can't linger either.
-        cfg = svcconfig.load_config(logging_service_id) or cfg
-        cfg["rum"] = dict(previous_rum_cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        svcconfig.mutate_config(logging_service_id, lambda target: _restore_faro_pin(target, previous_rum_cfg))
         fail(f"Reconciliation failed: {e}")
         raise
 
@@ -678,9 +690,11 @@ def upgrade_faro_version(
     # cleanup below (F-6): with activate=False the live VCL still serves the
     # old version, so the stored fingerprint must keep reflecting that.
     if result.activated_version is not None:
-        cfg = svcconfig.load_config(logging_service_id) or cfg
-        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+
+        def _refresh_sha(target: dict[str, Any]) -> None:
+            target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
+
+        svcconfig.mutate_config(logging_service_id, _refresh_sha)
 
     # Step 3: Best-effort purge of the cached bundle so the edge stops
     # serving the old version. A purge failure is a warning, never an
@@ -759,9 +773,11 @@ def disable_rum(
         }
 
     # Step 2: Update config to disable RUM
-    cfg["rum_enabled"] = False
-    cfg.pop("rum_vcl_sha", None)
-    svcconfig.save_config(logging_service_id, cfg)
+    def _apply_disable(target: dict[str, Any]) -> None:
+        target["rum_enabled"] = False
+        target.pop("rum_vcl_sha", None)
+
+    svcconfig.mutate_config(logging_service_id, _apply_disable)
     ok("Config updated: rum_enabled=False, rum_vcl_sha cleared")
 
     # Step 3: Delete JS from FOS (NON-BLOCKING)
@@ -786,10 +802,12 @@ def disable_rum(
     try:
         result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb, activate=activate)
     except Exception as e:
-        # Rollback config
-        cfg["rum_enabled"] = True
-        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        # Rollback only the keys _apply_disable wrote
+        def _undo_disable(target: dict[str, Any]) -> None:
+            target["rum_enabled"] = True
+            target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
+
+        svcconfig.mutate_config(logging_service_id, _undo_disable)
         fail(f"Reconciliation failed: {e}")
         raise
 
