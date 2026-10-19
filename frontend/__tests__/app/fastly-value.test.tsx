@@ -68,3 +68,23 @@ test('fastly-value page mounts and renders title and tab navigation', () => {
   expect(screen.getByRole('tab', { name: /image optimizer/i })).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
 })
+
+test('fastly-value summary query key keeps its pre-migration shape', async () => {
+  const { resolveRangeWire } = await import('@/lib/range-wire')
+  const { quantizeAnchor } = await import('@/lib/time-window')
+  render(
+    <QueryClientProvider client={queryClient}>
+      <FastlyValueClient />
+    </QueryClientProvider>,
+  )
+  const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
+  const { rangeKey } = resolveRangeWire({
+    relativeRange: null,
+    isAutoRange: false,
+    startTime: '2026-01-01T00:00:00Z',
+    endTime: '2026-01-01T01:00:00Z',
+    anchor,
+  })
+  const keys = queryClient.getQueryCache().getAll().map((q) => q.queryKey)
+  expect(keys).toContainEqual(['value', 'summary', 'test-svc', rangeKey, anchor, {}, '1 day', 'summary'])
+})

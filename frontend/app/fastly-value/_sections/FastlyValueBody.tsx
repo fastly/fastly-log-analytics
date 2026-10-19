@@ -11,8 +11,7 @@ import {
   BarChart3,
   Layers,
 } from 'lucide-react'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { resolveRangeWire } from '@/lib/range-wire'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { client } from '@/lib/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -65,23 +64,19 @@ export default function FastlyValueBody({
 }: FastlyValueBodyProps) {
   const [activeTab, setActiveTab] = useState<TabId>('summary')
 
-  const { rangeKey, rangeBody } = resolveRangeWire({
-    relativeRange,
-    isAutoRange,
-    startTime,
-    endTime,
-    anchor,
-  })
-
   const sections = React.useMemo(() => {
     if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
     if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
     return [activeTab]
   }, [activeTab]) as ("security" | "caching" | "bots" | "performance" | "network" | "io" | "overview")[]
 
-  const valueQuery = useServiceQuery<ValueData | undefined>(
-    ['value', 'summary', activeServiceId, rangeKey, anchor, filterPayload, '1 day', activeTab],
-    async ({ signal }) => {
+  const valueQuery = useAnalyticsReportQuery<ValueData | undefined>({
+    namespace: ['value', 'summary'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: ['1 day', activeTab],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data } = await client.POST('/api/value/summary', {
         signal,
         body: {
@@ -93,10 +88,10 @@ export default function FastlyValueBody({
       })
       return data
     },
-    {
+    queryOptions: {
       enabled: activeTab !== 'assets',
-    }
-  )
+    },
+  })
 
   const data = valueQuery.data
   const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && valueQuery.isPlaceholderData))
