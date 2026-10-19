@@ -31,6 +31,7 @@ from typing import Any
 import duckdb
 
 from backend import config as svcconfig
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
 from backend.utils.log_throttle import log_once_per
 
@@ -1053,8 +1054,7 @@ def delete_ingested_files(
     }
 
 
-_schema_cache: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
-# (source_name, table_name, stats) -> (timestamp, schema_list)
+# (source_name, table_name, stats) -> schema_list
 # The heavy refresh_config_status path fires SUMMARIZE every 60 s. With the
 # previous 60 s TTL the cache aged out at exactly the heavy-tick interval —
 # now-ts hit 60.0 right when the next call landed, so we missed every time
@@ -1067,15 +1067,17 @@ _schema_cache: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] =
 # consumes them. Schema column adds/removes still invalidate immediately via
 # the column-set comparison in update_iceberg_view.
 _SCHEMA_CACHE_TTL = 300
+_schema_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_SCHEMA_CACHE_TTL)
 
 
 def _clear_schema_cache(source_name: str | None = None):
     """Clear the schema cache. If source_name is provided, only clear that source."""
-    global _schema_cache
     if source_name:
-        _schema_cache = {k: v for k, v in _schema_cache.items() if k[0] != source_name}
+        for k in _schema_cache.keys():
+            if k[0] == source_name:
+                _schema_cache.pop(k, None)
     else:
-        _schema_cache = {}
+        _schema_cache.clear()
 
 
 def get_schema(
@@ -1088,12 +1090,10 @@ def get_schema(
     source_name = src["name"]
     table_name = _safe_table_name(source_name)
 
-    now = time.time()
     cache_key = (source_name, table_name, stats)
-    if cache_key in _schema_cache:
-        ts, schema = _schema_cache[cache_key]
-        if now - ts < _SCHEMA_CACHE_TTL:
-            return schema
+    cached = _schema_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         # COUNT(*) always returns one row — fetchone is None-typed in the
@@ -1115,7 +1115,7 @@ def get_schema(
             schema = [{"name": r[0], "type": r[1]} for r in result]
             if len(schema) == 1 and schema[0]["name"] == "timestamp":
                 schema = []
-            _schema_cache[cache_key] = (now, schema)
+            _schema_cache[cache_key] = schema
             return schema
 
         # Use SUMMARIZE to get rich metadata instead of just DESCRIBE.
@@ -1144,14 +1144,14 @@ def get_schema(
         if len(schema) == 1 and schema[0]["name"] == "timestamp":
             schema = []
 
-        _schema_cache[cache_key] = (now, schema)
+        _schema_cache[cache_key] = schema
         return schema
     except Exception:
         # If SUMMARIZE fails, fallback to DESCRIBE
         try:
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": row[0], "type": row[1]} for row in result]
-            _schema_cache[cache_key] = (now, schema)
+            _schema_cache[cache_key] = schema
             return schema
         except Exception:
             return []

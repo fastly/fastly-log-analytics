@@ -296,12 +296,11 @@ def get_health(
         return _runner
 
     _t = _time.perf_counter()
-    from backend.core._duckdb_status import _SCHEMA_CACHE_TTL, _schema_cache
+    from backend.core._duckdb_status import _schema_cache
 
-    _now = _time.time()
-    _cache_key = (src["name"], table_name, True)
-    if _cache_key in _schema_cache and (_now - _schema_cache[_cache_key][0] < _SCHEMA_CACHE_TTL):
-        actual_cols = set(c["name"] for c in _schema_cache[_cache_key][1])
+    _cached_schema = _schema_cache.get((src["name"], table_name, True))
+    if _cached_schema is not None:
+        actual_cols = set(c["name"] for c in _cached_schema)
     else:
         actual_cols = set(get_runner().get_schema_cols())
     timer.mark("get_schema_cols", _t)
@@ -1127,12 +1126,11 @@ def get_quality(
             **get_runner().telemetry(),
         }
 
-    from backend.core._duckdb_status import _SCHEMA_CACHE_TTL, _schema_cache
+    from backend.core._duckdb_status import _schema_cache
 
-    _now = _time.time()
-    _cache_key = (src["name"], table_name, True)
-    if _cache_key in _schema_cache and (_now - _schema_cache[_cache_key][0] < _SCHEMA_CACHE_TTL):
-        actual_cols = set(c["name"] for c in _schema_cache[_cache_key][1])
+    _cached_schema = _schema_cache.get((src["name"], table_name, True))
+    if _cached_schema is not None:
+        actual_cols = set(c["name"] for c in _cached_schema)
     else:
         actual_cols = set(get_runner().get_schema_cols())
     timer.mark("get_schema_cols", _t)

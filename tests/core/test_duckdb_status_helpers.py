@@ -1244,10 +1244,7 @@ def test_get_schema_returns_cached_within_ttl(in_memory_duckdb, fos_source):
     _schema_cache.clear()
     table_name = "logs_test_service"
     fake_schema = [{"name": "ip", "type": "VARCHAR"}]
-    # Seed cache with a recent timestamp.
-    import time as _t
-
-    _schema_cache[(fos_source["name"], table_name, True)] = (_t.time(), fake_schema)
+    _schema_cache[(fos_source["name"], table_name, True)] = fake_schema
 
     state = {"executes": 0}
 
@@ -1269,6 +1266,28 @@ def test_get_schema_returns_cached_within_ttl(in_memory_duckdb, fos_source):
     # Zero executes — the TTL-gated cache hit short-circuited.
     assert state["executes"] == 0
     _ = _duckdb_status  # silence ruff
+
+
+def test_schema_cache_is_bounded_ttl_and_clears_in_place():
+    """The cache object identity must survive clears: duckdb.py re-exports it
+    and repositories/network.py imports it by name, so a rebind would leave
+    them reading a stale dict."""
+    from backend.core._duckdb_status import _clear_schema_cache, _schema_cache
+    from backend.utils.bounded_cache import BoundedTTLCache
+
+    assert isinstance(_schema_cache, BoundedTTLCache)
+    _schema_cache.clear()
+    _schema_cache[("a", "t", True)] = [{"name": "x"}]
+    _schema_cache[("a", "t", False)] = [{"name": "x"}]
+    _schema_cache[("b", "t", True)] = [{"name": "y"}]
+    same = _schema_cache
+    _clear_schema_cache("a")
+    assert same is _schema_cache
+    assert ("a", "t", True) not in _schema_cache
+    assert ("a", "t", False) not in _schema_cache
+    assert ("b", "t", True) in _schema_cache
+    _clear_schema_cache()
+    assert len(_schema_cache) == 0
 
 
 def test_get_schema_falls_back_to_describe_when_summarize_errors(in_memory_duckdb, fos_source):
