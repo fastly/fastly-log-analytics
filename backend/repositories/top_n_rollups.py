@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import heapq
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import datetime, timedelta
@@ -97,6 +97,29 @@ def truncate_top_n(
         for val, count in top_items:
             top_results.append((field, val, count))
     return top_results, empty
+
+
+@dataclass
+class SchemaSeeds:
+    """Lazily resolved column list + column types, shared by the live and heal steps.
+
+    Callers that already paid for the schema lookup pass it in as the seed;
+    otherwise the first step to need it fetches it and later steps reuse the
+    result, so a request does at most one lookup of each.
+    """
+
+    cols_seed: list[str] | None = None
+    types_seed: dict[str, str] | None = None
+    cols: list[str] = dc_field(default_factory=list)
+    types: dict[str, str] = dc_field(default_factory=dict)
+
+    def ensure(self, get_cols: Callable[[], list[str]], get_types: Callable[[], dict[str, str]]) -> None:
+        """Fill ``cols`` then ``types`` if still unset (columns first: a failing
+        column lookup must not trigger the types lookup)."""
+        if not self.cols:
+            self.cols = self.cols_seed if self.cols_seed is not None else get_cols()
+        if not self.types:
+            self.types = self.types_seed if self.types_seed is not None else get_types()
 
 
 @dataclass

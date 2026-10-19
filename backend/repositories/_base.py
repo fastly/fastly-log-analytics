@@ -32,8 +32,10 @@ from backend.repositories.rollup_coverage import (
 from backend.repositories.rollup_coverage import heal_where_clause as _heal_where_clause
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
+from backend.repositories.top_n_rollups import SchemaSeeds as _SchemaSeeds
 from backend.repositories.top_n_rollups import TopNWindow as _TopNWindow
 from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
 from backend.repositories.top_n_rollups import find_unrolled_hours as _find_unrolled_hours
@@ -1390,210 +1392,37 @@ class QueryRunner:
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
 
-        # We also need to get the live active hour stats from the base table
+        # Callers (dashboard repo) already computed the schema once for the
+        # request; the kwargs let them seed both so the live and heal steps
+        # skip the duplicate get_schema_cols() / _get_schema() round-trip.
+        schema = _SchemaSeeds(actual_cols, schema_types)
+
+        # Live active hour: the rollup tree never holds it.
         _t_live = time.perf_counter()
-        live_res: list[tuple] = []
-        partial_rows: list[tuple] = []
-        # Defined here so the partial-day block below can reuse them
-        # without re-fetching if the active-hour block populated them.
-        # Callers (dashboard repo) already computed these once for the
-        # request; the kwargs above let them seed both so we skip the
-        # duplicate get_schema_cols() / _get_schema() round-trip below.
-        actual_cols_seed = actual_cols
-        schema_types_seed = schema_types
-        actual_cols = []
-        schema_types = {}
-
-        # Clamp the live window to the intersection of (active hour) and
-        # (requested window). Without this, a partial-hour request like
-        # [14:30, 15:30] where active_dt=15:00 would query the FULL active
-        # hour [15:00, 16:00) — over-counting rows from [15:30, 16:00) that
-        # fall outside the user's window. Most users hit hour-aligned
-        # windows (last 1h, 6h, 24h) so this only matters for custom date
-        # ranges that don't snap to hour boundaries, but the over-count is
-        # a real correctness gap when it does fire.
-        live_start = max(active_dt, st_dt) if st_dt else active_dt
-        live_end = min(win.active_dt_end, et_dt) if et_dt else win.active_dt_end
-        live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
-        # We only query the active hour if it overlaps with the requested time window
-        should_query_live = True
-        if et_dt and et_dt <= active_dt:
-            should_query_live = False
-        if st_dt and st_dt >= win.active_dt_end:
-            should_query_live = False
-
-        if should_query_live:
-            # We run a standard execute_top_n_batch query on the base table for just the active hour
-            try:
-                # Reuse caller-supplied seeds when present (dashboard repo
-                # already paid this cost once for the request); fall back
-                # to the schema lookups otherwise.
-                actual_cols = actual_cols_seed if actual_cols_seed is not None else self.get_schema_cols()
-                # _get_schema is module-local (line ~106); the prior code
-                # imported it from backend.core.duckdb which does NOT
-                # export this symbol — the ImportError silently broke the
-                # live merge for an indeterminate time, so the per-field
-                # top-N was missing the current hour entirely. Use the
-                # module-local function directly.
-                if schema_types_seed is not None:
-                    schema_types = schema_types_seed
-                else:
-                    schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
-
-                # To prevent creating a massive UNION, we'll create a temp table for just the live hour.
-                # execute_top_n_batch below applies per_field_limits per its
-                # own per-field branch now, so each field fetches only what
-                # ITS truncation needs — not max(all limits) for every field
-                # (that collapse used to make e.g. a country=500 override
-                # widen every other field's live-hour QUALIFY to 500 too).
-                # Fast path: read buffer + active hourly partition directly,
-                # skipping the iceberg view (~700ms saved per request on the
-                # 2026-06-08 baseline). Falls back to the view-based path if
-                # the direct read fails (schema mismatch, missing dirs, etc).
-                # Use the safe_fields list (validated at line 741) for temp
-                # construction so a hostile field name can never reach the
-                # SQL builder via this fast path — audit finding 004.
-                #
-                live_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
-                live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
-                    live_start, win.active_str, live_end
-                )
-                # live_where was built above from the un-narrowed live_start;
-                # rebuild it here so the create_filtered_temp_table fallback
-                # (used when the direct-read path below returns None) scans
-                # only [narrowed live_start, live_end) too. Otherwise the
-                # fallback re-scans [hour_start, watermark) — the exact
-                # range partial_rows already covers — and both get summed
-                # into the same by_field dict, double-counting every
-                # affected field.
-                live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
-                _t_lt = time.perf_counter()
-                tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
-                if tmp_name == "__empty__":
-                    tmp_name = None
-                elif tmp_name is None:
-                    tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
-                _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
-                _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
-                if tmp_name:
-                    try:
-                        # Diagnostic row count (in-memory temp, ~free): tells
-                        # the perf harness whether a slow live merge is data
-                        # volume (busy active hour) or per-field batch cost.
-                        _n_live = 0
-                        try:
-                            _n_live = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
-                            _phase("live_active_hour:n_rows", float(_n_live))
-                        except Exception:
-                            _n_live = 1
-                        # Filter to columns present in the temp's projection.
-                        # Virtual fields (waf_sig_ind, edge_score_reason_ind)
-                        # have rollup parquets but no live column — including
-                        # them here would build SQL referencing a missing
-                        # column and BinderException out the entire UNION
-                        # ALL, silently dropping the live-hour merge for
-                        # the real fields too.
-                        # When _n_live == 0, the active hour has zero rows; skipping
-                        # the 50+ UNION ALL grouping branches saves ~130ms of DuckDB
-                        # query planning, parsing, and pipeline setup.
-                        if _n_live > 0:
-                            live_fields = [f for f in live_topn_fields if f in actual_cols]
-                            if live_fields:
-                                _t_lb = time.perf_counter()
-                                live_res, _ = self.execute_top_n_batch(
-                                    live_fields,
-                                    tmp_name,
-                                    actual_cols,
-                                    schema_types,
-                                    limit=limit,
-                                    per_field_limits=per_field_limits,
-                                )
-                                _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
-                    finally:
-                        # Deferred to scope-exit when the shared active-hour
-                        # scope owns this temp (dashboard rollup path).
-                        self.release_active_direct_temp(tmp_name)
-            except Exception as e:
-                _logger.exception("[top_n_rollups] live active hour query failed")
+        live_res, partial_rows = self._top_n_live_active_hour(
+            win, safe_fields, base_table, limit, per_field_limits, schema, _phase
+        )
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
-        # ── Missing-hour live heal ────────────────────────────────────────
-        # Closed hours of NOT-yet-day-compacted days that have no rollup
-        # coverage (no hour bundle, no per-field hour file) are live-queried
-        # here so the returned top-N stays window-correct through rollup-
-        # writer gaps. Diagnosed 2026-07-06: the per-sync recompute only
-        # fires when a sync batch ingests rows stamped in an already-closed
-        # hour, so on bursty services every closed hour of the current day
-        # was silently absent until the nightly deep pass — total_rows (a
-        # live COUNT) disagreed with every card's field_total by the same
-        # factor. Steady-state cost is ZERO: the hourly rollup_heal cron
-        # keeps the bundle tree complete — real bundles for hours with
-        # data, empty SENTINEL bundles for verified-zero-row hours (which
-        # would otherwise be indistinguishable from writer gaps and re-
-        # scanned forever) — so `missing` is empty. The scan only fires
-        # while the writer is behind, bounded by _MISSING_HOUR_HEAL_CAP
-        # hours.
-        #
-        # Hours of day-compacted days are deliberately excluded
-        # (days_with_day_files_any): their per-hour files were deleted by
-        # design, so a window that cuts through such a day would otherwise
-        # pay a per-request day-scan forever — that boundary sliver keeps
-        # its pre-existing fast-but-partial behavior.
+        # Missing-hour live heal: closed hours of not-yet-day-compacted days
+        # with no rollup coverage are live-queried so the returned top-N stays
+        # window-correct through rollup-writer gaps. Diagnosed 2026-07-06: the
+        # per-sync recompute only fires when a sync batch ingests rows stamped
+        # in an already-closed hour, so on bursty services every closed hour of
+        # the current day was silently absent until the nightly deep pass —
+        # total_rows (a live COUNT) disagreed with every card's field_total by
+        # the same factor. Steady-state cost is ZERO: the hourly rollup_heal
+        # cron keeps the bundle tree complete (real bundles for hours with
+        # data, empty SENTINEL bundles for verified-zero-row hours), so
+        # `missing_hours` is empty. The scan only fires while the writer is
+        # behind, bounded by _MISSING_HOUR_HEAL_CAP hours.
         _t_heal = time.perf_counter()
-        heal_res: list[tuple] = []
         missing_hours = _find_unrolled_hours(plan, win, safe_fields, _MISSING_HOUR_HEAL_CAP)
-        if missing_hours:
-            _now_mono = time.monotonic()
-            _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
-            if _now_mono - _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key, 0.0) >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
-                _MISSING_HOUR_HEAL_WARN_TS[_svc_key] = _now_mono
-                _logger.warning(
-                    "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "
-                    "(%s..%s) — expected when the writer is <1 heal tick behind; persistent "
-                    "occurrences mean the rollup_heal cron is failing (check cron_runs), and "
-                    "gaps older than %dh need the daily deep pass or scripts/backfill_rollups.py",
-                    len(missing_hours),
-                    _svc_key,
-                    missing_hours[0],
-                    missing_hours[-1],
-                    _MISSING_HOUR_HEAL_CAP,
-                )
-            try:
-                if not actual_cols:
-                    actual_cols = actual_cols_seed if actual_cols_seed is not None else self.get_schema_cols()
-                if not schema_types:
-                    if schema_types_seed is not None:
-                        schema_types = schema_types_seed
-                    else:
-                        schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
-                heal_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
-                # Clamp to the requested window so a mid-hour window edge
-                # (custom range) can't over-count rows outside it; the IN
-                # list prunes to exactly the un-rolled hours in between.
-                heal_where = _heal_where_clause(missing_hours, st_dt, et_dt)
-                heal_tmp = self.create_filtered_temp_table(heal_topn_fields, actual_cols, base_table, heal_where)
-                if heal_tmp:
-                    try:
-                        heal_fields = [f for f in heal_topn_fields if f in actual_cols]
-                        if heal_fields:
-                            heal_res, _ = self.execute_top_n_batch(
-                                heal_fields,
-                                heal_tmp,
-                                actual_cols,
-                                schema_types,
-                                limit=limit,
-                                per_field_limits=per_field_limits,
-                            )
-                    finally:
-                        try:
-                            self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
-                        except Exception:
-                            if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
-                                _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
-            except Exception:
-                # Best-effort: a failed heal leaves the pre-fallback
-                # behavior (rollups + active hour only), never a 500.
-                _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
+        heal_res = (
+            self._top_n_heal_hours(missing_hours, win, safe_fields, base_table, limit, per_field_limits, schema)
+            if missing_hours
+            else []
+        )
         _phase("live_missing_hours", (time.perf_counter() - _t_heal) * 1000)
         _phase("live_missing_hours:n_hours", float(len(missing_hours)))
 
@@ -1638,6 +1467,165 @@ class QueryRunner:
         _phase("merge_sort", (time.perf_counter() - _t_merge) * 1000)
 
         return top_results, fields
+
+    def _top_n_live_active_hour(
+        self,
+        win: _TopNWindow,
+        safe_fields: list[str],
+        base_table: str,
+        limit: int,
+        per_field_limits: dict[str, int] | None,
+        schema: _SchemaSeeds,
+        _phase: Callable[[str, float], None],
+    ) -> tuple[list[tuple], list[tuple]]:
+        """Top-N rows for the active hour, from the base table: ``(live_rows, partial_rows)``.
+
+        ``partial_rows`` are the already-materialised part of the hour (see
+        ``_partial_hour_adjusted_live_start``). Empty when the request window
+        does not overlap the active hour. Best-effort: any failure is logged
+        and yields whatever was gathered, never an exception.
+        """
+        st_dt, et_dt, active_dt = win.st_dt, win.et_dt, win.active_dt
+        live_res: list[tuple] = []
+        partial_rows: list[tuple] = []
+
+        # Clamp the live window to the intersection of (active hour) and
+        # (requested window). Without this, a partial-hour request like
+        # [14:30, 15:30] where active_dt=15:00 would query the FULL active
+        # hour [15:00, 16:00) — over-counting rows from [15:30, 16:00) that
+        # fall outside the user's window.
+        live_start = max(active_dt, st_dt) if st_dt else active_dt
+        live_end = min(win.active_dt_end, et_dt) if et_dt else win.active_dt_end
+        # We only query the active hour if it overlaps with the requested time window
+        if et_dt and et_dt <= active_dt:
+            return live_res, partial_rows
+        if st_dt and st_dt >= win.active_dt_end:
+            return live_res, partial_rows
+
+        try:
+            schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})
+            actual_cols, schema_types = schema.cols, schema.types
+
+            # To prevent creating a massive UNION, create a temp table for just
+            # the live hour. execute_top_n_batch applies per_field_limits per its
+            # own per-field branch, so each field fetches only what ITS
+            # truncation needs. Fast path: read buffer + active hourly partition
+            # directly, skipping the iceberg view (~700ms saved per request on
+            # the 2026-06-08 baseline); falls back to the view-based path if the
+            # direct read fails. safe_fields (not raw input) feeds the temp so a
+            # hostile field name can never reach the SQL builder (audit 004).
+            live_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
+            live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
+                live_start, win.active_str, live_end
+            )
+            # Built from the narrowed live_start so the create_filtered_temp_table
+            # fallback scans only [narrowed live_start, live_end). Otherwise it
+            # re-scans [hour_start, watermark) — the range partial_rows already
+            # covers — and both get summed into the same bucket, double-counting.
+            live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
+            _t_lt = time.perf_counter()
+            tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
+            if tmp_name == "__empty__":
+                tmp_name = None
+            elif tmp_name is None:
+                tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
+            _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
+            _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
+            if tmp_name:
+                try:
+                    # Diagnostic row count (in-memory temp, ~free): tells the perf
+                    # harness whether a slow live merge is data volume or
+                    # per-field batch cost.
+                    _n_live = 0
+                    try:
+                        _n_live = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
+                        _phase("live_active_hour:n_rows", float(_n_live))
+                    except Exception:
+                        _n_live = 1
+                    # Only columns present in the temp's projection: virtual
+                    # fields (waf_sig_ind, edge_score_reason_ind) have rollup
+                    # parquets but no live column and would BinderException the
+                    # whole UNION ALL. A zero-row hour skips the 50+ grouping
+                    # branches (~130ms of planning).
+                    if _n_live > 0:
+                        live_fields = [f for f in live_topn_fields if f in actual_cols]
+                        if live_fields:
+                            _t_lb = time.perf_counter()
+                            live_res, _ = self.execute_top_n_batch(
+                                live_fields,
+                                tmp_name,
+                                actual_cols,
+                                schema_types,
+                                limit=limit,
+                                per_field_limits=per_field_limits,
+                            )
+                            _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
+                finally:
+                    # Deferred to scope-exit when the shared active-hour scope
+                    # owns this temp (dashboard rollup path).
+                    self.release_active_direct_temp(tmp_name)
+        except Exception:
+            _logger.exception("[top_n_rollups] live active hour query failed")
+        return live_res, partial_rows
+
+    def _top_n_heal_hours(
+        self,
+        missing_hours: list[str],
+        win: _TopNWindow,
+        safe_fields: list[str],
+        base_table: str,
+        limit: int,
+        per_field_limits: dict[str, int] | None,
+        schema: _SchemaSeeds,
+    ) -> list[tuple]:
+        """Live top-N rows for closed hours the rollup writer has not covered.
+
+        Best-effort: a failed heal leaves the pre-fallback behavior (rollups +
+        active hour only), never a 500.
+        """
+        heal_res: list[tuple] = []
+        _now_mono = time.monotonic()
+        _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
+        if _now_mono - _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key, 0.0) >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
+            _MISSING_HOUR_HEAL_WARN_TS[_svc_key] = _now_mono
+            _logger.warning(
+                "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "
+                "(%s..%s) — expected when the writer is <1 heal tick behind; persistent "
+                "occurrences mean the rollup_heal cron is failing (check cron_runs), and "
+                "gaps older than %dh need the daily deep pass or scripts/backfill_rollups.py",
+                len(missing_hours),
+                _svc_key,
+                missing_hours[0],
+                missing_hours[-1],
+                _MISSING_HOUR_HEAL_CAP,
+            )
+        try:
+            schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})
+            actual_cols, schema_types = schema.cols, schema.types
+            heal_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
+            heal_where = _heal_where_clause(missing_hours, win.st_dt, win.et_dt)
+            heal_tmp = self.create_filtered_temp_table(heal_topn_fields, actual_cols, base_table, heal_where)
+            if heal_tmp:
+                try:
+                    heal_fields = [f for f in heal_topn_fields if f in actual_cols]
+                    if heal_fields:
+                        heal_res, _ = self.execute_top_n_batch(
+                            heal_fields,
+                            heal_tmp,
+                            actual_cols,
+                            schema_types,
+                            limit=limit,
+                            per_field_limits=per_field_limits,
+                        )
+                finally:
+                    try:
+                        self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
+                    except Exception:
+                        if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
+                            _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
+        except Exception:
+            _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
+        return heal_res
 
     # Chart metrics the 1-minute time-series rollup can serve. Keys MUST match
     # the ChartMetric Literal in backend/models/dashboard.py.

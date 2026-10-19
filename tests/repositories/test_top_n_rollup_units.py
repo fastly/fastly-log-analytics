@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import NoReturn
+
+import pytest
+
 from backend.repositories.top_n_rollups import (
+    SchemaSeeds,
     TopNPaths,
     build_rolled_sql,
     fold_rows,
@@ -67,6 +72,62 @@ class TestTruncateTopN:
     def test_ties_keep_insertion_order_when_not_truncated(self) -> None:
         rows, _ = truncate_top_n({"a": {"x": 1, "y": 1}}, ["a"], 5, None)
         assert [r[1] for r in rows] == ["x", "y"]
+
+
+class TestSchemaSeeds:
+    def test_seeds_win_and_nothing_is_fetched(self) -> None:
+        seeds = SchemaSeeds(["a"], {"a": "VARCHAR"})
+        seeds.ensure(self._boom, self._boom)
+        assert (seeds.cols, seeds.types) == (["a"], {"a": "VARCHAR"})
+
+    def test_fetches_once_and_reuses(self) -> None:
+        calls: list[str] = []
+        seeds = SchemaSeeds()
+
+        def cols() -> list[str]:
+            calls.append("cols")
+            return ["a"]
+
+        def types() -> dict[str, str]:
+            calls.append("types")
+            return {"a": "INT"}
+
+        seeds.ensure(cols, types)
+        seeds.ensure(cols, types)
+        assert calls == ["cols", "types"]
+        assert (seeds.cols, seeds.types) == (["a"], {"a": "INT"})
+
+    def test_failed_column_lookup_skips_types_and_is_retried_by_the_next_step(self) -> None:
+        calls: list[str] = []
+        seeds = SchemaSeeds()
+
+        def bad_cols() -> list[str]:
+            calls.append("cols")
+            raise RuntimeError("nope")
+
+        def types() -> dict[str, str]:
+            calls.append("types")
+            return {}
+
+        with pytest.raises(RuntimeError):
+            seeds.ensure(bad_cols, types)
+        with pytest.raises(RuntimeError):
+            seeds.ensure(bad_cols, types)
+        assert calls == ["cols", "cols"]
+
+    def test_types_failure_keeps_the_columns_already_fetched(self) -> None:
+        seeds = SchemaSeeds()
+
+        def bad_types() -> dict[str, str]:
+            raise RuntimeError("nope")
+
+        with pytest.raises(RuntimeError):
+            seeds.ensure(lambda: ["a"], bad_types)
+        assert seeds.cols == ["a"]
+
+    @staticmethod
+    def _boom() -> NoReturn:
+        raise AssertionError("must not be called")
 
 
 class TestQualifyLimitExpr:
