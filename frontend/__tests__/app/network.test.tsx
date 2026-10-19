@@ -28,6 +28,8 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/Map/NetworkMap', () => ({
   NetworkMap: () => <div data-testid="network-map" />,
@@ -204,6 +206,12 @@ test('network page renders full dashboard with transport metrics and leaderboard
   // Verify ASN Leaderboard
   expect(screen.getByText('ASN Performance Leaderboard')).toBeInTheDocument()
   expect(screen.getByText('IMPROVING')).toBeInTheDocument()
+  for (const name of ['ASN', 'P95 RTT', 'P99 RTT', '1h Change', 'Trend', 'Metro / City']) {
+    expect(screen.getAllByRole('columnheader', { name }).length).toBeGreaterThan(0)
+  }
+  expect(screen.getByText('45.0ms')).toBeInTheDocument()
+  expect(screen.getByText('+1.5')).toBeInTheDocument()
+  expect(screen.getByText('San Jose')).toBeInTheDocument()
 
   // Verify PoP Heatmap
   expect(await screen.findByText('Fastly Edge PoP Health Heatmap')).toBeInTheDocument()

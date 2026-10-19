@@ -1,9 +1,10 @@
 'use client'
 
-import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, HealthBadge, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
+import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
 import React, { useState, type Dispatch, type SetStateAction } from 'react'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { TransportSection } from './_sections/TransportSection'
+import { AsnLeaderboardTable, MetroLeaderboardTable } from './_sections/LeaderboardTables'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
@@ -48,7 +49,6 @@ import type { RangeWireArgs } from '@/lib/range-wire'
 import { useFilterStore } from '@/stores/filterStore'
 import { LazyMount } from '@/components/LazyMount'
 import { StatCard } from '@/components/ui/stat-card'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SkeletonGrid } from '@/components/ui/skeleton-grid'
 import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, Download, Info } from 'lucide-react'
@@ -376,47 +376,6 @@ function NetworkBody({
   const asnOptions = React.useMemo(() => {
     if (!leaderboard) return []
     return leaderboard.map((a) => ({ value: String(a.asn), label: a.label }))
-  }, [leaderboard])
-
-  // Pre-memoise the ASN leaderboard rows so toggling the metric / mapAsn
-  // selectors (which re-render the parent) doesn't rebuild the
-  // 30-row × 7-column subtree every time. Row identity is keyed on
-  // `data?.leaderboard` so a real data refetch still re-renders.
-  const asnLeaderboardRows = React.useMemo(() => {
-    return (leaderboard ?? []).map((asn) => {
-      const delta = (asn.health_score_now ?? 0) - (asn.health_score_1h_ago ?? 0)
-      return (
-        <tr key={asn.asn} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
-          <td className="px-4 py-3 font-medium">
-            <FilterValueCell
-              filters={[{ column: 'asn', value: String(asn.asn) }]}
-              display={asn.label}
-            />
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(asn.total_reqs ?? 0)}</td>
-          <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now ?? null} /></td>
-          <td className="px-4 py-3 text-right font-mono text-xs">
-            {asn.p95_rtt_us != null ? `${(asn.p95_rtt_us / 1000).toFixed(1)}ms` : '—'}
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs">
-            {asn.p99_rtt_us != null ? `${(asn.p99_rtt_us / 1000).toFixed(1)}ms` : '—'}
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs">
-            <span className={delta > 0 ? 'text-green-500' : delta < 0 ? 'text-red-500' : 'text-muted-foreground'}>
-              {delta > 0 ? '+' : ''}{delta.toFixed(1)}
-            </span>
-          </td>
-          <td className="px-4 py-3 text-right">
-            <Badge
-              variant={asn.trend === 'degrading' ? 'destructive' : 'outline'}
-              className={cn("text-[10px]", asn.trend === 'improving' ? 'text-green-600 dark:text-green-400 border-green-300 dark:border-green-700' : '')}
-            >
-              {(asn.trend ?? 'stable').toUpperCase()}
-            </Badge>
-          </td>
-        </tr>
-      )
-    })
   }, [leaderboard])
 
   const heatmapRows = mapData?.heatmap
@@ -749,22 +708,7 @@ function NetworkBody({
               </p>
             </div>
           ) : (
-            <div className="relative w-full overflow-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b bg-muted/30">
-                    <th className="h-10 px-4 text-left font-medium text-muted-foreground">ASN</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">Requests</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">Health Score</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">P95 RTT</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">P99 RTT</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">1h Change</th>
-                    <th className="h-10 px-4 text-right font-medium text-muted-foreground">Trend</th>
-                  </tr>
-                </thead>
-                <tbody>{asnLeaderboardRows}</tbody>
-              </table>
-            </div>
+            <AsnLeaderboardTable rows={data.leaderboard} />
           )}
         </AnalyticsCard>
 
@@ -794,39 +738,7 @@ function NetworkBody({
                 </p>
               </div>
             ) : (
-              <div className="relative w-full overflow-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b bg-muted/30">
-                      <th className="h-10 px-4 text-left font-medium text-muted-foreground">Metro / City</th>
-                      <th className="h-10 px-4 text-right font-medium text-muted-foreground">Requests</th>
-                      <th className="h-10 px-4 text-right font-medium text-muted-foreground">Health Score</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data?.metro_leaderboard ?? []).map((m) => (
-                      <tr key={`${m.city}-${m.region}-${m.country}`} className="border-b last:border-0 hover:bg-muted/50 transition-colors">
-                        <td className="px-4 py-3 font-medium">
-                          {m.raw_city ? (
-                            <FilterValueCell
-                              filters={[
-                                { column: 'city', value: m.raw_city },
-                                ...(m.region ? [{ column: 'region', value: m.region }] : []),
-                                ...(m.country ? [{ column: 'country', value: m.country }] : []),
-                              ]}
-                              display={m.city}
-                            />
-                          ) : (
-                            <span>{m.city}</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(m.total_reqs ?? 0)}</td>
-                        <td className="px-4 py-3 text-right"><HealthBadge score={m.health_score ?? null} /></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <MetroLeaderboardTable rows={data.metro_leaderboard} />
             )}
           </AnalyticsCard>
         )}
