@@ -10,14 +10,12 @@ import math
 import random
 import sys
 import time
-import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request
 
 import aiohttp
@@ -27,6 +25,12 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib import prom  # noqa: E402
 from scripts.lib.admin_tls import admin_urlopen, validate_admin_tls_config  # noqa: E402
+from scripts.lib.log_factory import (  # noqa: E402
+    build_rum_beacon_body,
+    build_rum_beacon_url,
+    random_source_ip,
+    rum_hex_id,
+)
 
 OTEL_P95_BUCKETS = {
     "http_p95_ms": "http_server_duration_milliseconds_bucket",
@@ -63,99 +67,19 @@ async def _request(
     session: aiohttp.ClientSession,
     url: str,
     headers: dict[str, str],
+    rng: Any = random,
 ) -> tuple[int, int]:
     started = time.perf_counter()
     try:
         # Clone headers and generate a completely unique Request ID per log line
         headers = headers.copy()
-        req_id = f"req-{uuid.uuid4().hex[:16]}"
+        req_id = f"req-{rum_hex_id(rng, 16)}"
         headers["Fastly-Request-ID"] = req_id
 
-        # Generate a random IP and add X-Source-Ip header to spoof geography/ASNs via Fastly VCL
-        source_ip = (
-            f"{random.randint(12, 223)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
-        )
-        headers["X-Source-Ip"] = source_ip
+        headers["X-Source-Ip"] = random_source_ip(rng)
 
         if "/rum-beacon" in url:
-            # Parse metrics from URL to construct a real, randomized Faro payload body
-            from urllib.parse import parse_qs, urlparse
-
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query)
-
-            metric = qs.get("rum_metric_name", ["LCP"])[0]
-            val_str = qs.get("rum_metric_value", ["1200"])[0]
-            try:
-                value = float(val_str)
-            except ValueError:
-                value = 1200.0
-
-            cid = qs.get("rum_cid", ["cid-1234"])[0]
-            path = qs.get("rum_pathname", ["/"])[0]
-
-            browser = random.choice(["Chrome", "Firefox", "Safari"])
-            os_name = random.choice(["Windows", "macOS", "iOS"])
-            device = "Mobile" if os_name == "iOS" else "Desktop"
-
-            faro_payload = {
-                "meta": {
-                    "browser": {"name": browser, "mobile": device == "Mobile"},
-                    "os": {"name": os_name},
-                    "page": {"url": f"{parsed.scheme}://{parsed.netloc}{path}"},
-                }
-            }
-
-            # Randomize the beacon type to simulate a realistic production stream
-            beacon_type = random.choices(["vitals", "interaction", "exception"], weights=[75, 15, 10])[0]
-
-            if beacon_type == "vitals":
-                # Realistic rating calculation
-                if metric == "LCP":
-                    rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
-                elif metric == "CLS":
-                    rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
-                elif metric == "INP":
-                    rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
-                else:
-                    rating = "good" if value <= 800 else "poor"
-
-                faro_payload["measurements"] = [
-                    {"type": "web-vitals", "values": {metric: value}, "context": {"rating": rating}}
-                ]
-            elif beacon_type == "interaction":
-                event_name = random.choice(["click_search_button", "form_submit", "tab_switch_performance"])
-                faro_payload["events"] = [
-                    {
-                        "name": event_name,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                        "attributes": {"element_id": f"btn_{random.randint(100, 999)}"},
-                    }
-                ]
-            else:  # exception
-                err_msg = random.choice(
-                    [
-                        "TypeError: Cannot read properties of undefined (reading 'split')",
-                        "ReferenceError: analytics_tracker is not defined",
-                        "DOMException: Failed to execute 'appendChild' on 'Node'",
-                    ]
-                )
-                faro_payload["exceptions"] = [
-                    {
-                        "type": "error",
-                        "value": err_msg,
-                        "stacktrace": {
-                            "frames": [
-                                {
-                                    "filename": "static/chunks/main.js",
-                                    "lineno": random.randint(10, 500),
-                                    "colno": random.randint(1, 120),
-                                }
-                            ]
-                        },
-                    }
-                ]
-
+            faro_payload = build_rum_beacon_body(url, rng)
             async with session.post(url, headers=headers, data=json.dumps(faro_payload)) as response:
                 await response.read()
                 return response.status, round((time.perf_counter() - started) * 1000)
@@ -167,19 +91,9 @@ async def _request(
         return 0, round((time.perf_counter() - started) * 1000)
 
 
-def build_request_url(base_url: str, rum_ratio: float) -> str:
-    if rum_ratio > 0 and random.random() < rum_ratio:
-        metric = random.choice(["LCP", "CLS", "INP", "FID", "TTFB", "FCP"])
-        value = random.choice([150, 250, 1200, 2500, 3500]) if metric != "CLS" else round(random.uniform(0.01, 0.45), 3)
-        beacon_id = uuid.uuid4().hex
-        cid = f"cid-{beacon_id}"
-        req_id = f"req-{beacon_id}"
-        path = random.choice(["/", "/dashboard", "/origin", "/security", "/performance"])
-        return (
-            f"{base_url.rstrip('/')}/rum-beacon?rum_metric_name={metric}"
-            f"&rum_metric_value={value}&rum_cid={quote(cid)}&cid={quote(cid)}"
-            f"&req={quote(req_id)}&rum_pathname={quote(path)}"
-        )
+def build_request_url(base_url: str, rum_ratio: float, rng: Any = random) -> str:
+    if rum_ratio > 0 and rng.random() < rum_ratio:
+        return build_rum_beacon_url(base_url, rng)
     return base_url
 
 
@@ -189,6 +103,7 @@ async def run_stage(
     request_url: str,
     headers: dict[str, str],
     rum_ratio: float = 0.0,
+    rng: Any = random,
 ) -> dict[str, Any]:
     started_at = datetime.now(UTC)
     started = time.perf_counter()
@@ -208,8 +123,8 @@ async def run_stage(
                 status, latency = task.result()
                 statuses[str(status)] += 1
                 latencies.append(latency)
-        request_url_final = build_request_url(request_url, rum_ratio)
-        pending.add(asyncio.create_task(_request(session, request_url_final, headers)))
+        request_url_final = build_request_url(request_url, rum_ratio, rng)
+        pending.add(asyncio.create_task(_request(session, request_url_final, headers, rng)))
         launched += 1
 
     if pending:
@@ -405,11 +320,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "marker": args.marker,
         "stages": [],
     }
+    rng = random.Random(args.seed) if args.seed is not None else random
     timeout = aiohttp.ClientTimeout(total=10)
     connector = aiohttp.TCPConnector(limit=max(args.max_in_flight, 1), ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         for index, stage in enumerate(stages, 1):
-            result = await run_stage(stage, session, args.url, headers, args.rum_ratio)
+            result = await run_stage(stage, session, args.url, headers, args.rum_ratio, rng)
             checkpoint = sample_checkpoint(
                 args.backend,
                 args.service_id,
@@ -457,6 +373,9 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Ratio of requests to send to /rum-beacon with randomized vitals payloads (0.0 to 1.0)",
+    )
+    run_parser.add_argument(
+        "--seed", type=int, default=None, help="Seed request/beacon generation for reproducible runs"
     )
     run_parser.add_argument("--output", type=Path, default=Path("performance-report/scale-harness.json"))
     args = parser.parse_args()

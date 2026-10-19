@@ -8,6 +8,9 @@ and distributions used across the repo:
   bulk Arrow/Parquet/NDJSON batches.
 * ``tests/utils/mock_data.py`` imports :func:`generate_mock_records` for small
   deterministic per-record fixtures.
+* ``scripts/load_test/generate_synthetic_rum_traffic.py`` and
+  ``scripts/dev/scale_harness.py`` build RUM (Faro) records/beacons through the
+  ``generate_rum_*`` / ``build_rum_*`` helpers at the bottom of this module.
 
 Both the columnar generator (NumPy ``Generator``) and the per-record generator
 (stdlib ``random``) take an injectable RNG for determinism. NumPy / PyArrow are
@@ -18,11 +21,15 @@ collection).
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, quote, urlparse
 
 if TYPE_CHECKING:
     import numpy as np
@@ -562,3 +569,268 @@ def generate_mock_records(
         logs.append(log_entry)
 
     return logs
+
+
+# ---------------------------------------------------------------------------
+# RUM (Faro) synthetic beacons and records — stdlib random, injectable rng
+# ---------------------------------------------------------------------------
+#
+# Two historical generators fed this section: the FOS seeding script (full
+# log-line records with a wide dimension pool) and the scale harness (beacon
+# POST bodies derived from the request URL, narrower pools). Both now draw from
+# one rng so a seeded ``random.Random`` reproduces a run; the pool/threshold
+# differences between them live in the two :class:`RumProfile` constants.
+
+_BEACON_TYPES = ["vitals", "interaction", "exception"]
+_BEACON_WEIGHTS = [75, 15, 10]
+_RUM_METRICS = ["LCP", "CLS", "INP", "FID", "TTFB", "FCP"]
+_RUM_PATHS = ["/", "/dashboard", "/origin", "/security", "/performance"]
+
+
+def rum_hex_id(rng: Any, chars: int = 16) -> str:
+    """Seedable stand-in for ``uuid.uuid4().hex[:chars]``."""
+    return f"{rng.getrandbits(chars * 4):0{chars}x}"
+
+
+def random_source_ip(rng: Any = random) -> str:
+    """Public-looking IPv4 used to spoof geography/ASN via ``X-Source-Ip``."""
+    return f"{rng.randint(12, 223)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}"
+
+
+def _draw_file_metric(rng: Any) -> tuple[str, float]:
+    metric = rng.choice(_RUM_METRICS)
+    if metric == "LCP":
+        return metric, rng.choice([800, 1200, 2200, 3100, 4200])
+    if metric == "CLS":
+        return metric, round(rng.uniform(0.01, 0.35), 3)
+    if metric == "INP":
+        return metric, rng.choice([50, 120, 180, 240, 320])
+    if metric == "TTFB":
+        return metric, rng.choice([150, 250, 650, 950])
+    return metric, rng.choice([10, 25, 80, 150])
+
+
+def _draw_harness_metric(rng: Any) -> tuple[str, float]:
+    metric = rng.choice(_RUM_METRICS)
+    if metric == "CLS":
+        return metric, round(rng.uniform(0.01, 0.45), 3)
+    return metric, rng.choice([150, 250, 1200, 2500, 3500])
+
+
+@dataclass(frozen=True)
+class RumProfile:
+    browsers: tuple[str, ...]
+    oses: tuple[str, ...]
+    events: tuple[str, ...]
+    errors: tuple[str, ...]
+    other_good_max: float
+    hashed_chunk: bool
+    mobile_browser_hint: bool
+    draw_metric: Callable[[Any], tuple[str, float]]
+
+
+FILE_RUM_PROFILE = RumProfile(
+    browsers=("Chrome", "Firefox", "Safari", "Edge", "Mobile Safari"),
+    oses=("Windows", "macOS", "iOS", "Android", "Linux"),
+    events=("click_search_button", "form_submit", "tab_switch_performance", "modal_close_settings"),
+    errors=(
+        "TypeError: Cannot read properties of null (reading 'style')",
+        "ReferenceError: x_analytics is not defined",
+        "Error: Failed to fetch npm registry assets",
+        "DOMException: Playwright auto-navigation aborted",
+    ),
+    other_good_max=100,
+    hashed_chunk=True,
+    mobile_browser_hint=True,
+    draw_metric=_draw_file_metric,
+)
+
+HARNESS_RUM_PROFILE = RumProfile(
+    browsers=("Chrome", "Firefox", "Safari"),
+    oses=("Windows", "macOS", "iOS"),
+    events=("click_search_button", "form_submit", "tab_switch_performance"),
+    errors=(
+        "TypeError: Cannot read properties of undefined (reading 'split')",
+        "ReferenceError: analytics_tracker is not defined",
+        "DOMException: Failed to execute 'appendChild' on 'Node'",
+    ),
+    other_good_max=800,
+    hashed_chunk=False,
+    mobile_browser_hint=False,
+    draw_metric=_draw_harness_metric,
+)
+
+
+def pick_beacon_type(rng: Any = random) -> str:
+    return str(rng.choices(_BEACON_TYPES, weights=_BEACON_WEIGHTS)[0])
+
+
+def rum_rating(metric: str, value: float, profile: RumProfile) -> str:
+    if metric == "LCP":
+        return "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
+    if metric == "CLS":
+        return "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
+    if metric == "INP":
+        return "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
+    if metric == "TTFB":
+        return "good" if value <= 800 else "poor"
+    return "good" if value <= profile.other_good_max else "poor"
+
+
+def rum_device(browser: str, os_name: str, profile: RumProfile) -> str:
+    if profile.mobile_browser_hint:
+        return "Mobile" if "Mobile" in browser or os_name in ("iOS", "Android") else "Desktop"
+    return "Mobile" if os_name == "iOS" else "Desktop"
+
+
+def generate_faro_payload(
+    rng: Any,
+    profile: RumProfile,
+    *,
+    beacon_type: str,
+    browser: str,
+    os_name: str,
+    page_url: str,
+    record_dt: datetime,
+    metric: str | None = None,
+    value: float | None = None,
+) -> dict[str, Any]:
+    """Faro payload (``meta`` plus one of measurements/events/exceptions).
+
+    ``metric``/``value`` are drawn from the profile's pools when omitted
+    (vitals beacons only).
+    """
+    payload: dict[str, Any] = {
+        "meta": {
+            "browser": {"name": browser, "mobile": rum_device(browser, os_name, profile) == "Mobile"},
+            "os": {"name": os_name},
+            "page": {"url": page_url},
+        }
+    }
+    if beacon_type == "vitals":
+        if metric is None or value is None:
+            metric, value = profile.draw_metric(rng)
+        payload["measurements"] = [
+            {
+                "type": "web-vitals",
+                "values": {metric: value},
+                "context": {"rating": rum_rating(metric, value, profile)},
+            }
+        ]
+    elif beacon_type == "interaction":
+        payload["events"] = [
+            {
+                "name": rng.choice(profile.events),
+                "timestamp": record_dt.isoformat(),
+                "attributes": {"element_id": f"btn_{rng.randint(100, 999)}"},
+            }
+        ]
+    else:
+        message = rng.choice(profile.errors)
+        filename = f"static/chunks/main-{rum_hex_id(rng, 8)}.js" if profile.hashed_chunk else "static/chunks/main.js"
+        payload["exceptions"] = [
+            {
+                "type": "error",
+                "value": message,
+                "stacktrace": {
+                    "frames": [{"filename": filename, "lineno": rng.randint(10, 500), "colno": rng.randint(1, 120)}]
+                },
+            }
+        ]
+    return payload
+
+
+def generate_rum_record(service_id: str, record_dt: datetime, rng: Any = random) -> dict[str, Any]:
+    """One raw RUM log line as the edge writes it (FOS ``raw/rum/`` layout)."""
+    profile = FILE_RUM_PROFILE
+    beacon_type = pick_beacon_type(rng)
+    browser = rng.choice(profile.browsers)
+    os_name = rng.choice(profile.oses)
+    device = rum_device(browser, os_name, profile)
+
+    city = rng.choice(["Denver", "New York", "San Francisco", "London", "Tokyo", "Paris"])
+    region = rng.choice(["CO", "NY", "CA", "ENG", "TKY", "IDF"])
+    country = rng.choice(["US", "US", "US", "GB", "JP", "FR"])
+    pop = rng.choice(["DEN", "EWR", "SJC", "LCY", "TYO", "CDG"])
+
+    path = rng.choice(["/", "/dashboard", "/origin", "/security", "/performance", "/rum"])
+    cid = f"cid-{rng.randint(10000, 99999)}"
+    req_id = f"req-{rum_hex_id(rng, 16)}"
+
+    faro_payload = generate_faro_payload(
+        rng,
+        profile,
+        beacon_type=beacon_type,
+        browser=browser,
+        os_name=os_name,
+        page_url=f"http://localhost{path}",
+        record_dt=record_dt,
+    )
+
+    return {
+        "service_id": service_id,
+        "timestamp": record_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "geo_city": city,
+        "geo_region": region,
+        "geo_country_code": country,
+        "server_pop": pop,
+        "browser": browser,
+        "os": os_name,
+        "device": device,
+        "rum_cid": cid,
+        "req_id": req_id,
+        # Standard-mode ingest (backend/core/rum_ingest.py) reads
+        # `fastly_req_id` specifically — the same field the real edge VCL
+        # stamps. Without it the request-id join to the CDN log resolves to "".
+        "fastly_req_id": req_id,
+        "request_event_id": req_id,  # Aligns ClickHouse high-scale schema
+        "url": f"http://localhost{path}",
+        "rum_body": json.dumps(faro_payload),
+    }
+
+
+def generate_rum_records(
+    service_id: str, n: int, now: datetime, rng: Any = random, step_ms: int = 50
+) -> list[dict[str, Any]]:
+    """``n`` records, newest first, spaced ``step_ms`` apart so timestamps are unique."""
+    return [generate_rum_record(service_id, now - timedelta(milliseconds=i * step_ms), rng) for i in range(n)]
+
+
+def build_rum_beacon_url(base_url: str, rng: Any = random) -> str:
+    """``/rum-beacon`` URL carrying the identity/metric query the edge VCL reads."""
+    metric, value = HARNESS_RUM_PROFILE.draw_metric(rng)
+    beacon_id = rum_hex_id(rng, 32)
+    cid = f"cid-{beacon_id}"
+    req_id = f"req-{beacon_id}"
+    path = rng.choice(_RUM_PATHS)
+    return (
+        f"{base_url.rstrip('/')}/rum-beacon?rum_metric_name={metric}"
+        f"&rum_metric_value={value}&rum_cid={quote(cid)}&cid={quote(cid)}"
+        f"&req={quote(req_id)}&rum_pathname={quote(path)}"
+    )
+
+
+def build_rum_beacon_body(url: str, rng: Any = random, now: datetime | None = None) -> dict[str, Any]:
+    """Faro POST body for a ``/rum-beacon`` URL built by :func:`build_rum_beacon_url`."""
+    profile = HARNESS_RUM_PROFILE
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    metric = qs.get("rum_metric_name", ["LCP"])[0]
+    try:
+        value = float(qs.get("rum_metric_value", ["1200"])[0])
+    except ValueError:
+        value = 1200.0
+    path = qs.get("rum_pathname", ["/"])[0]
+    browser = rng.choice(profile.browsers)
+    os_name = rng.choice(profile.oses)
+    return generate_faro_payload(
+        rng,
+        profile,
+        beacon_type=pick_beacon_type(rng),
+        browser=browser,
+        os_name=os_name,
+        page_url=f"{parsed.scheme}://{parsed.netloc}{path}",
+        record_dt=now or datetime.now(UTC),
+        metric=metric,
+        value=value,
+    )
