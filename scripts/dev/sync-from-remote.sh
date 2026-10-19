@@ -88,6 +88,9 @@ if [ -f "$REPO_ROOT/.env" ]; then
   set +a
 fi
 
+# shellcheck source=scripts/lib/gce_ssh.sh
+source "$REPO_ROOT/scripts/lib/gce_ssh.sh"
+
 REMOTE_INSTANCE="${REMOTE_INSTANCE:-}"
 REMOTE_ZONE="${REMOTE_ZONE:-}"
 REMOTE_PATH="${REMOTE_PATH:-}"
@@ -186,8 +189,7 @@ if [ -n "$RUNNING_PIDS" ]; then
 fi
 
 # Verify gcloud SSH connectivity + remote layout before touching anything local.
-if gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" \
-     --command="true" --quiet >/dev/null 2>&1; then
+if gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- true >/dev/null 2>&1; then
   ok "ssh reachable"
 else
   fail "gcloud compute ssh to '$REMOTE_INSTANCE' (zone $REMOTE_ZONE) failed"
@@ -201,9 +203,12 @@ fi
 # without sudo. Test for passwordless sudo up front so we either succeed
 # or fail fast (instead of hanging on a password prompt mid-transfer).
 SUDO=""
-if gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-     --command="sudo -n true" >/dev/null 2>&1; then
+SUDO_ARGV=()
+# ACTIVE_CATEGORIES only ever holds names from the fixed ALL_CATEGORIES set.
+read -r -a ACTIVE_ARR <<< "$ACTIVE_CATEGORIES"
+if gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- sudo -n true >/dev/null 2>&1; then
   SUDO="sudo"
+  SUDO_ARGV=(sudo)
   ok "passwordless sudo available on remote"
 else
   warn "no passwordless sudo on remote — will try unprivileged reads"
@@ -211,8 +216,10 @@ else
   warn " to your SSH user or chmod -R a+rX $REMOTE_PATH on the VM)"
 fi
 
-MISSING="$(gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-    --command="for d in ${ACTIVE_CATEGORIES}; do [ -d \"$REMOTE_PATH/\$d\" ] || echo \$d; done" \
+# shellcheck disable=SC2016 # $1/$d are expanded by the remote bash, not here
+MISSING="$(gce_ssh_script "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
+    'p=$1; shift; for d in "$@"; do [ -d "$p/$d" ] || echo "$d"; done' \
+    "$REMOTE_PATH" "${ACTIVE_ARR[@]}" \
     2>/dev/null || true)"
 if [ -n "$MISSING" ]; then
   fail "expected $REMOTE_PATH/{${ACTIVE_CATEGORIES}} on the remote, missing: $MISSING"
@@ -226,8 +233,10 @@ echo
 step "${C_BOLD}local${C_RESET}    →    ${C_BOLD}remote${C_RESET}"
 
 REMOTE_BYTES_TOTAL=0
-REMOTE_BYTES_RAW="$(gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-    --command="cd $REMOTE_PATH && for d in ${ACTIVE_CATEGORIES}; do $SUDO du -sb --exclude='*-wal' --exclude='*-shm' --exclude='*.duckdb.wal' \"\$d\" 2>/dev/null; done" \
+# shellcheck disable=SC2016 # $1/$d are expanded by the remote bash, not here
+REMOTE_BYTES_RAW="$(gce_ssh_script "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
+    'cd "$1" && s=$2 && shift 2 && for d in "$@"; do $s du -sb --exclude="*-wal" --exclude="*-shm" --exclude="*.duckdb.wal" "$d" 2>/dev/null; done' \
+    "$REMOTE_PATH" "$SUDO" "${ACTIVE_ARR[@]}" \
     2>/dev/null || true)"
 # Parse remote sizes (du -sb output: bytes\tpath)
 fmt_bytes() {
@@ -297,10 +306,6 @@ if [ "$DRY_RUN" = 1 ]; then
 else
   # Exclude ephemeral SQLite WAL/SHM sidecars — they're tied to the writer
   # process on the remote and will be recreated by ours.
-  REMOTE_TAR_CMD="$SUDO tar -C \"$REMOTE_PATH\" \
-    --exclude='*-wal' --exclude='*-shm' --exclude='*.duckdb.wal' \
-    -cf - ${ACTIVE_CATEGORIES}"
-
   step "expected ~$(fmt_bytes "$REMOTE_BYTES_TOTAL") on the wire"
 
   # Live progress: a tiny python middleman copies stdin→stdout while
@@ -309,8 +314,10 @@ else
   # \033[K wipes any tail from a longer previous render, and the bar
   # auto-shrinks below ~80 cols so we never wrap (which would leave
   # the next \r writing one row below, producing a scrolling effect).
-  gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-    --command="$REMOTE_TAR_CMD" \
+  gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
+    ${SUDO_ARGV[@]+"${SUDO_ARGV[@]}"} tar -C "$REMOTE_PATH" \
+    --exclude='*-wal' --exclude='*-shm' --exclude='*.duckdb.wal' \
+    -cf - "${ACTIVE_ARR[@]}" \
     | TOTAL_BYTES="$REMOTE_BYTES_TOTAL" python3 -c '
 import os, sys, time, shutil
 

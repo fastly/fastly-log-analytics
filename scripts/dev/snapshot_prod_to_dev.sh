@@ -76,6 +76,9 @@ if [ -f "$REPO_ROOT/.env" ]; then
   set +a
 fi
 
+# shellcheck source=scripts/lib/gce_ssh.sh
+source "$REPO_ROOT/scripts/lib/gce_ssh.sh"
+
 REMOTE_INSTANCE="${REMOTE_INSTANCE:-}"
 REMOTE_ZONE="${REMOTE_ZONE:-}"
 REMOTE_PATH="${REMOTE_PATH:-}"
@@ -128,8 +131,7 @@ fi
 
 # Confirm ssh reachability up front (mirrors sync-from-remote.sh pre-flight)
 # so a missing key fails fast instead of mid-transfer.
-if gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-     --command="true" >/dev/null 2>&1; then
+if gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- true >/dev/null 2>&1; then
   ok "gcloud ssh reachable"
 else
   fail "gcloud compute ssh to '$REMOTE_INSTANCE' (zone $REMOTE_ZONE) failed"
@@ -138,10 +140,9 @@ else
 fi
 
 # Passwordless sudo on remote (the bind-mount is owned by the container user).
-SUDO=""
-if gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-     --command="sudo -n true" >/dev/null 2>&1; then
-  SUDO="sudo"
+SUDO_ARGV=()
+if gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- sudo -n true >/dev/null 2>&1; then
+  SUDO_ARGV=(sudo)
   ok "passwordless sudo on remote"
 else
   warn "no passwordless sudo — will try unprivileged read"
@@ -168,8 +169,11 @@ else
   # Stream the tree as a tarball directly to local disk via the same
   # gcloud ssh + tar pattern sync-from-remote.sh uses. We tee into a
   # checksum file as we write so the manifest doesn't need a second read.
-  gcloud compute ssh "$REMOTE_INSTANCE" --zone="$REMOTE_ZONE" --quiet \
-    --command="cd $REMOTE_PATH && $SUDO tar -czf - --exclude='*-wal' --exclude='*-shm' data cache configs" \
+  # shellcheck disable=SC2016 # $1/$@ are expanded by the remote bash, not here
+  gce_ssh_script "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
+    'cd "$1" && shift && exec "$@"' \
+    "$REMOTE_PATH" ${SUDO_ARGV[@]+"${SUDO_ARGV[@]}"} \
+    tar -czf - --exclude='*-wal' --exclude='*-shm' data cache configs \
     > "$SNAP_PATH/prod-snapshot.tar.gz"
 
   # Manifest: timestamp, source, size, sha256. Used by restore + the
