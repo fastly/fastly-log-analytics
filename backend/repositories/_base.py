@@ -8,7 +8,6 @@ Import from here instead of redefining in each file:
 from __future__ import annotations
 
 import contextlib
-import heapq
 import logging
 import re
 import time
@@ -35,6 +34,9 @@ from backend.repositories.rollup_coverage import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+from backend.repositories.top_n_rollups import fold_rows as _fold_rows
+from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
+from backend.repositories.top_n_rollups import truncate_top_n as _truncate_top_n
 from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -1809,20 +1811,7 @@ class QueryRunner:
                 # construction so a hostile field name can never reach the
                 # SQL builder via this fast path — audit finding 004.
                 #
-                lf_config = self.src.get("log_fields") or {}
-                custom_fields = {
-                    cf["name"]
-                    for cf in lf_config.get("custom_fields", [])
-                    if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
-                }
-                live_topn_fields = []
-                for f in safe_fields:
-                    if f in _LIVE_TOPN_SKIP_FIELDS:
-                        continue
-                    if f.startswith("cmcd_") or f.startswith("edge_") or f.startswith("rum_") or f == "fastly_req_id":
-                        if f not in custom_fields:
-                            continue
-                    live_topn_fields.append(f)
+                live_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
                 live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
                     live_start, active_str, live_end
                 )
@@ -1981,20 +1970,7 @@ class QueryRunner:
                         schema_types = schema_types_seed
                     else:
                         schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
-                lf_config = self.src.get("log_fields") or {}
-                custom_fields = {
-                    cf["name"]
-                    for cf in lf_config.get("custom_fields", [])
-                    if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
-                }
-                heal_topn_fields = []
-                for f in safe_fields:
-                    if f in _LIVE_TOPN_SKIP_FIELDS:
-                        continue
-                    if f.startswith("cmcd_") or f.startswith("edge_") or f.startswith("rum_") or f == "fastly_req_id":
-                        if f not in custom_fields:
-                            continue
-                    heal_topn_fields.append(f)
+                heal_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
                 # Clamp to the requested window so a mid-hour window edge
                 # (custom range) can't over-count rows outside it; the IN
                 # list prunes to exactly the un-rolled hours in between.
@@ -2034,78 +2010,44 @@ class QueryRunner:
         _phase("live_missing_hours", (time.perf_counter() - _t_heal) * 1000)
         _phase("live_missing_hours:n_hours", float(len(missing_hours)))
 
-        # Combine rolled and live, bucketed by field. The prior
-        # implementation kept a flat (field, value) keyed dict and then
-        # re-scanned the whole dict per field at sort time, making the
-        # merge O(N × F) — at ~50k combined rows × 12 fields = 600k
-        # filter iterations, this Python work was ~880ms (the single
-        # biggest phase inside top_n_rollups, larger than the SQL
-        # read itself). Bucketing by field once is O(N) and brings
-        # the merge down to <50ms.
+        # Combine rolled and live, bucketed by field (O(rows), see fold_rows).
         _t_merge = time.perf_counter()
-        by_field: dict[str, dict[Any, int]] = {}
-        for field, value, count in rolled_res:
-            bucket = by_field.setdefault(field, {})
-            bucket[value] = bucket.get(value, 0) + count
-        for field, value, count in live_res:
-            bucket = by_field.setdefault(field, {})
-            bucket[value] = bucket.get(value, 0) + count
-        for field, value, count in heal_res:
-            bucket = by_field.setdefault(field, {})
-            bucket[value] = bucket.get(value, 0) + count
-        for field, value, count in partial_rows:
-            bucket = by_field.setdefault(field, {})
-            bucket[value] = bucket.get(value, 0) + count
+        by_field = _fold_rows(rolled_res, live_res, heal_res, partial_rows)
 
-        # Sort and limit. Per-field limits override the global default for
-        # specific fields (e.g. country at 500 for choropleth).
-        top_results = []
-        _pfl = per_field_limits or {}
+        # Per-field limits override the global default for specific fields
+        # (e.g. country at 500 for choropleth).
+        top_results, empty_fields = _truncate_top_n(by_field, fields, limit, per_field_limits)
         _service_key = self.src.get("name") or self.src.get("service_id") or "default"
-        for field in fields:
-            bucket_opt: dict[Any, int] | None = by_field.get(field)
-            if not bucket_opt:
-                # Silent-skip surface: when a caller requests a field that has
-                # NO rollup or live entries in the window, the dashboard panel
-                # for that field renders empty with no operator trail. This is
-                # indistinguishable from "the field truly had zero traffic"
-                # vs. "the rollup writer hasn't backfilled this field yet" —
-                # see e.g. fingerprint fields added 2026-06-10 that lacked
-                # 30-day history. Warn (rate-limited to once per
-                # _EMPTY_ROLLUP_WARN_INTERVAL_S per (service, field)) so
-                # operators can correlate empty panels with missing rollups.
-                #
-                # Skip the warning for _LIVE_TOPN_SKIP_FIELDS: these are
-                # deliberately omitted from the live top-up and have no rendered
-                # panel, so an empty merged result is expected (often un-rolled
-                # too) — warning here is a false positive, not a backfill gap.
-                if field not in _LIVE_TOPN_SKIP_FIELDS:
-                    _ts_key = (_service_key, field)
-                    _now = time.monotonic()
-                    _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key, 0.0)
-                    if _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
-                        _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
-                        _logger.debug(
-                            "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
-                            "panel will render empty; check rollup backfill coverage if unexpected",
-                            field,
-                            _service_key,
-                            start_time,
-                            end_time,
-                        )
+        for field in empty_fields:
+            # Silent-skip surface: when a caller requests a field that has
+            # NO rollup or live entries in the window, the dashboard panel
+            # for that field renders empty with no operator trail. This is
+            # indistinguishable from "the field truly had zero traffic"
+            # vs. "the rollup writer hasn't backfilled this field yet" —
+            # see e.g. fingerprint fields added 2026-06-10 that lacked
+            # 30-day history. Warn (rate-limited to once per
+            # _EMPTY_ROLLUP_WARN_INTERVAL_S per (service, field)) so
+            # operators can correlate empty panels with missing rollups.
+            #
+            # Skip the warning for _LIVE_TOPN_SKIP_FIELDS: these are
+            # deliberately omitted from the live top-up and have no rendered
+            # panel, so an empty merged result is expected (often un-rolled
+            # too) — warning here is a false positive, not a backfill gap.
+            if field in _LIVE_TOPN_SKIP_FIELDS:
                 continue
-            bucket = bucket_opt
-            _field_limit = _pfl.get(field, limit)
-            # Use heapq.nlargest when truncating to a small slice of a
-            # large bucket — avoids the full O(N log N) sort for the
-            # common case (10-of-thousands).
-            items = bucket.items()
-            if _field_limit < len(bucket):
-                top_items = heapq.nlargest(_field_limit, items, key=lambda x: x[1])
-            else:
-                top_items = sorted(items, key=lambda x: x[1], reverse=True)
-            for val, count in top_items:
-                top_results.append((field, val, count))
+            _ts_key = (_service_key, field)
+            _now = time.monotonic()
+            _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key, 0.0)
+            if _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
+                _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
+                _logger.debug(
+                    "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
+                    "panel will render empty; check rollup backfill coverage if unexpected",
+                    field,
+                    _service_key,
+                    start_time,
+                    end_time,
+                )
         _phase("merge_sort", (time.perf_counter() - _t_merge) * 1000)
 
         return top_results, fields
