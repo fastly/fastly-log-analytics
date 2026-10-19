@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hmac
 import logging
-import secrets
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse
@@ -202,8 +201,8 @@ def oauth_authorize(
 
     try:
         metadata = oidc.get_metadata(prov)
-        state = secrets.token_urlsafe(32)
-        nonce = secrets.token_urlsafe(32)
+        state = oidc.make_state_token()
+        nonce = oidc.make_state_token()
         verifier = oidc.make_pkce_verifier()
         authorize_url = oidc.build_authorize_url(
             prov,

@@ -31,8 +31,10 @@ from typing import Final
 from urllib.parse import urlencode
 
 import httpx
+from authlib.common.security import generate_token
 from authlib.integrations.base_client import OAuthError
 from authlib.integrations.httpx_client import OAuth2Client
+from authlib.oauth2.rfc7636 import create_s256_code_challenge
 from joserfc import jwt
 from joserfc.errors import (
     ExpiredTokenError,
@@ -173,20 +175,18 @@ def _refresh_jwks(provider: OAuthProvider, metadata: dict, stale: KeySet) -> Key
 # ── Authorize URL + PKCE ─────────────────────────────────────────────────────
 
 
-def _b64url_nopad(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+def make_state_token() -> str:
+    """CSRF ``state`` / OIDC ``nonce`` value (~190 bits, CSPRNG-backed)."""
+    return generate_token(32)
 
 
 def make_pkce_verifier() -> str:
-    import secrets
-
-    return secrets.token_urlsafe(64)
+    """RFC 7636 ``code_verifier``: 64 unreserved chars (limit is 43-128)."""
+    return generate_token(64)
 
 
 def pkce_challenge(verifier: str) -> str:
-    import hashlib
-
-    return _b64url_nopad(hashlib.sha256(verifier.encode("ascii")).digest())
+    return create_s256_code_challenge(verifier)
 
 
 def build_authorize_url(
