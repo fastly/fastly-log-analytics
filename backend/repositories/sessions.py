@@ -9,6 +9,7 @@ from typing import Any
 
 import duckdb
 
+from backend.core.metric_expressions import sum_or_zero
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, empty_schema_response
 from backend.repositories._sql import sessions as SQL
@@ -81,10 +82,10 @@ def _build_active_hour_session_sql(
         if "status" in actual_cols
         else "CAST(0 AS BIGINT)"
     )
-    total_bytes = (
-        'CAST(COALESCE(SUM("resp_bytes"), 0) AS BIGINT)' if "resp_bytes" in actual_cols else "CAST(0 AS BIGINT)"
-    )
-    rtt_sum = 'CAST(COALESCE(SUM("tcp_rtt"), 0.0) AS DOUBLE)' if "tcp_rtt" in actual_cols else "CAST(0.0 AS DOUBLE)"
+    resp_bytes_sum = sum_or_zero('"resp_bytes"')
+    tcp_rtt_sum = sum_or_zero('"tcp_rtt"', zero="0.0")
+    total_bytes = f"CAST({resp_bytes_sum} AS BIGINT)" if "resp_bytes" in actual_cols else "CAST(0 AS BIGINT)"
+    rtt_sum = f"CAST({tcp_rtt_sum} AS DOUBLE)" if "tcp_rtt" in actual_cols else "CAST(0.0 AS DOUBLE)"
     rtt_count = (
         'CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT)'
         if "tcp_rtt" in actual_cols

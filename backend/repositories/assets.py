@@ -7,6 +7,7 @@ import time as _time
 
 import duckdb
 
+from backend.core.metric_expressions import column_or_default
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -63,13 +64,11 @@ def get_assets_aggregates(
     }
 
     # Graceful defaults for optional columns
-    encoding_expr = (
-        "COALESCE(\"resp_header_content_encoding\", '')" if "resp_header_content_encoding" in actual_cols else "''"
-    )
-    bytes_expr = 'COALESCE(CAST("resp_bytes" AS BIGINT), 0)' if "resp_bytes" in actual_cols else "0"
-    status_expr = 'COALESCE(CAST("status" AS INTEGER), 200)' if "status" in actual_cols else "200"
-    ttl_expr = 'COALESCE(CAST("ttl" AS DOUBLE), 0.0)' if "ttl" in actual_cols else "0.0"
-    cache_expr = "COALESCE(\"cache\", 'MISS')" if "cache" in actual_cols else "'MISS'"
+    encoding_expr = column_or_default(actual_cols, "resp_header_content_encoding", "''")
+    bytes_expr = column_or_default(actual_cols, "resp_bytes", "0", cast="BIGINT")
+    status_expr = column_or_default(actual_cols, "status", "200", cast="INTEGER")
+    ttl_expr = column_or_default(actual_cols, "ttl", "0.0", cast="DOUBLE")
+    cache_expr = column_or_default(actual_cols, "cache", "'MISS'")
     url_expr = '"url"' if "url" in actual_cols else "''"
 
     needed_cols = ["url", "cache", "resp_header_content_encoding", "resp_bytes", "status", "ttl"]

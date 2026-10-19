@@ -2812,7 +2812,7 @@ class QueryRunner:
         if rollup_paths:
             paths_sql = quote_path_list(rollup_paths)
             select_clauses.append(
-                f"SELECT COALESCE(SUM(requests), 0) AS num "
+                f"SELECT {metric_expressions.sum_or_zero('requests')} AS num "
                 f"FROM read_parquet([{paths_sql}]) "
                 f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
@@ -2900,7 +2900,7 @@ class QueryRunner:
             return 0
 
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
-        final_sql = f"SELECT COALESCE(SUM(num), 0) FROM ({unioned})"
+        final_sql = f"SELECT {metric_expressions.sum_or_zero('num')} FROM ({unioned})"
 
         try:
             return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])

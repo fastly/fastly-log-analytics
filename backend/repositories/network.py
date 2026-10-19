@@ -8,6 +8,7 @@ from typing import Any
 
 import duckdb
 
+from backend.core.metric_expressions import sum_or_zero
 from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
@@ -1331,9 +1332,9 @@ def get_transport_metrics(
 
     select_parts = ["COUNT(*) AS total_reqs"]
     if "resp_bytes" in actual_cols:
-        select_parts.append("COALESCE(SUM(resp_bytes), 0) AS total_bytes")
+        select_parts.append(f"{sum_or_zero('resp_bytes')} AS total_bytes")
     elif "bytes" in actual_cols:
-        select_parts.append("COALESCE(SUM(bytes), 0) AS total_bytes")
+        select_parts.append(f"{sum_or_zero('bytes')} AS total_bytes")
     else:
         select_parts.append("0 AS total_bytes")
 

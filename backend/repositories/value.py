@@ -10,6 +10,7 @@ from typing import Any
 
 import duckdb
 
+from backend.core.metric_expressions import HIT_STATES, sum_or_zero
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -351,7 +352,7 @@ def _try_overview_from_rollup(
         return None
 
     interval = safe_interval(chart_interval, "1 day")
-    _HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+    _HIT_STATES = HIT_STATES
 
     select_clauses: list[str] = []
 
@@ -385,7 +386,10 @@ def _try_overview_from_rollup(
         live_st_tz = live_start.astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
 
-        sum_miss_elapsed = "COALESCE(SUM(elapsed) FILTER (WHERE cache = 'MISS'), 0.0)" if has_elapsed else "0.0"
+        sum_miss_elapsed = sum_or_zero("elapsed", zero="0.0", where="cache = 'MISS'") if has_elapsed else "0.0"
+        hit_bandwidth_saved = sum_or_zero("resp_bytes", where=f"cache IN {_HIT_STATES}")
+        total_bandwidth = sum_or_zero("resp_bytes")
+        sum_hit_elapsed = sum_or_zero("elapsed", zero="0.0", where=f"cache IN {_HIT_STATES}") if has_elapsed else "0.0"
         cnt_miss_elapsed = "COUNT(elapsed) FILTER (WHERE cache = 'MISS')" if has_elapsed else "0"
 
         table_name = _safe_table(runner.src["name"])
@@ -397,12 +401,12 @@ def _try_overview_from_rollup(
             f"  COUNT(*) FILTER (WHERE cache = 'PASS') AS pass_cnt, "
             f"  COUNT(*) FILTER (WHERE cache = 'SYNTH') AS synth_cnt, "
             f"  COUNT(*) FILTER (WHERE cache IN ('MISS','PASS','SYNTH','ERROR')) AS origin_cnt, "
-            f"  COALESCE(SUM(resp_bytes) FILTER (WHERE cache IN {_HIT_STATES}), 0) AS bandwidth_saved, "
-            f"  COALESCE(SUM(resp_bytes), 0) AS total_bytes, "
+            f"  {hit_bandwidth_saved} AS bandwidth_saved, "
+            f"  {total_bandwidth} AS total_bytes, "
             f"  {'COUNT(*) FILTER (WHERE is_shield = true AND cache IN ' + _HIT_STATES + ')' if has_shield else '0'} AS shield_hit, "
             f"  {'COUNT(*) FILTER (WHERE is_shield = true)' if has_shield else '0'} AS shield_total, "
             f"  {'COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406)' if has_waf else '0'} AS threats_cnt, "
-            f"  {'COALESCE(SUM(elapsed) FILTER (WHERE cache IN ' + _HIT_STATES + '), 0.0)' if has_elapsed else '0.0'} AS sum_hit_elapsed, "
+            f"  {sum_hit_elapsed} AS sum_hit_elapsed, "
             f"  {'COUNT(elapsed) FILTER (WHERE cache IN ' + _HIT_STATES + ')' if has_elapsed else '0'} AS cnt_hit_elapsed, "
             f"  {sum_miss_elapsed} AS sum_miss_elapsed, "
             f"  {cnt_miss_elapsed} AS cnt_miss_elapsed "
@@ -699,7 +703,7 @@ def get_summary(
     # ── Rollup fast path for overview + caching ────────────────────────
     _overview_done = False
     _caching_done = False
-    _HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+    _HIT_STATES = HIT_STATES
 
     if (_want("caching") or _want("overview")) and has_cache and not filters:
         _t = time.perf_counter()

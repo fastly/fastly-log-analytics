@@ -7,6 +7,7 @@ import time as _time
 
 import duckdb
 
+from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -289,8 +290,8 @@ def get_performance_aggregates(
             # pass — the derived rowset is spooled once and read by both the
             # 300-row sample and the four AVG aggregates.
             _t = _time.perf_counter()
-            ottfb_expr = "COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0)" if "ottfb" in actual_cols else "0"
-            ottlb_expr = "COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0)" if "ottlb" in actual_cols else "0"
+            ottfb_expr = coalesce("CAST(ottfb AS DOUBLE) / 1000.0", "0") if "ottfb" in actual_cols else "0"
+            ottlb_expr = coalesce("CAST(ottlb AS DOUBLE) / 1000.0", "0") if "ottlb" in actual_cols else "0"
 
             combined_q = f"""
                 WITH components AS MATERIALIZED (

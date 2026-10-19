@@ -5,6 +5,7 @@ from __future__ import annotations
 import duckdb
 
 from backend import config as svcconfig
+from backend.core.metric_expressions import coalesce
 from backend.repositories._base import QueryRunner, _safe_table
 from backend.repositories._sql import usage as SQL
 
@@ -182,7 +183,7 @@ def _log_activity_durable(
     sql = (
         f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS bucket, "
         f"COUNT(*) AS total, "
-        f"COALESCE({bytes_expr}, 0) AS total_bytes "
+        f"{coalesce(bytes_expr, '0')} AS total_bytes "
         f"FROM {table} "
         f"WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp < CAST(? AS TIMESTAMPTZ) "
         f"GROUP BY 1 ORDER BY 1"

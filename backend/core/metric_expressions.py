@@ -24,7 +24,47 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-__all__ = ["origin_latency_us"]
+__all__ = [
+    "HIT_STATES",
+    "coalesce",
+    "column_or_default",
+    "origin_latency_us",
+    "sum_or_zero",
+]
+
+# Cache states that count as an edge hit (SQL ``IN`` tuple literal).
+HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+
+
+def coalesce(expr: str, default: str) -> str:
+    """Render ``COALESCE(<expr>, <default>)`` byte-for-byte."""
+    return f"COALESCE({expr}, {default})"
+
+
+def sum_or_zero(expr: str, *, zero: str = "0", where: str | None = None) -> str:
+    """Render a NULL-safe sum: ``COALESCE(SUM(<expr>)[ FILTER (WHERE <where>)], <zero>)``."""
+    agg = f"SUM({expr})" if where is None else f"SUM({expr}) FILTER (WHERE {where})"
+    return coalesce(agg, zero)
+
+
+def column_or_default(
+    actual_cols: Collection[str],
+    col: str,
+    default: str,
+    *,
+    cast: str | None = None,
+) -> str:
+    """Return a quoted-column expression with a NULL default, or the bare default.
+
+    Present column: ``COALESCE("<col>", <default>)`` (or
+    ``COALESCE(CAST("<col>" AS <cast>), <default>)`` when ``cast`` is given).
+    Absent column: ``<default>`` — so the expression is always valid SQL on a
+    schema that lacks the optional column.
+    """
+    if col not in actual_cols:
+        return default
+    ref = f'"{col}"' if cast is None else f'CAST("{col}" AS {cast})'
+    return coalesce(ref, default)
 
 
 def origin_latency_us(actual_cols: Collection[str], *, absent: str | None = "NULL") -> str | None:
