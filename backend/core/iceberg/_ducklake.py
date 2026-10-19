@@ -37,11 +37,11 @@ import threading
 import time
 
 from backend import config
+from backend.core.sql_ident import require_safe_ident
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Serializes ``ATTACH ... AS lake`` across every connection in this process.
 # Concurrent connections attaching a DuckLake catalog under the SAME alias
@@ -487,8 +487,7 @@ def _apply_target_file_size(con, alias: str = "lake") -> None:
     size-capped like the local tiered compaction. Checked before set so a
     steady-state attach doesn't write the catalog every time.
     """
-    if not _IDENT_RE.fullmatch(alias):
-        raise ValueError(f"invalid ducklake alias: {alias!r}")
+    require_safe_ident(alias, "invalid ducklake alias")
     target = f"{_DUCKLAKE_TARGET_FILE_SIZE_MB}MiB"
     target_bytes = str(_DUCKLAKE_TARGET_FILE_SIZE_MB * 1024 * 1024)
     try:
@@ -509,8 +508,7 @@ def ducklake_current_snapshot_id(con, alias: str = "lake") -> int | None:
     design — under a shared catalog this is conservative (another
     tenant's commit forces a rebuild) but never stale.
     """
-    if not _IDENT_RE.fullmatch(alias):
-        raise ValueError(f"invalid ducklake alias: {alias!r}")
+    require_safe_ident(alias, "invalid ducklake alias")
     try:
         row = con.execute(
             f"SELECT snapshot_id FROM ducklake_snapshots('{alias}') ORDER BY snapshot_id DESC LIMIT 1"
@@ -531,10 +529,8 @@ def _ducklake_add_data_files(con, s3_paths: list[str], alias: str = "lake", tabl
     """
     if not s3_paths:
         return
-    if not _IDENT_RE.fullmatch(alias):
-        raise ValueError(f"invalid ducklake alias: {alias!r}")
-    if not _IDENT_RE.fullmatch(table):
-        raise ValueError(f"invalid ducklake table name: {table!r}")
+    require_safe_ident(alias, "invalid ducklake alias")
+    require_safe_ident(table, "invalid ducklake table name")
     paths_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in s3_paths)
     con.execute(
         f"CALL ducklake_add_data_files('{alias}', '{table}', [{paths_str}], allow_missing := true, ignore_extra_columns := true);"

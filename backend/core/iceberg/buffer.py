@@ -26,7 +26,6 @@ import glob as _glob
 import hashlib
 import logging
 import os
-import re
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -49,6 +48,7 @@ from backend.core import metadata as _meta_mod
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
 from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+from backend.core.sql_ident import require_safe_ident
 
 
 def __getattr__(name: str):
@@ -885,8 +885,6 @@ def run_cloud_maintenance(source: dict) -> dict:
 # interpolated (DuckDB cannot bind an identifier). ``ducklake_table_name``
 # already sanitizes to ``[a-z0-9_]``, but Trap #4 says validate at the point
 # of interpolation — a future naming change must fail loudly, not build SQL.
-_LAKE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 # RUM beacon telemetry lives in these DuckLake tables (see
 # ``backend/core/iceberg/rum_schema.py``), keyed by ``cid``. ``logs.rum_cid``
 # is only the CDN-side correlation key for the same session.
@@ -895,9 +893,7 @@ _RUM_BEACON_TABLES = ("client_vitals", "client_errors")
 
 def _lake_ident(name: str) -> str:
     """Validate a DuckLake table name before interpolating it into SQL."""
-    if not _LAKE_IDENT_RE.fullmatch(name or ""):
-        raise ValueError(f"unsafe ducklake table name: {name!r}")
-    return name
+    return require_safe_ident(name, "unsafe ducklake table name")
 
 
 def _lake_columns(con, table: str) -> set[str]:

@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from backend.core.sql_ident import SAFE_IDENT_RE, is_safe_ident
 from backend.utils.date_utils import parse_hour_key, parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -71,11 +71,8 @@ IP_SPREAD_BUNDLE_FILENAME = "all_fields_ip.parquet"
 # fields are derived from admin-controlled custom_field entries).
 # Defense in depth: this module reject anything not matching the
 # pattern with a logged warning.
-_SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _is_safe_ident(name: str) -> bool:
-    return bool(name) and bool(_SAFE_IDENT_RE.fullmatch(name))
+_SAFE_IDENT_RE = SAFE_IDENT_RE
+_is_safe_ident = is_safe_ident
 
 
 def _safe_table_for(source: dict) -> str | None:
