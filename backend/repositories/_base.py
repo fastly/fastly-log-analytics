@@ -35,6 +35,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
+from backend.repositories.ip_spread_rollups import build_ip_spread_sql as _build_ip_spread_sql
+from backend.repositories.ip_spread_rollups import fold_sketches as _fold_sketches
+from backend.repositories.ip_spread_rollups import plan_ip_spread_paths as _plan_ip_spread_paths
+from backend.repositories.ip_spread_rollups import spread_meta as _spread_meta
 from backend.repositories.top_n_rollups import SchemaSeeds as _SchemaSeeds
 from backend.repositories.top_n_rollups import TopNWindow as _TopNWindow
 from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
@@ -4124,18 +4128,14 @@ class QueryRunner:
         Returns ``({}, {})`` when no ip_spread parquets exist for any
         of the requested fields in the window — the caller's signal to
         fall back to the live ``count(DISTINCT ip)`` SQL path."""
-        import os
-        from datetime import UTC, datetime, timedelta
+        from datetime import UTC, datetime
 
-        from backend.core.duckdb import _cache_dir
         from backend.core.rollups._common import (
-            IP_SPREAD_BUNDLE_FILENAME,
             _hour_bundled_root,
             _ip_spread_root,
             _is_safe_ident,
         )
         from backend.utils.date_utils import parse_iso_utc
-        from backend.utils.hll import HyperLogLog
 
         if durable_serving_blocked(self.src):
             return {}, {}
@@ -4151,195 +4151,37 @@ class QueryRunner:
         if not safe_fields:
             return {}, {}
 
-        st_dt = parse_iso_utc(start_time) if start_time else None
-        et_dt = parse_iso_utc(end_time) if end_time else None
-        active_str = datetime.now(UTC).replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d-%H")
+        win = _TopNWindow.build(
+            parse_iso_utc(start_time) if start_time else None,
+            parse_iso_utc(end_time) if end_time else None,
+            datetime.now(UTC),
+        )
 
-        cache_dir = _cache_dir(self.src)
-        ip_spread_per_field_root = _ip_spread_root(self.src)
-        bundled_hour_root = _hour_bundled_root(self.src)
-
-        # Pre-pass: discover which closed hours fall in the requested
-        # window AND have at least one ip_spread source on disk. Returns
-        # early if neither tree exists yet (cold pool, no writer ticks
-        # have run for any field in this service).
-        if not os.path.isdir(ip_spread_per_field_root) and not os.path.isdir(bundled_hour_root):
+        _t = time.perf_counter()
+        plan = _plan_ip_spread_paths(_hour_bundled_root(self.src), _ip_spread_root(self.src), safe_fields, win)
+        if plan is None:
+            return {}, {}
+        _phase("enumerate", (time.perf_counter() - _t) * 1000.0)
+        # No tree yet (cold pool) or nothing in the window: the caller's signal
+        # to fall back to the live count(DISTINCT ip) path.
+        if not plan:
             return {}, {}
 
-        if st_dt is not None:
-            st_str = st_dt.strftime("%Y-%m-%d-%H")
-        else:
-            st_str = None
-        if et_dt is not None:
-            # Half-open semantics match execute_top_n_rollups: an
-            # end_time on an exact hour boundary excludes that hour.
-            et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
-        else:
-            et_inclusive = None
-
-        def _in_window(hour: str) -> bool:
-            if hour >= active_str:
-                return False
-            if st_str is not None and hour < st_str:
-                return False
-            if et_inclusive is not None and hour > et_inclusive:
-                return False
-            return True
-
-        # Bundled paths first (one file per hour, multi-field). Per-
-        # field paths supply hours that DON'T have a bundle yet (cold
-        # writer hours, or the bundler hasn't caught up to the latest
-        # recompute tick). Hive-partitioning differs between the two
-        # trees (bundled has field as a regular column; per-field has
-        # it in the path), so they need separate read_parquet calls
-        # UNION ALL'd — same constraint that the count rollup reader
-        # documents at backend/repositories/_base.py:914-921.
-        import time as _time
-
-        _t = _time.perf_counter()
-        bundled_paths: list[str] = []
-        bundled_hours: set[str] = set()
-        if os.path.isdir(bundled_hour_root):
-            try:
-                for entry in os.listdir(bundled_hour_root):
-                    if not entry.startswith("hour="):
-                        continue
-                    hour = entry[len("hour=") :]
-                    if not _in_window(hour):
-                        continue
-                    bundle_path = os.path.join(bundled_hour_root, entry, IP_SPREAD_BUNDLE_FILENAME)
-                    if os.path.isfile(bundle_path):
-                        bundled_paths.append(bundle_path)
-                        bundled_hours.add(hour)
-            except OSError:
-                pass
-
-        per_field_paths: list[str] = []
-        per_field_hours_by_field: dict[str, set[str]] = {f: set() for f in safe_fields}
-        if os.path.isdir(ip_spread_per_field_root):
-            try:
-                for field_entry in os.listdir(ip_spread_per_field_root):
-                    if not field_entry.startswith("field="):
-                        continue
-                    field = field_entry[len("field=") :]
-                    if field not in safe_fields:
-                        continue
-                    field_dir = os.path.join(ip_spread_per_field_root, field_entry)
-                    try:
-                        for hour_entry in os.listdir(field_dir):
-                            if not hour_entry.startswith("hour="):
-                                continue
-                            hour = hour_entry[len("hour=") :]
-                            if not _in_window(hour):
-                                continue
-                            # Bundle wins — skip per-field for hours
-                            # already covered by all_fields_ip.parquet
-                            # so we don't double-count the same data.
-                            if hour in bundled_hours:
-                                continue
-                            hour_dir = os.path.join(field_dir, hour_entry)
-                            for fname in os.listdir(hour_dir):
-                                if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
-                                    continue
-                                per_field_paths.append(os.path.join(hour_dir, fname))
-                                per_field_hours_by_field[field].add(hour)
-                    except OSError:
-                        continue
-            except OSError:
-                pass
-        _phase("enumerate", (_time.perf_counter() - _t) * 1000.0)
-
-        if not bundled_paths and not per_field_paths:
-            return {}, {}
-
-        # Build SQL — at most two SELECT branches UNION ALL'd. Field
-        # filter goes on the column directly because the bundled
-        # parquets carry field as a regular column. The per-field
-        # branch reads it from the hive path via hive_partitioning=1.
-        field_filter_sql = "(" + ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields) + ")"
-
-        branches: list[str] = []
-        if bundled_paths:
-            paths_sql = quote_path_list(bundled_paths)
-            branches.append(
-                f"SELECT field, value, ip_sketch, sample_capped "
-                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
-                f"WHERE field IN {field_filter_sql}"
-            )
-        if per_field_paths:
-            paths_sql = quote_path_list(per_field_paths)
-            branches.append(
-                f"SELECT field, value, ip_sketch, sample_capped "
-                f"FROM read_parquet([{paths_sql}], hive_partitioning=1) "
-                f"WHERE field IN {field_filter_sql}"
-            )
-
-        unioned = " UNION ALL ".join(f"({b})" for b in branches)
-
-        _t = _time.perf_counter()
+        _t = time.perf_counter()
         try:
-            rows = self.execute(unioned).fetchall()
+            rows = self.execute(_build_ip_spread_sql(plan, safe_fields)).fetchall()
         except duckdb.Error as e:
             # A read failure here drops the caller to its live fallback
             # — never let an ip_spread bug take down the security tab.
             _logger.debug("[ip_spread_rollup] read failed: %s", e)
             return {}, {}
-        _phase("read", (_time.perf_counter() - _t) * 1000.0)
+        _phase("read", (time.perf_counter() - _t) * 1000.0)
 
-        # Fold sketches by (field, value) in Python. HLL merge is
-        # O(m) = O(256) per pair so the per-row cost is constant; the
-        # total time scales with the number of rows we pulled, which
-        # is bounded by ``top_K_per_field × len(safe_fields) × hours``.
-        _t = _time.perf_counter()
-        merged: dict[tuple[str, str], HyperLogLog] = {}
-        any_capped: dict[tuple[str, str], bool] = {}
-        for field, value, sketch_bytes, capped in rows:
-            if not isinstance(sketch_bytes, (bytes, bytearray)) or not sketch_bytes:
-                continue
-            try:
-                hll = HyperLogLog.from_bytes(sketch_bytes)
-            except ValueError:
-                # Malformed BLOB — skip rather than poison the whole
-                # merge. Logged at debug because this implies on-disk
-                # corruption that the next recompute will overwrite.
-                continue
-            key = (field, value)
-            if key not in merged:
-                merged[key] = HyperLogLog(precision=hll.precision)
-                any_capped[key] = bool(capped)
-            else:
-                any_capped[key] = any_capped[key] or bool(capped)
-            try:
-                merged[key].merge(hll)
-            except ValueError:
-                # Precision mismatch (unexpected — writer pins p=8).
-                # Drop this row; the merged sketch still reflects every
-                # other input. Better partial than wrong.
-                continue
-        _phase("merge", (_time.perf_counter() - _t) * 1000.0)
+        _t = time.perf_counter()
+        merged, any_capped = _fold_sketches(rows)
+        _phase("merge", (time.perf_counter() - _t) * 1000.0)
 
-        result_counts: dict[tuple[str, str], int] = {k: int(v.count()) for k, v in merged.items()}
-
-        # Per-field metadata so the caller can render coverage hints
-        # without re-walking the filesystem. ``coverage_hours`` is the
-        # set union of bundled-covered hours (which contain rows for
-        # ALL fields) and per-field-hour-covered hours specific to
-        # this field; ``capped_values`` is the count of distinct
-        # (field, value) pairs flagged by any input row.
-        per_field_meta: dict[str, dict] = {}
-        capped_by_field: dict[str, int] = {f: 0 for f in safe_fields}
-        for (field, _value), capped in any_capped.items():
-            if capped:
-                capped_by_field[field] = capped_by_field.get(field, 0) + 1
-
-        for field in safe_fields:
-            field_hours = bundled_hours | per_field_hours_by_field.get(field, set())
-            per_field_meta[field] = {
-                "coverage_hours": len(field_hours),
-                "capped_values": capped_by_field.get(field, 0),
-            }
-
-        return result_counts, per_field_meta
+        return {k: int(v.count()) for k, v in merged.items()}, _spread_meta(safe_fields, plan, any_capped)
 
     def execute_top_n_batch(
         self,
