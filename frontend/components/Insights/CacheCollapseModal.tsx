@@ -20,6 +20,11 @@ import { CHART_COLORS } from '@/lib/chart-colors'
 
 import { formatCount } from '@/lib/format'
 import { statusBadgeClass } from '@/lib/status-style'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import type { components } from '@/types/api.generated'
+
+type CacheMiss = components['schemas']['CacheMissPoint']
 interface CacheCollapseModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
@@ -97,6 +102,75 @@ export function CacheCollapseModal({
       },
     ]
   }, [data])
+
+  const missColumns = useMemo<ColumnDef<CacheMiss>[]>(
+    () => [
+      {
+        id: 'timestamp',
+        header: `Timestamp (${abbr()})`,
+        accessorFn: (e) => e.timestamp,
+        size: 200,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="font-mono text-xs font-medium whitespace-nowrap">{full(row.original.timestamp)}</span>
+        ),
+      },
+      {
+        id: 'cache',
+        header: 'Cache Status',
+        accessorFn: (e) => e.cache,
+        size: 130,
+        enableSorting: false,
+        cell: ({ row }) => {
+          const cache = row.original.cache
+          return (
+            <span className={cn(
+              "px-1.5 py-0.5 rounded text-[10px] font-bold border",
+              cache.includes("PASS") ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
+              cache.includes("MISS") ? "bg-red-500/10 text-red-500 border-red-500/20" :
+              "bg-muted text-muted-foreground border-border"
+            )}>
+              {cache}
+            </span>
+          )
+        },
+      },
+      {
+        id: 'pop',
+        header: 'POP',
+        accessorFn: (e) => e.pop ?? '',
+        size: 90,
+        enableSorting: false,
+        cell: ({ row }) => <span className="font-mono text-xs">{row.original.pop || '—'}</span>,
+      },
+      {
+        id: 'ip',
+        header: 'Client IP',
+        accessorFn: (e) => e.ip ?? '',
+        size: 150,
+        enableSorting: false,
+        cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.ip || '—'}</span>,
+      },
+      {
+        id: 'status',
+        header: 'HTTP Status',
+        accessorFn: (e) => e.status ?? 0,
+        size: 110,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="block text-right">
+            <span className={cn(
+              "px-1.5 py-0.5 rounded font-mono font-semibold border text-[10px]",
+              statusBadgeClass(row.original.status, 'traffic-light')
+            )}>
+              {row.original.status || '—'}
+            </span>
+          </span>
+        ),
+      },
+    ],
+    [abbr, full],
+  )
 
   const chartLayout = useMemo(() => ({
     yaxis: { title: { text: 'Hits' } },
@@ -225,51 +299,14 @@ export function CacheCollapseModal({
                     No cache misses captured for this lookback.
                   </div>
                 ) : (
-                  <div className="flex-1 overflow-x-auto">
-                    <table className="w-full text-xs text-left">
-                      <thead>
-                        <tr className="border-b border-border text-muted-foreground uppercase text-[10px] tracking-wider font-semibold">
-                          <th className="py-2 pr-4">Timestamp ({abbr()})</th>
-                          <th className="py-2 px-4">Cache Status</th>
-                          <th className="py-2 px-4">POP</th>
-                          <th className="py-2 px-4">Client IP</th>
-                          <th className="py-2 pl-4 text-right">HTTP Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border/60">
-                        {data.recent_misses.map((e) => (
-                          <tr key={`${e.timestamp}-${e.ip || ''}-${e.cache}-${e.pop || ''}`} className="hover:bg-muted/30">
-                            <td className="py-2 pr-4 font-mono font-medium whitespace-nowrap">
-                              {full(e.timestamp)}
-                            </td>
-                            <td className="py-2 px-4 whitespace-nowrap">
-                              <span className={cn(
-                                "px-1.5 py-0.5 rounded text-[10px] font-bold border",
-                                e.cache.includes("PASS") ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
-                                e.cache.includes("MISS") ? "bg-red-500/10 text-red-500 border-red-500/20" :
-                                "bg-muted text-muted-foreground border-border"
-                              )}>
-                                {e.cache}
-                              </span>
-                            </td>
-                            <td className="py-2 px-4 font-mono whitespace-nowrap">
-                              {e.pop || '—'}
-                            </td>
-                            <td className="py-2 px-4 font-mono text-muted-foreground whitespace-nowrap">
-                              {e.ip || '—'}
-                            </td>
-                            <td className="py-2 pl-4 text-right whitespace-nowrap">
-                              <span className={cn(
-                                "px-1.5 py-0.5 rounded font-mono font-semibold border text-[10px]",
-                                statusBadgeClass(e.status, 'traffic-light')
-                              )}>
-                                {e.status || '—'}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="flex-1">
+                    <DataTableReadonly
+                      columns={missColumns}
+                      data={data.recent_misses}
+                      hideToolbar
+                      showPagination={false}
+                      tableCaption="Recent cache misses"
+                    />
                   </div>
                 )}
               </div>
