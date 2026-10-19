@@ -57,14 +57,16 @@ def deploy_frontend(payload: SharingDeployRequest):
 
     Raises 400 if token is missing.
     """
+    from backend.utils.router_utils import stored_fastly_token
+
     token = payload.token_override
 
     # 1. Try to load from configs/*.json if not overridden
     if not token:
         for cfg in list_configs():
-            key = cfg.get("fastly_api_key")
-            if key and key.strip():
-                token = key.strip()
+            key = stored_fastly_token(cfg)
+            if key:
+                token = key
                 break
 
     from backend.utils.router_utils import make_error, mutate_service_config, raise_internal
@@ -127,14 +129,16 @@ def teardown_frontend(payload: SharingTeardownRequest):
     Resolves Fastly API token, deletes the remote frontend on Fastly, and
     clears remote_frontend configuration on the logging service.
     """
+    from backend.utils.router_utils import stored_fastly_token
+
     token = payload.token_override
 
     # 1. Try to load from configs/*.json if not overridden
     if not token:
         for cfg in list_configs():
-            key = cfg.get("fastly_api_key")
-            if key and key.strip():
-                token = key.strip()
+            key = stored_fastly_token(cfg)
+            if key:
+                token = key
                 break
 
     from backend.utils.router_utils import load_service_config, make_error, mutate_service_config, raise_internal

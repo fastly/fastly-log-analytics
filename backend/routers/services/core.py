@@ -29,7 +29,13 @@ from backend.models.services import (
 from backend.repositories import service_stats as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import require_service_in_scope
-from backend.utils.router_utils import load_service_config, make_error, mutate_service_config, raise_internal
+from backend.utils.router_utils import (
+    load_service_config,
+    make_error,
+    mutate_service_config,
+    raise_internal,
+    stored_fastly_token,
+)
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -528,7 +534,7 @@ def api_service_logging_settings(service_id: str):
         )
 
     cfg = load_service_config(service_id)
-    token = cfg.get("fastly_api_key", "")
+    token = stored_fastly_token(cfg)
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
     try:
         from backend.core.fastly.client import fastly
@@ -794,7 +800,7 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
-    token = cfg.get("fastly_api_key", "")
+    token = stored_fastly_token(cfg)
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
     from backend.provision.log_paths import analytics_log_path
 
@@ -961,7 +967,7 @@ def api_ngwaf_sync(service_id: str):
         if not workspace_id:
             yield json.dumps({"type": "error", "message": "No NGWAF workspace configured for this service"})
             return
-        api_key = cfg.get("fastly_api_key", "")
+        api_key = stored_fastly_token(cfg)
         if not api_key:
             yield json.dumps({"type": "error", "message": "No Fastly API key stored for this service"})
             return

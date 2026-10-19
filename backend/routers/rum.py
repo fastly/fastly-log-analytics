@@ -58,7 +58,7 @@ from backend.provision.rum_orchestrator_v2 import (
 from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.error_redaction import correlation_id
-from backend.utils.router_utils import make_error, raise_internal, require_fastly_token
+from backend.utils.router_utils import make_error, raise_internal, require_fastly_token, stored_fastly_token
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ async def enable_rum_handler(
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
 
-    stored_token = cfg.get("fastly_api_key", "")
+    stored_token = stored_fastly_token(cfg)
     if not token:
         token = stored_token
 

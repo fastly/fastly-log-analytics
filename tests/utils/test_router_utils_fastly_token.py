@@ -59,3 +59,32 @@ def test_strict_variant_errors_match_the_historical_rum_bodies(configs) -> None:
     with pytest.raises(HTTPException) as nokey:
         require_fastly_token("svc-nokey")
     assert (nokey.value.status_code, nokey.value.detail) == (400, {"error": "No Fastly API key for service svc-nokey"})
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        ({"fastly_api_key": "k"}, "k"),
+        ({"fastly_api_key": "  k \n"}, "k"),
+        ({"fastly_api_key": None}, ""),
+        ({"fastly_api_key": ""}, ""),
+        ({}, ""),
+        (None, ""),
+    ],
+)
+def test_stored_fastly_token_reads_config_value(cfg, expected) -> None:
+    from backend.utils.router_utils import stored_fastly_token
+
+    assert stored_fastly_token(cfg) == expected
+
+
+def test_token_resolution_never_logs_the_secret(configs, caplog) -> None:
+    import logging
+
+    from backend.utils.router_utils import stored_fastly_token
+
+    with caplog.at_level(logging.DEBUG):
+        resolve_fastly_token("svc-a")
+        require_fastly_token("svc-a")
+        stored_fastly_token({"fastly_api_key": "stored-a"})
+    assert "stored-a" not in caplog.text

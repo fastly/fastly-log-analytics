@@ -1444,7 +1444,7 @@ def provision_set_ngwaf_workspace(
     """
 
     from backend.utils.fastly_auth import validate_destructive_token
-    from backend.utils.router_utils import load_service_config, mutate_service_config
+    from backend.utils.router_utils import load_service_config, mutate_service_config, stored_fastly_token
 
     cfg = load_service_config(service_id)
 
@@ -1452,7 +1452,7 @@ def provision_set_ngwaf_workspace(
         token = authorization[len("bearer ") :].strip()
     else:
         token = (token or "").strip()
-    stored = (cfg.get("fastly_api_key") or "").strip()
+    stored = stored_fastly_token(cfg)
     if not token:
         raise HTTPException(
             status_code=401,

@@ -49,7 +49,7 @@ from backend.models.session_scoring import (
     ScoringTopFlaggedResponse,
 )
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import make_error, not_found, resolve_fastly_token
+from backend.utils.router_utils import make_error, not_found, resolve_fastly_token, stored_fastly_token
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -695,7 +695,7 @@ def scoring_status(
     # service so the polled status panel doesn't hit Fastly every refresh, and
     # never breaks the status page if the Fastly call fails.
     scoring_svc = scoring.get("scoring_service_id")
-    token = (cfg.get("fastly_api_key") or "").strip()
+    token = stored_fastly_token(cfg)
     if scoring_svc and token:
         info = _scoring_svc_version_cache.get(scoring_svc)
         if info is None:

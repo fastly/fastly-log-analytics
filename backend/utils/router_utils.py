@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from functools import wraps
 from logging import Logger
 from typing import Any, NoReturn, get_args
@@ -163,6 +163,17 @@ def mutate_service_config(service_id: str, mutate: Callable[[dict], None]) -> di
     return saved
 
 
+def stored_fastly_token(cfg: Mapping[str, Any] | None) -> str:
+    """The ``fastly_api_key`` stored in an already-loaded service config, stripped; ``""`` if absent.
+
+    The single read of that field for routers that already hold ``cfg``. Never logs the value and
+    never falls back to another service's key.
+    """
+    if not cfg:
+        return ""
+    return str(cfg.get("fastly_api_key") or "").strip()
+
+
 def resolve_fastly_token(service_id: str, override: str | None = "") -> str:
     """Lenient token resolution: ``override`` if given, else the service config's stored
     ``fastly_api_key``, else ``""`` (callers raise their own error on empty).
@@ -175,10 +186,7 @@ def resolve_fastly_token(service_id: str, override: str | None = "") -> str:
         return override
     from backend import config as svcconfig
 
-    cfg = svcconfig.load_config(service_id)
-    if cfg:
-        return cfg.get("fastly_api_key", "") or ""
-    return ""
+    return stored_fastly_token(svcconfig.load_config(service_id))
 
 
 def require_fastly_token(service_id: str, override: str | None = "") -> str:
@@ -191,7 +199,7 @@ def require_fastly_token(service_id: str, override: str | None = "") -> str:
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
-    token = cfg.get("fastly_api_key", "")
+    token = stored_fastly_token(cfg)
     if not token:
         raise HTTPException(status_code=400, detail={"error": f"No Fastly API key for service {service_id}"})
     return token
