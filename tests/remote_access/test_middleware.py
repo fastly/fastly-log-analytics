@@ -1159,6 +1159,27 @@ def test_login_rate_limit_triggers_after_threshold(client):
     assert r.json()["detail"]["error"] == "rate_limited"
 
 
+@pytest.mark.security_regression
+def test_share_login_brute_force_lockout_shape_matches_e2e(client):
+    """Mirror of frontend/e2e/zz-analyst-share-login-lockout.spec.ts: 35 wrong
+    passcodes -> 401s up to the threshold, then 429 {error, retry_after_s}."""
+    _start_share()
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
+    statuses, first_429 = [], None
+    for i in range(35):
+        r = client.post(
+            "/api/share/login", json={"email": "attacker@example.com", "passcode": f"wrong-{i}"}, headers=headers
+        )
+        statuses.append(r.status_code)
+        if r.status_code == 429 and first_429 is None:
+            first_429 = r.json()["detail"]
+    assert statuses[: tunnel.LOGIN_FAILURE_THRESHOLD] == [401] * tunnel.LOGIN_FAILURE_THRESHOLD
+    assert set(statuses[tunnel.LOGIN_FAILURE_THRESHOLD :]) == {429}
+    assert first_429 is not None
+    assert first_429["error"] == "rate_limited"
+    assert isinstance(first_429["retry_after_s"], int) and 0 < first_429["retry_after_s"] <= tunnel.LOGIN_LOCKOUT_S
+
+
 # ── Hardening headers ──────────────────────────────────────────────────────
 
 

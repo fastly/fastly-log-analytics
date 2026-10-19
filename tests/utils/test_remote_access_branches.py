@@ -642,38 +642,29 @@ def test_static_limiter_blocks_over_byte_threshold():
     assert lim.check("1.2.3.4", 100) is False
 
 
-def test_static_limiter_eviction_resets_when_over_cap(monkeypatch):
-    """When tracked IPs exceed MAX_TRACKED_IPS, _evict_locked sweeps stale
-    entries and clears everything if still over cap."""
+def test_static_limiter_evicts_stale_keys_over_cap(monkeypatch):
+    """Stale per-IP entries are dropped when the tracked-IP cap is exceeded."""
     lim = _StaticAssetLimiter()
-    # Shrink for test speed.
     monkeypatch.setattr(lim, "MAX_TRACKED_IPS", 3)
-    # Fill past the cap with stale entries (timestamp in the past).
-    old_now = time.time() - 9999
-    lim._reqs = {f"ip-{i}": [old_now] for i in range(5)}
-    lim._bytes = {f"ip-{i}": [(old_now, 100)] for i in range(5)}
-    # A fresh check triggers _evict_locked because len > cap.
+    real_now = time.time()
+    monkeypatch.setattr(time, "time", lambda: real_now - 9999)
+    for i in range(3):
+        lim.check(f"ip-{i}", 100)
+    monkeypatch.setattr(time, "time", lambda: real_now)
     assert lim.check("ip-new", 50) is True
-    # All stale entries were swept; the new IP is the only one tracked.
-    assert "ip-new" in lim._reqs
-    # Stale entries are gone (all their timestamps were before cutoff).
-    for i in range(5):
-        assert f"ip-{i}" not in lim._reqs
+    assert lim.tracked_keys() == 1
 
 
-def test_static_limiter_cardinality_bomb_clears_all(monkeypatch):
-    """If after stale-sweep we're STILL over cap, _evict_locked clears the
-    dicts entirely (the DoS guard)."""
+def test_static_limiter_cardinality_bomb_is_lru_bounded(monkeypatch):
+    """Fresh keys beyond the cap evict the least-recently-touched IP, never
+    exceeding the cap (no clear-everything reset an attacker could trigger)."""
     lim = _StaticAssetLimiter()
     monkeypatch.setattr(lim, "MAX_TRACKED_IPS", 2)
-    now = time.time()
-    # All entries are fresh — sweep won't drop them.
-    lim._reqs = {f"ip-{i}": [now] for i in range(5)}
-    lim._bytes = {f"ip-{i}": [(now, 10)] for i in range(5)}
-    # Force _evict_locked: check sees len > cap, calls evict, which clears.
+    for i in range(5):
+        lim.check(f"ip-{i}", 10)
+    assert lim.tracked_keys() == 2
     lim.check("ip-trigger", 0)
-    # After clear, only the trigger IP remains.
-    assert set(lim._reqs.keys()) == {"ip-trigger"}
+    assert lim.tracked_keys() == 2
 
 
 # ── TimeBounds.clamp + get_analyst_time_bounds ────────────────────────────
@@ -908,8 +899,7 @@ def test_static_asset_rate_limit_429(client, monkeypatch):
 
     # Shrink the limit for test speed.
     monkeypatch.setattr(ra._static_limiter, "REQ_LIMIT", 3)
-    monkeypatch.setattr(ra._static_limiter, "_reqs", {})
-    monkeypatch.setattr(ra._static_limiter, "_bytes", {})
+    ra._static_limiter.clear()
 
     headers = {"X-Remote-Analyst": "1", "Host": "testserver"}
     for _ in range(3):

@@ -36,6 +36,7 @@ from backend.utils.admin_gateway import (
     admin_gateway_required,
     authenticated_admin_gateway,
 )
+from backend.utils.rate_limit import SlidingWindowLimiter
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -1048,14 +1049,13 @@ class _StaticAssetLimiter:
     ``byte_limit`` bytes/min. Two instances exist — the static-asset budget
     (``/_next/`` + ``/static/``) and the analyst-API budget (L6) — each with
     its own counters so they don't share a bucket. (Name kept for the
-    importing tests; it's a generic limiter.)
+    importing tests; it's a facade over the shared ``SlidingWindowLimiter``.)
 
-    Security: bound the in-memory ``_reqs`` / ``_bytes`` dicts so a
-    high-cardinality IP attack (one request per source) cannot OOM the
-    server by inflating the dicts indefinitely. The original implementation
-    never evicted; an attacker with a botnet (or one that spoofed XFF before
-    Phase 0 closed it) could pump ~50 bytes of memory per unique IP per
-    minute with no upper bound.
+    Security: the tracked-IP map is bounded (``max_tracked_ips``, LRU) so a
+    high-cardinality source attack cannot inflate memory without limit. Sized
+    to comfortably accommodate thousands of analyst sessions on NAT'd corporate
+    egress IPs while capping a runaway-cardinality DoS in single-digit-MB
+    territory.
     """
 
     def __init__(
@@ -1064,60 +1064,32 @@ class _StaticAssetLimiter:
         req_limit: int = 600,
         byte_limit: int = 50 * 1024 * 1024,
         window_s: int = 60,
-        # Total distinct IPs tracked concurrently. Sized to comfortably
-        # accommodate a busy real workload (thousands of analyst sessions on
-        # NAT'd corporate networks share a small set of egress IPs) while
-        # blocking a runaway-cardinality DoS in single-digit-MB territory.
         max_tracked_ips: int = 10_000,
     ) -> None:
-        import threading
-
         self.REQ_LIMIT = req_limit
         self.BYTE_LIMIT = byte_limit
-        self.WINDOW_S = window_s
-        self.MAX_TRACKED_IPS = max_tracked_ips
-        self._lock = threading.Lock()
-        self._reqs: dict[str, list[float]] = {}
-        self._bytes: dict[str, list[tuple[float, int]]] = {}
+        self._limiter = SlidingWindowLimiter(window_s=window_s, max_keys=max_tracked_ips)
 
-    def _evict_locked(self, cutoff: float) -> None:
-        """Sweep stale per-IP entries whose all timestamps fall before cutoff."""
-        # Iterate over a snapshot so we can mutate during the loop.
-        for ip in list(self._reqs.keys()):
-            recent = [t for t in self._reqs[ip] if t >= cutoff]
-            if not recent:
-                self._reqs.pop(ip, None)
-                self._bytes.pop(ip, None)
-            else:
-                # Take this opportunity to also trim the surviving list.
-                self._reqs[ip] = recent
-        if len(self._reqs) > self.MAX_TRACKED_IPS:
-            # Cardinality bomb: drop everything rather than spending CPU
-            # on quadratic LRU tracking. Limits get a one-minute reset for
-            # all IPs but the next legitimate burst will re-grow the dict.
-            self._reqs.clear()
-            self._bytes.clear()
+    @property
+    def WINDOW_S(self) -> int:
+        return int(self._limiter.window_s)
+
+    @property
+    def MAX_TRACKED_IPS(self) -> int:
+        return self._limiter.max_keys
+
+    @MAX_TRACKED_IPS.setter
+    def MAX_TRACKED_IPS(self, value: int) -> None:
+        self._limiter.max_keys = value
 
     def check(self, ip: str, content_length: int) -> bool:
-        with self._lock:
-            now = time.time()
-            cutoff = now - self.WINDOW_S
-            # Cheap pre-check: only sweep when we're past the cap. The sweep
-            # is O(n) so we don't want to run it on every request.
-            if len(self._reqs) > self.MAX_TRACKED_IPS:
-                self._evict_locked(cutoff)
-            rs = [t for t in self._reqs.get(ip, []) if t >= cutoff]
-            if len(rs) >= self.REQ_LIMIT:
-                self._reqs[ip] = rs
-                return False
-            rs.append(now)
-            self._reqs[ip] = rs
-            bs = [(t, n) for (t, n) in self._bytes.get(ip, []) if t >= cutoff]
-            bs.append((now, max(0, int(content_length))))
-            self._bytes[ip] = bs
-            if sum(n for _, n in bs) > self.BYTE_LIMIT:
-                return False
-            return True
+        return self._limiter.try_acquire(ip, content_length, max_events=self.REQ_LIMIT, max_weight=self.BYTE_LIMIT)
+
+    def tracked_keys(self) -> int:
+        return self._limiter.tracked_keys()
+
+    def clear(self) -> None:
+        self._limiter.clear()
 
 
 _static_limiter = _StaticAssetLimiter()

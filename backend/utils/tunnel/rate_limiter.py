@@ -8,8 +8,7 @@ vector against a known address).
 
 from __future__ import annotations
 
-import threading
-import time
+from backend.utils.rate_limit import SlidingWindowLimiter
 
 # Login rate-limit: 5 failures / 60s → 5-minute lockout.
 LOGIN_FAILURE_WINDOW_S = 60
@@ -21,24 +20,22 @@ MAX_TRACKED_IPS = 10000
 
 
 class _LoginRateLimiter:
-    """Thread-safe sliding-window failure tracker per client IP."""
+    """Per-client-IP failure tracker with lockout (facade over ``SlidingWindowLimiter``)."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._failures: dict[str, list[float]] = {}
-        self._lockouts: dict[str, float] = {}
+        self._limiter = SlidingWindowLimiter(window_s=LOGIN_FAILURE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
+
+    @property
+    def _failures(self):
+        return self._limiter._events
+
+    @property
+    def _lockouts(self):
+        return self._limiter._locks
 
     def is_locked(self, ip: str) -> tuple[bool, int]:
         """Returns ``(locked, remaining_seconds)``."""
-        with self._lock:
-            until = self._lockouts.get(ip)
-            if until is None:
-                return False, 0
-            now = time.time()
-            if now >= until:
-                self._lockouts.pop(ip, None)
-                return False, 0
-            return True, int(until - now)
+        return self._limiter.is_locked(ip)
 
     def snapshot(self) -> dict:
         """Best-effort snapshot of recent failure activity for the admin UI.
@@ -47,46 +44,12 @@ class _LoginRateLimiter:
         carries the IP, count/remaining, and a window in seconds. Self-prunes
         expired lockouts on the way out so the snapshot reflects current state.
         """
-        with self._lock:
-            now = time.time()
-            window_start = now - LOGIN_FAILURE_WINDOW_S
-            failures = []
-            for ip, history in list(self._failures.items()):
-                pruned = [t for t in history if t >= window_start]
-                if pruned:
-                    failures.append(
-                        {
-                            "ip": ip,
-                            "count": len(pruned),
-                            "window_s": LOGIN_FAILURE_WINDOW_S,
-                        }
-                    )
-                    self._failures[ip] = pruned
-                else:
-                    self._failures.pop(ip, None)
-            lockouts = []
-            for ip, until in list(self._lockouts.items()):
-                if until <= now:
-                    self._lockouts.pop(ip, None)
-                    continue
-                lockouts.append({"ip": ip, "remaining_s": int(until - now)})
-            return {"failures": failures, "lockouts": lockouts}
+        counts, locks = self._limiter.snapshot()
+        return {
+            "failures": [{"ip": ip, "count": n, "window_s": LOGIN_FAILURE_WINDOW_S} for ip, n in counts.items()],
+            "lockouts": [{"ip": ip, "remaining_s": rem} for ip, rem in locks.items()],
+        }
 
     def record_failure(self, ip: str) -> bool:
         """Record a failure and return True if a NEW lockout was triggered."""
-        with self._lock:
-            now = time.time()
-            window_start = now - LOGIN_FAILURE_WINDOW_S
-            history = [t for t in self._failures.get(ip, []) if t >= window_start]
-            history.append(now)
-            self._failures.pop(ip, None)
-            self._failures[ip] = history
-            if len(self._failures) > MAX_TRACKED_IPS:
-                self._failures.pop(next(iter(self._failures)))
-
-            if len(history) >= LOGIN_FAILURE_THRESHOLD and ip not in self._lockouts:
-                self._lockouts[ip] = now + LOGIN_LOCKOUT_S
-                if len(self._lockouts) > MAX_TRACKED_IPS:
-                    self._lockouts.pop(next(iter(self._lockouts)))
-                return True
-            return False
+        return self._limiter.strike(ip, threshold=LOGIN_FAILURE_THRESHOLD, lockout_s=LOGIN_LOCKOUT_S)
