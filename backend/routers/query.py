@@ -65,6 +65,19 @@ def query_endpoint(
 
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
+        # Analysts are an adversary. The high-scale console validates with DuckDB's parser but runs on
+        # ClickHouse, and name-based allow-lists keep desyncing from ClickHouse's name resolution (five
+        # independent reviews each found another gap). Until console queries run as a ClickHouse user whose
+        # grants cover only the fact tables, the free-form console stays admin-only here; analysts keep every
+        # purpose-built analytics endpoint.
+        if analyst_session is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=make_error(
+                    "console_unavailable_for_analysts",
+                    "The SQL console is not available to analysts on high-scale deployments.",
+                ),
+            )
         from backend.high_scale.query import query_endpoint as hs_query
 
         try:

@@ -539,3 +539,48 @@ def test_query_schema_endpoint_falls_back_when_empty(client):
     body = resp.json()
     col_names = {c["column"] for c in body["schema"]}
     assert {"timestamp", "url", "status"}.issubset(col_names)
+
+
+@pytest.mark.security_regression
+def test_query_high_scale_is_closed_to_analysts_until_clickhouse_enforces_the_boundary(
+    client, in_memory_duckdb, test_service_source
+):
+    """Analysts are an adversary: the console's name-based guards cannot be the only thing between them and ClickHouse."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    calls: list[str] = []
+    fake_hs_client = SimpleNamespace(execute=lambda sql, params=None, settings=None: calls.append(sql) or [])
+    fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=fake_hs_client)
+    session = SimpleNamespace(
+        session_id="sess-hs",
+        pii_policy={"mask_ips": True},
+        service_ids=[test_service_source["service_id"]],
+    )
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        session=session,
+        path="/api/query",
+        time_bounds=TimeBounds(
+            start=datetime(2026, 6, 17, 9, 0, tzinfo=UTC), end=datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
+        ),
+    )
+
+    with patch(
+        "backend.high_scale.registry.get_high_scale_service_registry",
+        return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
+    ):
+        resp = client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "SELECT count(*) FROM logs"},
+        )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "console_unavailable_for_analysts"
+    assert calls == [], "nothing may reach ClickHouse for an analyst"
