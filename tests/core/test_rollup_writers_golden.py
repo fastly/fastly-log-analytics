@@ -125,7 +125,9 @@ def _normalise_sql(q: str, root: str) -> str:
         parts = sorted(p.strip() for p in m.group(1).split(","))
         return "read_parquet([" + ", ".join(parts) + "]"
 
-    return re.sub(r"\s+", " ", _PATHS_RE.sub(_sorted_paths, q)).strip()
+    q = re.sub(r"\s+", " ", _PATHS_RE.sub(_sorted_paths, q)).strip()
+    # Whitespace next to parentheses is cosmetic too (a multi-line COPY vs the shared one-line helper).
+    return re.sub(r" ?([()]) ?", r"\1", q)
 
 
 _SHAPE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2})?|-\d{2})?")
