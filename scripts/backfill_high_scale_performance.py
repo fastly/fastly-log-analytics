@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -40,6 +42,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.days <= 0:
         parser.error("--days must be positive")
+    # Pin the id before any work: batch ids derive from it, so a killed run can only be resumed
+    # idempotently (instead of double-counting what it already published) if the id was printed.
+    rebuild_id = args.rebuild_id or uuid.uuid4().hex
+    print(f"rebuild_id={rebuild_id}", file=sys.stderr, flush=True)
 
     settings = app_config.load_clickhouse_config()
     if settings is None:
@@ -63,7 +69,7 @@ def main() -> int:
             service_id=args.service_id,
             now=args.until,
             window=timedelta(days=args.days),
-            rebuild_id=args.rebuild_id,
+            rebuild_id=rebuild_id,
         )
         print(json.dumps(asdict(report), sort_keys=True))
         return 0 if report.full_rebuild_complete else 1

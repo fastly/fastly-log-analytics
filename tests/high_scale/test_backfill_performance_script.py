@@ -61,3 +61,20 @@ def test_until_is_required_and_must_carry_an_offset(script, monkeypatch) -> None
 
     assert missing.value.code == 2
     assert naive.value.code == 2
+
+
+def test_rebuild_id_is_generated_and_printed_before_any_work_so_a_killed_run_can_resume(
+    script, monkeypatch, capsys
+) -> None:
+    _, seen = _run(script, monkeypatch, ["--service-id", "svc", "--until", "2026-10-20T12:00:00Z"])
+
+    assert seen["rebuild_id"], "the script must pin a rebuild id itself instead of letting the rebuild pick one"
+    assert f"rebuild_id={seen['rebuild_id']}" in capsys.readouterr().err
+
+
+def test_an_explicit_rebuild_id_is_passed_through_unchanged(script, monkeypatch) -> None:
+    _, seen = _run(
+        script, monkeypatch, ["--service-id", "svc", "--until", "2026-10-20T12:00:00Z", "--rebuild-id", "abc123"]
+    )
+
+    assert seen["rebuild_id"] == "abc123"
