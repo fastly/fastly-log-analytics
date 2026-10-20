@@ -35,18 +35,19 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   test('1. Route accessibility, ServerFooter identity, and Usage Log layout mount', async ({
     page,
   }) => {
+    const main = page.locator('#main');
     const response = await page.goto('/admin/usage-log', { waitUntil: 'domcontentloaded' });
     expect(response).not.toBeNull();
     expect(response!.status()).toBe(200);
 
-    await expect(page.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole('heading', { name: /FOS Usage Log/i })).toBeVisible({
+    await expect(main.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByRole('heading', { name: /FOS Usage Log/i })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByTestId('admin-usage-log-toolbar')).toBeVisible();
-    await expect(page.getByTestId('admin-usage-log-kpi-reservation')).toBeVisible();
-    await expect(page.getByTestId('admin-usage-log-chart-reservation')).toBeVisible();
-    await expect(page.getByTestId('admin-usage-log-table-reservation')).toBeVisible();
+    await expect(main.getByTestId('admin-usage-log-toolbar')).toBeVisible();
+    await expect(main.getByTestId('admin-usage-log-kpi-reservation')).toBeVisible();
+    await expect(main.getByTestId('admin-usage-log-chart-reservation')).toBeVisible();
+    await expect(main.getByTestId('admin-usage-log-table-reservation')).toBeVisible();
 
     const footer = page.locator('footer');
     await expect(footer).toBeVisible();
@@ -57,13 +58,14 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   test('2. Pre-allocated zero-CLS reservation containers and warm-load performance budget', async ({
     page,
   }) => {
+    const main = page.locator('#main');
     await page.goto('/admin/usage-log', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
 
-    const toolbar = page.getByTestId('admin-usage-log-toolbar');
-    const kpiReservation = page.getByTestId('admin-usage-log-kpi-reservation');
-    const chartReservation = page.getByTestId('admin-usage-log-chart-reservation');
-    const tableReservation = page.getByTestId('admin-usage-log-table-reservation');
+    const toolbar = main.getByTestId('admin-usage-log-toolbar');
+    const kpiReservation = main.getByTestId('admin-usage-log-kpi-reservation');
+    const chartReservation = main.getByTestId('admin-usage-log-chart-reservation');
+    const tableReservation = main.getByTestId('admin-usage-log-table-reservation');
 
     for (const container of [toolbar, kpiReservation, chartReservation, tableReservation]) {
       await expect(container).toBeVisible();
@@ -84,8 +86,8 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
     await page.addInitScript(clsInitScript);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('admin-usage-log-filters')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByTestId('admin-usage-log-filters')).toBeVisible({ timeout: 30_000 });
 
     const perfMetrics = await page.evaluate(() => {
       const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as
@@ -161,33 +163,34 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   test('4. Filter & granularity interaction across preset windows and filter inputs', async ({
     page,
   }) => {
+    const main = page.locator('#main');
     await page.goto('/admin/usage-log', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('admin-usage-log-filters')).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByTestId('admin-usage-log-filters')).toBeVisible({ timeout: 15_000 });
 
     // Default preset is 24h
-    await expect(page.getByTestId('admin-usage-log-preset-24h')).toHaveAttribute(
+    await expect(main.getByTestId('admin-usage-log-preset-24h')).toHaveAttribute(
       'aria-pressed',
       'true'
     );
 
     for (const hours of [1, 168, 720] as const) {
-      const btn = page.getByTestId(`admin-usage-log-preset-${hours}h`);
+      const btn = main.getByTestId(`admin-usage-log-preset-${hours}h`);
       await expect(btn).toBeVisible();
       await btn.click();
       await expect(btn).toHaveAttribute('aria-pressed', 'true');
     }
 
     // Filter by process_context and operation_type
-    const procInput = page.getByTestId('admin-usage-log-process-input');
-    const opInput = page.getByTestId('admin-usage-log-operation-input');
+    const procInput = main.getByTestId('admin-usage-log-process-input');
+    const opInput = main.getByTestId('admin-usage-log-operation-input');
     await expect(procInput).toBeVisible();
     await expect(opInput).toBeVisible();
 
     await procInput.fill('cron:');
     await opInput.fill('PutObject');
 
-    const exportBtn = page.getByTestId('admin-usage-log-export-btn');
+    const exportBtn = main.getByTestId('admin-usage-log-export-btn');
     await expect(exportBtn).toHaveAttribute('href', /process_context=cron%3A/);
     await expect(exportBtn).toHaveAttribute('href', /operation_type=PutObject/);
 
@@ -199,6 +202,7 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   test('5. Interactive refresh and CSV export workflow with X-Page-Load-ID attribution', async ({
     page,
   }) => {
+    const main = page.locator('#main');
     const usageLogRequests: Array<{ url: string; pageLoadId: string | null }> = [];
 
     page.on('request', (req) => {
@@ -214,9 +218,9 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
     });
 
     await page.goto('/admin/usage-log', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByTestId('admin-usage-log-root')).toBeVisible({ timeout: 30_000 });
 
-    const refreshBtn = page.getByTestId('admin-usage-log-refresh-btn');
+    const refreshBtn = main.getByTestId('admin-usage-log-refresh-btn');
     await expect(refreshBtn).toBeVisible({ timeout: 15_000 });
     await expect(refreshBtn).toBeEnabled({ timeout: 30_000 });
 
@@ -231,7 +235,7 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
     expect(latestWithHeader.length).toBeGreaterThan(0);
 
     // Verify CSV export endpoint contract directly
-    const exportBtn = page.getByTestId('admin-usage-log-export-btn');
+    const exportBtn = main.getByTestId('admin-usage-log-export-btn');
     await expect(exportBtn).toBeVisible();
     const exportHref = await exportBtn.getAttribute('href');
     expect(exportHref).toBeTruthy();
