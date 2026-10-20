@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Metadata retention cleanup no longer carries a constant Postgres flag** — the `usage_log` table keeps its dedicated statements; behavior is unchanged.
 - **Repository null-default SQL now renders through shared helpers** — rendered SQL is byte-identical.
 
+### Fixed
+
+- **Standard-mode RUM queries dropped live rows when racing `rum_commit` buffer unlinks** — `_view_cache` was keyed by `source_name` alone so `logs`, `client_vitals`, and `client_errors` overwrote each other's view fingerprints, and `fetch_rum_analytics` / `fetch_rum_live_events` did not retry on stale buffer file errors (`is_stale_view_error`). `_view_cache` is now keyed by `(source_name, table_name)`, pooled connections track RUM buffer mtimes, and RUM reads self-heal and re-glob on concurrent buffer unlinks.
+- **Long-window (`> 6h`) RUM views lagged behind `1h` by the rollup interval** — windows over 6 hours (`24h`, `7d`, `30d`) read only pre-aggregated `rum_vitals_aggregates` / `rum_error_aggregates`. They now merge the deduplicated active/un-rolled tail since `MAX(hour_bucket)` from `client_vitals` and `client_errors` (keyed by composite natural key) on read so newly ingested RUM beacons appear immediately across all windows without double-counting rolled-up hours.
+- **High-Scale RUM decoder emitted only one row per multi-event Faro `rum_body` beacon** — `decode_source_object` in `backend/high_scale/decoder.py` now expands multi-measurement and multi-exception Faro payloads via `extract_metrics_from_faro_payload` with deterministic per-sub-event UUIDs, matching Standard-mode row emission.
+
 ## [3.0.0-beta4] - 2026-10-19
 
 ### Fixed
