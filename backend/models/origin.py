@@ -141,7 +141,8 @@ class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
 #
 # Plain ``WireSafeModel`` payloads (not ``BaseResponse``: a nested telemetry envelope would
 # add ``_debug_*`` keys inside each section). ``_approx`` is set by the rollup/high-scale
-# readers on weighted-percentile panels.
+# readers on weighted-percentile panels; ``_approx_note`` carries the producer's own
+# description of the approximation so the UI never has to guess which method applies.
 
 
 class OriginSummarySection(WireSafeModel):
@@ -158,24 +159,28 @@ class OriginSummarySection(WireSafeModel):
     origin_error_rate: float | None = None
     obytes_p50: float | None = None
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginTimeseriesSection(WireSafeModel):
     has_data: bool = False
     series: list[OriginTimeseriesPoint] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginSlowUrlsSection(WireSafeModel):
     has_data: bool = False
     rows: list[OriginSlowUrlRow] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginStatusCodesSection(WireSafeModel):
     has_data: bool = False
     rows: list[OriginStatusCodeRow] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginPathBreakdownSection(WireSafeModel):
@@ -183,6 +188,7 @@ class OriginPathBreakdownSection(WireSafeModel):
     shielding_detected: bool = False
     rows: list[OriginPathRow] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginPopLatencySection(WireSafeModel):
@@ -191,12 +197,14 @@ class OriginPopLatencySection(WireSafeModel):
     median_p95_ms: float | int | None = None
     rows: list[OriginPopLatencyRow] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginIpHealthSection(WireSafeModel):
     has_data: bool = False
     rows: list[OriginIpHealthRow] = []
     approx: bool | None = Field(default=None, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
 class OriginAggregatesResponse(HasDataMixin, BaseResponse):

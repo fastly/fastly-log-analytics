@@ -19,37 +19,36 @@ class _Client:
                     "passes": 2,
                     "origin_5xx": 1,
                     "status_count": 10,
-                    "latency_p50_us": 1000.0,
-                    "latency_p75_us": 1500.0,
-                    "latency_p95_us": 2500.0,
-                    "latency_p99_us": 3000.0,
-                    "ttlb_p50_us": 2000.0,
-                    "ttlb_p95_us": 4000.0,
-                    "cdn_overhead_p50_us": 500.0,
-                    "origin_bytes_p50": 128.0,
+                    "latency_q": [1000.0, 1500.0, 2500.0, 3000.0],
+                    "latency_n": 10,
+                    "ttlb_q": [2000.0, 4000.0],
+                    "ttlb_n": 10,
+                    "overhead_q": [500.0],
+                    "overhead_n": 10,
+                    "bytes_q": [128.0],
+                    "bytes_n": 10,
                 }
             ]
         if "origin:timeseries" in sql:
-            return [{"time": "2026-09-14 10:00:00", "miss_count": 6, "value_us": 2500.0}]
+            return [{"time": "2026-09-14 10:00:00", "miss_count": 6, "value_q": [2500.0], "value_n": 6}]
         if "origin:slow_urls" in sql:
             return [
                 {
                     "value": "/slow",
                     "requests": 5,
-                    "p50_us": 1000.0,
-                    "p95_us": 2500.0,
-                    "p99_us": 3000.0,
+                    "latency_q": [1000.0, 2500.0, 3000.0],
+                    "latency_n": 5,
                 }
             ]
         if "origin:status_codes" in sql:
             return [{"value": "503", "requests": 2, "total_requests": 10}]
         if "origin:path_breakdown" in sql:
-            return [{"value": "false", "requests": 4, "p50_us": 1200.0, "p95_us": 2400.0}]
+            return [{"value": "false", "requests": 4, "latency_q": [1200.0, 2400.0], "latency_n": 4}]
         if "origin:pop_latency" in sql:
             return [
-                {"value": "SJC", "requests": 4, "p50_us": 1000.0, "p95_us": 1000.0},
-                {"value": "IAD", "requests": 3, "p50_us": 1200.0, "p95_us": 2000.0},
-                {"value": "LAX", "requests": 3, "p50_us": 1500.0, "p95_us": 5000.0},
+                {"value": "SJC", "requests": 4, "latency_q": [1000.0, 1000.0], "latency_n": 4},
+                {"value": "IAD", "requests": 3, "latency_q": [1200.0, 2000.0], "latency_n": 3},
+                {"value": "LAX", "requests": 3, "latency_q": [1500.0, 5000.0], "latency_n": 3},
             ]
         if "origin:ip_health" in sql:
             return [
@@ -57,8 +56,8 @@ class _Client:
                     "value": "203.0.113.1",
                     "requests": 7,
                     "origin_5xx": 1,
-                    "p50_us": 1000.0,
-                    "p95_us": 3000.0,
+                    "latency_q": [1000.0, 3000.0],
+                    "latency_n": 7,
                 }
             ]
         raise AssertionError(sql)
@@ -148,3 +147,89 @@ def test_rejects_subminute_timeseries_buckets() -> None:
             None,
             sections={"timeseries"},
         )
+
+
+def test_percentile_sections_merge_sketches_exactly_instead_of_averaging_percentiles() -> None:
+    client = _Client()
+    service = SimpleNamespace(service_id="svc", client=client)
+
+    aggregates(
+        service,
+        _request(),
+        None,
+        None,
+        sections={"summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"},
+    )
+
+    percentile_queries = [sql for sql, _ in client.calls if "_q" in sql or "quantiles" in sql]
+    assert percentile_queries
+    for sql in percentile_queries:
+        assert "quantilesExactWeightedArray" in sql
+        assert "_sk_v" in sql and "_sk_w" in sql
+        assert "latency_p50_us" not in sql and "latency_p95_us" not in sql
+        assert "* latency_count" not in sql
+
+
+def test_sketch_backed_sections_declare_how_they_are_approximate() -> None:
+    service = SimpleNamespace(service_id="svc", client=_Client())
+
+    result = aggregates(
+        service,
+        _request(),
+        None,
+        None,
+        sections={"summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"},
+    )
+
+    for section in ("summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"):
+        assert result[section]["_approx"] is True
+        assert "histogram sketch" in result[section]["_approx_note"]
+        assert "1%" in result[section]["_approx_note"]
+    assert "_approx" not in result["status_codes"]
+
+
+def test_percentiles_without_sketch_observations_are_none_not_zero() -> None:
+    class _NoSketch(_Client):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "origin:slow_urls" in sql:
+                return [{"value": "/legacy", "requests": 9, "latency_q": [0.0, 0.0, 0.0], "latency_n": 0}]
+            return super().execute(sql, params)
+
+    service = SimpleNamespace(service_id="svc", client=_NoSketch())
+
+    result = aggregates(service, _request(), None, None, sections={"slow_urls"})
+
+    row = result["slow_urls"]["rows"][0]
+    assert row["requests"] == 9
+    assert row["p50_ms"] is None and row["p95_ms"] is None and row["p99_ms"] is None
+
+
+def test_summary_without_any_sketch_observations_reports_no_data() -> None:
+    class _NoSketch(_Client):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "origin:summary" in sql:
+                return [
+                    {
+                        "requests": 4,
+                        "misses": 0,
+                        "passes": 0,
+                        "origin_5xx": 0,
+                        "status_count": 4,
+                        "latency_q": [0.0, 0.0, 0.0, 0.0],
+                        "latency_n": 0,
+                        "ttlb_q": [0.0, 0.0],
+                        "ttlb_n": 0,
+                        "overhead_q": [0.0],
+                        "overhead_n": 0,
+                        "bytes_q": [0.0],
+                        "bytes_n": 0,
+                    }
+                ]
+            return super().execute(sql, params)
+
+    service = SimpleNamespace(service_id="svc", client=_NoSketch())
+
+    result = aggregates(service, _request(), None, None, sections={"summary"})
+
+    assert result["has_data"] is False
+    assert result["summary"]["has_data"] is False

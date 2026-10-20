@@ -20,7 +20,7 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
     <div className="mb-6">
       {isApprox && (
         <div className="flex justify-end mb-2">
-          <ApproxBadge message="Origin TTFB percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Error rate and fetch volume are exact." />
+          <ApproxBadge message={summary.data?._approx_note ?? "Origin TTFB percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Error rate and fetch volume are exact."} />
         </div>
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

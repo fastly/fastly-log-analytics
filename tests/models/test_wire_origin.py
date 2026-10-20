@@ -127,34 +127,36 @@ class _HsClient:
                     "passes": 2,
                     "origin_5xx": 1,
                     "status_count": 10,
-                    "latency_p50_us": 1000.0,
-                    "latency_p75_us": 1500.0,
-                    "latency_p95_us": 2500.0,
-                    "latency_p99_us": 3000.0,
-                    "ttlb_p50_us": 2000.0,
-                    "ttlb_p95_us": 4000.0,
-                    "cdn_overhead_p50_us": 500.0,
-                    "origin_bytes_p50": 128.0,
+                    "latency_q": [1000.0, 1500.0, 2500.0, 3000.0],
+                    "latency_n": 10,
+                    "ttlb_q": [2000.0, 4000.0],
+                    "ttlb_n": 10,
+                    "overhead_q": [500.0],
+                    "overhead_n": 10,
+                    "bytes_q": [128.0],
+                    "bytes_n": 10,
                 }
             ]
         if "origin:timeseries" in sql:
-            return [{"time": "2026-09-14 10:00:00", "miss_count": 6, "value_us": 2500.0}]
+            return [{"time": "2026-09-14 10:00:00", "miss_count": 6, "value_q": [2500.0], "value_n": 6}]
         if "origin:slow_urls" in sql:
-            return [{"value": "/slow", "requests": 5, "p50_us": 1000.0, "p95_us": 2500.0, "p99_us": 3000.0}]
+            return [{"value": "/slow", "requests": 5, "latency_q": [1000.0, 2500.0, 3000.0], "latency_n": 5}]
         if "origin:status_codes" in sql:
             return [{"value": "503", "requests": 2, "total_requests": 10}]
         if "origin:path_breakdown" in sql:
             return [
-                {"value": "false", "requests": 4, "p50_us": 1200.0, "p95_us": 2400.0},
-                {"value": "true", "requests": 6, "p50_us": 1000.0, "p95_us": 2000.0},
+                {"value": "false", "requests": 4, "latency_q": [1200.0, 2400.0], "latency_n": 4},
+                {"value": "true", "requests": 6, "latency_q": [1000.0, 2000.0], "latency_n": 6},
             ]
         if "origin:pop_latency" in sql:
             return [
-                {"value": "SJC", "requests": 4, "p50_us": 1000.0, "p95_us": 1000.0},
-                {"value": "LAX", "requests": 3, "p50_us": 1500.0, "p95_us": 5000.0},
+                {"value": "SJC", "requests": 4, "latency_q": [1000.0, 1000.0], "latency_n": 4},
+                {"value": "LAX", "requests": 3, "latency_q": [1500.0, 5000.0], "latency_n": 3},
             ]
         if "origin:ip_health" in sql:
-            return [{"value": "203.0.113.1", "requests": 7, "origin_5xx": 1, "p50_us": 1000.0, "p95_us": 2000.0}]
+            return [
+                {"value": "203.0.113.1", "requests": 7, "origin_5xx": 1, "latency_q": [1000.0, 2000.0], "latency_n": 7}
+            ]
         return []
 
 
@@ -177,6 +179,10 @@ def test_high_scale_aggregates_wire_identical():
         res,
         non_empty=("summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"),
     )
+    dumped = OriginAggregatesResponse.model_validate(res).model_dump(by_alias=True)
+    for section in ("summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"):
+        assert dumped[section]["_approx"] is True
+        assert "histogram sketch" in dumped[section]["_approx_note"], section
 
 
 def test_high_scale_empty_sections_wire_identical():

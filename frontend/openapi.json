@@ -76334,6 +76334,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -76537,6 +76548,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -76807,6 +76829,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -77275,6 +77308,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -77404,6 +77448,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -77728,6 +77783,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,
@@ -77933,6 +77999,17 @@
               }
             ],
             "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "additionalProperties": true,

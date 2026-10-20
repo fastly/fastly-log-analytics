@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS origin_minute_summary
     ttlb_p95_us Nullable(Float64),
     cdn_overhead_p50_us Nullable(Float64),
     origin_bytes_p50 Nullable(Float64),
+    latency_sk_v Array(Float64),
+    latency_sk_w Array(UInt32),
+    ttlb_sk_v Array(Float64),
+    ttlb_sk_w Array(UInt32),
+    overhead_sk_v Array(Float64),
+    overhead_sk_w Array(UInt32),
+    origin_bytes_sk_v Array(Float64),
+    origin_bytes_sk_w Array(UInt32),
     batch_id UUID,
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
@@ -32,6 +40,14 @@ ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS status_count UInt64 A
 ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS ttlb_count UInt64 AFTER latency_count;
 ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS overhead_count UInt64 AFTER ttlb_count;
 ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS origin_bytes_count UInt64 AFTER overhead_count;
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS latency_sk_v Array(Float64);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS latency_sk_w Array(UInt32);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS ttlb_sk_v Array(Float64);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS ttlb_sk_w Array(UInt32);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS overhead_sk_v Array(Float64);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS overhead_sk_w Array(UInt32);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS origin_bytes_sk_v Array(Float64);
+ALTER TABLE origin_minute_summary ADD COLUMN IF NOT EXISTS origin_bytes_sk_w Array(UInt32);
 
 CREATE TABLE IF NOT EXISTS origin_minute_dimensions
 (
@@ -46,6 +62,8 @@ CREATE TABLE IF NOT EXISTS origin_minute_dimensions
     latency_p50_us Nullable(Float64),
     latency_p95_us Nullable(Float64),
     latency_p99_us Nullable(Float64),
+    latency_sk_v Array(Float64),
+    latency_sk_w Array(UInt32),
     batch_id UUID,
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
@@ -53,3 +71,6 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/origin_minute_dimension
 PARTITION BY toYYYYMMDD(bucket_start)
 ORDER BY (service_id, bucket_start, dimension, value, batch_id)
 TTL bucket_start + INTERVAL 30 DAY;
+
+ALTER TABLE origin_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_v Array(Float64);
+ALTER TABLE origin_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_w Array(UInt32);

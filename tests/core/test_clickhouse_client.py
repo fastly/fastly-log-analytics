@@ -80,6 +80,14 @@ def test_origin_projection_tables_and_columns_are_allowlisted():
         "ttlb_p95_us",
         "cdn_overhead_p50_us",
         "origin_bytes_p50",
+        "latency_sk_v",
+        "latency_sk_w",
+        "ttlb_sk_v",
+        "ttlb_sk_w",
+        "overhead_sk_v",
+        "overhead_sk_w",
+        "origin_bytes_sk_v",
+        "origin_bytes_sk_w",
     ):
         assert column in ch.CLICKHOUSE_HIGH_SCALE_COLUMNS
 

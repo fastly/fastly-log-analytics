@@ -338,3 +338,29 @@ def test_performance_projection_replay_rejects_non_request_manifests() -> None:
 
     with pytest.raises(ValueError, match="request manifests"):
         replay_performance_projections(rum, archive, publication, rebuild_id="r")
+
+
+def test_purge_origin_projections_deletes_only_the_service_window_from_origin_tables() -> None:
+    from backend.high_scale.recovery import purge_origin_projections
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            return []
+
+    client = _Recorder()
+
+    purge_origin_projections(client, service_id="svc", since=NOW - timedelta(days=30))
+
+    assert [sql.split()[2].strip("`") for sql, _ in client.calls] == [
+        "origin_minute_summary",
+        "origin_minute_dimensions",
+    ]
+    for sql, params in client.calls:
+        assert sql.startswith("ALTER TABLE")
+        assert "DELETE WHERE service_id={service_id:String} AND bucket_start >= {since:DateTime64(3)}" in sql
+        assert "mutations_sync=2" in sql
+        assert params == {"service_id": "svc", "since": NOW - timedelta(days=30)}

@@ -179,7 +179,7 @@ export function LatencyHeatmap({
           headerAction={
             <div className="flex items-center gap-2">
               {slowUrls.data?._approx === true && (
-                <ApproxBadge message="P50/P95/P99 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact." />
+                <ApproxBadge message={slowUrls.data?._approx_note ?? "P50/P95/P99 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact."} />
               )}
               <ColumnVisibilityDropdown
                 columns={getLabels(['url', 'requests', 'p50_ms', 'p95_ms', 'p99_ms'])}
@@ -212,7 +212,7 @@ export function LatencyHeatmap({
           headerAction={
             <div className="flex items-center gap-2">
               {popLatency.data?._approx === true && (
-                <ApproxBadge message="P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact." />
+                <ApproxBadge message={popLatency.data?._approx_note ?? "P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts are exact."} />
               )}
               <ColumnVisibilityDropdown
                 columns={getLabels(['pop', 'requests', 'p50_ms', 'p95_ms'])}
@@ -247,7 +247,7 @@ export function LatencyHeatmap({
           headerAction={
             <div className="flex items-center gap-2">
               {ipHealth.data?._approx === true && (
-                <ApproxBadge message="P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts and the 5xx error rate are exact." />
+                <ApproxBadge message={ipHealth.data?._approx_note ?? "P50/P95 latency on this window are request-weighted averages of per-hour percentiles. Request counts and the 5xx error rate are exact."} />
               )}
               <ColumnVisibilityDropdown
                 columns={getLabels(['oip', 'requests', 'p50_ms', 'p95_ms', 'error_pct'])}

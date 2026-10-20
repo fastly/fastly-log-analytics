@@ -53,6 +53,14 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "ttlb_p95_us",
             "cdn_overhead_p50_us",
             "origin_bytes_p50",
+            "latency_sk_v",
+            "latency_sk_w",
+            "ttlb_sk_v",
+            "ttlb_sk_w",
+            "overhead_sk_v",
+            "overhead_sk_w",
+            "origin_bytes_sk_v",
+            "origin_bytes_sk_w",
         ),
     ),
     "origin_dimensions": (
@@ -67,6 +75,8 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "latency_p50_us",
             "latency_p95_us",
             "latency_p99_us",
+            "latency_sk_v",
+            "latency_sk_w",
         ),
     ),
     "performance_dimensions": (

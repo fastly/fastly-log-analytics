@@ -14632,6 +14632,8 @@ export interface components {
             rows: components["schemas"]["OriginIpHealthRow"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -14729,6 +14731,8 @@ export interface components {
             rows: components["schemas"]["OriginPathRow"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -14846,6 +14850,8 @@ export interface components {
             rows: components["schemas"]["OriginPopLatencyRow"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -15063,6 +15069,8 @@ export interface components {
             rows: components["schemas"]["OriginSlowUrlRow"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -15133,6 +15141,8 @@ export interface components {
             rows: components["schemas"]["OriginStatusCodeRow"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -15223,6 +15233,8 @@ export interface components {
             obytes_p50?: number | null;
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -15331,6 +15343,8 @@ export interface components {
             series: components["schemas"]["OriginTimeseriesPoint"][];
             /** Approx */
             _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         } & {
             [key: string]: unknown;
         };

@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import pytest
+
 from backend.high_scale.origin_projection import build_origin_projection_rows
 
 
@@ -47,6 +49,9 @@ def test_builds_minute_summary_and_dimension_rows_without_mutating_events():
     projection = build_origin_projection_rows(events)
 
     assert events == original
+    (summary_row,) = projection.summary_rows
+    for key in [key for key in summary_row if "_sk_" in key]:
+        del summary_row[key]
     assert projection.summary_rows == (
         {
             "bucket_start": "2026-09-16T14:00:00+00:00",
@@ -89,3 +94,39 @@ def test_skips_rows_without_parseable_timestamps_and_non_finite_numbers():
 
     assert projection.summary_rows == ()
     assert projection.dimension_rows == ()
+
+
+def test_rows_carry_mergeable_sketches_for_every_percentile_metric():
+    events = (
+        {
+            "timestamp": "2026-09-16T14:00:01Z",
+            "ost": 200,
+            "ottfb": 1000,
+            "ottlb": 1800,
+            "elapsed": 2300,
+            "obytes": 100,
+            "url": "/a",
+        },
+        {
+            "timestamp": "2026-09-16T14:00:40Z",
+            "ost": 200,
+            "ottfb": 1000,
+            "ottlb": 2800,
+            "elapsed": 3400,
+            "obytes": 300,
+            "url": "/a",
+        },
+    )
+
+    projection = build_origin_projection_rows(events)
+
+    (summary,) = projection.summary_rows
+    for metric, observations in (("latency", 2), ("ttlb", 2), ("overhead", 2), ("origin_bytes", 2)):
+        assert sum(summary[f"{metric}_sk_w"]) == observations
+        assert len(summary[f"{metric}_sk_v"]) == len(summary[f"{metric}_sk_w"])
+    assert summary["latency_sk_w"] == [2]
+    assert summary["latency_sk_v"][0] == pytest.approx(1000.0, rel=0.01)
+    url = next(row for row in projection.dimension_rows if row["dimension"] == "url")
+    assert url["latency_sk_w"] == [2]
+    status = next(row for row in projection.dimension_rows if row["dimension"] == "status")
+    assert status["latency_sk_v"] == [] and status["latency_sk_w"] == []

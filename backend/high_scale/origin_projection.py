@@ -20,6 +20,7 @@ from backend.high_scale._projection_utils import (
 from backend.high_scale._projection_utils import (
     text as _text,
 )
+from backend.high_scale._sketch import sketch as _sketch
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,10 @@ def _summary_row(bucket: datetime, acc: _Accumulator) -> dict[str, Any]:
     ttlb_p50, ttlb_p95 = _percentiles(acc.ttlb_values, (0.50, 0.95))
     (overhead_p50,) = _percentiles(acc.overhead_values, (0.50,))
     (bytes_p50,) = _percentiles(acc.byte_values, (0.50,))
+    latency_sk = _sketch(acc.latencies)
+    ttlb_sk = _sketch(acc.ttlb_values)
+    overhead_sk = _sketch(acc.overhead_values)
+    bytes_sk = _sketch(acc.byte_values)
     return {
         "bucket_start": bucket.isoformat(),
         "requests": acc.requests,
@@ -148,6 +153,14 @@ def _summary_row(bucket: datetime, acc: _Accumulator) -> dict[str, Any]:
         "ttlb_p95_us": ttlb_p95,
         "cdn_overhead_p50_us": overhead_p50,
         "origin_bytes_p50": bytes_p50,
+        "latency_sk_v": latency_sk[0],
+        "latency_sk_w": latency_sk[1],
+        "ttlb_sk_v": ttlb_sk[0],
+        "ttlb_sk_w": ttlb_sk[1],
+        "overhead_sk_v": overhead_sk[0],
+        "overhead_sk_w": overhead_sk[1],
+        "origin_bytes_sk_v": bytes_sk[0],
+        "origin_bytes_sk_w": bytes_sk[1],
     }
 
 
@@ -158,6 +171,7 @@ def _dimension_row(
     acc: _Accumulator,
 ) -> dict[str, Any]:
     lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
+    latency_sk = _sketch(acc.latencies)
     return {
         "bucket_start": bucket.isoformat(),
         "dimension": dimension,
@@ -169,6 +183,8 @@ def _dimension_row(
         "latency_p50_us": lat_p50,
         "latency_p95_us": lat_p95,
         "latency_p99_us": lat_p99,
+        "latency_sk_v": latency_sk[0],
+        "latency_sk_w": latency_sk[1],
     }
 
 

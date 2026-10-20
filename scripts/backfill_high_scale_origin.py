@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +14,7 @@ from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHousePublication, PostgresBatchManifestStore
-from backend.high_scale.recovery import rebuild_origin_projections_from_fos
+from backend.high_scale.recovery import purge_origin_projections, rebuild_origin_projections_from_fos
 from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
@@ -26,6 +26,12 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--rebuild-id")
     parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="delete this service's existing Origin projection rows in the window first "
+        "(required when rows already exist, otherwise every request is counted twice)",
+    )
+    parser.add_argument(
         "--capacity-json",
         type=Path,
         help="measured RecoveryCapacityMeasurement fields; exit 3 when the rebuild completes but the claim is invalid",
@@ -33,6 +39,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.days <= 0:
         parser.error("--days must be positive")
+    if args.replace_existing and args.rebuild_id:
+        parser.error("--replace-existing cannot resume a rebuild: the purge would delete rows the resumed id skips")
     capacity = None
     if args.capacity_json is not None:
         try:
@@ -56,6 +64,12 @@ def main() -> int:
             PostgresBatchManifestStore(control),
             AggregateBatchAdapter(cast(ClickHouseClient, service.client)),
         )
+        if args.replace_existing:
+            purge_origin_projections(
+                service.client,
+                service_id=args.service_id,
+                since=datetime.now(UTC) - timedelta(days=args.days),
+            )
         report = rebuild_origin_projections_from_fos(
             service.manifest_catalog,
             service.archive,

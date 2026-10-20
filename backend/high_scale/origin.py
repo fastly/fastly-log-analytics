@@ -7,6 +7,7 @@ from typing import Any
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
+from backend.high_scale._sketch import RELATIVE_ERROR
 from backend.high_scale.registry import HighScaleService
 from backend.utils.date_utils import safe_iso
 
@@ -55,8 +56,28 @@ def _where(
     return " AND ".join(clauses), params
 
 
-def _weighted(column: str, count_column: str = "latency_count") -> str:
-    return f"sum({column} * {count_column}) / nullIf(sum({count_column}), 0)"
+_APPROX_NOTE = (
+    "Latency percentiles are merged from per-minute log-histogram sketches "
+    f"(relative error at most {RELATIVE_ERROR:.0%}). Request counts and error rates are exact."
+)
+_APPROX = {"_approx": True, "_approx_note": _APPROX_NOTE}
+
+
+def _sketch_select(alias: str, column: str, quantiles: tuple[float, ...]) -> str:
+    """Merge the per-minute ``{column}_sk_v/_sk_w`` histograms and read ``quantiles`` from the union."""
+    levels = ", ".join(str(level) for level in quantiles)
+    return (
+        f"quantilesExactWeightedArray({levels})({column}_sk_v, {column}_sk_w) AS {alias}_q, "
+        f"sumArray({column}_sk_w) AS {alias}_n"
+    )
+
+
+def _quantile(row: dict[str, Any], alias: str, index: int) -> float | None:
+    """The ``index``-th requested quantile in milliseconds-ready microseconds; None with no observations."""
+    if int(row.get(f"{alias}_n") or 0) == 0:
+        return None
+    values = row.get(f"{alias}_q") or []
+    return _float_or_none(values[index]) if index < len(values) else None
 
 
 def _summary(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
@@ -65,20 +86,16 @@ def _summary(service: HighScaleService, start_time: str | None, end_time: str | 
         "/* origin:summary */ SELECT "
         "sum(requests) AS requests, sum(misses) AS misses, sum(passes) AS passes, "
         "sum(origin_5xx) AS origin_5xx, sum(status_count) AS status_count, "
-        f"{_weighted('latency_p50_us')} AS latency_p50_us, "
-        f"{_weighted('latency_p75_us')} AS latency_p75_us, "
-        f"{_weighted('latency_p95_us')} AS latency_p95_us, "
-        f"{_weighted('latency_p99_us')} AS latency_p99_us, "
-        f"{_weighted('ttlb_p50_us', 'ttlb_count')} AS ttlb_p50_us, "
-        f"{_weighted('ttlb_p95_us', 'ttlb_count')} AS ttlb_p95_us, "
-        f"{_weighted('cdn_overhead_p50_us', 'overhead_count')} AS cdn_overhead_p50_us, "
-        f"{_weighted('origin_bytes_p50', 'origin_bytes_count')} AS origin_bytes_p50 "
+        f"{_sketch_select('latency', 'latency', (0.5, 0.75, 0.95, 0.99))}, "
+        f"{_sketch_select('ttlb', 'ttlb', (0.5, 0.95))}, "
+        f"{_sketch_select('overhead', 'overhead', (0.5,))}, "
+        f"{_sketch_select('bytes', 'origin_bytes', (0.5,))} "
         f"FROM origin_minute_summary WHERE {where}",
         params,
     )
     row = rows[0] if rows else {}
     requests = int(row.get("requests") or 0)
-    latency_p50 = row.get("latency_p50_us")
+    latency_p50 = _quantile(row, "latency", 0)
     if requests == 0 or latency_p50 is None:
         return {
             "has_data": False,
@@ -99,19 +116,19 @@ def _summary(service: HighScaleService, start_time: str | None, end_time: str | 
         "total_misses": int(row.get("misses") or 0),
         "total_passes": int(row.get("passes") or 0),
         "ottfb_p50_ms": _milliseconds(latency_p50),
-        "ottfb_p75_ms": _milliseconds(row.get("latency_p75_us")),
-        "ottfb_p95_ms": _milliseconds(row.get("latency_p95_us")),
-        "ottfb_p99_ms": _milliseconds(row.get("latency_p99_us")),
-        "ottlb_p50_ms": _milliseconds(row.get("ttlb_p50_us")),
-        "ottlb_p95_ms": _milliseconds(row.get("ttlb_p95_us")),
-        "cdn_overhead_p50_ms": _milliseconds(row.get("cdn_overhead_p50_us")),
+        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency", 1)),
+        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency", 2)),
+        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency", 3)),
+        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb", 0)),
+        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb", 1)),
+        "cdn_overhead_p50_ms": _milliseconds(_quantile(row, "overhead", 0)),
         "origin_error_rate": (
             int(row.get("origin_5xx") or 0) / int(row["status_count"])
             if int(row.get("status_count") or 0) > 0
             else None
         ),
-        "obytes_p50": _float_or_none(row.get("origin_bytes_p50")),
-        "_approx": True,
+        "obytes_p50": _quantile(row, "bytes", 0),
+        **_APPROX,
     }
 
 
@@ -127,20 +144,21 @@ def _timeseries(
         raise ValueError("high-scale Origin timeseries requires bucket_minutes of at least 1")
     where, params = _where(service.service_id, "origin_summary", start_time, end_time)
     params["bucket_minutes"] = int(req.bucket_minutes)
-    metric_column = {
-        ("ttfb", "p50"): "latency_p50_us",
-        ("ttfb", "p95"): "latency_p95_us",
-        ("ttfb", "p99"): "latency_p99_us",
-        ("ttlb", "p50"): "ttlb_p50_us",
-        ("ttlb", "p95"): "ttlb_p95_us",
+    metric = {
+        ("ttfb", "p50"): ("latency", 0.5),
+        ("ttfb", "p95"): ("latency", 0.95),
+        ("ttfb", "p99"): ("latency", 0.99),
+        ("ttlb", "p50"): ("ttlb", 0.5),
+        ("ttlb", "p95"): ("ttlb", 0.95),
     }.get((req.timeseries_metric, req.timeseries_percentile))
-    if metric_column is None:
+    if metric is None:
         raise ValueError("high-scale Origin timeseries does not support the requested metric and percentile")
+    metric_column, level = metric
     rows = service.client.execute(
         "/* origin:timeseries */ SELECT "
         "toStartOfInterval(bucket_start, toIntervalMinute({bucket_minutes:UInt32})) AS time, "
         "sum(misses) AS miss_count, "
-        f"{_weighted(metric_column)} AS value_us "
+        f"{_sketch_select('value', metric_column, (level,))} "
         f"FROM origin_minute_summary WHERE {where} "
         "GROUP BY time ORDER BY time",
         params,
@@ -151,11 +169,11 @@ def _timeseries(
             {
                 "time": safe_iso(row["time"]),
                 "miss_count": int(row.get("miss_count") or 0),
-                "value": _milliseconds(row.get("value_us")),
+                "value": _milliseconds(_quantile(row, "value", 0)),
             }
             for row in rows
         ],
-        "_approx": True,
+        **_APPROX,
     }
 
 
@@ -202,12 +220,10 @@ def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_
         end_time=end_time,
         select=(
             "sum(origin_minute_dimensions.requests) AS requests, "
-            f"{_weighted('latency_p50_us')} AS p50_us, "
-            f"{_weighted('latency_p95_us')} AS p95_us, "
-            f"{_weighted('latency_p99_us')} AS p99_us"
+            f"{_sketch_select('latency', 'latency', (0.5, 0.95, 0.99))}"
         ),
         having="sum(origin_minute_dimensions.requests) >= {min_requests:UInt64}",
-        order_by="p95_us DESC",
+        order_by="latency_q[2] DESC",
         limit=req.slow_urls_limit,
         extra_params={"min_requests": int(req.slow_urls_min_requests)},
     )
@@ -217,13 +233,13 @@ def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_
             {
                 "url": row["value"],
                 "requests": int(row["requests"]),
-                "p50_ms": _milliseconds(row.get("p50_us")),
-                "p95_ms": _milliseconds(row.get("p95_us")),
-                "p99_ms": _milliseconds(row.get("p99_us")),
+                "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                "p99_ms": _milliseconds(_quantile(row, "latency", 2)),
             }
             for row in rows
         ],
-        "_approx": True,
+        **_APPROX,
     }
 
 
@@ -273,10 +289,9 @@ def _latency_dimension(
         select=(
             "sum(origin_minute_dimensions.requests) AS requests, "
             "sum(origin_5xx) AS origin_5xx, "
-            f"{_weighted('latency_p50_us')} AS p50_us, "
-            f"{_weighted('latency_p95_us')} AS p95_us"
+            f"{_sketch_select('latency', 'latency', (0.5, 0.95))}"
         ),
-        order_by="p95_us DESC",
+        order_by="latency_q[2] DESC",
         limit=limit,
         having=having,
     )
@@ -327,12 +342,12 @@ def aggregates(
                 {
                     "edge": row["value"] == "true",
                     "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(row.get("p50_us")),
-                    "p95_ms": _milliseconds(row.get("p95_us")),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
                 }
                 for row in rows
             ],
-            "_approx": True,
+            **_APPROX,
         }
     if "pop_latency" in sections:
         rows = _latency_dimension(
@@ -343,7 +358,7 @@ def aggregates(
             end_time=end_time,
             limit=req.pop_latency_limit,
         )
-        p95s = [value for row in rows if (value := _milliseconds(row.get("p95_us"))) is not None]
+        p95s = [value for row in rows if (value := _milliseconds(_quantile(row, "latency", 1))) is not None]
         p95s.sort()
         median_p95 = p95s[len(p95s) // 2] if p95s else 0
         result["pop_latency"] = {
@@ -354,13 +369,13 @@ def aggregates(
                 {
                     "pop": row["value"],
                     "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(row.get("p50_us")),
-                    "p95_ms": _milliseconds(row.get("p95_us")),
-                    "elevated": _is_elevated(row.get("p95_us"), median_p95),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                    "elevated": _is_elevated(_quantile(row, "latency", 1), median_p95),
                 }
                 for row in rows
             ],
-            "_approx": True,
+            **_APPROX,
         }
     if "ip_health" in sections:
         rows = _latency_dimension(
@@ -378,14 +393,14 @@ def aggregates(
                 {
                     "oip": row["value"],
                     "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(row.get("p50_us")),
-                    "p95_ms": _milliseconds(row.get("p95_us")),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
                     "error_pct": int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
                 }
                 for row in rows
                 if int(row["requests"]) > 0
             ],
-            "_approx": True,
+            **_APPROX,
         }
     summary = result.get("summary", _EMPTY["summary"])
     return {"has_data": bool(summary.get("has_data")), **result}

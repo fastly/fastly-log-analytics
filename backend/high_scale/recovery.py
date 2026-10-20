@@ -165,6 +165,28 @@ def rebuild_serving_state_from_fos(
     )
 
 
+class _SqlClient(Protocol):
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]: ...
+
+
+_ORIGIN_PROJECTION_TABLES = ("origin_minute_summary", "origin_minute_dimensions")
+
+
+def purge_origin_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
+    """Delete one service's Origin projection rows from ``since`` onward, synchronously.
+
+    A rebuild publishes under new batch ids, so rebuilding over rows that already exist would
+    count every request twice. Purge first when the existing rows are being replaced (for
+    example after a projection column was added); the archive remains the source for the rebuild.
+    """
+    for table in _ORIGIN_PROJECTION_TABLES:
+        client.execute(
+            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
+            "AND bucket_start >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+            {"service_id": service_id, "since": since},
+        )
+
+
 def rebuild_origin_projections_from_fos(
     catalog: ArchiveManifestCatalog,
     archive: ArchivePublication,

@@ -66,7 +66,7 @@ export function Timeseries({
         headerAction={
           <div className="flex items-center gap-2">
             {originTs.data?._approx === true && (
-              <ApproxBadge message="Latency percentiles on wide windows are request-weighted averages of per-minute percentiles. Request volume is exact." />
+              <ApproxBadge message={originTs.data?._approx_note ?? "Latency percentiles on wide windows are request-weighted averages of per-minute percentiles. Request volume is exact."} />
             )}
             <ButtonGroup>
               {(['ttfb', 'ttlb'] as const).map(m => (

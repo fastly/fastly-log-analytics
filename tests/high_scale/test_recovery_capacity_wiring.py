@@ -205,3 +205,40 @@ def test_cli_rejects_a_malformed_measurement_file(cli, monkeypatch, tmp_path) ->
         _run_cli(cli, monkeypatch, tmp_path, {**_GOOD, "events_per_second": 0})
 
     assert excinfo.value.code == 2
+
+
+def test_cli_replace_existing_purges_origin_rows_before_the_rebuild(cli, monkeypatch, tmp_path) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(
+        cli, "purge_origin_projections", lambda client, **kwargs: order.append(f"purge:{kwargs['service_id']}")
+    )
+
+    def fake_rebuild(*args, **kwargs):
+        order.append("rebuild")
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_origin_projections_from_fos", fake_rebuild)
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--replace-existing"])
+
+    assert cli.main() == 0
+    assert order == ["purge:svc", "rebuild"]
+
+
+def test_cli_without_replace_existing_never_purges(cli, monkeypatch, tmp_path) -> None:
+    purged: list[str] = []
+    monkeypatch.setattr(cli, "purge_origin_projections", lambda client, **kwargs: purged.append("purge"))
+
+    _run_cli(cli, monkeypatch, tmp_path, None)
+
+    assert purged == []
+
+
+def test_cli_rejects_replace_existing_with_a_resumed_rebuild_id(cli, monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--replace-existing", "--rebuild-id", "rb-1"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2

@@ -131,9 +131,16 @@ def test_origin_projection_schema_is_bounded_and_mergeable() -> None:
         "ttlb_p95_us",
         "cdn_overhead_p50_us",
         "origin_bytes_p50",
+        "latency_sk_v",
+        "latency_sk_w",
+        "ttlb_sk_v",
+        "overhead_sk_w",
+        "origin_bytes_sk_v",
         "ReplicatedMergeTree",
     ):
         assert required in sql
+    for table in ("origin_minute_summary", "origin_minute_dimensions"):
+        assert f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS latency_sk_v Array(Float64)" in sql
 
 
 def test_performance_projection_schema_covers_waterfall_and_scatter() -> None:

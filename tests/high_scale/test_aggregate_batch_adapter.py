@@ -44,6 +44,8 @@ def _origin_batch(domain: str) -> HighScaleBatch:
         "latency_p50_us": 1000.0,
         "latency_p95_us": 2000.0,
         "latency_p99_us": 2200.0,
+        "latency_sk_v": [1000.0, 2000.0],
+        "latency_sk_w": [2, 1],
     }
     if domain == "origin_summary":
         row.update(
@@ -55,6 +57,12 @@ def _origin_batch(domain: str) -> HighScaleBatch:
                 "ttlb_p95_us": 2800.0,
                 "cdn_overhead_p50_us": 500.0,
                 "origin_bytes_p50": 100.0,
+                "ttlb_sk_v": [1800.0],
+                "ttlb_sk_w": [3],
+                "overhead_sk_v": [500.0],
+                "overhead_sk_w": [3],
+                "origin_bytes_sk_v": [100.0],
+                "origin_bytes_sk_w": [3],
             }
         )
     else:
@@ -182,6 +190,9 @@ def test_maps_origin_projection_domains_to_allowlisted_tables(domain, table) -> 
     facts = client.inserts[1]
     assert facts[0] == table
     assert facts[2][0][-2]
+    assert {"latency_sk_v", "latency_sk_w"} <= set(facts[1])
+    assert ("origin_bytes_sk_v" in facts[1]) == (domain == "origin_summary")
+    assert facts[2][0][facts[1].index("latency_sk_w")] == [2, 1]
 
 
 def _performance_batch(domain: str) -> HighScaleBatch:
