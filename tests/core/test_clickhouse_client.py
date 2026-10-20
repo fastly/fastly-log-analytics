@@ -660,3 +660,19 @@ def test_only_allow_listed_query_settings_may_be_supplied(clients, name):
 
     with pytest.raises(ValueError, match="setting"):
         client.execute("SELECT 1", settings={name: "1"})
+
+
+def test_credentials_in_user_ddl_never_reach_the_debug_query_telemetry(clients):
+    from backend.utils import telemetry
+
+    token = telemetry._QUERIES.set([])
+    try:
+        clients(lambda request: httpx.Response(200, content=b"")).execute(
+            "ALTER USER `u` IDENTIFIED WITH sha256_password BY 'hunter2-super-secret' DEFAULT DATABASE `d`"
+        )
+        recorded = " ".join(q["sql"] for q in telemetry.get_queries())
+    finally:
+        telemetry._QUERIES.reset(token)
+
+    assert "hunter2-super-secret" not in recorded
+    assert "BY '[REDACTED]'" in recorded

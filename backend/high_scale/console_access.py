@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 SCOPED_TABLES = ("request_facts", "rum_vitals_facts", "rum_error_facts", "high_scale_batch_publications")
 PROFILE = "fla_console_ro"
 MIN_SECRET_BYTES = 32
+MIN_DISTINCT_SECRET_BYTES = 8
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 # Mirrors the per-query settings ClickHouseClient._request always sends, plus the three the console adds. Any
@@ -54,7 +55,11 @@ _PROFILE_SETTINGS = (
     "timeout_before_checking_execution_speed CHANGEABLE_IN_READONLY, "
     "output_format_json_quote_64bit_integers CHANGEABLE_IN_READONLY, "
     "memory_overcommit_ratio_denominator CHANGEABLE_IN_READONLY, "
-    "memory_overcommit_ratio_denominator_for_user CHANGEABLE_IN_READONLY"
+    "memory_overcommit_ratio_denominator_for_user CHANGEABLE_IN_READONLY, "
+    # Ceilings the client never sends, so they apply as non-changeable defaults: a user's concurrent queries
+    # share 2 GiB, and a single result is cut off at 64 MiB (wait_end_of_query buffers it in the backend).
+    "max_memory_usage_for_user = 2147483648 MAX 2147483648, "
+    "max_result_bytes = 67108864"
 )
 
 
@@ -66,6 +71,8 @@ def console_identity(service_id: str, secret: bytes) -> tuple[str, str]:
     """``(user, password)`` for ``service_id``; the password is an HMAC of the service under the deployment secret."""
     if len(secret) < MIN_SECRET_BYTES:
         raise ValueError(f"CLICKHOUSE_CONSOLE_SECRET must be at least {MIN_SECRET_BYTES} bytes")
+    if len(set(secret)) < MIN_DISTINCT_SECRET_BYTES:
+        raise ValueError(f"CLICKHOUSE_CONSOLE_SECRET needs at least {MIN_DISTINCT_SECRET_BYTES} distinct bytes")
     user = "fla_console_" + hashlib.sha256(service_id.encode()).hexdigest()[:16]
     password = hmac.new(secret, f"console:{service_id}".encode(), hashlib.sha256).hexdigest()
     return user, password
@@ -82,18 +89,34 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
     user, password = console_identity(service_id, secret)
     db = f"`{database}`"
     tables = ", ".join(f"{db}.`{table}`" for table in SCOPED_TABLES)
-    statements = [
+    policy = f"`{user}_scope`"
+    scope = f"FOR SELECT USING service_id = {_literal(service_id)} AS RESTRICTIVE TO `{user}`"
+    before_grants = [
         f"CREATE SETTINGS PROFILE IF NOT EXISTS {PROFILE} SETTINGS {_PROFILE_SETTINGS}",
         f"ALTER SETTINGS PROFILE {PROFILE} SETTINGS {_PROFILE_SETTINGS}",
         f"CREATE USER IF NOT EXISTS `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} "
         f"DEFAULT DATABASE {db} SETTINGS PROFILE '{PROFILE}'",
-        f"ALTER USER `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)}",
-        f"CREATE ROW POLICY IF NOT EXISTS `{user}_scope` ON {tables} FOR SELECT "
-        f"USING service_id = {_literal(service_id)} AS RESTRICTIVE TO `{user}`",
-        *(f"GRANT SELECT ON {db}.`{table}` TO `{user}`" for table in SCOPED_TABLES),
+        # Always re-applied: rotates the password and re-attaches the profile on a pre-existing user.
+        f"ALTER USER `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} SETTINGS PROFILE '{PROFILE}'",
+        f"CREATE ROW POLICY IF NOT EXISTS {policy} ON {tables} {scope}",
+        f"ALTER ROW POLICY {policy} ON {tables} {scope}",
     ]
-    for statement in statements:
+    for statement in before_grants:
         admin.execute(statement)
+    # CREATE ROW POLICY is one multi-table statement, and a user holding SELECT on a table without a policy reads
+    # every service: prove all of them exist before granting anything.
+    present = {
+        row.get("table")
+        for row in admin.execute(
+            "SELECT table FROM system.row_policies "
+            f"WHERE database = {_literal(database)} AND short_name = {_literal(user + '_scope')}"
+        )
+    }
+    missing = set(SCOPED_TABLES) - present
+    if missing:
+        raise RuntimeError(f"row policies missing on {sorted(missing)} for {service_id}; nothing was granted")
+    for table in SCOPED_TABLES:
+        admin.execute(f"GRANT SELECT ON {db}.`{table}` TO `{user}`")
     return user
 
 
@@ -142,26 +165,30 @@ class ConsoleClients:
             return None
         with self._lock:
             existing = self._clients.get(service_id)
-            if existing is not None:
-                return existing
-            user, password = console_identity(service_id, self._secret)
-            client = self._factory(dataclasses.replace(self._settings, user=user, password=password))
-            try:
-                self._assert_isolated(client, service_id)
-            except BaseException:
-                client.close()
-                raise
-            self._clients[service_id] = client
-            return client
+        if existing is not None:
+            return existing
+        # The isolation check is a ClickHouse round trip: never hold the shared lock across it, or one slow
+        # service would stall the console for every other service.
+        user, password = console_identity(service_id, self._secret)
+        client = self._factory(dataclasses.replace(self._settings, user=user, password=password))
+        try:
+            self._assert_isolated(client, service_id)
+        except BaseException:
+            client.close()
+            raise
+        with self._lock:
+            winner = self._clients.setdefault(service_id, client)
+        if winner is not client:
+            client.close()
+        return winner
 
     @staticmethod
     def _assert_isolated(client: Any, service_id: str) -> None:
         """Fail closed unless the identity cannot read another service's rows (a missing policy would fail open)."""
-        rows = client.execute(
-            f"SELECT count() AS n FROM request_facts WHERE service_id != {_literal(service_id)}",
-        )
-        if not rows or int(rows[0].get("n", 1)) != 0:
-            raise RuntimeError(f"console identity for {service_id} failed the row isolation check")
+        for table in SCOPED_TABLES:
+            rows = client.execute(f"SELECT count() AS n FROM {table} WHERE service_id != {_literal(service_id)}")
+            if not rows or int(rows[0].get("n", 1)) != 0:
+                raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {table}")
 
     def close(self) -> None:
         with self._lock:

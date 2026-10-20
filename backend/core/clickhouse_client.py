@@ -182,6 +182,14 @@ CLICKHOUSE_TABLE_COLUMNS = {
     **{table: CLICKHOUSE_HIGH_SCALE_COLUMNS for table in CLICKHOUSE_HIGH_SCALE_TABLES},
 }
 _PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_DDL_PASSWORD = re.compile(r"(\bIDENTIFIED\s+WITH\s+\w+\s+BY\s+)'(?:[^'\\]|\\.|'')*'", re.IGNORECASE)
+
+
+def _redact_ddl_secrets(sql: str) -> str:
+    """Debug telemetry keeps SQL text; user DDL carries the password, which must never be recorded."""
+    return _DDL_PASSWORD.sub(r"\1'[REDACTED]'", sql)
+
+
 # Per-query settings callers may add. They travel as HTTP settings (never as SQL text, where a user
 # comment could swallow them) and may only narrow what a query can read or return, never widen it.
 _QUERY_SETTINGS = frozenset(
@@ -530,7 +538,7 @@ class ClickHouseClient:
                         queries = get_queries()
                         queries.append(
                             {
-                                "sql": data["query"].strip(),
+                                "sql": _redact_ddl_secrets(data["query"].strip()),
                                 "time_ms": round(stats["duration_ms"], 2),
                                 "engine": "ClickHouse",
                             }

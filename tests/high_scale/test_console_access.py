@@ -16,18 +16,21 @@ from backend.high_scale import console_access as access
 
 pytestmark = pytest.mark.security_regression
 
-SECRET = b"s" * 48
+SECRET = bytes(range(40, 88))
 
 
 class _Admin:
-    def __init__(self, fail_on: str | None = None) -> None:
+    def __init__(self, fail_on: str | None = None, policy_tables: tuple[str, ...] | None = None) -> None:
         self.statements: list[str] = []
         self._fail_on = fail_on
+        self._policy_tables = access.SCOPED_TABLES if policy_tables is None else policy_tables
 
     def execute(self, sql: str, params: dict | None = None, *, settings: dict | None = None) -> list[dict]:
         if self._fail_on and self._fail_on in sql:
             raise RuntimeError("denied")
         self.statements.append(sql)
+        if "system.row_policies" in sql:
+            return [{"table": table} for table in self._policy_tables]
         return []
 
 
@@ -42,12 +45,18 @@ def test_identity_is_deterministic_per_service_and_unique_across_services() -> N
 
 
 def test_identity_depends_on_the_secret() -> None:
-    assert access.console_identity("svc", SECRET) != access.console_identity("svc", b"t" * 48)
+    assert access.console_identity("svc", SECRET) != access.console_identity("svc", bytes(range(90, 138)))
 
 
 @pytest.mark.parametrize("secret", [b"", b"short", b"x" * 31])
 def test_a_weak_console_secret_is_rejected(secret: bytes) -> None:
     with pytest.raises(ValueError, match="at least 32"):
+        access.console_identity("svc", secret)
+
+
+@pytest.mark.parametrize("secret", [b"a" * 48, b"ab" * 30, b"0123" * 12])
+def test_a_long_but_low_diversity_secret_is_rejected(secret: bytes) -> None:
+    with pytest.raises(ValueError, match="distinct"):
         access.console_identity("svc", secret)
 
 
@@ -227,3 +236,78 @@ def test_settings_replacement_keeps_every_other_connection_field() -> None:
         base.database,
         base.secure,
     )
+
+
+def test_existing_users_policies_and_profiles_are_repaired_not_left_stale() -> None:
+    admin = _Admin()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    user, _ = access.console_identity("svc-a", SECRET)
+    assert any(s.startswith(f"ALTER USER `{user}`") and "SETTINGS PROFILE" in s for s in admin.statements)
+    assert any(s.startswith("ALTER ROW POLICY") and "service_id = 'svc-a'" in s for s in admin.statements)
+
+
+def test_provisioning_verifies_all_scoped_tables_have_the_policy_before_granting() -> None:
+    admin = _Admin(policy_tables=("request_facts",))  # one table silently lacks its policy
+
+    with pytest.raises(RuntimeError, match="row polic"):
+        access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    assert not any(s.startswith("GRANT") for s in admin.statements)
+
+
+def test_the_profile_adds_per_user_memory_and_result_size_ceilings() -> None:
+    admin = _Admin()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    profile = next(s for s in admin.statements if s.startswith("CREATE SETTINGS PROFILE"))
+    assert "max_memory_usage_for_user = 2147483648 MAX 2147483648" in profile
+    assert "max_result_bytes = 67108864" in profile and "max_result_bytes = 67108864 MAX" not in profile
+
+
+def test_the_isolation_probe_covers_every_scoped_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, built = _manager(monkeypatch)
+
+    manager.client_for("svc-a")
+
+    probed = " ".join(built[0].sql)
+    for table in access.SCOPED_TABLES:
+        assert f"FROM {table} WHERE service_id != 'svc-a'" in probed
+
+
+def test_a_leak_in_any_single_scoped_table_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _LeakyOne(_FakeClient):
+        def execute(self, sql, params=None, *, settings=None):
+            self.sql.append(sql)
+            return [{"n": 1 if "FROM rum_error_facts" in sql else 0}]
+
+    manager = access.ConsoleClients(settings=_settings(), secret=SECRET, client_factory=_LeakyOne)
+
+    with pytest.raises(RuntimeError, match="isolation"):
+        manager.client_for("svc-a")
+
+
+def test_a_slow_identity_check_for_one_service_does_not_block_another(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _Slow(_FakeClient):
+        def execute(self, sql, params=None, *, settings=None):
+            if self.settings.user == access.console_identity("slow", SECRET)[0]:
+                entered.set()
+                release.wait(5)
+            return [{"n": 0}]
+
+    manager = access.ConsoleClients(settings=_settings(), secret=SECRET, client_factory=_Slow)
+    worker = threading.Thread(target=lambda: manager.client_for("slow"))
+    worker.start()
+    assert entered.wait(5)
+
+    assert manager.client_for("fast") is not None  # must not wait for the slow service's ClickHouse call
+
+    release.set()
+    worker.join(5)

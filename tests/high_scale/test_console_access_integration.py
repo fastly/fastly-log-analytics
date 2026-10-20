@@ -302,3 +302,67 @@ def test_the_probe_query_the_console_runs_first_is_allowed_for_the_identity(clie
     )
 
     assert rows == [{"n": 0}]
+
+
+def test_a_tampered_policy_is_repaired_by_the_next_provisioning_run(server: _Server) -> None:
+    user, _ = access.console_identity("svc-b", SECRET)
+    server.admin_sql(
+        f"ALTER ROW POLICY `{user}_scope` ON {DB}.request_facts USING 1 AS RESTRICTIVE TO `{user}`"
+    )  # an operator edit that silently widens the scope
+    leaky = server.client(*access.console_identity("svc-b", SECRET))
+    try:
+        assert _count(leaky) == 13, "sanity: the tampered policy really does leak"
+    finally:
+        leaky.close()
+
+    admin = server.client("admin", "adminpw")
+    try:
+        access.provision_console_access(admin, DB, "svc-b", SECRET)
+    finally:
+        admin.close()
+
+    repaired = server.client(*access.console_identity("svc-b", SECRET))
+    try:
+        assert _count(repaired) == 7
+    finally:
+        repaired.close()
+
+
+def test_the_per_user_and_result_size_ceilings_are_in_force_and_not_raisable(clients: access.ConsoleClients) -> None:
+    client = clients.client_for("svc-a")
+
+    limits = {
+        r["name"]: r["value"]
+        for r in client.execute(
+            "SELECT name, value FROM system.settings WHERE name IN ('max_result_bytes', 'max_memory_usage_for_user')"
+        )
+    }
+
+    assert limits == {"max_result_bytes": "67108864", "max_memory_usage_for_user": "2147483648"}
+    with pytest.raises(ClickHouseError):
+        client.execute("SELECT count() FROM request_facts SETTINGS max_result_bytes = 99999999999")
+    with pytest.raises(ClickHouseError):
+        client.execute("SELECT count() FROM request_facts SETTINGS max_memory_usage_for_user = 99999999999")
+
+
+def test_a_missing_row_policy_on_any_table_aborts_provisioning_before_any_grant(server: _Server) -> None:
+    admin = server.client("admin", "adminpw")
+    user, _ = access.console_identity("svc-gap", SECRET)
+    try:
+        original = admin.execute
+
+        def drop_one_policy(sql, params=None, *, settings=None):
+            result = original(sql, params, settings=settings)
+            if sql.startswith("ALTER ROW POLICY"):
+                original(f"DROP ROW POLICY IF EXISTS `{user}_scope` ON {DB}.rum_error_facts")
+            return result
+
+        admin.execute = drop_one_policy  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="row polic"):
+            access.provision_console_access(admin, DB, "svc-gap", SECRET)
+        admin.execute = original  # type: ignore[method-assign]
+        assert admin.execute(f"SHOW GRANTS FOR `{user}`") == [] or all(
+            "GRANT SELECT" not in str(row) for row in admin.execute(f"SHOW GRANTS FOR `{user}`")
+        )
+    finally:
+        admin.close()
