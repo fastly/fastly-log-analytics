@@ -470,3 +470,60 @@ def test_backfill_bundle_rollups_success(client):
         assert body["slow_urls"] == 1
         assert body["origin_summary"] == 1
         assert body["origin_summary_days"] == 1
+
+
+def test_backfill_bundle_rollups_response_maps_each_backfiller_and_compactor_to_its_key(client):
+    """Pins which function feeds which response key (the mapping the handler hand-wires)."""
+    from contextlib import contextmanager
+
+    backfills = {
+        "backfill_slow_urls_bundles": "slow_urls",
+        "backfill_origin_summary_bundles": "origin_summary",
+        "backfill_origin_dims_bundles": "origin_dims",
+        "backfill_origin_latency_ts_bundles": "origin_latency_ts",
+        "backfill_network_rtt_bundles": "network_rtt",
+        "backfill_network_speed_bundles": "network_speed",
+        "backfill_network_quality_bundles": "network_quality",
+        "backfill_verified_bots_ts_bundles": "verified_bots_ts",
+        "backfill_perf_latency_bundles": "perf_latency",
+        "backfill_pop_health_bundles": "pop_health",
+        "backfill_security_dims_bundles": "security_dims",
+        "backfill_perf_dims_bundles": "perf_ttl_dist",
+        "backfill_wellknown_bots_rollup": "wellknown_bots",
+        "backfill_ngwaf_bots_bundles": "ngwaf_bots",
+        "backfill_overview_bundles": "overview",
+        "backfill_network_summary_bundles": "network_summary",
+    }
+    compactors = {
+        "compact_origin_summary_closed_days_to_daily": "origin_summary_days",
+        "compact_origin_dims_closed_days_to_daily": "origin_dims_days",
+        "compact_origin_latency_ts_closed_days_to_daily": "origin_latency_ts_days",
+        "compact_network_rtt_closed_days_to_daily": "network_rtt_days",
+        "compact_network_speed_closed_days_to_daily": "network_speed_days",
+        "compact_network_quality_closed_days_to_daily": "network_quality_days",
+        "compact_verified_bots_ts_closed_days_to_daily": "verified_bots_ts_days",
+        "compact_perf_latency_closed_days_to_daily": "perf_latency_days",
+        "compact_pop_health_closed_days_to_daily": None,
+        "compact_security_dims_closed_days_to_daily": "security_dims_days",
+        "compact_perf_dims_closed_days_to_daily": "perf_ttl_dist_days",
+        "compact_ngwaf_bots_closed_days_to_daily": "ngwaf_bots_days",
+        "compact_overview_closed_days_to_daily": "overview_days",
+    }
+    values = {name: 100 + i for i, name in enumerate([*backfills, *compactors])}
+
+    @contextmanager
+    def mock_get_connection(*args, **kwargs):
+        yield MagicMock()
+
+    with (
+        patch.multiple("backend.core.rollups", **{n: MagicMock(return_value=v) for n, v in values.items()}),
+        patch("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock()),
+        patch("backend.core.duckdb.get_connection", mock_get_connection),
+    ):
+        resp = client.post("/api/admin/backfill-bundle-rollups")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    for name, key in {**backfills, **compactors}.items():
+        if key is not None:
+            assert body[key] == values[name], f"{key} should come from {name}"

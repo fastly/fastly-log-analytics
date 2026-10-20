@@ -230,6 +230,65 @@ def test_rollup_compact_logs_warning_when_bundle_step_fails(monkeypatch, stub_so
     assert "bundled 0 day" in kwargs["summary"]
 
 
+CRON_DAY_COMPACTOR_ORDER = [
+    "origin_summary",
+    "network_rtt",
+    "network_speed",
+    "network_quality",
+    "verified_bots_ts",
+    "perf_latency",
+    "origin_dims",
+    "origin_latency_ts",
+    "security_dims",
+    "perf_dims",
+    "ngwaf_bots",
+    "overview",
+    "pop_health",
+]
+
+
+def _record_day_compactors(monkeypatch, calls: list, *, fail: str | None = None) -> None:
+    for label in CRON_DAY_COMPACTOR_ORDER:
+
+        def compactor(*args, _label=label, **kwargs):
+            calls.append((_label, args, kwargs))
+            if _label == fail:
+                raise RuntimeError("boom")
+            return 0
+
+        monkeypatch.setattr(f"backend.core.rollups.compact_{label}_closed_days_to_daily", compactor)
+
+
+def test_rollup_compact_runs_every_day_compactor_in_order_with_30d_lookback(monkeypatch, stub_source, stub_progress):
+    _mock_rollups(monkeypatch)
+    calls: list = []
+    _record_day_compactors(monkeypatch, calls)
+
+    compaction._run_rollup_compact_daily.__wrapped__("svc-1")
+
+    assert [c[0] for c in calls] == CRON_DAY_COMPACTOR_ORDER
+    assert all(args == ("svc-1", stub_source) and kwargs == {"lookback_days": 30} for _, args, kwargs in calls)
+    from backend.core import duckdb as _db
+
+    assert _db.log_cron_run.call_args.args[3] == "success"
+
+
+def test_rollup_compact_isolates_a_failing_day_compactor(monkeypatch, stub_source, stub_progress):
+    _mock_rollups(monkeypatch)
+    calls: list = []
+    _record_day_compactors(monkeypatch, calls, fail="ngwaf_bots")
+
+    compaction._run_rollup_compact_daily.__wrapped__("svc-1")
+
+    # Everything after the failing one still ran.
+    assert [c[0] for c in calls] == CRON_DAY_COMPACTOR_ORDER
+    from backend.core import duckdb as _db
+
+    args, kwargs = _db.log_cron_run.call_args
+    assert args[3] == "warning"
+    assert kwargs["error_message"] == "ngwaf_bots: boom"
+
+
 def test_rollup_compact_records_error_on_exception(monkeypatch, stub_source, stub_progress):
     _mock_rollups(monkeypatch)
     stub_progress["start_progress"].side_effect = RuntimeError("manifest read failed")
