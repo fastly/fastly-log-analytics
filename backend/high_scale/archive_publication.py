@@ -160,31 +160,37 @@ class ArchivePublication:
             return PublicationState.MANIFEST_COMMITTED
         return None
 
-    def is_replayable(self, manifest_id: str) -> bool:
+    def _read_verified_artifact(self, manifest_id: str) -> bytes | None:
         manifest_key = f"archive/manifests/{manifest_id}.json"
         commit_key = f"archive/manifests/{manifest_id}.commit"
         if not self._store.exists(manifest_key) or not self._store.exists(commit_key):
-            return False
+            return None
         try:
             manifest_payload = self._store.get(manifest_key)
             commit = json.loads(self._store.get(commit_key))
             manifest = _manifest_from_json(manifest_payload)
             manifest.validate()
             if commit.get("manifest_id") != manifest_id:
-                return False
+                return None
             if commit.get("manifest_checksum") != _checksum(manifest_payload):
-                return False
+                return None
             if commit.get("artifact_checksum") != manifest.artifact.checksum:
-                return False
+                return None
             artifact = self._store.get(_artifact_key(manifest.artifact.uri))
-            return _checksum(artifact) == manifest.artifact.checksum and len(artifact) == manifest.artifact.size_bytes
+            if _checksum(artifact) == manifest.artifact.checksum and len(artifact) == manifest.artifact.size_bytes:
+                return artifact
+            return None
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return False
+            return None
+
+    def is_replayable(self, manifest_id: str) -> bool:
+        return self._read_verified_artifact(manifest_id) is not None
 
     def read_artifact(self, manifest: ArchiveManifest) -> bytes:
-        if not self.is_replayable(manifest.manifest_id):
+        artifact = self._read_verified_artifact(manifest.manifest_id)
+        if artifact is None:
             raise ValueError("archive manifest is not replayable")
-        return self._store.get(_artifact_key(manifest.artifact.uri))
+        return artifact
 
 
 def _artifact_key(uri: str) -> str:

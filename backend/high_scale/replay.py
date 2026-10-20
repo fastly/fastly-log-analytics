@@ -14,7 +14,12 @@ from backend.high_scale.archive_writer import event_digest
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.projections import project_cmcd
-from backend.high_scale.publication import ClickHousePublication, PublicationResult
+from backend.high_scale.publication import (
+    ClickHousePublication,
+    PublicationResult,
+    PublicationStatus,
+    row_matches_serving_domain,
+)
 
 
 @dataclass(frozen=True)
@@ -51,8 +56,23 @@ def replay_manifest(
     that are no longer actually there.
     """
     rows = _read_manifest_rows(manifest, archive)
-    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    serving_rows = tuple(
+        row
+        for row in rows
+        if row.get("_record_kind", "event") == "event" and row_matches_serving_domain(manifest.source.domain, row)
+    )
     resolved_batch_id = batch_id or f"replay:{manifest.manifest_id}"
+    if not serving_rows:
+        return ReplayResult(
+            manifest.manifest_id,
+            0,
+            PublicationResult(
+                batch_id=resolved_batch_id,
+                status=PublicationStatus.VISIBLE,
+                rows_visible=0,
+                duplicate=False,
+            ),
+        )
     batch = _batch_from_rows(resolved_batch_id, manifest, serving_rows)
     result = publication.publish(batch)
     return ReplayResult(manifest.manifest_id, len(serving_rows), result)

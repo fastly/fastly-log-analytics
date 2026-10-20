@@ -111,6 +111,62 @@ def test_replay_with_a_custom_batch_id_reinserts_after_a_prior_replay_is_marked_
     assert inserted == [1, 1]
 
 
+def test_replay_manifest_filters_mixed_rum_rows_by_serving_domain() -> None:
+    """Raw RUM objects share raw/rum/ across vitals and errors, so a rum_errors
+    archive manifest may contain only vitals rows (empty error_message) or a mix.
+    replay_manifest must filter with row_matches_serving_domain and skip publishing
+    empty batches."""
+    vitals_only_rows = (
+        {
+            "event_id": "vital-1",
+            "metric_name": "LCP",
+            "metric_value": 1200.0,
+            "error_message": "",
+        },
+    )
+    artifact_bytes = _parquet(vitals_only_rows)
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/a.gz", "sha256:source", 4, "v1")
+    manifest = ArchiveManifest(
+        "manifest-rum-err-empty",
+        source,
+        ArchiveArtifact(
+            "s3://archive/artifacts/manifest-rum-err-empty.parquet",
+            _checksum(artifact_bytes),
+            len(artifact_bytes),
+            len(vitals_only_rows),
+            1,
+            _event_digest(vitals_only_rows),
+            "rum_errors.v1",
+            "normalize.v1",
+        ),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime(2026, 9, 3, tzinfo=UTC),
+        4,
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(manifest, artifact_bytes)
+
+    inserted: list[int] = []
+
+    class StrictRumErrorClient:
+        def insert(self, batch):
+            for row in batch.rows:
+                if not row.get("error_message"):
+                    raise ValueError("rum_errors batch contained non-error row")
+            inserted.append(len(batch.rows))
+            return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), StrictRumErrorClient())
+    result = replay_manifest(manifest, archive, publication)
+
+    assert result.rows_read == 0
+    assert result.publication.rows_visible == 0
+    assert inserted == []
+
+
 def _parquet(rows: tuple[dict[str, object], ...]) -> bytes:
     output = BytesIO()
     pq.write_table(pa.Table.from_pylist(list(rows)), output)
