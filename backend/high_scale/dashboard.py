@@ -20,7 +20,6 @@ from backend.models.dashboard import (
     MapPoint,
     TimeSeriesPoint,
 )
-from backend.models.security import SecurityTopBotsResponse
 from backend.utils.date_utils import safe_iso
 
 _FIELD_DIMENSIONS = {
@@ -512,10 +511,11 @@ def bundle(
     start_time: str | None,
     end_time: str | None,
 ) -> dict[str, Any]:
+    from backend.high_scale.security import top_bots
     from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
     res_aggregates = aggregates(service, req, start_time, end_time)
-    res_top_bots = SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=[])
+    res_top_bots = top_bots(service, req, start_time, end_time)
 
     return {
         "aggregates": res_aggregates,

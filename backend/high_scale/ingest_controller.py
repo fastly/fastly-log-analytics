@@ -350,6 +350,8 @@ class HighScaleIngestController:
         )
         if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
             raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
+        if source.domain == "request":
+            _enrich_high_scale_ngwaf_bots(decoded.events)
         serving_rows = tuple(e for e in decoded.events if row_matches_serving_domain(source.domain, e))
         if serving_rows:
             batch = HighScaleBatch(
@@ -551,6 +553,8 @@ class HighScaleIngestController:
         if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
             raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
 
+        if domain == "request":
+            _enrich_high_scale_ngwaf_bots(tuple(all_events))
         serving_rows = tuple(e for e in all_events if row_matches_serving_domain(domain, e))
         batch_id = build_batch_id_from_manifest_id(manifest.manifest_id)
         if serving_rows:
@@ -635,7 +639,6 @@ class HighScaleIngestController:
             if domain == "request":
                 origin_proj = build_origin_projection_rows(event_tuple)
                 perf_proj = build_performance_projection_rows(event_tuple)
-                _enrich_high_scale_ngwaf_bots(event_tuple)
                 security_proj = build_security_projection_rows(event_tuple)
                 network_proj = build_network_projection_rows(event_tuple)
 
@@ -692,7 +695,6 @@ class HighScaleIngestController:
             if source.domain == "request":
                 origin_proj = build_origin_projection_rows(events)
                 perf_proj = build_performance_projection_rows(events)
-                _enrich_high_scale_ngwaf_bots(events)
                 security_proj = build_security_projection_rows(events)
                 network_proj = build_network_projection_rows(events)
 
@@ -822,14 +824,17 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
         for e in events:
             wid = str(e.get("waf_req_id")) if e.get("waf_req_id") else None
             if wid and wid in bot_map:
-                e["_ngwaf_bot_name"] = bot_map[wid]["name"]
-                e["_ngwaf_bot_category"] = bot_map[wid]["cat"]
-                e["_ngwaf_wellknown_bot_name"] = bot_map[wid]["wk"]
+                bot = bot_map[wid]
+                e["_ngwaf_bot_name"] = bot["name"]
+                e["_ngwaf_bot_category"] = bot["cat"]
+                e["_ngwaf_wellknown_bot_name"] = bot["wk"]
                 e["ngwaf_bot_verification_state"] = "verified"
-            elif wid and "waf-" in wid:
-                e["_ngwaf_bot_name"] = f"SyntheticBot-{wid}"
-                e["_ngwaf_bot_category"] = "scraper"
-                e["_ngwaf_wellknown_bot_name"] = "SyntheticBot"
-                e["ngwaf_bot_verification_state"] = "verified"
+                # Persisted on the fact row (no underscore) so filtered Security
+                # queries can group by bot without the waf_req_id join.
+                e["ngwaf_bot"] = bot["name"]
+                if bot["cat"]:
+                    e["ngwaf_bot_category"] = bot["cat"]
+                if bot["wk"]:
+                    e["ngwaf_wellknown_bot"] = bot["wk"]
     except Exception:
-        pass
+        logger.warning("high-scale NGWAF bot enrichment failed", exc_info=True)

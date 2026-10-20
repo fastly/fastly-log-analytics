@@ -138,6 +138,15 @@ available) and the stage-by-stage arithmetic.
 - `scripts/backfill_high_scale_origin.py --capacity-json PATH` loads a
   measurement file and exits `3` when the rebuild completed but the claim is
   not valid, so a qualification run can gate on it.
+- `scripts/backfill_high_scale_security.py` rebuilds the Security projection
+  (`security_minute_dimensions`, the `ngwaf_bot` rows behind the unfiltered NGWAF
+  bot cards) from the archive via `rebuild_security_projections_from_fos` in
+  `backend/high_scale/security_replay.py`, re-enriching against the current
+  NGWAF bot cache. It takes the same `--service-id`, `--days`, `--rebuild-id` and
+  `--capacity-json` arguments. A rebuild ADDS rows: remove the service's existing
+  `security_minute_dimensions` rows for the window first (operator-confirmed), or
+  the window is counted twice. Facts rows already written keep the `ngwaf_bot*`
+  keys they were ingested with; only newly ingested facts carry them.
 
 ### Performance waterfall/scatter backfill
 

@@ -85,13 +85,13 @@ def security_aggregates(
     # ceiling is enforced regardless of token. Mirrors routers/origin.py.
     start_time, end_time = ctx.resolve_window(req)
 
+    sections = _expand_sections(req.sections)
+    mask_ips = mask_ips_for(ctx.analyst_session)
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.security import security_aggregates as hs_aggregates
 
-        return hs_aggregates(high_scale_service, req, start_time, end_time)
-    sections = _expand_sections(req.sections)
-    mask_ips = mask_ips_for(ctx.analyst_session)
+        return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
     res = repo.get_security_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -140,24 +140,26 @@ def export_proxies_csv(
     format: str = "fastly-acl",
     ctx: RequestContext = Depends(build_request_context),
 ):
-    high_scale_service = ctx.high_scale
-    if high_scale_service is not None:
-        raise ValueError("Exporting proxies is not yet supported in high-scale mode")
-
     # Enforce correct date-bounds tenancy
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
 
     mask_ips = mask_ips_for(ctx.analyst_session)
 
-    # Query repository
-    res = repo.get_security_proxies(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=resolved_start,
-        end_time=resolved_end,
-        filters=None,
-        mask_ips=mask_ips,
-    )
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.security import get_proxies_data as hs_proxies
+
+        res = hs_proxies(high_scale_service, None, resolved_start, resolved_end, mask_ips=mask_ips).model_dump()
+    else:
+        # Query repository
+        res = repo.get_security_proxies(
+            con=ctx.con,
+            src=ctx.source,
+            start_time=resolved_start,
+            end_time=resolved_end,
+            filters=None,
+            mask_ips=mask_ips,
+        )
 
     # Filter clients by risk threshold
     clients = res.get("active_clients", [])
@@ -232,13 +234,13 @@ def get_security_threat_intel(
     end_time: str | None = Query(default=None),
 ):
     """Correlate client TLS fingerprints with active WAF triggers and proxy flags."""
+    resolved_start, resolved_end = ctx.clamp(start_time, end_time)
+
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.security import get_security_threat_intel as hs_threat_intel
 
-        return hs_threat_intel(high_scale_service, start_time, end_time)
-
-    resolved_start, resolved_end = ctx.clamp(start_time, end_time)
+        return hs_threat_intel(high_scale_service, resolved_start, resolved_end)
 
     if not resolved_start:
         resolved_start = (datetime.now(UTC) - timedelta(hours=24)).isoformat()

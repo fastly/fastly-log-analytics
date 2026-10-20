@@ -134,19 +134,40 @@ def _wellknown_and_verified(con, src):
 
 class _FakeClickHouse:
     def execute(self, sql, params=None):
-        if "p_desc" in sql:
-            return [{"type": "vpn", "count": 7}]
-        if "tls_ciphers_sha" in sql and "ngwaf_bot" not in sql:
-            return [{"fingerprint": "abc", "count": 5, "ips": 2}]
-        if "req_bytes" in sql:
-            return [{"label": "<1KB", "count": 9}]
-        if "is_ipv6" in sql:
-            return [{"version": "IPv4", "count": 9}]
-        if "conn_requests" in sql:
-            return [{"label": "1", "count": 4}]
-        if "ngwaf_bot" in sql:
-            return [{"bot_name": "bing", "request_count": 11}]
-        return []
+        tag = sql.split("hs_security:")[1].split(" ")[0]
+        return {
+            "proxy_dist": [{"type": "vpn", "count": 7}],
+            "tls_fingerprints": [{"fingerprint": "abc", "ip_count": 2, "request_count": 5}],
+            "req_size_dist": [{"bucket": "0-256B", "count": 9, "min_val": 0}],
+            "ipv6_adoption": [{"bucket_ts": 1_790_000_000, "pct": 33.3}],
+            "conn_reuse_dist": [{"bucket": "1 (None)", "count": 4, "min_val": 1}],
+            "ngwaf_bots": [{"bot_name": "bing", "wk_name": "", "bot_cat": "search", "request_count": 11}],
+            "ngwaf_verified_bots_ts": [{"bucket_ts": 1_790_000_000, "bot_name": "bing", "count": 11}],
+            "verified_bots_ts": [{"bucket_ts": 1_790_000_000, "bot_type": "search-engine", "count": 3}],
+            "top_ips_header": [{"ip": "10.0.0.1", "max_header": 9000}],
+            "proxy_stats": [{"active_proxies_count": 1, "total_requests_count": 2, "distance_mismatches_count": 1}],
+            "traffic_quality": [{"type": "Direct Connection", "count": 3}],
+            "suspicious_isps": [{"asn": 15169, "count": 2}],
+            "active_clients": [
+                {
+                    "ip": "10.0.0.1",
+                    "asn": 15169,
+                    "rtt_min_ms": 5.0,
+                    "tcp_rtt_ms": 100.0,
+                    "distance_km": 10.0,
+                    "pop": "SJC",
+                    "client_lat": 1.0,
+                    "client_lon": 2.0,
+                    "pop_lat": 37.0,
+                    "pop_lon": -121.0,
+                    "impossible_distance": 1,
+                    "risk_level": "High",
+                    "country": "US",
+                    "city": "x",
+                }
+            ],
+            "fingerprint_coverage": [{"total_rows": 10, "populated": 5}],
+        }.get(tag, [])
 
 
 def test_high_scale_aggregates_wire_identical(monkeypatch):
@@ -175,14 +196,27 @@ def test_high_scale_aggregates_wire_identical(monkeypatch):
         return cls(**kwargs)
 
     monkeypatch.setattr(hs_security.SecurityAggregatesResponse, "with_telemetry", classmethod(_capture))
-    hs_security_aggregates(svc, None, None, None)
-    captured["bots"] = []
-    captured["ngwaf_bots"] = [r.model_dump() for r in captured["ngwaf_bots"]]
-    assert captured["tls_fingerprints"][0]["ips"] == 2
-    assert captured["req_size_dist"][0]["label"] == "<1KB"
-    assert captured["ipv6_adoption"][0]["version"] == "IPv4"
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        hs_security_aggregates(svc, None, START, END)
+    assert captured["tls_fingerprints"][0]["ip_count"] == 2
+    assert captured["req_size_dist"][0]["bucket"] == "0-256B"
+    assert captured["ipv6_adoption"][0]["pct"] == 33.3
     assert_sections_wire_identical(
         SecurityAggregatesResponse,
         captured,
-        non_empty=("tls_fingerprints", "req_size_dist", "ipv6_adoption", "ngwaf_verified_bots", "ngwaf_bots"),
+        non_empty=(
+            "tls_fingerprints",
+            "req_size_dist",
+            "ipv6_adoption",
+            "conn_reuse_dist",
+            "proxy_dist",
+            "verified_bots_ts",
+            "ngwaf_verified_bots",
+            "ngwaf_verified_bots_ts",
+            "ngwaf_bots",
+            "top_ips_header",
+            "traffic_quality",
+            "suspicious_isps",
+            "active_clients",
+        ),
     )

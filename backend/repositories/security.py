@@ -385,6 +385,89 @@ def _proxy_dist_from_rollups(runner: QueryRunner, start_time: str | None, end_ti
     return [{"type": v, "count": c} for v, c in sorted(by_val.items(), key=lambda kv: kv[1], reverse=True)]
 
 
+def classify_ua_counts(rows: list[tuple[str, int]], n: int) -> list[dict]:
+    """Match ``(ua, count)`` rows against the bot catalog; top ``n`` bots by request count."""
+    from backend.utils.bot_sources import build_matcher
+
+    match_ua = build_matcher()
+    bot_counts: dict[str, dict] = {}
+    for ua_val, cnt in rows:
+        for entry in match_ua(ua_val):
+            bot_id = entry.get("id", "unknown")
+            if bot_id not in bot_counts:
+                cats = entry.get("categories", [])
+                bot_counts[bot_id] = {
+                    "id": bot_id,
+                    "name": bot_id.replace("-", " ").title(),
+                    "category": cats[0] if cats else "unknown",
+                    "request_count": 0,
+                }
+            bot_counts[bot_id]["request_count"] += cnt
+    return sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
+
+
+def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
+    """Aggregate ``(ua, ip, count)`` rows into well-known bot rows with FCrDNS verification counters."""
+    from backend.utils.bot_sources import build_matcher
+    from backend.utils.rdns_cache import classify, enqueue, get_hostnames
+
+    match_ua = build_matcher()
+    bot_agg: dict[str, dict] = {}
+    new_ips: list[str] = []
+
+    # Batch-resolve every distinct IP in one SELECT instead of
+    # opening a fresh SQLite connection per (ua, ip) row.
+    hostnames = get_hostnames([ip for _, ip, _ in rows if ip])
+
+    for ua_val, ip_val, cnt in rows:
+        matches = match_ua(ua_val)
+        for entry in matches:
+            bot_id = entry.get("id", "unknown")
+            hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
+            if status == "pending":
+                new_ips.append(ip_val)
+            verification = entry.get("verification", {})
+            verification_domains = verification.get("domains", [])
+            verification_cidrs = verification.get("cidrs", [])
+            state = classify(ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
+
+            if bot_id not in bot_agg:
+                cats = entry.get("categories", [])
+                bot_agg[bot_id] = {
+                    "id": bot_id,
+                    "name": bot_id.replace("-", " ").title(),
+                    "category": cats[0] if cats else "unknown",
+                    "request_count": 0,
+                    "verified_count": 0,
+                    "impersonator_count": 0,
+                    "unverified_count": 0,
+                    "pending_count": 0,
+                }
+            agg = bot_agg[bot_id]
+            agg["request_count"] += cnt
+            if state == "verified":
+                agg["verified_count"] += cnt
+            elif state == "impersonator":
+                agg["impersonator_count"] += cnt
+            elif state == "unverified_pending":
+                agg["pending_count"] += cnt
+            else:
+                agg["unverified_count"] += cnt
+
+    # Enqueue any pending IPs we encountered for future enrichment
+    if new_ips:
+        enqueue(list(set(new_ips)))
+
+    # Sort by request count, return top 50, annotate coverage
+    sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
+    for b in sorted_bots:
+        total = b["request_count"]
+        covered = b["verified_count"] + b["impersonator_count"]
+        b["verification_coverage"] = round(covered / total, 3) if total else 0.0
+
+    return sorted_bots
+
+
 def get_top_bots(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -454,23 +537,7 @@ def get_top_bots(
             ua_rollup_rows = None
 
     def _classify(rows: list[tuple[str, int]]) -> list[dict]:
-        from backend.utils.bot_sources import build_matcher
-
-        match_ua = build_matcher()
-        bot_counts: dict[str, dict] = {}
-        for ua_val, cnt in rows:
-            for entry in match_ua(ua_val):
-                bot_id = entry.get("id", "unknown")
-                if bot_id not in bot_counts:
-                    cats = entry.get("categories", [])
-                    bot_counts[bot_id] = {
-                        "id": bot_id,
-                        "name": bot_id.replace("-", " ").title(),
-                        "category": cats[0] if cats else "unknown",
-                        "request_count": 0,
-                    }
-                bot_counts[bot_id]["request_count"] += cnt
-        return sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
+        return classify_ua_counts(rows, n)
 
     if ua_rollup_rows is not None:
         _t = _time.perf_counter()
@@ -1191,66 +1258,7 @@ def _build_security_response(
                 if _wk_rows is None:
                     results["wellknown_bots"] = []
                 else:
-                    from backend.utils.bot_sources import build_matcher
-                    from backend.utils.rdns_cache import classify, enqueue, get_hostnames
-
-                    match_ua = build_matcher()
-                    bot_agg: dict[str, dict] = {}
-                    new_ips: list[str] = []
-
-                    # Batch-resolve every distinct IP in one SELECT instead of
-                    # opening a fresh SQLite connection per (ua, ip) row.
-                    hostnames = get_hostnames([ip for _, ip, _ in _wk_rows if ip])
-
-                    for ua_val, ip_val, cnt in _wk_rows:
-                        matches = match_ua(ua_val)
-                        for entry in matches:
-                            bot_id = entry.get("id", "unknown")
-                            hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
-                            if status == "pending":
-                                new_ips.append(ip_val)
-                            verification = entry.get("verification", {})
-                            verification_domains = verification.get("domains", [])
-                            verification_cidrs = verification.get("cidrs", [])
-                            state = classify(
-                                ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs
-                            )
-
-                            if bot_id not in bot_agg:
-                                cats = entry.get("categories", [])
-                                bot_agg[bot_id] = {
-                                    "id": bot_id,
-                                    "name": bot_id.replace("-", " ").title(),
-                                    "category": cats[0] if cats else "unknown",
-                                    "request_count": 0,
-                                    "verified_count": 0,
-                                    "impersonator_count": 0,
-                                    "unverified_count": 0,
-                                    "pending_count": 0,
-                                }
-                            agg = bot_agg[bot_id]
-                            agg["request_count"] += cnt
-                            if state == "verified":
-                                agg["verified_count"] += cnt
-                            elif state == "impersonator":
-                                agg["impersonator_count"] += cnt
-                            elif state == "unverified_pending":
-                                agg["pending_count"] += cnt
-                            else:
-                                agg["unverified_count"] += cnt
-
-                    # Enqueue any pending IPs we encountered for future enrichment
-                    if new_ips:
-                        enqueue(list(set(new_ips)))
-
-                    # Sort by request count, return top 50, annotate coverage
-                    sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
-                    for b in sorted_bots:
-                        total = b["request_count"]
-                        covered = b["verified_count"] + b["impersonator_count"]
-                        b["verification_coverage"] = round(covered / total, 3) if total else 0.0
-
-                    results["wellknown_bots"] = sorted_bots
+                    results["wellknown_bots"] = summarize_wellknown_bot_rows(_wk_rows)
             except Exception as e:
                 _logger.error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []

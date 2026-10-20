@@ -40,8 +40,9 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
-| **Data Plane** | Reads DuckDB session view + `security_dims` / `verified_bots_ts` rollups. | Reads Postgres DuckLake / ClickHouse security tables. |
-| **Bot Enrichment** | Local SQLite `ngwaf_bot_cache.db` and `rdns_cache.db`. | Centralized threat cache / Postgres bot tables. |
+| **Data Plane** | Reads DuckDB session view + `security_dims` / `verified_bots_ts` rollups. | Reads ClickHouse `request_facts` (every card honors the request filters and `sections` selector) and, for unfiltered NGWAF bot cards, the `ngwaf_bot` rows of `security_minute_dimensions`. A ClickHouse failure returns an error envelope, never an empty card. |
+| **Bot Enrichment** | Local SQLite `ngwaf_bot_cache.db` and `rdns_cache.db`. | NGWAF bot names are resolved at ingest from the Postgres `ngwaf_bots` cache and persisted on the fact row (`ngwaf_bot`, `ngwaf_bot_category`, `ngwaf_wellknown_bot`) plus the per-minute `ngwaf_bot` projection; well-known-bot verification uses the shared `rdns` cache. |
+| **Analyst masking** | `mask_ips` masks `active_clients[].ip` and `top_ips_header[].ip`. | Same fields masked by the same helper, on the aggregates and proxies-export paths. |
 
 ---
 
