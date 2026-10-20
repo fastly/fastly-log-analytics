@@ -174,9 +174,9 @@ Every page feature, drill-down, and visualization must work properly across all 
 ### 3. Multi-Architecture Parity Contract (Standard vs High-Scale)
 Every page's underlying queries, aggregations, and data pipelines must function predictably across both deployment topologies:
 - **Standard Deployment Mode (`DEPLOYMENT_MODE=standard`):**
-  - Single-node synchronous ingest with local Parquet buffer and local DuckLake catalog.
+  - Single-node synchronous ingest with local Parquet buffer and DuckLake catalog (`DUCKLAKE_CATALOG`).
   - Serving queries execute against thread-local DuckDB connections stitching the local buffer and DuckLake table.
-  - SQLite WAL databases manage service metadata, cron logs, usage tracking, and NGWAF bot caches.
+  - PostgreSQL 16 (`METADATA_DSN`, per ADR-22) manages operational service metadata, cron logs, usage tracking, and NGWAF bot caches.
 - **High-Scale Deployment Mode (`DEPLOYMENT_MODE=high_scale`):**
   - Distributed Celery + Valkey + RedBeat worker ingest with shared Postgres DuckLake catalog (`DUCKLAKE_CATALOG`) and `ingest_ledger`.
   - **ClickHouse Serving & Fact Engine:** Ingests massive event streams into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `cmcd_projection_facts`, and minute-level dimensions for origin, security, network, and performance). Supports bounded diagnostic replay via `PgManifest`.
