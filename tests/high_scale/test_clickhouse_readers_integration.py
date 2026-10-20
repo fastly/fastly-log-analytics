@@ -145,8 +145,10 @@ def _make_client(seed: str) -> ClickHouseClient:
         ]
         command += [f"--{name}={value}" for name, value in fields.items() if name.startswith("param_")]
         completed = subprocess.run(
-            command, input=seed + "\n" + fields["query"] + ";", text=True, capture_output=True, timeout=120, check=True
+            command, input=seed + "\n" + fields["query"] + ";", text=True, capture_output=True, timeout=120
         )
+        if completed.returncode:
+            return httpx.Response(500, content=completed.stderr.encode())
         return httpx.Response(200, content=completed.stdout.encode())
 
     settings = ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password="")
@@ -603,3 +605,47 @@ def test_filtered_origin_exclude_mode_and_oip_health(traffic: _Fixture, service:
     assert result["summary"]["has_data"] is True
     assert {row["url"] for row in result["slow_urls"]["rows"]} >= {"/ok"}
     assert 200 in {row["status"] for row in result["status_codes"]["rows"]}
+
+
+@pytest.fixture
+def two_tenants(traffic: _Fixture) -> _Fixture:
+    """``traffic`` plus a second service's rows, so a scope escape is observable as extra rows."""
+    rows = []
+    for index in range(50):
+        row = traffic.request(NOW - timedelta(minutes=90, seconds=index), "/other-tenant", status=200)
+        row["service_id"] = "other-svc"
+        row["batch_id"] = "22222222-2222-4222-8222-222222222222"
+        rows.append(row)
+    traffic.insert("request_facts", "request", rows)
+    return traffic
+
+
+def _console(service: SimpleNamespace, sql: str, *, window_minutes: int = 30) -> list[dict[str, Any]]:
+    from backend.high_scale.query import query_endpoint
+    from backend.models.query import QueryRequest
+
+    result = query_endpoint(
+        service,  # type: ignore[arg-type]
+        QueryRequest(sql=sql, max_rows=100),
+        (NOW - timedelta(minutes=window_minutes)).isoformat(),
+        NOW.isoformat(),
+        False,
+    )
+    return result["data"]
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["1=1 OR url = '/nope'", "country = 'US' OR 1 = 1", "url = '/ok' OR url != '/ok'"],
+    ids=["tautology", "or-country", "complement"],
+)
+def test_sql_console_cannot_widen_past_the_service_and_window_with_an_or_condition(
+    two_tenants: _Fixture, service: SimpleNamespace, where: str
+) -> None:
+    scoped = _console(service, "SELECT count(*) AS n FROM logs")[0]["n"]
+
+    attacked = _console(service, f"SELECT count(*) AS n FROM logs WHERE {where}")[0]["n"]
+
+    assert 0 < scoped < 300, "fixture sanity: the 30 minute window holds only part of one tenant's rows"
+    assert attacked == scoped, "a user OR must not escape the injected service and time-window predicates"
+    assert _console(service, "SELECT count(*) AS n FROM logs WHERE url = '/other-tenant'")[0]["n"] == 0

@@ -2,17 +2,54 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import duckdb
 
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import QueryRequest
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
 from backend.utils.sql_validator import SQLValidationError, validate_user_sql
 from backend.utils.telemetry import get_tracked_calls
+
+_FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "rum_error_facts": "rum_errors"}
+
+
+def _literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _instant(value: datetime) -> str:
+    return f"toDateTime64({_literal(value.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S.%f'))}, 6, 'UTC')"
+
+
+def _scope_settings(service_id: str, start_time: str | None, end_time: str | None, tables: list[str]) -> str:
+    """``SETTINGS additional_table_filters`` pinning every fact table to this service, its visible batches and the window.
+
+    ClickHouse applies the predicate to the storage read itself, so no shape of user SQL (an ``OR`` in its own
+    ``WHERE``, a subquery, CTE, join or alias) can read another service's rows or widen the granted window.
+    """
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    entries = []
+    for table in tables:
+        domain = _FACT_DOMAINS[table]
+        clauses = [
+            f"service_id = {_literal(service_id)}",
+            "publication_state = 'visible'",
+            "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+            f"WHERE service_id = {_literal(service_id)} AND domain = '{domain}' AND publication_state = 'visible')",
+        ]
+        if start is not None:
+            clauses.append(f"event_timestamp >= {_instant(start)}")
+        if end is not None:
+            clauses.append(f"event_timestamp <= {_instant(end)}")
+        entries.append(f"{_literal(table)}: {_literal(' AND '.join(clauses))}")
+    return " SETTINGS additional_table_filters = {" + ", ".join(entries) + "}"
 
 
 def query_endpoint(
@@ -66,31 +103,13 @@ def query_endpoint(
             continue
         sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
 
-    has_fact_table = bool(
-        re.search(r"\b(?:request_facts|rum_vitals_facts|rum_error_facts)\b", sql, flags=re.IGNORECASE)
-    )
-    if has_fact_table:
-        time_clauses = [f"service_id = '{service.service_id}'"]
-        if start_time:
-            time_clauses.append(f"event_timestamp >= parseDateTime64BestEffort('{start_time}')")
-        if end_time:
-            time_clauses.append(f"event_timestamp <= parseDateTime64BestEffort('{end_time}')")
-        time_cond = " AND ".join(time_clauses)
-
-        if re.search(r"\bWHERE\b", sql, flags=re.IGNORECASE):
-            sql = re.sub(r"\bWHERE\b", f"WHERE {time_cond} AND ", sql, count=1, flags=re.IGNORECASE)
-        elif re.search(r"\bGROUP\s+BY\b", sql, flags=re.IGNORECASE):
-            sql = re.sub(r"\bGROUP\s+BY\b", f"WHERE {time_cond} GROUP BY ", sql, count=1, flags=re.IGNORECASE)
-        elif re.search(r"\bORDER\s+BY\b", sql, flags=re.IGNORECASE):
-            sql = re.sub(r"\bORDER\s+BY\b", f"WHERE {time_cond} ORDER BY ", sql, count=1, flags=re.IGNORECASE)
-        elif re.search(r"\bLIMIT\b", sql, flags=re.IGNORECASE):
-            sql = re.sub(r"\bLIMIT\b", f"WHERE {time_cond} LIMIT ", sql, count=1, flags=re.IGNORECASE)
-        else:
-            sql += f" WHERE {time_cond}"
+    fact_tables = [table for table in _FACT_DOMAINS if re.search(rf"\b{table}\b", sql, flags=re.IGNORECASE)]
 
     has_explicit_limit = bool(re.search(r"\bLIMIT\b", sql, flags=re.IGNORECASE))
     if not has_explicit_limit:
         sql += f" LIMIT {max_rows + 1}"
+    if fact_tables:
+        sql += _scope_settings(service.service_id, start_time, end_time, fact_tables)
 
     t0 = time.perf_counter()
     try:
