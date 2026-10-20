@@ -6,9 +6,11 @@ import concurrent.futures
 from datetime import datetime
 from typing import Any
 
+from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
+from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.aggregate_query import query_clickhouse_aggregate
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleService
@@ -278,49 +280,31 @@ def _time_series(
     ]
 
 
-def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    if not filters:
-        return "1=1", {}
+def _panels(req: AggregatesRequest) -> tuple[bool, bool, bool]:
+    """``(time_series, map_data, top_n)`` gates, derived exactly as the standard router derives them."""
+    if req.sections:
+        sections = set(req.sections)
+        return "core" in sections, "core" in sections, "topten" in sections
+    return req.include_time_series is not False, req.include_map_data is not False, True
 
-    clauses = []
-    params = {}
 
-    for i, (field, config) in enumerate(filters.items()):
-        if isinstance(config, dict):
-            mode = config.get("mode", "include")
-            values = config.get("values", [])
-        else:
-            mode = getattr(config, "mode", "include")
-            values = getattr(config, "values", [])
+def _field_sql_column(field: str) -> str:
+    col_name = _FIELD_DIMENSIONS[field]
+    if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
+        return col_name
+    if col_name in {"age", "ttl"}:
+        return f"toString(toInt32(round(toFloat64OrZero(custom_fields['{col_name}']))))"
+    return f"custom_fields['{col_name}']"
 
-        if values is None or not values:
-            continue
 
-        col_name = _FIELD_DIMENSIONS.get(field)
-        if not col_name:
-            continue
-
-        if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
-            sql_col = col_name
-        elif col_name in {"age", "ttl"}:
-            sql_col = f"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}'])) AS INTEGER) AS VARCHAR)"
-        else:
-            sql_col = f"custom_fields['{col_name}']"
-
-        op = "IN" if mode == "include" else "NOT IN"
-        keys = []
-        for j, val in enumerate(values):
-            p_name = f"filter_{i}_{j}"
-            params[p_name] = str(val)
-            keys.append(f"{{{p_name}:String}}")
-
-        if keys:
-            clauses.append(f"{sql_col} {op} ({', '.join(keys)})")
-        else:
-            clauses.append("1=0" if mode == "include" else "1=1")
-
-    where_sql = " AND ".join(clauses) if clauses else "1=1"
-    return where_sql, params
+def _fields_to_fetch(req: AggregatesRequest, want_map: bool, want_top_n: bool) -> tuple[list[str], list[str]]:
+    """``(card_fields, fields_to_query)``; the map is the country card's top values, so it may need an extra field."""
+    card_fields = [field for field in (req.fields or list(_FIELD_DIMENSIONS)) if field in _FIELD_DIMENSIONS]
+    top_fields = card_fields if want_top_n else []
+    to_query = list(top_fields)
+    if want_map and "country" not in to_query:
+        to_query.append("country")
+    return top_fields, to_query
 
 
 def _filtered_aggregates(
@@ -329,19 +313,17 @@ def _filtered_aggregates(
     start = _range_value(start_time)
     end = _range_value(end_time)
     request_watermark = service.watermark_for("request")
+    want_time_series, want_map, want_top_n = _panels(req)
 
     if not req.filters:
         filter_dict = {}
     elif hasattr(req.filters, "model_dump"):
         filter_dict = req.filters.model_dump()
-    elif hasattr(req.filters, "dict"):
-        filter_dict = req.filters.dict()
     else:
         filter_dict = req.filters
-    where_sql, filter_params = _build_clickhouse_filters(filter_dict)
+    filter_clauses, filter_params = request_filter_clauses(filter_dict)
 
-    clauses = ["service_id={service_id:String}", "1=1", where_sql]
-
+    clauses = [*visible_fact_clauses("request"), *filter_clauses]
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
@@ -354,57 +336,36 @@ def _filtered_aggregates(
 
     where_clause = " AND ".join(clauses)
 
-    requested_fields = req.fields or list(_FIELD_DIMENSIONS)
+    top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
 
     def fetch_field(field: str):
-        if field not in _FIELD_DIMENSIONS:
-            return field, []
-        col_name = _FIELD_DIMENSIONS[field]
-
-        if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
-            sql_col = col_name
-        elif col_name in {"age", "ttl"}:
-            sql_col = f"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}'])) AS INTEGER) AS VARCHAR)"
-        else:
-            sql_col = f"custom_fields['{col_name}']"
-
-        q = f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' GROUP BY v ORDER BY c DESC LIMIT 10"
-        try:
-            rows = service.client.execute(q, params)
-            return field, [(str(r["v"]), int(r["c"])) for r in rows]
-        except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).error("FILTER ERROR field %s: %s", field, e)
-            return field, []
+        sql_col = _field_sql_column(field)
+        rows = service.client.execute(
+            f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' "
+            "GROUP BY v ORDER BY c DESC LIMIT 10",
+            params,
+        )
+        return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        field_results = dict(ex.map(fetch_field, requested_fields))
+        field_results = dict(ex.map(fetch_field, fields_to_query))
 
-    try:
-        total_rows_result = service.client.execute(
-            f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params
-        )
-        total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
-    except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).error("FILTER ERROR total: %s", e)
-        total_count = 0
+    total_rows_result = service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params)
+    total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
 
     data = {
         field: FieldAggregate(
-            top=[FieldTopEntry(value=v, count=c) for v, c in top_values],
+            top=[FieldTopEntry(value=v, count=c) for v, c in field_results[field]],
             total=total_count,
         )
-        for field, top_values in field_results.items()
+        for field in top_fields
     }
 
-    map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])]
+    map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])] if want_map else []
 
     norm_interval = _normalize_chart_interval(req.chart_interval)
     time_series = []
-    if req.include_time_series is not False:
+    if want_time_series:
         interval_sql = "toStartOfMinute(event_timestamp)"
         if norm_interval == "1 second":
             interval_sql = "toStartOfSecond(event_timestamp)"
@@ -425,15 +386,15 @@ def _filtered_aggregates(
         else:
             metric_sql = "count()"
 
-        ts_q = f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start"
-        try:
-            ts_rows = service.client.execute(ts_q, params)
-            time_series = [
-                TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
-                for r in ts_rows
-            ]
-        except Exception:
-            time_series = []
+        ts_rows = service.client.execute(
+            f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts "
+            f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
+            params,
+        )
+        time_series = [
+            TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+            for r in ts_rows
+        ]
 
     return AggregatesResponse.with_telemetry(
         data=data,
@@ -454,7 +415,8 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
     if req.filters or norm_interval == "1 second" or (req.chart_metric and req.chart_metric != "requests"):
         return _filtered_aggregates(service, req, start_time, end_time)
 
-    requested_fields = req.fields or list(_FIELD_DIMENSIONS)
+    want_time_series, want_map, want_top_n = _panels(req)
+    top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
     request_watermark = service.watermark_for("request")
     responses = {
         field: _aggregate(
@@ -464,8 +426,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
             dimension=_FIELD_DIMENSIONS[field],
             watermark=request_watermark,
         )
-        for field in requested_fields
-        if field in _FIELD_DIMENSIONS
+        for field in fields_to_query
     }
     total = responses.get("url")
     if total is None:
@@ -479,18 +440,18 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
 
     data = {
         field: FieldAggregate(
-            top=[FieldTopEntry(value=value, count=count) for value, count in response.top_values],
-            total=response.request_count,
+            top=[FieldTopEntry(value=value, count=count) for value, count in responses[field].top_values],
+            total=responses[field].request_count,
         )
-        for field, response in responses.items()
+        for field in top_fields
     }
     map_response = responses.get("country")
     map_data = (
         [MapPoint(country=value, count=count) for value, count in map_response.top_values]
-        if map_response is not None
+        if want_map and map_response is not None
         else []
     )
-    time_series = _time_series(service, start_time, end_time, norm_interval)
+    time_series = _time_series(service, start_time, end_time, norm_interval) if want_time_series else []
     return AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
@@ -511,11 +472,14 @@ def bundle(
     start_time: str | None,
     end_time: str | None,
 ) -> dict[str, Any]:
-    from backend.high_scale.security import top_bots
+    from backend.high_scale import security as hs_security
     from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
-    res_aggregates = aggregates(service, req, start_time, end_time)
-    res_top_bots = top_bots(service, req, start_time, end_time)
+    sections = set(req.sections) if req.sections else None
+    want_aggregates = sections is None or bool(sections & {"core", "topten"})
+    want_bots = sections is None or "bots" in sections
+    res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
+    res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
 
     return {
         "aggregates": res_aggregates,

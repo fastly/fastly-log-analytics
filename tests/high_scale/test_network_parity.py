@@ -246,7 +246,8 @@ def test_health_shielding_analysis_is_computed_from_rid_prid_pairs():
     assert len(client.calls) == 1
     sql, params = client.calls[0]
     edge_cte, shield_cte = sql.split("INNER JOIN")
-    assert "custom_fields['pop'] IN ({filter_0_0:String})" in edge_cte
+    assert "custom_fields[{filter_k0:String}] IN ({filter_0_0:String})" in edge_cte
+    assert params["filter_k0"] == "pop"
     assert "filter_0_0" not in shield_cte, "edge filters must not strip the shield hit"
 
 
@@ -302,7 +303,8 @@ def test_transport_honors_filters_and_reports_missing_fields():
     assert resp.has_transport_data is True
     assert len(client.calls) == 2
     for sql, params in client.calls:
-        assert "custom_fields['pop'] IN ({filter_0_0:String})" in sql
+        assert "custom_fields[{filter_k0:String}] IN ({filter_0_0:String})" in sql
+        assert params["filter_k0"] == "pop"
         assert params["filter_0_0"] == "SJC"
 
 

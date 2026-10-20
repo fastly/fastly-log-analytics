@@ -6,9 +6,24 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.core.share_db.validation import SESSION_ID_KEYS, mask_ip
+from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale._projection_utils import range_value
+from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.models.logs import LogsQueryRequest
+from backend.utils.date_utils import safe_iso
+
+_BASE_COLUMNS = ("timestamp", "client_ip", "url", "country")
+# Newest rows sampled to discover which custom-field columns exist; keeps the column set
+# stable from page to page without scanning the whole window for map keys.
+_COLUMN_SAMPLE_ROWS = 1000
+_SEARCH_FIELDS = (
+    "url ILIKE {search_term:String}",
+    "client_ip ILIKE {search_term:String}",
+    "custom_fields['status'] ILIKE {search_term:String}",
+    "custom_fields['pop'] ILIKE {search_term:String}",
+    "custom_fields['method'] ILIKE {search_term:String}",
+)
 
 
 def _parse_ts(val: str | None) -> datetime | None:
@@ -16,8 +31,15 @@ def _parse_ts(val: str | None) -> datetime | None:
         return None
     try:
         return range_value(val)
-    except Exception:
+    except ValueError:
         return None
+
+
+def _iso(value: Any) -> str:
+    if isinstance(value, datetime):
+        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        return stamp.isoformat().replace("+00:00", "Z")
+    return safe_iso(value) or ""
 
 
 def logs_query_endpoint(
@@ -28,131 +50,92 @@ def logs_query_endpoint(
     mask_ips: bool,
 ) -> dict[str, Any]:
     """Execute high-scale logs query against ClickHouse request_facts."""
-    now = datetime.now(UTC)
-    end_dt = _parse_ts(end_time) or now
+    end_dt = _parse_ts(end_time) or datetime.now(UTC)
     start_dt = _parse_ts(start_time) or (end_dt - timedelta(hours=24))
 
+    filter_clauses, filter_params = request_filter_clauses(req.filters)
+    clauses = [
+        *visible_fact_clauses("request"),
+        "event_timestamp >= {start_time:DateTime64(3)}",
+        "event_timestamp <= {end_time:DateTime64(3)}",
+        *filter_clauses,
+    ]
     params: dict[str, Any] = {
         "service_id": service.service_id,
         "start_time": start_dt,
         "end_time": end_dt,
+        **filter_params,
     }
-
-    where_clauses = [
-        "service_id = {service_id:String}",
-        "publication_state = 'visible'",
-        "event_timestamp >= {start_time:DateTime64(3)}",
-        "event_timestamp <= {end_time:DateTime64(3)}",
-    ]
-
-    # Filters
-    if req.filters:
-        for idx, (k, v) in enumerate(req.filters.items()):
-            if not v:
-                continue
-            param_name = f"flt_{idx}"
-            if k == "client_ip":
-                where_clauses.append(f"client_ip = {{{param_name}:String}}")
-                params[param_name] = str(v)
-            elif k == "url":
-                where_clauses.append(f"url = {{{param_name}:String}}")
-                params[param_name] = str(v)
-            elif k == "country":
-                where_clauses.append(f"country = {{{param_name}:String}}")
-                params[param_name] = str(v)
-            else:
-                where_clauses.append(f"custom_fields['{k}'] = {{{param_name}:String}}")
-                params[param_name] = str(v)
-
-    # Search term
     if req.search and req.search.strip():
-        search_term = f"%{req.search.strip()}%"
-        params["search_term"] = search_term
-        where_clauses.append(
-            "(url ILIKE {search_term:String} OR client_ip ILIKE {search_term:String} OR "
-            "custom_fields['status'] ILIKE {search_term:String} OR custom_fields['pop'] ILIKE {search_term:String})"
-        )
+        params["search_term"] = f"%{req.search.strip()}%"
+        clauses.append(f"({' OR '.join(_SEARCH_FIELDS)})")
+    where_sql = " AND ".join(clauses)
 
-    where_sql = " AND ".join(where_clauses)
-
-    # Count query
-    count_sql = f"SELECT count() as cnt FROM request_facts WHERE {where_sql}"
-    try:
-        count_res = service.client.execute(count_sql, params)
-        total_count = int(count_res[0]["cnt"]) if count_res else 0
-    except Exception:
-        total_count = 0
+    count_rows = service.client.execute(
+        f"/* logs:count */ SELECT count() AS cnt FROM request_facts WHERE {where_sql}", params
+    )
+    total_count = int(count_rows[0]["cnt"]) if count_rows else 0
 
     sort_dir = "ASC" if str(req.sort_dir).upper() == "ASC" else "DESC"
     limit = req.limit or 100
     offset = req.offset or 0
+    page = service.client.execute(
+        "/* logs:page */ SELECT event_timestamp AS timestamp, client_ip, url, country, custom_fields "
+        f"FROM request_facts WHERE {where_sql} ORDER BY event_timestamp {sort_dir} "
+        "LIMIT {limit:UInt32} OFFSET {offset:UInt32}",
+        {**params, "limit": limit, "offset": offset},
+    )
+    sampled = service.client.execute(
+        "/* logs:columns */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS keys FROM ("
+        f"SELECT custom_fields FROM request_facts WHERE {where_sql} "
+        f"ORDER BY event_timestamp DESC LIMIT {_COLUMN_SAMPLE_ROWS})",
+        params,
+    )
 
-    data_sql = f"""
-    SELECT
-        event_timestamp as timestamp,
-        client_ip,
-        url,
-        country,
-        custom_fields
-    FROM request_facts
-    WHERE {where_sql}
-    ORDER BY event_timestamp {sort_dir}
-    LIMIT {limit} OFFSET {offset}
-    """
-
-    res = service.client.execute(data_sql, params)
+    known: set[str] = set(_BASE_COLUMNS)
+    known.update(sampled[0]["keys"] if sampled and sampled[0].get("keys") else [])
     rows: list[dict[str, Any]] = []
-    seen_cols: set[str] = {"timestamp", "client_ip", "url", "country"}
-
-    for r in res:
-        ts_val = r.get("timestamp")
-        iso_ts = ""
-        if ts_val is not None:
-            if hasattr(ts_val, "isoformat"):
-                iso_ts = str(ts_val.isoformat()).replace("+00:00", "Z")
-            else:
-                iso_ts = str(ts_val)
-
+    for record in page:
         row: dict[str, Any] = {
-            "timestamp": iso_ts,
-            "client_ip": r.get("client_ip", ""),
-            "url": r.get("url", ""),
-            "country": r.get("country", ""),
+            "timestamp": _iso(record.get("timestamp")),
+            "client_ip": record.get("client_ip", ""),
+            "url": record.get("url", ""),
+            "country": record.get("country", ""),
         }
-        custom = r.get("custom_fields") or {}
+        custom = record.get("custom_fields") or {}
         if isinstance(custom, dict):
-            for ck, cv in custom.items():
-                seen_cols.add(ck)
-                row[ck] = cv
-
-        if mask_ips:
-            for ip_key in ("client_ip", "ip", "remote_addr"):
-                if ip_key in row and row[ip_key]:
-                    row[ip_key] = mask_ip(str(row[ip_key]))
-            for sess_key in SESSION_ID_KEYS:
-                if sess_key in row and row[sess_key]:
-                    row[sess_key] = "[redacted]"
-
+            known.update(custom)
+            row.update(custom)
         rows.append(row)
 
-    # Filter columns if requested
     if req.columns:
-        selected_cols = [c for c in req.columns if c in seen_cols]
+        selected_cols = [column for column in req.columns if column in known]
         if "timestamp" not in selected_cols:
             selected_cols.insert(0, "timestamp")
     else:
-        selected_cols = sorted(list(seen_cols))
+        selected_cols = sorted(known)
 
-    schema_columns = [{"name": c, "type": "VARCHAR"} for c in selected_cols]
-    has_more = (offset + len(rows)) < total_count
+    projected: list[dict[str, Any]] = []
+    for row in rows:
+        out = {column: row.get(column) for column in selected_cols}
+        if mask_ips:
+            for ip_key in ("client_ip", "ip", "remote_addr"):
+                if out.get(ip_key):
+                    out[ip_key] = mask_ip(str(out[ip_key]))
+            for session_key in SESSION_ID_KEYS:
+                if out.get(session_key):
+                    out[session_key] = "[redacted]"
+        projected.append(out)
 
     return {
-        "rows": rows,
+        "rows": projected,
         "total_count": total_count,
-        "has_more": has_more,
+        "has_more": (offset + len(projected)) < total_count,
         "limit": limit,
         "offset": offset,
         "columns": selected_cols,
-        "schema_columns": schema_columns,
+        "schema_columns": [
+            {"name": column, "type": "TIMESTAMP" if column == "timestamp" else "VARCHAR"} for column in selected_cols
+        ],
         "missing_fields": [],
     }

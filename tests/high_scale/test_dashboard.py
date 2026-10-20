@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.dashboard import aggregates, header_metrics
+from backend.high_scale.dashboard import aggregates, bundle, header_metrics
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import AggregatesRequest
 
@@ -334,3 +334,180 @@ def test_high_scale_one_second_chart_uses_request_facts() -> None:
     assert any("toStartOfSecond(event_timestamp)" in sql for sql in executed)
     assert not any("FROM request_aggregates" in sql for sql in executed)
     assert response.interval == "1 second"
+
+
+class _RecordingClient(FakeClient):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params or {}))
+        return super().execute(sql, params)
+
+
+def _recording_service() -> tuple[HighScaleService, _RecordingClient]:
+    client = _RecordingClient()
+    return replace(_service_with_watermark(), client=client), client
+
+
+_WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")
+
+
+def test_filtered_aggregates_use_the_shared_filter_translation_and_visibility_fence():
+    service, client = _recording_service()
+
+    aggregates(
+        service,
+        AggregatesRequest(
+            fields=["url"],
+            filters={"country": {"mode": "include", "values": ["US"]}, "pop": {"mode": "exclude", "values": ["SJC"]}},
+        ),
+        *_WINDOW,
+    )
+
+    facts = [(sql, params) for sql, params in client.calls if "FROM request_facts" in sql]
+    assert facts
+    for sql, params in facts:
+        assert "country IN ({flt_0_0:String})" in sql
+        assert "custom_fields[{flt_k1:String}] NOT IN ({flt_1_0:String})" in sql
+        assert "high_scale_batch_publications FINAL" in sql and "domain='request'" in sql
+        assert params["flt_0_0"] == "US" and params["flt_1_0"] == "SJC"
+
+
+def test_filters_on_fields_outside_the_card_list_are_still_applied():
+    service, client = _recording_service()
+
+    aggregates(
+        service,
+        AggregatesRequest(fields=["url"], filters={"rid": {"mode": "include", "values": ["abc"]}}),
+        *_WINDOW,
+    )
+
+    assert any(params.get("flt_k0") == "rid" for _, params in client.calls)
+
+
+def test_filters_the_fact_table_cannot_express_fail_loudly():
+    service, _ = _recording_service()
+
+    with pytest.raises(ValueError, match="do not support filtering"):
+        aggregates(
+            service,
+            AggregatesRequest(filters={"_bot_name": {"mode": "include", "values": ["googlebot"]}}),
+            *_WINDOW,
+        )
+
+
+@pytest.mark.parametrize("failing", ["AS v, count() AS c", "count() AS c FROM request_facts", "AS bucket_start"])
+def test_filtered_aggregate_failures_propagate_instead_of_rendering_empty_cards(failing):
+    class Failing(FakeClient):
+        def execute(self, sql, params=None):
+            if failing in sql:
+                raise RuntimeError("clickhouse unavailable")
+            return super().execute(sql, params)
+
+    service = replace(_service_with_watermark(), client=Failing())
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        aggregates(
+            service,
+            AggregatesRequest(fields=["url"], filters={"host": {"mode": "include", "values": ["example.com"]}}),
+            *_WINDOW,
+        )
+
+
+def test_include_time_series_false_skips_the_time_series_query():
+    service, client = _recording_service()
+
+    response = aggregates(service, AggregatesRequest(fields=["url"], include_time_series=False), *_WINDOW)
+
+    assert response.time_series == []
+    assert all("AS chart_bucket" not in sql for sql, _ in client.calls)
+
+
+def test_include_map_data_false_skips_the_map_and_never_adds_country_work():
+    service, client = _recording_service()
+
+    response = aggregates(
+        service, AggregatesRequest(fields=["url"], include_map_data=False, include_time_series=False), *_WINDOW
+    )
+
+    assert response.map_data == []
+    assert not any(params.get("dimension") == "country" for _, params in client.calls)
+
+
+def test_map_data_is_served_even_when_country_is_not_a_requested_card():
+    service, _ = _recording_service()
+
+    response = aggregates(service, AggregatesRequest(fields=["url"]), *_WINDOW)
+
+    assert response.map_data
+    assert "country" not in response.data
+
+
+def test_sections_selector_gates_the_panels_like_the_standard_router():
+    service, client = _recording_service()
+
+    topten = aggregates(service, AggregatesRequest(fields=["url"], sections=["topten"]), *_WINDOW)
+
+    assert topten.data and topten.time_series == [] and topten.map_data == []
+
+    core = aggregates(service, AggregatesRequest(fields=["url"], sections=["core"]), *_WINDOW)
+
+    assert core.data == {} and core.time_series and core.map_data
+
+
+def test_bundle_serves_top_bots_from_the_security_reader(monkeypatch):
+    from backend.high_scale import security as hs_security
+    from backend.models.security import SecurityTopBotsResponse
+
+    seen: list[tuple] = []
+
+    def fake_top_bots(service, req, start_time, end_time):
+        seen.append((service.service_id, start_time, end_time))
+        return SecurityTopBotsResponse.with_telemetry(
+            bots=[],
+            ngwaf_bots=[
+                {
+                    "id": "googlebot",
+                    "name": "Googlebot",
+                    "category": "search",
+                    "request_count": 5,
+                    "verified_count": 5,
+                    "impersonator_count": 0,
+                    "unverified_count": 0,
+                    "verification_coverage": 1.0,
+                    "pending_count": 0,
+                }
+            ],
+        )
+
+    monkeypatch.setattr(hs_security, "top_bots", fake_top_bots)
+    service, _ = _recording_service()
+
+    result = bundle(service, AggregatesRequest(fields=["url"]), *_WINDOW)
+
+    assert seen == [("svc", *_WINDOW)]
+    assert result["top_bots"].ngwaf_bots[0].id == "googlebot"
+    assert result["aggregates"].data
+
+
+def test_bundle_sections_skip_the_unrequested_branch(monkeypatch):
+    from backend.high_scale import security as hs_security
+
+    monkeypatch.setattr(hs_security, "top_bots", lambda *a, **k: pytest.fail("bots were not requested"))
+    service, client = _recording_service()
+
+    core_only = bundle(service, AggregatesRequest(fields=["url"], sections=["core"]), *_WINDOW)
+
+    assert core_only["top_bots"] is None and core_only["aggregates"] is not None
+
+    from backend.models.security import SecurityTopBotsResponse
+
+    monkeypatch.setattr(
+        hs_security, "top_bots", lambda *a, **k: SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=[])
+    )
+    client.calls.clear()
+    bots_only = bundle(service, AggregatesRequest(sections=["bots"]), *_WINDOW)
+
+    assert bots_only["aggregates"] is None and bots_only["top_bots"] is not None
+    assert client.calls == []

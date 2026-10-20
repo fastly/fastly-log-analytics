@@ -1,10 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
-from backend.high_scale.dashboard import _build_clickhouse_filters
 from backend.high_scale.registry import HighScaleService
 from backend.models.network import (
     NetworkBundleRequest,

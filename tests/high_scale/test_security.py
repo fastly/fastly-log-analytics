@@ -446,7 +446,7 @@ def test_dashboard_bundle_serves_real_top_bots():
             "ngwaf_bots": [{"bot_name": "bingbot", "wk_name": "", "bot_cat": "search", "request_count": "11"}],
         }
     )
-    request = SimpleNamespace(filters={}, bucket_seconds=3600)
+    request = SimpleNamespace(filters={}, bucket_seconds=3600, sections=None)
     with (
         patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
         patch.object(hs_dashboard, "aggregates", return_value="aggregates"),

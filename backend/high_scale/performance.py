@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
-from backend.high_scale.dashboard import _FIELD_DIMENSIONS, _build_clickhouse_filters
+from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
 from backend.high_scale.registry import HighScaleService
 from backend.models.performance import PerformanceAggregatesResponse
