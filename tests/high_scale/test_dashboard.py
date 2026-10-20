@@ -511,3 +511,16 @@ def test_bundle_sections_skip_the_unrequested_branch(monkeypatch):
 
     assert bots_only["aggregates"] is None and bots_only["top_bots"] is not None
     assert client.calls == []
+
+
+def test_header_metrics_surface_clickhouse_failures_instead_of_reporting_no_data():
+    class _Failing:
+        def execute(self, sql, params=None):
+            if "rum_error_aggregates" in sql:
+                raise RuntimeError("clickhouse down")
+            return []
+
+    service = HighScaleService(service_id="svc", client=_Failing(), cursor_secret=b"s", request_watermark=None)
+
+    with pytest.raises(RuntimeError, match="clickhouse down"):
+        header_metrics(service)

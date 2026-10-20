@@ -241,10 +241,7 @@ def network_health(
     bucket_expr = f"intDiv(toUnixTimestamp(event_timestamp), {bs}) * {bs}"
 
     def _run(sql: str) -> list[dict]:
-        try:
-            return service.client.execute(sql, params)
-        except Exception:
-            return []
+        return service.client.execute(sql, params)
 
     map_asn_sql = ""
     if map_asn != "all":
@@ -666,10 +663,7 @@ def network_quality(
             ORDER BY reqs DESC
             LIMIT 25
         """
-        try:
-            rows = service.client.execute(sql, params)
-        except Exception:
-            return []
+        rows = service.client.execute(sql, params)
         out = []
         for r in rows:
             label = r["label"]
@@ -809,10 +803,7 @@ def get_transport_metrics(
         FROM request_facts
         WHERE {base_where}
     """
-    try:
-        rows = service.client.execute(sql, params)
-    except Exception:
-        rows = []
+    rows = service.client.execute(sql, params)
 
     if rows:
         r = rows[0]
@@ -855,21 +846,18 @@ def get_transport_metrics(
         ORDER BY reqs DESC
     """
     protocol_distribution = []
-    try:
-        p_rows = service.client.execute(proto_sql, params)
-        sum_p = sum(r.get("reqs", 0) for r in p_rows) or total_requests or 1
-        for pr in p_rows:
-            p_name = str(pr.get("proto_clean", "Other"))
-            p_cnt = int(pr.get("reqs", 0))
-            protocol_distribution.append(
-                TransportProtocolShare(
-                    protocol=p_name,
-                    requests=p_cnt,
-                    share_pct=round(p_cnt * 100.0 / sum_p, 2),
-                )
+    p_rows = service.client.execute(proto_sql, params)
+    sum_p = sum(r.get("reqs", 0) for r in p_rows) or total_requests or 1
+    for pr in p_rows:
+        p_name = str(pr.get("proto_clean", "Other"))
+        p_cnt = int(pr.get("reqs", 0))
+        protocol_distribution.append(
+            TransportProtocolShare(
+                protocol=p_name,
+                requests=p_cnt,
+                share_pct=round(p_cnt * 100.0 / sum_p, 2),
             )
-    except Exception:
-        pass
+        )
 
     return TransportMetrics(
         has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),

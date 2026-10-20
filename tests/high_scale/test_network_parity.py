@@ -401,3 +401,51 @@ def test_origin_shielding_analysis_reports_edge_only_when_no_shield_traffic_exis
     assert resp.has_data is False
     assert resp.edge_only is True
     assert resp.rows == []
+
+
+class _FailingClient:
+    """Raises on statements containing ``marker`` (every statement when empty); answers the rest with no rows."""
+
+    def __init__(self, marker: str = "") -> None:
+        self._marker = marker
+
+    def execute(self, sql, params=None):
+        if self._marker in sql:
+            raise RuntimeError("clickhouse down")
+        return []
+
+
+def _failing_service(marker: str = "") -> HighScaleService:
+    return HighScaleService(service_id="svc", client=_FailingClient(marker), cursor_secret=b"s", request_watermark=None)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: network_health(
+            s, NetworkHealthRequest(start_time=_START_S, end_time=_END_S, sections=["heatmap"]), _START_S, _END_S
+        ),
+        lambda s: network_quality(s, NetworkQualityRequest(start_time=_START_S, end_time=_END_S), _START_S, _END_S),
+        lambda s: get_transport_metrics(s, _START_S, _END_S),
+    ],
+    ids=["health", "quality", "transport"],
+)
+def test_clickhouse_failures_propagate_instead_of_reading_as_empty_data(call) -> None:
+    with pytest.raises(RuntimeError, match="clickhouse down"):
+        call(_failing_service())
+
+
+@pytest.mark.parametrize(
+    ("marker", "call"),
+    [
+        (
+            "GROUP BY label",
+            lambda s: network_quality(s, NetworkQualityRequest(start_time=_START_S, end_time=_END_S), _START_S, _END_S),
+        ),
+        ("proto_clean", lambda s: get_transport_metrics(s, _START_S, _END_S)),
+    ],
+    ids=["quality-dimension", "transport-protocol-share"],
+)
+def test_a_single_failing_query_is_not_hidden_behind_a_partial_response(marker, call) -> None:
+    with pytest.raises(RuntimeError, match="clickhouse down"):
+        call(_failing_service(marker))
