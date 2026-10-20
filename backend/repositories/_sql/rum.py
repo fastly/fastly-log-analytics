@@ -83,21 +83,13 @@ DISTINCT_ID = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(tim
 RUM_TEMP_VITALS_CREATE = (
     "CREATE OR REPLACE TEMP TABLE t_client_vitals AS "
     "SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname "
-    "FROM ("
-    "SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname, "
-    "ROW_NUMBER() OVER (PARTITION BY timestamp, metric_name, pathname, cid, req_id ORDER BY timestamp) AS _rn "
     "FROM client_vitals WHERE {where_sql}"
-    ") WHERE _rn = 1"
 )  # str.format template: {where_sql}, {distinct_id}
 
 RUM_TEMP_ERRORS_CREATE = (
     "CREATE OR REPLACE TEMP TABLE t_client_errors AS "
     "SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col "
-    "FROM ("
-    "SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col, "
-    "ROW_NUMBER() OVER (PARTITION BY timestamp, error_message, error_file, error_line, pathname, cid, req_id ORDER BY timestamp) AS _rn "
     "FROM client_errors WHERE {where_sql}"
-    ") WHERE _rn = 1"
 )  # str.format template: {where_sql}, {distinct_id}
 
 RUM_ROLLUP_MAX_BUCKET = """

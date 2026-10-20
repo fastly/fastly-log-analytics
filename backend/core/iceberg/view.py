@@ -1052,7 +1052,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         try:
             con.execute(f"DROP VIEW IF EXISTS temp.main.{view_name}")
         except Exception:
-            pass
+            logger.debug("_update_iceberg_view_locked: drop temp view %s failed (ignored)", view_name, exc_info=True)
         create_stmt = f"CREATE OR REPLACE VIEW {view_name} AS {final_sql}"
 
     try:
@@ -1083,7 +1083,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         fp_key = f"fast_path_view_fp_{target_table}"
         _set_conn_state(con, **{fp_key: (token, frozenset(buf_files), schema_fp, variant_fp, target_table)})
     except Exception:
-        pass
+        logger.debug("_update_iceberg_view_locked: _set_conn_state failed (ignored)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

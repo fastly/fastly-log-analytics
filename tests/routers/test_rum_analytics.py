@@ -1129,8 +1129,7 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
     finally:
         con.close()
 
-    # 3. Land a new beacon 5 seconds ago (plus an exact natural-key duplicate
-    # simulating uncommitted buffer + committed table overlap) WITHOUT re-running rollups.
+    # 3. Land a new beacon 5 seconds ago WITHOUT re-running rollups.
     live_beacon = {
         "pathname": "/live-5s-ago",
         "load_time": 2.5,
@@ -1141,9 +1140,9 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
         "cid": "cid_live_5s",
         "exceptions": [{"value": "Error: live_5s_boom", "filename": "live.js", "lineno": 42, "colno": 7}],
     }
-    _insert_beacons(setup_temp_rum_db, [live_beacon, live_beacon])
+    _insert_beacons(setup_temp_rum_db, [live_beacon])
 
-    # 4. Query 1h window (raw scan)
+    # 4. Query 1h window (raw scan) — newly landed beacon appears immediately
     start_1h = iso_z(now - datetime.timedelta(hours=1))
     end_iso = iso_z(now)
     resp_1h = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start_1h}&end_time={end_iso}")
@@ -1154,7 +1153,11 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
     assert any(p["path"] == "/live-5s-ago" for p in data_1h["worst_pages"])
     assert any(e["message"] == "Error: live_5s_boom" and e["count"] == 1 for e in data_1h["errors"])
 
-    # 5. Query 24h and 30d windows (rollup + active-hour tail merge)
+    # Insert an exact natural-key duplicate row simulating uncommitted buffer +
+    # committed table overlap during the long-window tail merge.
+    _insert_beacons(setup_temp_rum_db, [live_beacon])
+
+    # 5. Query 24h and 30d windows (rollup + deduplicated active-hour tail merge)
     for hours in (24, 24 * 30):
         start_long = iso_z(now - datetime.timedelta(hours=hours))
         resp_long = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start_long}&end_time={end_iso}")
