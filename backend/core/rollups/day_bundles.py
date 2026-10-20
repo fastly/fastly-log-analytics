@@ -571,14 +571,13 @@ def compact_closed_days_to_daily(
                 # per column; without this CAST, the day file lands as
                 # DOUBLE and the union breaks (and the dashboard top-N
                 # tabs go blank — 2026-06-06 incident).
-                copy_sql = f"""
-                    COPY (
-                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count
-                        FROM ({" UNION ALL ".join(branches)})
-                        GROUP BY field, value
-                    ) TO '{tmp_file}'
-                    (FORMAT PARQUET, COMPRESSION ZSTD)
-                """
+                copy_sql = (
+                    f"COPY ("
+                    f"SELECT field, value, CAST(SUM(count) AS BIGINT) AS count "
+                    f"FROM ({' UNION ALL '.join(branches)}) "
+                    f"GROUP BY field, value"
+                    f") {parquet_zstd_target(tmp_file)}"
+                )
                 try:
                     con.execute(copy_sql)
                 except duckdb.Error as e:

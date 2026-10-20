@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from backend.utils.date_utils import parse_hour_key_strict
 
-from ._common import TOP_K, _build_copy_query, _is_safe_ident, parse_hour_token, unlink_quiet
+from ._common import TOP_K, _build_copy_query, _is_safe_ident, parquet_zstd_target, parse_hour_token, unlink_quiet
 
 if TYPE_CHECKING:
     import duckdb
@@ -361,7 +361,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
         tmp_path = os.path.join(d, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
         try:
             try:
-                con.execute(f"COPY ({merged_sql}) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+                con.execute(f"COPY ({merged_sql}) {parquet_zstd_target(tmp_path)}")
             except Exception as e:
                 from backend.core.iceberg import is_stale_view_error
 
@@ -401,7 +401,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                             GROUP BY field, value
                         ) WHERE rn <= {TOP_K}
                     """
-                    con.execute(f"COPY ({merged_sql}) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+                    con.execute(f"COPY ({merged_sql}) {parquet_zstd_target(tmp_path)}")
                 else:
                     raise
             os.replace(tmp_path, _all_fields_path(source, active_hour))
