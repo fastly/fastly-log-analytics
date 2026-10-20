@@ -2,10 +2,11 @@
 
 import React, { useMemo, useState } from 'react'
 import { formatCount } from '@/lib/format'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
   SelectContent,
@@ -41,6 +42,7 @@ export function LogAccountingPanel() {
       if (error) throw new Error(extractApiError(error))
       return data
     },
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
@@ -128,7 +130,7 @@ export function LogAccountingPanel() {
           {catchupBadge}
           {isFetching && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
           <Select value={String(presetIdx)} onValueChange={(v) => { if (v) setPresetIdx(parseInt(v)) }}>
-            <SelectTrigger className="h-8 w-[120px] text-xs">
+            <SelectTrigger data-testid="admin-usage-log-accounting-granularity" className="h-8 w-[120px] text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -140,47 +142,61 @@ export function LogAccountingPanel() {
         </div>
       }
     >
-      {(!mounted || isLoading) ? (
-        <div className="text-xs text-muted-foreground italic px-1 py-4">Loading log accounting…</div>
-      ) : error ? null : (
-        <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-            <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly requests</div>
-              <div className="font-mono text-base">{formatCount(totals?.fastly_requests ?? 0)}</div>
+      <div className={`min-h-[312px] transition-opacity ${mounted && isFetching && !!data ? 'opacity-40 pointer-events-none' : ''}`}>
+        {(!mounted || (isLoading && !data)) ? (
+          <div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <Skeleton className="h-[54px] w-full rounded-md" />
+              <Skeleton className="h-[54px] w-full rounded-md" />
+              <Skeleton className="h-[54px] w-full rounded-md" />
+              <Skeleton className="h-[54px] w-full rounded-md" />
             </div>
-            <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">We ingested</div>
-              <div className="font-mono text-base">{formatCount(totals?.our_rows ?? 0)}</div>
-            </div>
-            <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (rows)</div>
-              <div className={`font-mono text-base ${gapColor}`}>{formatCount(totals?.gap ?? 0)}</div>
-            </div>
-            <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap %</div>
-              <div className={`font-mono text-base ${gapColor}`}>{(gapPct * 100).toFixed(3)}%</div>
+            <div className="h-[240px] flex items-center justify-center rounded-md border border-dashed border-muted bg-muted/10 text-xs text-muted-foreground italic">
+              Loading log accounting…
             </div>
           </div>
-          {data?.sustained_loss && (
-            <div className="mb-3 text-xs px-3 py-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
-              <AlertTriangle className="h-3 w-3 inline mr-1.5" />
-              Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {formatCount(data.sustained_loss.total_lost_lines)} rows missing
+        ) : error ? null : (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly requests</div>
+                <div className="font-mono text-base">{formatCount(totals?.fastly_requests ?? 0)}</div>
+              </div>
+              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">We ingested</div>
+                <div className="font-mono text-base">{formatCount(totals?.our_rows ?? 0)}</div>
+              </div>
+              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (rows)</div>
+                <div className={`font-mono text-base ${gapColor}`}>{formatCount(totals?.gap ?? 0)}</div>
+              </div>
+              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap %</div>
+                <div className={`font-mono text-base ${gapColor}`}>{(gapPct * 100).toFixed(3)}%</div>
+              </div>
             </div>
-          )}
-          {totals?.worst_bucket_ts && (totals.worst_bucket_gap_pct ?? 0) > 0.01 && (
-            <div className="mb-3 text-xs px-3 py-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
-              <AlertTriangle className="h-3 w-3 inline mr-1.5" />
-              Worst bucket: {totals.worst_bucket_ts} — {((totals.worst_bucket_gap_pct ?? 0) * 100).toFixed(2)}% gap
-            </div>
-          )}
-          {buckets.length > 0 ? (
-            <TimeSeriesChart data={chartData} layout={chartLayout} timezone="UTC" height={240} />
-          ) : (
-            <div className="text-xs text-muted-foreground italic px-1 py-4">No data in this window yet.</div>
-          )}
-        </>
-      )}
+            {data?.sustained_loss && (
+              <div className="mb-3 text-xs px-3 py-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
+                <AlertTriangle className="h-3 w-3 inline mr-1.5" />
+                Sustained loss: {data.sustained_loss.n_buckets} consecutive {preset.by === 'hour' ? 'hours' : 'days'} ≥5% gap since {data.sustained_loss.started_at} — peak {(data.sustained_loss.max_gap_pct * 100).toFixed(1)}%, {formatCount(data.sustained_loss.total_lost_lines)} rows missing
+              </div>
+            )}
+            {totals?.worst_bucket_ts && (totals.worst_bucket_gap_pct ?? 0) > 0.01 && (
+              <div className="mb-3 text-xs px-3 py-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
+                <AlertTriangle className="h-3 w-3 inline mr-1.5" />
+                Worst bucket: {totals.worst_bucket_ts} — {((totals.worst_bucket_gap_pct ?? 0) * 100).toFixed(2)}% gap
+              </div>
+            )}
+            {buckets.length > 0 ? (
+              <TimeSeriesChart data={chartData} layout={chartLayout} timezone="UTC" height={240} />
+            ) : (
+              <div className="h-[240px] flex items-center justify-center rounded-md border border-dashed border-muted bg-muted/10 text-xs text-muted-foreground italic">
+                No data in this window yet.
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </AnalyticsCard>
   )
 }

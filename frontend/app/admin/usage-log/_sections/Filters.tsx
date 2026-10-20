@@ -39,11 +39,13 @@ export function UsageLogFilters({
   isLoading,
 }: UsageLogFiltersProps) {
   return (
-    <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b">
+    <div data-testid="admin-usage-log-filters" className="flex flex-wrap items-center gap-3 px-4 py-3 border-b">
       <div className="flex items-center gap-1.5">
         {DATE_PRESETS.map(p => (
           <Button
             key={p.hours}
+            data-testid={`admin-usage-log-preset-${p.hours}h`}
+            aria-pressed={preset === p.hours}
             size="sm"
             variant={preset === p.hours ? 'default' : 'outline'}
             className="h-7 px-3 text-xs"
@@ -57,7 +59,7 @@ export function UsageLogFilters({
       <div className="flex items-center gap-1.5">
         <Label htmlFor="usage-log-type" className="text-xs text-muted-foreground shrink-0">Type</Label>
         <Select value={usageType || 'all'} onValueChange={v => setUsageType(!v || v === 'all' ? '' : v)}>
-          <SelectTrigger id="usage-log-type" className="h-7 text-xs w-32">
+          <SelectTrigger id="usage-log-type" data-testid="admin-usage-log-type-select" className="h-7 text-xs w-32">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -74,6 +76,7 @@ export function UsageLogFilters({
         <Label htmlFor="usage-log-operation" className="text-xs text-muted-foreground shrink-0">Operation</Label>
         <Input
           id="usage-log-operation"
+          data-testid="admin-usage-log-operation-input"
           className="h-7 text-xs w-40 font-mono"
           placeholder="e.g. GET_OBJECT"
           value={operationFilter}
@@ -85,6 +88,7 @@ export function UsageLogFilters({
         <Label htmlFor="usage-log-process" className="text-xs text-muted-foreground shrink-0">Process</Label>
         <Input
           id="usage-log-process"
+          data-testid="admin-usage-log-process-input"
           className="h-7 text-xs w-44 font-mono"
           placeholder="e.g. cron:sync"
           value={processFilter}
@@ -93,7 +97,7 @@ export function UsageLogFilters({
       </div>
 
       {isFetching && !isLoading && (
-        <span className="text-xs text-muted-foreground animate-pulse">Refreshing…</span>
+        <span data-testid="admin-usage-log-refreshing-badge" className="text-xs text-muted-foreground animate-pulse">Refreshing…</span>
       )}
     </div>
   )

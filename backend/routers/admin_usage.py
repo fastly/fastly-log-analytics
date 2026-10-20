@@ -28,7 +28,7 @@ import io
 # in this file resolve.
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend.deps import get_source
+from backend.deps import get_source, require_admin
 from backend.models.admin import (
     SystemJobsResponse,
     UsageLogAggregate,
@@ -47,6 +47,7 @@ router: APIRouter = _adm.router  # type: ignore
     "/admin/usage-logging",
     response_model=UsageLoggingConfigResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
 def get_usage_logging_settings():
     """Return the usage logging config (global defaults)."""
@@ -59,6 +60,7 @@ def get_usage_logging_settings():
     "/admin/usage-logging",
     response_model=UsageLoggingConfigResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
 def update_usage_logging_settings(body: UsageLoggingUpdateBody):
     """Update the global usage logging config."""
@@ -118,7 +120,11 @@ def update_usage_logging_settings(body: UsageLoggingUpdateBody):
     return current
 
 
-@router.get("/admin/usage-log", response_model=UsageLogResponse)
+@router.get(
+    "/admin/usage-log",
+    response_model=UsageLogResponse,
+    dependencies=[Depends(require_admin)],
+)
 def usage_log_endpoint(
     source: dict = Depends(get_source),
     start: str = Query(default=""),
@@ -222,7 +228,10 @@ def usage_log_endpoint(
 
 # response_model intentionally omitted: streams CSV (StreamingResponse),
 # not a JSON body.
-@router.get("/admin/usage-log/export")
+@router.get(
+    "/admin/usage-log/export",
+    dependencies=[Depends(require_admin)],
+)
 def usage_log_export(
     source: dict = Depends(get_source),
     start: str = Query(default=""),
@@ -326,7 +335,11 @@ def usage_log_export(
     return _StreamingResponse(generate(), media_type="text/csv", headers=headers)
 
 
-@router.delete("/admin/usage-log", response_model=OkResponse)
+@router.delete(
+    "/admin/usage-log",
+    response_model=OkResponse,
+    dependencies=[Depends(require_admin)],
+)
 def purge_usage_log_endpoint(source: dict = Depends(get_source)):
     """Delete all _usage_log entries for this service from metadata_db (SQLite)."""
     from backend.core import metadata as metadata_db
@@ -336,7 +349,11 @@ def purge_usage_log_endpoint(source: dict = Depends(get_source)):
     return {"ok": True}
 
 
-@router.get("/admin/system-jobs", response_model=SystemJobsResponse)
+@router.get(
+    "/admin/system-jobs",
+    response_model=SystemJobsResponse,
+    dependencies=[Depends(require_admin)],
+)
 def get_system_jobs_endpoint():
     """Return status and schedule info for global background jobs."""
     from backend.cron.scheduler import get_scheduler

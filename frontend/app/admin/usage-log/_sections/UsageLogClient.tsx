@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useMemo, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -65,12 +65,14 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     // Gate the 30s tick on tab visibility so a backgrounded admin tab
     // doesn't keep rotating `now` and refetching ~MB of usage_log every
     // minute. Re-tick immediately on visibility-restore so the rolled
-    // window matches the moment the user returns to the tab.
+    // window matches the moment the user returns to the tab, while
+    // preserving `initialNowMs` on first mount so the SSR-seeded query
+    // key is not invalidated on initial hydration.
     const tick = () => setNow(new Date())
     let id: ReturnType<typeof setInterval> | null = null
-    const start = () => {
+    const start = (tickNow: boolean) => {
       if (id !== null) return
-      tick()
+      if (tickNow) tick()
       id = setInterval(tick, 30_000)
     }
     const stop = () => {
@@ -80,10 +82,10 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       }
     }
     const onVis = () => {
-      if (document.visibilityState === 'visible') start()
+      if (document.visibilityState === 'visible') start(true)
       else stop()
     }
-    if (document.visibilityState === 'visible') start()
+    if (document.visibilityState === 'visible') start(false)
     document.addEventListener('visibilitychange', onVis)
     return () => {
       document.removeEventListener('visibilitychange', onVis)
@@ -136,6 +138,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       return data as UsageLogResponse
     },
     enabled: !!activeServiceId,
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
@@ -153,6 +156,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     // Gate the heavier 500-row backfill on the head landing first so we
     // never block the aggregate render on the slower query.
     enabled: !!activeServiceId && !!headQuery.data,
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
@@ -166,8 +170,9 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   // until mounted so the server render (live client-only query → no data) and
   // the client's first render agree on the loading skeleton instead of the
   // server painting '—'/0 values that the client then diverges from (#418).
-  const isLoading = !mounted || headQuery.isLoading
+  const isLoading = !mounted || (headQuery.isLoading && !data)
   const isFetching = headQuery.isFetching || fullQuery.isFetching
+  const isRefreshing = mounted && isFetching && !isLoading
   const refetch = () => {
     headQuery.refetch()
     fullQuery.refetch()
@@ -217,32 +222,54 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   const exportUrl = `/api/admin/usage-log/export?${exportParams.toString()}`
 
   return (
-    <div className="space-y-6">
+    <div data-testid="admin-usage-log-root" className="space-y-6">
       <PageHeader
         title="FOS Usage Log"
         description="Fastly Object Storage and CDN operations captured for cost analysis."
       >
-        <Button variant="outline" size="sm" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>
-          <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Admin
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setNow(new Date())
-            refetch()
-          }}
-          disabled={isFetching}
+        <div
+          data-testid="admin-usage-log-toolbar"
+          className="flex flex-wrap items-center gap-2 min-h-[36px] [contain-intrinsic-size:auto_36px] [content-visibility:auto]"
         >
-          <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${isFetching ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => setPurgeOpen(true)} className="text-destructive hover:bg-destructive hover:text-white border-destructive/40">
-          <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Purge Logs
-        </Button>
-        <a href={mounted ? exportUrl : undefined} download="usage_log.csv" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-          <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
-        </a>
+          <Button
+            data-testid="admin-usage-log-back-btn"
+            variant="outline"
+            size="sm"
+            onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}
+          >
+            <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Admin
+          </Button>
+          <Button
+            data-testid="admin-usage-log-refresh-btn"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setNow(new Date())
+              refetch()
+            }}
+            disabled={isFetching}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${isFetching ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+          <Button
+            data-testid="admin-usage-log-purge-btn"
+            variant="outline"
+            size="sm"
+            onClick={() => setPurgeOpen(true)}
+            className="text-destructive hover:bg-destructive hover:text-white border-destructive/40"
+          >
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Purge Logs
+          </Button>
+          <a
+            data-testid="admin-usage-log-export-btn"
+            href={mounted ? exportUrl : undefined}
+            download="usage_log.csv"
+            className={buttonVariants({ variant: 'outline', size: 'sm' })}
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
+          </a>
+        </div>
       </PageHeader>
 
       <div className="bg-muted/30 border border-dashed rounded-lg p-3 text-xs text-muted-foreground flex items-center justify-between">
@@ -256,12 +283,18 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       </div>
 
       {/* Aggregate stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div
+        data-testid="admin-usage-log-kpi-reservation"
+        className={`grid grid-cols-2 md:grid-cols-4 gap-3 min-h-[164px] [contain-intrinsic-size:auto_164px] [content-visibility:auto] transition-opacity ${
+          isRefreshing ? 'opacity-40 pointer-events-none' : ''
+        }`}
+      >
         <StatCard
           title="FOS Class A Ops"
           value={agg ? fmtOps(agg.total_class_a) : '—'}
           icon={Zap}
           iconClassName="text-blue-500"
+          className="min-h-[164px]"
           sub={
             <div className="space-y-1">
               <div>{agg ? fmtCost(agg.estimated_cost_class_a) : '—'}</div>
@@ -275,6 +308,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           value={agg ? fmtOps(agg.total_class_b) : '—'}
           icon={Database}
           iconClassName="text-green-500"
+          className="min-h-[164px]"
           sub={
             <div className="space-y-1">
               <div>{agg ? fmtCost(agg.estimated_cost_class_b) : '—'}</div>
@@ -288,6 +322,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           value={agg ? formatBytes(agg.total_cdn_bytes) : '—'}
           icon={Globe}
           iconClassName="text-purple-500"
+          className="min-h-[164px]"
           sub={
             <div className="space-y-1">
               <div>{agg ? fmtCost(agg.estimated_cost_cdn) : '—'}</div>
@@ -308,6 +343,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           value={agg ? `$${agg.estimated_cost_total.toFixed(2)}` : '—'}
           icon={DollarSign}
           iconClassName="text-amber-500"
+          className="min-h-[164px]"
           sub={
             <div className="space-y-1">
               <div>for selected period</div>
@@ -333,9 +369,17 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         />
       </div>
 
-      <LogAccountingPanel />
+      <div
+        data-testid="admin-usage-log-chart-reservation"
+        className="min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+      >
+        <LogAccountingPanel />
+      </div>
 
-      <div className="rounded-lg border bg-card">
+      <div
+        data-testid="admin-usage-log-table-reservation"
+        className="rounded-lg border bg-card min-h-[520px] [contain-intrinsic-size:auto_520px] [content-visibility:auto]"
+      >
         <UsageLogFilters
           preset={preset}
           setPreset={setPreset}
@@ -349,12 +393,19 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           isLoading={isLoading}
         />
 
-        <DataTable
-          columns={columns}
-          data={entries}
-          isLoading={isLoading}
-          searchKey="url"
-        />
+        <div className={isRefreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>
+          {isLoading && (
+            <div className="sr-only" role="status">
+              Loading FOS usage ledger...
+            </div>
+          )}
+          <DataTable
+            columns={columns}
+            data={entries}
+            isLoading={isLoading}
+            searchKey="url"
+          />
+        </div>
       </div>
 
       {/* Purge confirmation dialog */}
