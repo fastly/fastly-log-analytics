@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Insights prewarmer now runs only on active `/api/insights` demand** — `insights_prewarmer` skips ticks when `/api/insights` has not been requested for a service within the configurable idle window (`provisioning.cron_insights_prewarmer.idle_minutes` / `INSIGHTS_PREWARM_IDLE_MINUTES`, default 30 minutes), avoiding background DuckDB scans when the Insights page is unused.
+- **Insights cold-compute SQL prunes 30-day baseline scans to window candidates** — window-first `AS NOT MATERIALIZED` CTEs, distinct-dimension regex pre-evaluation, pre-filtered window-function sorts, and schema-driven scratch column pruning reduce cold `/api/insights` wall p50 by 28% (p95 by 35%) and process CPU p50 by 21% with identical outputs across all 51 detections.
 - **Schema cache is now a bounded TTL cache** — the DuckDB per-source schema cache expires and evicts through `BoundedTTLCache` and is cleared in place, so modules that import it by name no longer read a stale copy after a clear.
 - **Metadata retention cleanup no longer carries a constant Postgres flag** — the `usage_log` table keeps its dedicated statements; behavior is unchanged.
 - **Repository null-default SQL now renders through shared helpers** — rendered SQL is byte-identical.
