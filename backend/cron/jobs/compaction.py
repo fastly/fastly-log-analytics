@@ -245,6 +245,32 @@ def _run_rollup_hour_heal(
             lookback_days=lookback_days,
             max_missing_hours=max_missing_hours,
         )
+        # Also heal any historical RUM aggregate hours (up to 30d) missing
+        # 'total_beacons' rows when RUM is enabled on this Standard service.
+        try:
+            cfg = svcconfig.load_config(service_id) or {}
+            if cfg.get("rum", {}).get("enabled") and not durable_mode:
+                from contextlib import closing
+
+                from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.iceberg import execute_with_stale_view_retry
+                from backend.core.iceberg._ducklake import _ducklake_attach
+                from backend.core.rollups.rum import backfill_missing_rum_aggregates
+
+                rum_src = rum_source_for(src)
+                with closing(get_connection(rum_src, read_only=False)) as rum_con:
+                    try:
+                        _ducklake_attach(rum_con, src, read_only=True)
+                    except Exception:
+                        pass
+                    execute_with_stale_view_retry(
+                        rum_con,
+                        rum_src,
+                        lambda c: backfill_missing_rum_aggregates(c, service_id, lookback_days=30),
+                        table_name="client_vitals",
+                    )
+        except Exception as rum_heal_err:
+            logger.warning("[rollup-heal] %s: RUM aggregate self-heal skipped/failed: %s", service_id, rum_heal_err)
         # Durable mode becomes trusted once the dashboard lookback is
         # complete. A failed or timed-out startup catch-up self-heals on the
         # next tick.

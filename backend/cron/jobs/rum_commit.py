@@ -124,7 +124,10 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                     from backend.core.duckdb import get_connection, rum_source_for
                     from backend.core.iceberg import execute_with_stale_view_retry
                     from backend.core.iceberg._ducklake import _ducklake_attach
-                    from backend.core.rollups.rum import recompute_rum_aggregates
+                    from backend.core.rollups.rum import (
+                        backfill_missing_rum_aggregates,
+                        recompute_rum_aggregates,
+                    )
 
                     rum_src = rum_source_for(src)
                     with closing(get_connection(rum_src, read_only=False)) as rum_con:
@@ -166,6 +169,22 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                             lambda c: recompute_rum_aggregates(c, service_id, hours=target_hours),
                             table_name="client_vitals",
                         )
+
+                        # Also heal any historical hours (up to 30d) missing from rum_vitals_aggregates
+                        # or lacking the synthetic 'total_beacons' row added in 3fcbcd27.
+                        try:
+                            execute_with_stale_view_retry(
+                                rum_con,
+                                rum_src,
+                                lambda c: backfill_missing_rum_aggregates(c, service_id, lookback_days=30),
+                                table_name="client_vitals",
+                            )
+                        except Exception as heal_err:
+                            logger.warning(
+                                "[rum_commit] %s: Failed to backfill missing RUM aggregate hours: %s",
+                                service_id,
+                                heal_err,
+                            )
 
                         # Persist RUM freshness/count into the status doc so the
                         # request-ingest status refresh reads it cheaply instead of

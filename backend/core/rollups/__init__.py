@@ -134,6 +134,7 @@ from .recompute import (
     cleanup_old_rollups,
     recompute_touched_hours,
 )
+from .rum import backfill_missing_rum_aggregates, recompute_rum_aggregates
 from .security_dims import backfill_security_dims_bundles, build_security_dims_bundles
 from .sessions import build_session_bundles
 from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
@@ -203,6 +204,8 @@ __all__ = [
     "backfill_rollups",
     "backfill_missing_hour_bundles",
     "backfill_missing_hour_ip_spread",
+    "backfill_missing_rum_aggregates",
+    "recompute_rum_aggregates",
     "cleanup_old_rollups",
     "recompute_wellknown_bots_rollup",
     "backfill_wellknown_bots_rollup",

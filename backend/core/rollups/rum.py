@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_hour_dt(dt_val: datetime) -> datetime:
+    """Normalize a datetime to an hour boundary, converting aware timestamps to UTC."""
+    if getattr(dt_val, "tzinfo", None) is not None:
+        dt_val = dt_val.astimezone(UTC)
+    return dt_val.replace(minute=0, second=0, microsecond=0)
 
 
 def table_exists(con, table_name: str) -> bool:
@@ -105,21 +112,17 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
         return
 
     # 2. Identify the hours that have raw data
-    hours_set = set()
+    hours_set: set[datetime] = set()
     if hours is not None:
         for h in hours:
             if isinstance(h, str):
                 try:
-                    parsed_dt = datetime.fromisoformat(h.replace("Z", "+00:00")).replace(
-                        minute=0, second=0, microsecond=0, tzinfo=None
-                    )
+                    parsed_dt = _normalize_hour_dt(datetime.fromisoformat(h.replace("Z", "+00:00")))
                     hours_set.add(parsed_dt)
                 except ValueError:
                     pass
             elif isinstance(h, datetime):
-                # Ensure we work with naive datetimes or normalize timezone
-                naive_dt = h.replace(tzinfo=None).replace(minute=0, second=0, microsecond=0)
-                hours_set.add(naive_dt)
+                hours_set.add(_normalize_hour_dt(h))
     else:
         if has_vitals:
             try:
@@ -128,10 +131,9 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
                 ).fetchall()
                 for r in res:
                     if r[0]:
-                        # Normalize timezone to match the other path
                         dt_val = r[0]
-                        if hasattr(dt_val, "replace"):
-                            dt_val = dt_val.replace(tzinfo=None)
+                        if isinstance(dt_val, datetime):
+                            dt_val = _normalize_hour_dt(dt_val)
                         hours_set.add(dt_val)
             except Exception as e:
                 logger.warning("[rum_rollups] Failed to query active hours from client_vitals: %s", e)
@@ -144,8 +146,8 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
                 for r in res:
                     if r[0]:
                         dt_val = r[0]
-                        if hasattr(dt_val, "replace"):
-                            dt_val = dt_val.replace(tzinfo=None)
+                        if isinstance(dt_val, datetime):
+                            dt_val = _normalize_hour_dt(dt_val)
                         hours_set.add(dt_val)
             except Exception as e:
                 logger.warning("[rum_rollups] Failed to query active hours from client_errors: %s", e)
@@ -153,6 +155,9 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
     if not hours_set:
         logger.info("[rum_rollups] %s: No active RUM data hours found. Skipping.", service_id)
         return
+
+    if any(getattr(h, "tzinfo", None) is not None for h in hours_set):
+        hours_set = {h if getattr(h, "tzinfo", None) is not None else h.replace(tzinfo=UTC) for h in hours_set}
 
     # 3. Format hours as SQL TIMESTAMPTZ list
     hours_list = sorted(list(hours_set))
@@ -456,3 +461,85 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
     )
 
     logger.info("[rum_rollups] %s: RUM aggregates successfully updated for %d hours", service_id, len(hours_list))
+
+
+def backfill_missing_rum_aggregates(
+    con,
+    service_id: str,
+    lookback_days: int = 30,
+) -> list[datetime]:
+    """Detect and heal hours in ``client_vitals`` / ``client_errors`` within
+    ``lookback_days`` that are either absent from ``rum_vitals_aggregates`` or
+    lack a ``total_beacons`` aggregate row.
+
+    Historical hours aggregated before commit ``3fcbcd27`` already have rows in
+    ``rum_vitals_aggregates`` (for ``LCP``/``CLS``/``pageviews``/etc.) and would
+    be skipped by a naive ``NOT EXISTS`` check on ``bucket_start`` alone.
+    Checking specifically for ``value = 'total_beacons'`` ensures those legacy
+    hours are detected and recomputed.
+    """
+    has_vitals = table_exists(con, "client_vitals")
+    has_errors = table_exists(con, "client_errors")
+    if not has_vitals and not has_errors:
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
+    raw_parts: list[str] = []
+    params: list[object] = []
+
+    if has_vitals:
+        raw_parts.append(
+            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
+            "FROM client_vitals WHERE timestamp IS NOT NULL AND timestamp >= ?"
+        )
+        params.append(cutoff)
+    if has_errors:
+        raw_parts.append(
+            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
+            "FROM client_errors WHERE timestamp IS NOT NULL AND timestamp >= ?"
+        )
+        params.append(cutoff)
+
+    raw_union = " UNION ".join(raw_parts)
+    if table_exists(con, "rum_vitals_aggregates"):
+        sql = f"""
+            SELECT DISTINCT r.bucket_start
+            FROM ({raw_union}) r
+            WHERE r.bucket_start IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM rum_vitals_aggregates a
+                  WHERE a.service_id = ?
+                    AND a.bucket_start = r.bucket_start
+                    AND a.value = 'total_beacons'
+              )
+            ORDER BY r.bucket_start ASC
+        """
+        rows = con.execute(sql, [*params, service_id]).fetchall()
+    else:
+        sql = f"""
+            SELECT DISTINCT r.bucket_start
+            FROM ({raw_union}) r
+            WHERE r.bucket_start IS NOT NULL
+            ORDER BY r.bucket_start ASC
+        """
+        rows = con.execute(sql, params).fetchall()
+
+    missing_hours: list[datetime] = []
+    for r in rows:
+        if r and r[0] is not None:
+            dt_val = r[0]
+            if isinstance(dt_val, datetime):
+                dt_val = _normalize_hour_dt(dt_val)
+            missing_hours.append(dt_val)
+
+    if missing_hours:
+        logger.info(
+            "[rum_rollups] %s: Healing %d RUM aggregate hour(s) missing total_beacons (lookback=%dd)",
+            service_id,
+            len(missing_hours),
+            lookback_days,
+        )
+        recompute_rum_aggregates(con, service_id, hours=missing_hours)
+
+    return missing_hours

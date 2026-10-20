@@ -22,7 +22,17 @@ from backend.core.metadata.cron_log import (
     log_cron_run,
     start_cron_run,
 )
+from backend.core.rollups.rum import (
+    backfill_missing_rum_aggregates,
+    recompute_rum_aggregates,
+)
 from backend.utils.date_utils import ensure_utc
+
+__all__ = [
+    "backfill_missing_rum_aggregates",
+    "cleanup_old_rum_logs",
+    "recompute_rum_aggregates",
+]
 from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
