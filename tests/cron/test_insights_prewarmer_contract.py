@@ -83,6 +83,8 @@ def _fake_cfg(
 def stub_source(monkeypatch) -> dict:
     src = _fake_src("svc-prewarm-contract")
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    if hasattr(insights_prewarmer, "record_insights_request"):
+        insights_prewarmer.record_insights_request("svc-prewarm-contract")
     return src
 
 

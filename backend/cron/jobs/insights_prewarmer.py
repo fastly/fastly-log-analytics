@@ -60,6 +60,15 @@ completion regardless of ingest. With interval I = 240 s < TTL = 300 s < 2I,
 at most one tick in a row can be deferred or cut short, so an entry is cold
 for at most 2I - TTL = 180 s (plus the recompute itself, as before) — never
 longer than one extra interval.
+
+Demand-driven gate: prewarming only runs while the Insights page is actively
+being used. ``POST /api/insights`` (and ``/api/insights/cache-collapse-detail``)
+records the per-service timestamp via :func:`record_insights_request`. When no
+request has arrived for ``idle_minutes`` (default 30, configurable via
+``provisioning.cron_insights_prewarmer.idle_minutes`` or
+``INSIGHTS_PREWARM_IDLE_MINUTES``; ``<= 0`` disables the gate), the prewarmer
+skips without acquiring a lease or opening a DuckDB connection. The first visit
+after an idle period computes cold and wakes the prewarmer for the next 30m.
 """
 
 from __future__ import annotations
@@ -83,9 +92,71 @@ _MAX_ANALYST_SHAPES = 8
 
 _INGEST_TASKS = ("log_discovery", "rum_sync")
 
+DEFAULT_PREWARM_IDLE_MINUTES = 30.0
+
 # service_id -> time.monotonic() of the last tick that warmed every shape.
 _last_full_warm: dict[str, float] = {}
 CacheRegistry.register("insights_prewarmer._last_full_warm", _last_full_warm)
+
+# service_id -> time.monotonic() of the last /api/insights request.
+_last_insights_request: dict[str, float] = {}
+CacheRegistry.register("insights_prewarmer._last_insights_request", _last_insights_request)
+
+
+def record_insights_request(service_id: str | None) -> None:
+    """Record that ``/api/insights`` was requested for ``service_id`` so the
+    demand-driven prewarmer keeps the cache warm for the configured idle window."""
+    if service_id:
+        _last_insights_request[service_id] = time.monotonic()
+
+
+def _prewarm_idle_minutes(service_id: str, src: dict | None = None) -> float:
+    """Return the idle timeout in minutes before prewarming pauses for ``service_id``.
+
+    Precedence:
+    1. ``provisioning.cron_insights_prewarmer.idle_minutes`` on ``src`` (or ``load_config(service_id)``)
+    2. ``INSIGHTS_PREWARM_IDLE_MINUTES`` environment variable
+    3. ``DEFAULT_PREWARM_IDLE_MINUTES`` (30.0)
+
+    A value ``<= 0`` disables the idle gate (always warm).
+    """
+    prov = (src or {}).get("provisioning") if isinstance(src, dict) else None
+    if not isinstance(prov, dict):
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id) or {}
+        prov = cfg.get("provisioning") if isinstance(cfg.get("provisioning"), dict) else {}
+    cron_ip = prov.get("cron_insights_prewarmer") if isinstance(prov, dict) else None
+    if isinstance(cron_ip, dict) and cron_ip.get("idle_minutes") is not None:
+        try:
+            return float(cron_ip["idle_minutes"])
+        except (TypeError, ValueError):
+            pass
+
+    env_val = os.environ.get("INSIGHTS_PREWARM_IDLE_MINUTES", "").strip()
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+
+    return DEFAULT_PREWARM_IDLE_MINUTES
+
+
+def is_insights_active(service_id: str, src: dict | None = None, *, idle_minutes: float | None = None) -> bool:
+    """Return True if ``/api/insights`` was requested for ``service_id`` within
+    ``idle_minutes`` (or if ``idle_minutes <= 0``)."""
+    limit_mins = _prewarm_idle_minutes(service_id, src) if idle_minutes is None else float(idle_minutes)
+    if limit_mins <= 0:
+        return True
+    last_req = _last_insights_request.get(service_id)
+    if last_req is None and isinstance(src, dict):
+        alt_id = src.get("service_id") or src.get("name")
+        if isinstance(alt_id, str) and alt_id:
+            last_req = _last_insights_request.get(alt_id)
+    if last_req is None:
+        return False
+    return (time.monotonic() - last_req) < (limit_mins * 60.0)
 
 
 def _running_ingest(service_id: str) -> str | None:
@@ -176,6 +247,15 @@ def _run_insights_prewarmer(service_id: str) -> None:
         return
 
     if should_defer_cron("insights_prewarmer", service_id):
+        return
+
+    idle_mins = _prewarm_idle_minutes(service_id, src)
+    if not is_insights_active(service_id, src, idle_minutes=idle_mins):
+        logger.info(
+            "[insights-prewarmer] %s: skipping — idle (no /api/insights requests in the last %gm)",
+            service_id,
+            idle_mins,
+        )
         return
 
     must_run = _cache_cold(service_id)

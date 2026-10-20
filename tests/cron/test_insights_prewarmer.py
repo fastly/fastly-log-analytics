@@ -28,12 +28,15 @@ from backend.cron.jobs import insights_prewarmer
 
 @pytest.fixture
 def stub_source(monkeypatch) -> dict:
-    """Make ``get_source_for_service`` return a stable dict."""
+    """Make ``get_source_for_service`` return a stable dict and seed an active
+    insights request so existing active-path tests run through the prewarm body."""
     src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}
     monkeypatch.setattr(
         "backend.core.duckdb.get_source_for_service",
         lambda sid: src,
     )
+    if hasattr(insights_prewarmer, "record_insights_request"):
+        insights_prewarmer.record_insights_request("svc-1")
     return src
 
 
@@ -475,6 +478,8 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     """Prewarmer initializes progress, emits completion event, and finalizes duration in finally block."""
     src = {"name": "svc-1", "service_id": "svc-1"}
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    if hasattr(insights_prewarmer, "record_insights_request"):
+        insights_prewarmer.record_insights_request("svc-1")
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: 99)
     monkeypatch.setattr("backend.config.get_status", lambda name: {})
@@ -702,3 +707,158 @@ def test_failed_warm_does_not_record_timestamp(monkeypatch, stub_source, stub_cr
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     assert "svc-1" not in insights_prewarmer._last_full_warm
+
+
+# ── demand-driven prewarm: idle skip, active warm, resume, analyst shapes ─────
+
+
+def test_demand_driven_skips_when_never_requested(monkeypatch, stub_source, stub_cron_run, caplog):
+    """When no /api/insights request has ever been recorded for the service,
+    the prewarmer skips without acquiring a lease, opening a DuckDB connection,
+    or calling get_insights."""
+    insights_prewarmer._last_insights_request.clear()
+    get_insights_mock = MagicMock()
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    with caplog.at_level(logging.INFO, logger="backend.scheduler"):
+        insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    get_insights_mock.assert_not_called()
+    stub_cron_run["start"].assert_not_called()
+    stub_cron_run["log"].assert_not_called()
+    stub_cron_run["get_conn"].assert_not_called()
+    assert any("idle" in r.message.lower() or "no /api/insights" in r.message.lower() for r in caplog.records)
+
+
+def test_demand_driven_skips_when_idle_past_default_30_minutes(monkeypatch, stub_source, stub_cron_run, caplog):
+    """When the last /api/insights request was >30m ago (default idle_minutes=30),
+    the prewarmer skips even when the cache is cold."""
+    import time
+
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (31 * 60)
+    insights_prewarmer._last_full_warm.clear()  # cache is cold
+    get_insights_mock = MagicMock()
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    with caplog.at_level(logging.INFO, logger="backend.scheduler"):
+        insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    get_insights_mock.assert_not_called()
+    stub_cron_run["start"].assert_not_called()
+    stub_cron_run["get_conn"].assert_not_called()
+
+
+def test_demand_driven_warms_when_active_within_window(monkeypatch, stub_source, stub_cron_run):
+    """When a request occurred within the idle window (e.g. 10m ago < 30m),
+    the prewarmer runs and warms the cache."""
+    import time
+
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (10 * 60)
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    get_insights_mock.assert_called_once()
+    stub_cron_run["log"].assert_called_once()
+
+
+def test_demand_driven_resumes_after_new_request_and_warms_analyst_shapes(monkeypatch, stub_source, stub_cron_run):
+    """After skipping while idle, a new /api/insights request (via record_insights_request)
+    resumes prewarming on the next tick for both admin and active analyst shapes."""
+    import time
+
+    stub_cron_run["mgr"].is_sharing_active.return_value = True
+    stub_cron_run["invites"].return_value = [
+        {
+            "revoked": 0,
+            "expires_at": None,
+            "service_ids": ["svc-1"],
+            "pii_policy": {"mask_ips": True},
+            "query_start_time": None,
+            "query_end_time": None,
+            "query_window_hours": 24,
+        },
+    ]
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    # Tick 1: idle (45m ago) -> skips completely
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (45 * 60)
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    get_insights_mock.assert_not_called()
+
+    # User (admin or analyst) visits /insights -> records request
+    insights_prewarmer.record_insights_request("svc-1")
+
+    # Tick 2: active -> warms admin + 1 analyst shape
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    assert get_insights_mock.call_count == 2
+    analyst_calls = [c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None]
+    assert len(analyst_calls) == 1
+    assert analyst_calls[0].kwargs["clamp_cache_key"] == "||24"
+    assert analyst_calls[0].kwargs["mask_ips"] is True
+
+
+def test_demand_driven_idle_minutes_setting_and_env(monkeypatch, stub_source, stub_cron_run):
+    """idle_minutes can be configured per-service via provisioning.cron_insights_prewarmer.idle_minutes
+    or globally via INSIGHTS_PREWARM_IDLE_MINUTES; <= 0 disables idle skipping."""
+    import time
+
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    # 1) Service config sets idle_minutes=10; request 12m ago -> skips
+    stub_source["provisioning"] = {"cron_insights_prewarmer": {"idle_minutes": 10}}
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (12 * 60)
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    get_insights_mock.assert_not_called()
+
+    # Request 8m ago (< 10m) -> runs
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (8 * 60)
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    assert get_insights_mock.call_count == 1
+
+    # 2) Env var INSIGHTS_PREWARM_IDLE_MINUTES=5 when service config omits idle_minutes
+    stub_source["provisioning"] = {}
+    monkeypatch.setenv("INSIGHTS_PREWARM_IDLE_MINUTES", "5")
+    insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (6 * 60)
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    assert get_insights_mock.call_count == 1  # skipped
+
+    # 3) idle_minutes=0 disables idle skipping even when never requested
+    stub_source["provisioning"] = {"cron_insights_prewarmer": {"idle_minutes": 0}}
+    insights_prewarmer._last_insights_request.clear()
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    assert get_insights_mock.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_insights_router_records_request_timestamp(monkeypatch):
+    """POST /api/insights records the service's request timestamp so the
+    demand-driven prewarmer wakes up for that service."""
+    from backend.models.insights import InsightsRequest
+    from backend.routers.insights import insights_endpoint
+
+    insights_prewarmer._last_insights_request.clear()
+    ctx = MagicMock()
+    ctx.service_id = "svc-router-active"
+    ctx.source = {"name": "svc-router-active", "service_id": "svc-router-active"}
+    ctx.analyst_session = None
+    ctx.high_scale = None
+
+    async def _noop_prewarm():
+        return None
+
+    ctx.prewarm_con = _noop_prewarm
+    ctx.con = MagicMock()
+
+    monkeypatch.setattr(
+        "backend.routers.insights.execute_with_stale_view_retry",
+        lambda con, src, fn: {"status": "success", "window_hours": 1.0, "baseline_hours": 168.0, "results": []},
+    )
+
+    req = InsightsRequest(window_size_hrs=1.0, baseline_hours=168.0)
+    await insights_endpoint(req=req, ctx=ctx)
+
+    assert insights_prewarmer.is_insights_active("svc-router-active") is True

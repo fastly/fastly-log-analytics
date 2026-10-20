@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
+from backend.cron.jobs.insights_prewarmer import record_insights_request
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.insights import (
     CacheCollapseDetailRequest,
@@ -78,6 +79,7 @@ async def insights_endpoint(
     req: InsightsRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
@@ -115,6 +117,7 @@ def cache_collapse_detail_endpoint(
     req: CacheCollapseDetailRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
 
     high_scale_service = ctx.high_scale
