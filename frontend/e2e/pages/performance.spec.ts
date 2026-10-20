@@ -49,7 +49,7 @@ test.describe('Performance Page Contract (/performance)', () => {
     await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
 
     // Verify pre-allocated cards exist with content-visibility / contain-intrinsic-size
-    const waterfallCard = page.locator('text=End-to-End Latency Waterfall (Average)')
+    const waterfallCard = page.getByText('End-to-End Latency Waterfall (Average)').locator('visible=true')
     await expect(waterfallCard).toBeVisible({ timeout: 15_000 })
 
     // Verify intrinsic size reservation classes
