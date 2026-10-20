@@ -50,10 +50,10 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     ).toBeVisible();
     await expect(page.getByTestId('admin-clickhouse-root')).toBeVisible();
 
-    const footer = page.locator('[data-testid="server-footer"]');
+    const footer = page.locator('footer');
     await expect(footer).toBeVisible();
-    const footerText = await footer.textContent();
-    expect(footerText).toMatch(/Standard|High-Scale|Local|GCE|Kubernetes/i);
+    const footerText = (await footer.textContent()) ?? '';
+    expect(footerText).toMatch(/Admin View.*(standard|high-scale)/i);
   });
 
   test('2. Pre-allocated zero-CLS reservation containers and warm-load budget (CLS <= 0.05, FCP < 1200ms)', async ({
