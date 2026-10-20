@@ -263,14 +263,23 @@ def test_repository_network_asn_health_and_low_and_slow_wire_identical(in_memory
     assert _assert_cards_wire_identical(cards) == 2
 
 
-def test_high_scale_5xx_card_wire_identical():
+def test_high_scale_cards_are_the_standard_cards_and_wire_identical():
     class _Client:
         def execute(self, query, params):
-            return [{"url": "/a", "errors": 7}, {"url": "/b", "errors": 0}]
+            if "insight:history" in query:
+                return [{"earliest": params["window_end"].replace(year=2020), "window_total": 9}]
+            if "insight:fields" in query:
+                return [{"fields": ["status", "elapsed", "cache"]}]
+            if "insight:error_spikes" in query:
+                return [{"url": "/a", "w_rate": 0.7, "b_rate": 0.0, "w_errors": 7, "w_total": 10, "b_total": 99}]
+            return []
 
     service = type("Svc", (), {"client": _Client(), "service_id": "svc"})()
-    res = hs_insights_endpoint(service, None, None, None)  # type: ignore[arg-type]
-    dumped = json.loads(res.model_dump_json(by_alias=True))["insights"][0]
-    assert dumped["id"] == "high_scale_5xx"
-    assert dumped["items"][0]["meta"] == {}
-    assert dumped["items"][0]["label"] == "/a"
+    req = type("Req", (), {"window_size_hrs": 24.0, "baseline_hours": 168.0})()
+    res = hs_insights_endpoint(service, req, None, None)  # type: ignore[arg-type]
+    cards = {card["id"]: card for card in json.loads(res.model_dump_json(by_alias=True))["insights"]}
+    assert "high_scale_5xx" not in cards
+    card = cards["error_spikes"]
+    assert card["items"][0]["label"] == "/a"
+    assert card["items"][0]["meta"] == {"requests": 10, "errors": 7, "filters": {"url": "/a"}}
+    assert card["severity"] == "critical" and card["category"] == "origin"

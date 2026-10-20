@@ -87,7 +87,7 @@ async def insights_endpoint(
     if high_scale_service is not None:
         from backend.high_scale.insights import insights_endpoint as hs_insights
 
-        return await asyncio.to_thread(hs_insights, high_scale_service, req, clamp_start, clamp_end)
+        return await asyncio.to_thread(hs_insights, high_scale_service, req, clamp_start, clamp_end, mask_ips)
 
     await ctx.prewarm_con()
     force_refresh = req.force_refresh if ctx.analyst_session is None else False
@@ -124,7 +124,7 @@ def cache_collapse_detail_endpoint(
     if high_scale_service is not None:
         from backend.high_scale.insights import cache_collapse_detail_endpoint as hs_detail
 
-        return hs_detail(high_scale_service, req, clamp_start, clamp_end)
+        return hs_detail(high_scale_service, req, clamp_start, clamp_end, mask_ips)
 
     def _run_detail(con):
         return repo.get_cache_collapse_detail(
