@@ -72,7 +72,7 @@ _RUM_SETTING_KEYS = ("capture_vitals", "capture_performance", "capture_errors", 
 # write connection + DuckLake attach, competing for the process-wide attach lock
 # and stalling the live view under load. Mirrors the request-log "recent data =
 # direct scan, no write-path in the read path" principle. Override via env.
-_RUM_RAW_WINDOW_MAX_S = int(os.getenv("RUM_RAW_WINDOW_MAX_S", str(2 * 60 * 60)))
+_RUM_RAW_WINDOW_MAX_S = int(os.getenv("RUM_RAW_WINDOW_MAX_S", str(6 * 60 * 60)))
 
 router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR_RESPONSES)
 

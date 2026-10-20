@@ -236,157 +236,214 @@ def _fetch_rum_analytics_once(
             use_rollup = True
 
     if use_rollup:
-        # Run optimized rollup-based query
-        logger.info("[rum_rollups] %s: Querying from precomputed RUM aggregates...", service_id)
+        vitals_agg_table = "rum_vitals_aggregates"
+        error_agg_table = "rum_error_aggregates"
+        try:
+            with track_query(
+                con,
+                sql_rum.RUM_ROLLUP_MAX_BUCKET,
+                [service_id, service_id],
+                "rum_rollup_max_bucket",
+            ) as cur_max:
+                row_max = cur_max.fetchone()
+                rollup_max_bucket = row_max[0] if row_max else None
 
-        # Check if we have any data
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_ANY_DATA,
-            [service_id, start_time, end_time],
-            "rum_rollup_any_data",
-        ) as cur_any:
-            if cur_any.fetchone()[0] == 0:
-                # Double check if any raw data exists at all
-                if not table_exists(con, "client_vitals") or not table_exists(con, "client_errors"):
-                    return {"no_data": True}
+            if rollup_max_bucket is None:
+                use_rollup = False
+            elif table_exists(con, "client_vitals") and table_exists(con, "client_errors"):
                 with track_query(
                     con,
-                    sql_rum.RUM_ANY_DATA,
+                    sql_rum.RUM_TAIL_VITALS_CREATE,
+                    [rollup_max_bucket, start_time, end_time],
+                    "rum_tail_vitals_create",
+                ):
+                    pass
+                with track_query(
+                    con,
+                    sql_rum.RUM_TAIL_ERRORS_CREATE,
+                    [rollup_max_bucket, start_time, end_time],
+                    "rum_tail_errors_create",
+                ):
+                    pass
+                with track_query(
+                    con,
+                    sql_rum.RUM_TAIL_HAS_ROWS,
                     [],
-                    "rum_any_data",
-                ) as cur_raw_any:
-                    if not cur_raw_any.fetchone()[0]:
-                        return {"no_data": True}
+                    "rum_tail_has_rows",
+                ) as cur_tail:
+                    tail_rows = (cur_tail.fetchone() or (0,))[0] or 0
 
-                # Rollups hold no rows for this window yet (the rum_commit
-                # cron hasn't built them) but raw beacons exist — serve the
-                # raw path directly instead of recomputing in-request.
-                use_rollup = False
+                if tail_rows > 0:
+                    with track_query(
+                        con,
+                        sql_rum.RUM_EFF_VITALS_AGG_CREATE.format(distinct_id=sql_rum.DISTINCT_ID),
+                        [service_id, start_time, end_time] + [service_id] * 10,
+                        "rum_eff_vitals_agg_create",
+                    ):
+                        pass
+                    with track_query(
+                        con,
+                        sql_rum.RUM_EFF_ERROR_AGG_CREATE.format(distinct_id=sql_rum.DISTINCT_ID),
+                        [service_id, start_time, end_time] + [service_id] * 3,
+                        "rum_eff_error_agg_create",
+                    ):
+                        pass
+                    vitals_agg_table = "t_eff_vitals_agg"
+                    error_agg_table = "t_eff_error_agg"
 
-    if use_rollup:
-        # 1. Pageviews, interactions, errors, total beacons
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_COUNTS_VITALS,
-            [service_id, start_time, end_time],
-            "rum_rollup_counts_vitals",
-        ) as cur_v:
-            pageviews, interactions = cur_v.fetchone()
-            pageviews = pageviews or 0
-            interactions = interactions or 0
+            if use_rollup:
+                logger.info("[rum_rollups] %s: Querying from precomputed RUM aggregates...", service_id)
 
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_COUNTS_ERRORS,
-            [service_id, start_time, end_time],
-            "rum_rollup_counts_errors",
-        ) as cur_e:
-            errors_count = cur_e.fetchone()[0] or 0
+                # Check if we have any data
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_ANY_DATA.format(
+                        vitals_agg_table=vitals_agg_table, error_agg_table=error_agg_table
+                    ),
+                    [service_id, start_time, end_time, service_id, start_time, end_time],
+                    "rum_rollup_any_data",
+                ) as cur_any:
+                    if cur_any.fetchone()[0] == 0:
+                        if not table_exists(con, "client_vitals") or not table_exists(con, "client_errors"):
+                            return {"no_data": True}
+                        with track_query(
+                            con,
+                            sql_rum.RUM_ANY_DATA,
+                            [],
+                            "rum_any_data",
+                        ) as cur_raw_any:
+                            if not cur_raw_any.fetchone()[0]:
+                                return {"no_data": True}
+                        use_rollup = False
 
-        # NOT pageviews + interactions + errors_count: those are
-        # separate distinct-id partitions and a single physical
-        # beacon event can appear in more than one (see the writer's
-        # 'total_beacons' comment in backend/core/rollups/rum.py).
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_COUNTS_TOTAL_BEACONS,
-            [service_id, start_time, end_time],
-            "rum_rollup_counts_total_beacons",
-        ) as cur_t:
-            total_beacons = cur_t.fetchone()[0] or 0
+            if use_rollup:
+                # 1. Pageviews, interactions, errors, total beacons
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_COUNTS_VITALS.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_vitals",
+                ) as cur_v:
+                    pageviews, interactions = cur_v.fetchone()
+                    pageviews = pageviews or 0
+                    interactions = interactions or 0
 
-        # 2. Vitals summary
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_VITALS_SUMMARY,
-            [service_id, start_time, end_time],
-            "rum_rollup_vitals_summary",
-        ) as cur_vitals:
-            vitals_rows = cur_vitals.fetchall()
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_COUNTS_ERRORS.format(error_agg_table=error_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_errors",
+                ) as cur_e:
+                    errors_count = cur_e.fetchone()[0] or 0
 
-        # 3. Environments
-        browsers = {}
-        os_dict = {}
-        devices = {}
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_COUNTS_TOTAL_BEACONS.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_total_beacons",
+                ) as cur_t:
+                    total_beacons = cur_t.fetchone()[0] or 0
 
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_BROWSERS,
-            [service_id, start_time, end_time],
-            "rum_rollup_browsers",
-        ) as cur_b:
-            for val, count in cur_b.fetchall():
-                browsers[val] = count
+                # 2. Vitals summary
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_VITALS_SUMMARY.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_vitals_summary",
+                ) as cur_vitals:
+                    vitals_rows = cur_vitals.fetchall()
 
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_OS,
-            [service_id, start_time, end_time],
-            "rum_rollup_os",
-        ) as cur_o:
-            for val, count in cur_o.fetchall():
-                os_dict[val] = count
+                # 3. Environments
+                browsers = {}
+                os_dict = {}
+                devices = {}
 
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_DEVICES,
-            [service_id, start_time, end_time],
-            "rum_rollup_devices",
-        ) as cur_d:
-            for val, count in cur_d.fetchall():
-                devices[val] = count
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_BROWSERS.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_browsers",
+                ) as cur_b:
+                    for val, count in cur_b.fetchall():
+                        browsers[val] = count
 
-        # 4. Worst Pages
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_WORST_PAGES,
-            [service_id, start_time, end_time, service_id, start_time, end_time],
-            "rum_rollup_worst_pages",
-        ) as cur_pages:
-            worst_pages_rows = cur_pages.fetchall()
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_OS.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_os",
+                ) as cur_o:
+                    for val, count in cur_o.fetchall():
+                        os_dict[val] = count
 
-        # 5. Top Exceptions
-        errors_rows = []
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_TOP_EXCEPTIONS,
-            [service_id, start_time, end_time],
-            "rum_rollup_top_exceptions",
-        ) as cur_errors:
-            for row in cur_errors.fetchall():
-                serialized, count = row
-                parts = serialized.split("|")
-                if len(parts) >= 4:
-                    msg, file, line, col = parts[0], parts[1], int(parts[2] or 0), int(parts[3] or 0)
-                    errors_rows.append((msg, file, line, col, count))
-                else:
-                    errors_rows.append((serialized, "Unknown", 0, 0, count))
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_DEVICES.format(vitals_agg_table=vitals_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_devices",
+                ) as cur_d:
+                    for val, count in cur_d.fetchall():
+                        devices[val] = count
 
-        # 6. Trends Rows
-        with track_query(
-            con,
-            sql_rum.RUM_ROLLUP_TRENDS,
-            [service_id, start_time, end_time, service_id, start_time, end_time],
-            "rum_rollup_trends",
-        ) as cur_trends:
-            trends_rows = cur_trends.fetchall()
+                # 4. Worst Pages
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_WORST_PAGES.format(
+                        vitals_agg_table=vitals_agg_table, error_agg_table=error_agg_table
+                    ),
+                    [service_id, start_time, end_time, service_id, start_time, end_time],
+                    "rum_rollup_worst_pages",
+                ) as cur_pages:
+                    worst_pages_rows = cur_pages.fetchall()
 
-        return {
-            "no_data": False,
-            "total_beacons": total_beacons,
-            "pageviews": pageviews,
-            "interactions": interactions,
-            "errors_count": errors_count,
-            "vitals_rows": vitals_rows,
-            "browsers": browsers,
-            "os": os_dict,
-            "devices": devices,
-            "worst_pages_rows": worst_pages_rows,
-            "errors_rows": errors_rows,
-            "trends_rows": trends_rows,
-            "_approx": True,
-        }
+                # 5. Top Exceptions
+                errors_rows = []
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_TOP_EXCEPTIONS.format(error_agg_table=error_agg_table),
+                    [service_id, start_time, end_time],
+                    "rum_rollup_top_exceptions",
+                ) as cur_errors:
+                    for row in cur_errors.fetchall():
+                        serialized, count = row
+                        parts = serialized.split("|")
+                        if len(parts) >= 4:
+                            msg, file, line, col = parts[0], parts[1], int(parts[2] or 0), int(parts[3] or 0)
+                            errors_rows.append((msg, file, line, col, count))
+                        else:
+                            errors_rows.append((serialized, "Unknown", 0, 0, count))
+
+                # 6. Trends Rows
+                with track_query(
+                    con,
+                    sql_rum.RUM_ROLLUP_TRENDS.format(
+                        vitals_agg_table=vitals_agg_table, error_agg_table=error_agg_table
+                    ),
+                    [service_id, start_time, end_time, service_id, start_time, end_time],
+                    "rum_rollup_trends",
+                ) as cur_trends:
+                    trends_rows = cur_trends.fetchall()
+
+                return {
+                    "no_data": False,
+                    "total_beacons": total_beacons,
+                    "pageviews": pageviews,
+                    "interactions": interactions,
+                    "errors_count": errors_count,
+                    "vitals_rows": vitals_rows,
+                    "browsers": browsers,
+                    "os": os_dict,
+                    "devices": devices,
+                    "worst_pages_rows": worst_pages_rows,
+                    "errors_rows": errors_rows,
+                    "trends_rows": trends_rows,
+                    "_approx": True,
+                }
+        finally:
+            con.execute("DROP TABLE IF EXISTS t_eff_vitals_agg")
+            con.execute("DROP TABLE IF EXISTS t_eff_error_agg")
+            con.execute("DROP TABLE IF EXISTS t_tail_vitals")
+            con.execute("DROP TABLE IF EXISTS t_tail_errors")
 
     try:
         # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans

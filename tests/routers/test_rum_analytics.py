@@ -1078,3 +1078,90 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         assert last_dt is not None
     finally:
         con.close()
+
+
+def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(setup_temp_rum_db) -> None:
+    """A beacon that landed 5 seconds ago must appear immediately in both 1h
+    (raw path) and 24h / 30d (rollup path) RUM analytics queries without waiting
+    for recompute_rum_aggregates, while neither double-counting beacons already
+    rolled up in the active hour nor double-counting duplicate rows with the
+    same composite natural key."""
+    from backend.core.rollups.rum import recompute_rum_aggregates
+
+    service_id = "test_service_long_window_live_tail"
+    now = datetime.datetime.now(datetime.UTC).replace(minute=30, second=0, microsecond=0)
+    three_hours_ago = now - datetime.timedelta(hours=3)
+    ten_mins_ago = now - datetime.timedelta(minutes=10)
+    five_secs_ago = now - datetime.timedelta(seconds=5)
+
+    # 1. Seed 10 beacons 3 hours ago + 2 beacons 10 minutes ago (same active hour as `now`)
+    initial_beacons = []
+    for i in range(10):
+        initial_beacons.append(
+            {
+                "pathname": "/historical",
+                "load_time": 1.2,
+                "lcp": 1.5,
+                "cls": 0.01,
+                "received_at": (three_hours_ago + datetime.timedelta(minutes=i)).isoformat(),
+                "req_id": f"hist_{i}",
+                "cid": f"cid_hist_{i}",
+            }
+        )
+    for i in range(2):
+        initial_beacons.append(
+            {
+                "pathname": "/active-early",
+                "load_time": 1.4,
+                "lcp": 1.8,
+                "cls": 0.02,
+                "received_at": (ten_mins_ago + datetime.timedelta(minutes=i)).isoformat(),
+                "req_id": f"early_{i}",
+                "cid": f"cid_early_{i}",
+            }
+        )
+    _insert_beacons(setup_temp_rum_db, initial_beacons)
+
+    # 2. Run rollup cron once so both `three_hours_ago` and `now`'s hour exist in rum_*_aggregates
+    con = duckdb.connect(str(setup_temp_rum_db), read_only=False)
+    try:
+        recompute_rum_aggregates(con, service_id)
+    finally:
+        con.close()
+
+    # 3. Land a new beacon 5 seconds ago (plus an exact natural-key duplicate
+    # simulating uncommitted buffer + committed table overlap) WITHOUT re-running rollups.
+    live_beacon = {
+        "pathname": "/live-5s-ago",
+        "load_time": 2.5,
+        "lcp": 2.9,
+        "cls": 0.04,
+        "received_at": five_secs_ago.isoformat(),
+        "req_id": "live_5s_req",
+        "cid": "cid_live_5s",
+        "exceptions": [{"value": "Error: live_5s_boom", "filename": "live.js", "lineno": 42, "colno": 7}],
+    }
+    _insert_beacons(setup_temp_rum_db, [live_beacon, live_beacon])
+
+    # 4. Query 1h window (raw scan)
+    start_1h = iso_z(now - datetime.timedelta(hours=1))
+    end_iso = iso_z(now)
+    resp_1h = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start_1h}&end_time={end_iso}")
+    assert resp_1h.status_code == 200
+    data_1h = resp_1h.json()
+    assert data_1h["beacon_count"] == 3
+    assert data_1h["error_count"] == 1
+    assert any(p["path"] == "/live-5s-ago" for p in data_1h["worst_pages"])
+    assert any(e["message"] == "Error: live_5s_boom" and e["count"] == 1 for e in data_1h["errors"])
+
+    # 5. Query 24h and 30d windows (rollup + active-hour tail merge)
+    for hours in (24, 24 * 30):
+        start_long = iso_z(now - datetime.timedelta(hours=hours))
+        resp_long = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start_long}&end_time={end_iso}")
+        assert resp_long.status_code == 200
+        data_long = resp_long.json()
+        # 10 historical + 2 early-active + 1 deduplicated live-5s-ago = 13 total beacons
+        assert data_long["beacon_count"] == 13
+        assert data_long["error_count"] == 1
+        assert any(p["path"] == "/live-5s-ago" for p in data_long["worst_pages"])
+        assert any(e["message"] == "Error: live_5s_boom" and e["count"] == 1 for e in data_long["errors"])
