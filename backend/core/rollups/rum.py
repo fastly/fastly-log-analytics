@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
+from backend.utils.date_utils import ensure_utc
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,7 +159,7 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
         return
 
     if any(getattr(h, "tzinfo", None) is not None for h in hours_set):
-        hours_set = {h if getattr(h, "tzinfo", None) is not None else h.replace(tzinfo=UTC) for h in hours_set}
+        hours_set = {ensure_utc(h) for h in hours_set}
 
     # 3. Format hours as SQL TIMESTAMPTZ list
     hours_list = sorted(list(hours_set))
