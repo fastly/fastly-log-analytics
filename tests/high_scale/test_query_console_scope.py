@@ -170,6 +170,11 @@ def test_the_word_limit_in_a_literal_does_not_raise_the_users_row_cap(decoy: str
         "SELECT * FROM default.logs",
         "SELECT * FROM fastly_log_analytics.request_facts",
         "SELECT * FROM logs WHERE country = 'US\u200b'  AND x\u00a0= 1",
+        # A quote inside a double-quoted identifier must not open a fake string literal that hides code.
+        'SELECT 1 AS "a\'" /* /* */ FROM system.tables\n-- */ , 2 AS "b\'" FROM logs',
+        "SELECT 1 AS \"a'\" /* /* */ FROM remote('h', x.y)\n-- */ , 2 AS \"b'\" FROM logs",
+        'SELECT "url" FROM logs',
+        'SELECT 1 AS "a\'", 2 AS "b\'" FROM logs',
     ],
 )
 def test_syntax_the_two_parsers_could_read_differently_is_rejected_before_validation(sql: str) -> None:
@@ -190,6 +195,7 @@ def test_syntax_the_two_parsers_could_read_differently_is_rejected_before_valida
         "SELECT 'a -- b /* c */ # d' AS s FROM logs",
         "SELECT 'it''s' AS s FROM logs",
         "SELECT logs.url FROM logs",
+        "SELECT 'a\"b' AS s, 'c\"d' AS t FROM logs",
     ],
 )
 def test_ordinary_sql_still_runs(sql: str) -> None:

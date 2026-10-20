@@ -128,6 +128,7 @@ def _code_only(sql: str) -> str:
 
 
 _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+_QUOTE_SCAN = re.compile(r"""'(?:[^']|'')*'|\"""")
 _COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
 _RESULT_CLAUSES = re.compile(r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b", re.IGNORECASE)
 
@@ -144,6 +145,11 @@ def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
     """
     if "\\" in sql:
         raise PermissionError("backslashes are not allowed in console queries")
+    # Walk left to right so a quote inside a double-quoted identifier can never be paired with a later one
+    # (`"a'"` ... `"b'"` would otherwise read as a string literal and hide whatever lies between).
+    for token in _QUOTE_SCAN.finditer(sql):
+        if token.group(0) == '"':
+            raise PermissionError("double-quoted identifiers are not allowed in console queries")
     code = _STRING_LITERAL.sub(" ", sql)
     if "'" in code:
         raise PermissionError("unterminated string literal")
