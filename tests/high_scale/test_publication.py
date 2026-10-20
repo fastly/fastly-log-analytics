@@ -386,3 +386,89 @@ def test_cmcd_rows_persist_country_and_asn_after_the_cmcd_map() -> None:
     assert len(first) == len(_DOMAIN_COLUMNS["cmcd"])
     assert first[-2:] == ("US", 7922)
     assert second[-2:] == ("", None)
+
+
+def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
+    base = {
+        "event_id": f"{domain}-1",
+        "timestamp": "2026-09-11T20:00:00Z",
+        "source_object_key": "raw/rum/one.gz",
+        "source_object_version": "v1",
+        "line_ordinal": 0,
+        "transform_version": "normalize.v1",
+    }
+    return HighScaleBatch(f"batch-{domain}", "svc", domain, "4", ({**base, **row},))
+
+
+def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = _rum_batch(
+        "rum_vitals",
+        {
+            "metric_name": "LCP",
+            "metric_value": 1.5,
+            "browser": "Firefox",
+            "os": "Linux",
+            "device": "Desktop",
+            "geo_country_code": "DE",
+            "city": "Berlin",
+            "region": "BE",
+            "server_pop": "FRA",
+            "tls": "1.3",
+            "ttfb": "0.04",
+        },
+    )
+
+    (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    columns = _DOMAIN_COLUMNS["rum_vitals"]
+    assert columns[-9:] == ("country", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
+    assert len(row) == len(columns)
+    assert row[-9:] == ("DE", "Firefox", "Linux", "Desktop", "Berlin", "BE", "FRA", "1.3", 0.04)
+
+
+def test_rum_error_rows_persist_error_position_and_environment() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = _rum_batch(
+        "rum_errors",
+        {
+            "error_message": "boom",
+            "error_file": "app.js",
+            "rum_error_line": "12",
+            "rum_error_col": "34",
+            "browser": "Chrome",
+            "country": "US",
+        },
+    )
+
+    (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    columns = _DOMAIN_COLUMNS["rum_errors"]
+    assert columns[-11:] == (
+        "country",
+        "error_line",
+        "error_col",
+        "browser",
+        "os",
+        "device",
+        "city",
+        "region",
+        "pop",
+        "tls",
+        "ttfb",
+    )
+    assert len(row) == len(columns)
+    assert row[-11:] == ("US", 12, 34, "Chrome", "", "", "", "", "", "", None)
+
+
+def test_rum_rows_without_environment_keep_empty_columns_not_defaults() -> None:
+    from backend.high_scale.publication import _rows_for_domain
+
+    (row,) = _rows_for_domain(
+        _rum_batch("rum_vitals", {"metric_name": "CLS", "metric_value": 0.1}),
+        "00000000-0000-0000-0000-000000000001",
+    )
+
+    assert row[-9:] == ("", "", "", "", "", "", "", "", None)

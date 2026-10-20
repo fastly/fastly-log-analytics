@@ -1,10 +1,70 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.high_scale._projection_utils import range_value
+from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
+from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+from backend.utils.date_utils import safe_iso
+
+# Columns present on BOTH rum fact tables; a filter on anything else cannot apply to every beacon kind.
+_FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
+_BEACON_IDENTITY = """
+        coalesce(nullIf(toString(request_event_id), ''),
+                 concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))
+    """
+
+
+def parse_rum_filters(raw: str | None) -> dict[str, Any]:
+    """Decode the ``filters`` query parameter (a JSON object of ``{column: {mode, values}}``)."""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("filters must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("filters must be a JSON object")
+    return payload
+
+
+def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    unsupported: list[str] = []
+    for i, (raw_key, spec) in enumerate((filters or {}).items()):
+        values = [
+            value
+            for value in (filter_spec_attr(spec, "values") or [])
+            if value is not None and not (isinstance(value, str) and value.strip() == "")
+        ]
+        if not values:
+            continue
+        column = normalize_filter_key(raw_key)
+        if column not in _FILTER_COLUMNS:
+            unsupported.append(raw_key)
+            continue
+        names: list[str] = []
+        for j, value in enumerate(values):
+            name = f"flt_{i}_{j}"
+            params[name] = str(value)
+            names.append(f"{{{name}:String}}")
+        operator = "NOT IN" if str(filter_spec_attr(spec, "mode") or "include") == "exclude" else "IN"
+        clauses.append(f"{column} {operator} ({', '.join(names)})")
+    if unsupported:
+        raise ValueError(f"high-scale RUM cannot filter on: {', '.join(sorted(unsupported))}")
+    return clauses, params
+
+
+def _iso(value: Any) -> str:
+    if isinstance(value, datetime):
+        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        return stamp.isoformat().replace("+00:00", "Z")
+    return safe_iso(value) or ""
 
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
@@ -23,7 +83,12 @@ def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
     return {"has_data": beacons > 0, "beacons": beacons}
 
 
-def rum_analytics(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
+def rum_analytics(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Serve the standard RUM wire contract from visible, time-filtered facts.
 
     Counts use beacon identity, not metric-row count. All SQL goes through the
@@ -36,27 +101,33 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     end = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
     if end < start:
         raise ValueError("RUM end time precedes start time")
-    params = {"service_id": service.service_id, "start": start, "end": end}
-    where = """
-        service_id = {service_id:String} AND publication_state = 'visible'
-        AND event_timestamp >= {start:DateTime64(3, 'UTC')}
-        AND event_timestamp <= {end:DateTime64(3, 'UTC')}
-    """
+    filter_clauses, filter_params = _filter_clauses(filters)
+    params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+
+    def scope(domain: str) -> str:
+        return " AND ".join(
+            [
+                *visible_fact_clauses(domain),
+                "event_timestamp >= {start:DateTime64(3, 'UTC')}",
+                "event_timestamp <= {end:DateTime64(3, 'UTC')}",
+                *filter_clauses,
+            ]
+        )
+
+    where_vitals = scope("rum_vitals")
+    where_errors = scope("rum_errors")
     # Same fallback as the standard raw producer's req_id / cid + epoch-second
     # identity. Do not count separate LCP/CLS rows as separate pageviews.
-    identity = """
-        coalesce(nullIf(toString(request_event_id), ''),
-                 concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))
-    """
+    identity = _BEACON_IDENTITY
     events = f"""
         WITH events AS (
             SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src,
                    metric_name, metric_value, pathname
-            FROM rum_vitals_facts WHERE {where}
+            FROM rum_vitals_facts WHERE {where_vitals}
             UNION ALL
             SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src,
                    '' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname
-            FROM rum_error_facts WHERE {where}
+            FROM rum_error_facts WHERE {where_errors}
         )
     """
     counts = service.client.execute(
@@ -74,15 +145,15 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     no_data = False
     if not counts["beacons"]:
         # Distinguish an empty selected range from a never-configured service.
+        any_vitals = " AND ".join(visible_fact_clauses("rum_vitals"))
+        any_errors = " AND ".join(visible_fact_clauses("rum_errors"))
         any_data = service.client.execute(
-            """
+            f"""
             /* rum_analytics_any_data */
             SELECT count() AS has_data FROM (
-                (SELECT event_id FROM rum_vitals_facts
-                 WHERE service_id={service_id:String} AND publication_state='visible' LIMIT 1)
+                (SELECT event_id FROM rum_vitals_facts WHERE {any_vitals} LIMIT 1)
                 UNION ALL
-                (SELECT event_id FROM rum_error_facts
-                 WHERE service_id={service_id:String} AND publication_state='visible' LIMIT 1)
+                (SELECT event_id FROM rum_error_facts WHERE {any_errors} LIMIT 1)
             )
             """,
             {"service_id": service.service_id},
@@ -99,11 +170,35 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
                countIf(metric_rating IN ('needs-improvement', 'needs_improvement')) as ni,
                countIf(metric_rating = 'poor') as poor
         FROM rum_vitals_facts
-        WHERE {where}
+        WHERE {where_vitals}
         GROUP BY metric_name
         """,
         params,
     )
+    environment_rows = service.client.execute(
+        f"""
+        /* rum_analytics_environments */
+        SELECT if(browser = '', 'Unknown', browser) AS env_browser,
+               if(os = '', 'Unknown', os) AS env_os,
+               if(device = '', 'Unknown', device) AS env_device,
+               uniqExact({identity}) AS beacons,
+               grouping(browser) AS g_browser, grouping(os) AS g_os, grouping(device) AS g_device
+        FROM rum_vitals_facts
+        WHERE {where_vitals}
+        GROUP BY GROUPING SETS ((browser), (os), (device))
+        """,
+        params,
+    )
+    browsers: dict[str, int] = {}
+    operating_systems: dict[str, int] = {}
+    devices: dict[str, int] = {}
+    for row in environment_rows:
+        if not row["g_browser"]:
+            browsers[row["env_browser"]] = int(row["beacons"])
+        elif not row["g_os"]:
+            operating_systems[row["env_os"]] = int(row["beacons"])
+        elif not row["g_device"]:
+            devices[row["env_device"]] = int(row["beacons"])
 
     vitals: dict[str, Any] = {
         "lcp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
@@ -218,9 +313,10 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     error_rows = service.client.execute(
         f"""
         /* rum_analytics_exceptions */
-        SELECT error_message, error_file, count() AS count
-        FROM rum_error_facts WHERE {where}
-        GROUP BY error_message, error_file ORDER BY count DESC, error_message, error_file LIMIT 3
+        SELECT error_message, error_file, error_line, error_col, count() AS count
+        FROM rum_error_facts WHERE {where_errors}
+        GROUP BY error_message, error_file, error_line, error_col
+        ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3
         """,
         params,
     )
@@ -237,15 +333,14 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
             {
                 "message": row["error_message"],
                 "file": row["error_file"] or "unknown.js",
-                "line": 0,
-                "col": 0,
+                "line": int(row.get("error_line") or 0),
+                "col": int(row.get("error_col") or 0),
                 "count": row["count"],
             }
             for row in error_rows
         ],
         "trends": trends,
-        # These dimensions are not present in the native fact schema.
-        "environments": {"browsers": {}, "os": {}, "devices": {}},
+        "environments": {"browsers": browsers, "os": operating_systems, "devices": devices},
     }
     if no_data:
         result["message"] = "Waiting for real-time RUM user events..."
@@ -254,111 +349,122 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     return result
 
 
+def _ttfb_ms(value: Any) -> int | None:
+    """Beacons report TTFB in seconds or milliseconds; the live feed always shows whole milliseconds."""
+    if value is None:
+        return None
+    number = float(value)
+    return int(number * 1000) if number < 15 else int(number)
+
+
 def rum_live_events(
-    service: HighScaleService, start_time: str | None, end_time: str | None, limit: int
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    limit: int,
+    filters: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     now = datetime.now(UTC)
     end_dt = range_value(end_time) if end_time else now
     start_dt = range_value(start_time) if start_time else (end_dt - timedelta(days=1))
-    query = """
+    filter_clauses, filter_params = _filter_clauses(filters)
+    window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp <= {end_time:DateTime64(3)}"]
+
+    def scope(domain: str) -> str:
+        return " AND ".join([*visible_fact_clauses(domain), *window, *filter_clauses])
+
+    # ClickHouse binds a trailing ORDER BY / LIMIT to the last SELECT only, so the union is wrapped.
+    query = f"""
+    /* rum_live_events */
+    SELECT * FROM (
     SELECT
-        event_timestamp as timestamp,
-        'vitals' as type,
+        event_timestamp AS timestamp,
+        'pageview' AS type,
         pathname,
         metric_name,
         metric_value,
         metric_rating,
-        client_id as cid,
-        request_event_id as req_id,
-        country,
-        '' as error_message
+        browser, os, device,
+        client_id AS cid,
+        toString(request_event_id) AS req_id,
+        '' AS error_message,
+        city, region, country, pop, tls, ttfb
     FROM rum_vitals_facts
-    WHERE service_id = {service_id:String}
-      AND publication_state = 'visible'
-      AND event_timestamp >= {start_time:DateTime64(3)}
-      AND event_timestamp <= {end_time:DateTime64(3)}
+    WHERE {scope("rum_vitals")}
 
     UNION ALL
 
     SELECT
-        event_timestamp as timestamp,
-        'error' as type,
+        event_timestamp AS timestamp,
+        'error' AS type,
         pathname,
-        '' as metric_name,
-        0.0 as metric_value,
-        '' as metric_rating,
-        client_id as cid,
-        request_event_id as req_id,
-        country,
-        error_message
+        '' AS metric_name,
+        CAST(NULL AS Nullable(Float64)) AS metric_value,
+        '' AS metric_rating,
+        browser, os, device,
+        client_id AS cid,
+        toString(request_event_id) AS req_id,
+        error_message,
+        city, region, country, pop, tls, ttfb
     FROM rum_error_facts
-    WHERE service_id = {service_id:String}
-      AND publication_state = 'visible'
-      AND event_timestamp >= {start_time:DateTime64(3)}
-      AND event_timestamp <= {end_time:DateTime64(3)}
-
+    WHERE {scope("rum_errors")}
+    )
     ORDER BY timestamp DESC
-    LIMIT {limit:UInt32}
+    LIMIT {{limit:UInt32}}
     """
-    try:
-        res = service.client.execute(
-            query,
-            {
-                "service_id": service.service_id,
-                "start_time": start_dt,
-                "end_time": end_dt,
-                "limit": limit,
-            },
-        )
-    except Exception as e:
-        import logging
+    res = service.client.execute(
+        query,
+        {
+            "service_id": service.service_id,
+            "start_time": start_dt,
+            "end_time": end_dt,
+            "limit": limit,
+            **filter_params,
+        },
+    )
 
-        logging.getLogger("backend").error(f"ERROR in rum_live_events: {e}")
-        return []
-
-    events = []
+    events: list[dict[str, Any]] = []
     for d in res:
-        ts = d["timestamp"].isoformat() if hasattr(d["timestamp"], "isoformat") else str(d["timestamp"])
-        ts = ts.replace("+00:00", "Z") if "+" in ts else ts + "Z"
-
-        etype = d.get("type", "vitals")
+        etype = d.get("type", "pageview")
         mname = d.get("metric_name")
         mrating = d.get("metric_rating")
         mval = d.get("metric_value")
         emsg = d.get("error_message")
-
+        path = d.get("pathname") or "/"
+        browser = d.get("browser") or "Unknown"
+        os_name = d.get("os") or "Unknown"
+        meta = {
+            "browser": {"name": browser},
+            "os": {"name": os_name},
+            "device": {"type": d.get("device") or "Unknown"},
+            "page": {"url": path},
+        }
+        context = {
+            "cid": d.get("cid"),
+            "req_id": d.get("req_id"),
+            "city": d.get("city") or "Unknown",
+            "region": d.get("region") or "Unknown",
+            "country": d.get("country") or "Unknown",
+            "pop": d.get("pop") or "Unknown",
+            "tls": d.get("tls") or "Unknown",
+            "ttfb": _ttfb_ms(d.get("ttfb")),
+        }
         if etype == "error":
-            desc = emsg or "Unknown JavaScript Error"
-            raw_log = {
-                "meta": {
-                    "browser": {"name": "Unknown"},
-                    "os": {"name": "Unknown"},
-                    "device": {"type": "Unknown"},
-                    "page": {"url": d.get("pathname") or "/"},
-                },
-                "events": [{"type": "error", "value": emsg}],
-                "cid": d.get("cid"),
-                "req_id": d.get("req_id"),
-                "city": "Unknown",
-                "region": "Unknown",
-                "country": d.get("country") or "Unknown",
-                "pop": "Unknown",
-                "tls": "Unknown",
-                "ttfb": 0,
+            desc = emsg or "JS Error"
+            raw_log: dict[str, Any] = {
+                "meta": meta,
+                "measurements": [],
+                "exceptions": [{"type": "Error", "value": desc}],
+                **context,
             }
         else:
             desc = "Page loaded successfully"
             if mname:
-                desc = f"Metric {mname.upper()}: {mval}"
+                desc = f"Metric {mname.upper()}: {float(mval)}" if mval is not None else f"Metric {mname.upper()}"
                 if mrating:
                     desc += f" ({mrating.upper()})"
             raw_log = {
-                "meta": {
-                    "browser": {"name": "Unknown"},
-                    "os": {"name": "Unknown"},
-                    "device": {"type": "Unknown"},
-                    "page": {"url": d.get("pathname") or "/"},
-                },
+                "meta": meta,
                 "measurements": [
                     {
                         "type": "web-vitals",
@@ -368,24 +474,17 @@ def rum_live_events(
                 ]
                 if mname
                 else [],
-                "cid": d.get("cid"),
-                "req_id": d.get("req_id"),
-                "city": "Unknown",
-                "region": "Unknown",
-                "country": d.get("country") or "Unknown",
-                "pop": "Unknown",
-                "tls": "Unknown",
-                "ttfb": 0,
+                "exceptions": [],
+                **context,
             }
-
         events.append(
             {
-                "time": ts,
+                "time": _iso(d.get("timestamp")),
                 "type": etype,
-                "path": d.get("pathname") or "/",
+                "path": path,
                 "desc": desc,
-                "browser": "Unknown",
-                "os": "Unknown",
+                "browser": browser,
+                "os": os_name,
                 "raw_log": raw_log,
             }
         )

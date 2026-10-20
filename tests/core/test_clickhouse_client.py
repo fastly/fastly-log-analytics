@@ -624,3 +624,9 @@ def test_performance_waterfall_and_scatter_tables_and_columns_are_allowlisted():
 
 def test_cmcd_projection_geography_columns_are_allowlisted_for_insert():
     assert {"country", "asn", "cmcd"} <= ch.CLICKHOUSE_TABLE_COLUMNS["cmcd_projection_facts"]
+
+
+def test_rum_environment_columns_are_allowlisted_for_both_rum_fact_tables():
+    environment = {"browser", "os", "device", "city", "region", "pop", "tls", "ttfb", "country"}
+    assert environment <= ch.CLICKHOUSE_TABLE_COLUMNS["rum_vitals_facts"]
+    assert environment | {"error_line", "error_col"} <= ch.CLICKHOUSE_TABLE_COLUMNS["rum_error_facts"]

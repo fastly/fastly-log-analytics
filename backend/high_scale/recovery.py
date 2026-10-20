@@ -192,6 +192,54 @@ def purge_origin_projections(client: _SqlClient, *, service_id: str, since: date
         )
 
 
+_RUM_FACT_TABLES = {"rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
+
+
+def purge_rum_facts(client: _SqlClient, *, domain: str, service_id: str, since: datetime) -> None:
+    """Delete one service's RUM fact rows of ``domain`` from ``since`` onward, synchronously.
+
+    Used to replace rows written before a fact column existed: a rebuild publishes under new batch
+    ids, so rebuilding over the old rows would count every beacon twice. The archive is the source.
+    """
+    table = _RUM_FACT_TABLES.get(domain)
+    if table is None:
+        raise ValueError("domain must be rum_vitals or rum_errors")
+    client.execute(
+        f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
+        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+        {"service_id": service_id, "since": since},
+    )
+
+
+def rebuild_rum_facts_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    domain: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Replay one RUM domain over ``window`` (newest day first) through the fact writer."""
+    if domain not in _RUM_FACT_TABLES:
+        raise ValueError("domain must be rum_vitals or rum_errors")
+    return rebuild_serving_state_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        domain=domain,
+        now=now,
+        recent_window=min(timedelta(hours=24), window / 2),
+        warm_window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
 def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
     """Delete one service's CMCD projection rows from ``since`` onward, synchronously.
 

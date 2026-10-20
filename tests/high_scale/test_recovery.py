@@ -15,6 +15,7 @@ from backend.high_scale.recovery import (
     rebuild_cmcd_projections_from_fos,
     rebuild_origin_projections_from_fos,
     rebuild_performance_projections_from_fos,
+    rebuild_rum_facts_from_fos,
     rebuild_serving_state_from_fos,
 )
 from backend.high_scale.replay import replay_performance_projections
@@ -467,3 +468,67 @@ def test_purge_cmcd_projections_deletes_only_the_service_window() -> None:
     assert "event_timestamp >= {since:DateTime64(3)}" in sql
     assert "mutations_sync=2" in sql
     assert params == {"service_id": "svc", "since": NOW - timedelta(days=30)}
+
+
+@pytest.mark.parametrize(("domain", "table"), [("rum_vitals", "rum_vitals_facts"), ("rum_errors", "rum_error_facts")])
+def test_purge_rum_facts_deletes_only_the_service_window_of_one_rum_table(domain: str, table: str) -> None:
+    from backend.high_scale.recovery import purge_rum_facts
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            return []
+
+    client = _Recorder()
+
+    purge_rum_facts(client, domain=domain, service_id="svc", since=NOW - timedelta(days=30))
+
+    ((sql, params),) = client.calls
+    assert sql.startswith(f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}}")
+    assert "event_timestamp >= {since:DateTime64(3)}" in sql and "mutations_sync=2" in sql
+    assert params == {"service_id": "svc", "since": NOW - timedelta(days=30)}
+
+
+def test_purge_rum_facts_rejects_other_domains() -> None:
+    from backend.high_scale.recovery import purge_rum_facts
+
+    with pytest.raises(ValueError, match="rum_vitals or rum_errors"):
+        purge_rum_facts(object(), domain="request", service_id="svc", since=NOW)  # type: ignore[arg-type]
+
+
+def test_rum_fact_rebuild_replays_the_rum_domain_over_the_requested_window() -> None:
+    recent, recent_bytes = _manifest(
+        "rum-1", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), ({"event_id": "1"},)
+    )
+    warm, warm_bytes = _manifest(
+        "rum-2", NOW - timedelta(days=10), NOW - timedelta(days=10) + timedelta(minutes=1), ({"event_id": "2"},)
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    archive.publish(warm, warm_bytes)
+    seen: list[str] = []
+
+    class _Catalog:
+        def manifests_covering(self, service_id, domain, start, end):
+            seen.append(domain)
+            return tuple(m for m in (recent, warm) if m.coverage_end > start and m.coverage_start < end)
+
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ReplayClient())
+
+    report = rebuild_rum_facts_from_fos(
+        _Catalog(), archive, publication, service_id="svc", domain="rum_vitals", now=NOW, window=timedelta(days=30)
+    )
+
+    assert set(seen) == {"rum_vitals"}
+    assert report.full_rebuild_complete is True and report.manifests_replayed == 2
+
+    with pytest.raises(ValueError, match="rum_vitals or rum_errors"):
+        rebuild_rum_facts_from_fos(_Catalog(), archive, publication, service_id="svc", domain="request", now=NOW)
+
+    short = rebuild_rum_facts_from_fos(
+        _Catalog(), archive, publication, service_id="svc", domain="rum_errors", now=NOW, window=timedelta(hours=6)
+    )
+    assert short.full_rebuild_complete is True

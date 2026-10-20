@@ -269,3 +269,26 @@ def test_cli_projection_cmcd_rebuilds_through_the_facts_adapter_and_purges_cmcd_
     assert cli.main() == 0
     assert calls == ["purge-cmcd", "rebuild-cmcd"]
     assert adapters == ["facts"]
+
+
+def test_cli_projection_rum_replays_the_rum_domain_through_the_facts_adapter(cli, monkeypatch) -> None:
+    seen: dict = {}
+    adapters: list[str] = []
+    monkeypatch.setattr(cli, "ClickHouseBatchAdapter", lambda client: adapters.append("facts") or MagicMock())
+    monkeypatch.setattr(cli, "purge_rum_facts", lambda client, **kwargs: seen.setdefault("purge", kwargs))
+
+    def fake_rum_rebuild(*args, **kwargs):
+        seen["rebuild"] = kwargs
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_rum_facts_from_fos", fake_rum_rebuild)
+    monkeypatch.setattr(
+        "sys.argv", ["backfill", "--service-id", "svc", "--projection", "rum_errors", "--replace-existing"]
+    )
+
+    assert cli.main() == 0
+    assert adapters == ["facts"]
+    assert seen["purge"]["domain"] == "rum_errors" and seen["purge"]["service_id"] == "svc"
+    assert seen["rebuild"]["domain"] == "rum_errors" and seen["rebuild"]["service_id"] == "svc"

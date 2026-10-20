@@ -667,10 +667,15 @@ async def rum_analytics(
     window = SimpleNamespace(range_token=range_token, anchor=anchor, start_time=start_time, end_time=end_time)
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
+        from backend.high_scale.rum import parse_rum_filters
         from backend.high_scale.rum import rum_analytics as hs_rum_analytics
 
         start_time, end_time = ctx.resolve_window(window)
-        return _inject_telemetry(hs_rum_analytics(high_scale_service, start_time, end_time))
+        try:
+            hs_result = hs_rum_analytics(high_scale_service, start_time, end_time, parse_rum_filters(filters))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=make_error("rum_filters_unsupported", str(exc))) from exc
+        return _inject_telemetry(hs_result)
 
     service_id = ctx.service_id
 
@@ -963,10 +968,14 @@ async def rum_live_events(
     """
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
+        from backend.high_scale.rum import parse_rum_filters
         from backend.high_scale.rum import rum_live_events as hs_rum_live
 
         start_time, end_time = ctx.clamp(start_time, end_time)
-        return hs_rum_live(high_scale_service, start_time, end_time, 50)
+        try:
+            return hs_rum_live(high_scale_service, start_time, end_time, 50, parse_rum_filters(filters))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=make_error("rum_filters_unsupported", str(exc))) from exc
 
     service_id = ctx.service_id
 

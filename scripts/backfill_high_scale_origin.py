@@ -1,4 +1,4 @@
-"""Rebuild bounded high-scale projections (Origin or CMCD) from immutable archives."""
+"""Rebuild bounded high-scale projections and fact columns (Origin, CMCD, RUM) from immutable archives."""
 
 from __future__ import annotations
 
@@ -17,12 +17,30 @@ from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePub
 from backend.high_scale.recovery import (
     purge_cmcd_projections,
     purge_origin_projections,
+    purge_rum_facts,
     rebuild_cmcd_projections_from_fos,
     rebuild_origin_projections_from_fos,
+    rebuild_rum_facts_from_fos,
 )
 from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
+
+
+def _select(projection: str):
+    """``(adapter, purge, rebuild)`` for ``projection``; looked up at call time so callers can substitute them."""
+    if projection == "cmcd":
+        return ClickHouseBatchAdapter, purge_cmcd_projections, rebuild_cmcd_projections_from_fos
+    if projection in ("rum_vitals", "rum_errors"):
+
+        def purge(client, **kwargs):
+            return purge_rum_facts(client, domain=projection, **kwargs)
+
+        def rebuild(*args, **kwargs):
+            return rebuild_rum_facts_from_fos(*args, domain=projection, **kwargs)
+
+        return ClickHouseBatchAdapter, purge, rebuild
+    return AggregateBatchAdapter, purge_origin_projections, rebuild_origin_projections_from_fos
 
 
 def main() -> int:
@@ -32,9 +50,9 @@ def main() -> int:
     parser.add_argument("--rebuild-id")
     parser.add_argument(
         "--projection",
-        choices=("origin", "cmcd"),
+        choices=("origin", "cmcd", "rum_vitals", "rum_errors"),
         default="origin",
-        help="which projection to rebuild from the request archive",
+        help="which projection (origin, cmcd: request archive) or RUM fact table to rebuild from its archive",
     )
     parser.add_argument(
         "--replace-existing",
@@ -71,14 +89,10 @@ def main() -> int:
         if service is None or service.manifest_catalog is None or service.archive is None:
             raise RuntimeError("service is not registered with its archive dependencies")
         control = PostgresControlPlane()
-        adapter_type = ClickHouseBatchAdapter if args.projection == "cmcd" else AggregateBatchAdapter
+        adapter_type, purge, rebuild = _select(args.projection)
         publication = ClickHousePublication(
             PostgresBatchManifestStore(control),
             adapter_type(cast(ClickHouseClient, service.client)),
-        )
-        purge = purge_cmcd_projections if args.projection == "cmcd" else purge_origin_projections
-        rebuild = (
-            rebuild_cmcd_projections_from_fos if args.projection == "cmcd" else rebuild_origin_projections_from_fos
         )
         if args.replace_existing:
             purge(

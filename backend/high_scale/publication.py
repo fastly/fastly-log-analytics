@@ -20,6 +20,7 @@ from backend.core.clickhouse_client import (
     ClickHouseClient as HttpClickHouseClient,
 )
 from backend.high_scale._projection_utils import range_value
+from backend.high_scale._rum_fields import rum_environment, rum_error_position
 from backend.high_scale.schema import build_cmcd_projection_key
 
 _BATCH_NAMESPACE = UUID("f3e6bd14-9df9-5f8a-9d92-7a4f1fd36d9a")
@@ -80,6 +81,14 @@ _DOMAIN_COLUMNS = {
         "metric_rating",
         "pathname",
         "country",
+        "browser",
+        "os",
+        "device",
+        "city",
+        "region",
+        "pop",
+        "tls",
+        "ttfb",
     ),
     "rum_errors": (
         "service_id",
@@ -98,6 +107,16 @@ _DOMAIN_COLUMNS = {
         "error_file",
         "pathname",
         "country",
+        "error_line",
+        "error_col",
+        "browser",
+        "os",
+        "device",
+        "city",
+        "region",
+        "pop",
+        "tls",
+        "ttfb",
     ),
     "cmcd": (
         "service_id",
@@ -367,6 +386,23 @@ def _timestamp(row: Mapping[str, Any], field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _rum_environment_values(row: Mapping[str, Any], *, with_error_position: bool = False) -> tuple[Any, ...]:
+    env = rum_environment(row)
+    position = rum_error_position(row) if with_error_position else ()
+    return (
+        env["country"],
+        *position,
+        env["browser"],
+        env["os"],
+        env["device"],
+        env["city"],
+        env["region"],
+        env["pop"],
+        env["tls"],
+        env["ttfb"],
+    )
+
+
 def _optional_asn(value: Any) -> int | None:
     if value is None or isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
@@ -499,7 +535,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                     float(metric_value),
                     _required_string(row, "metric_rating", default=""),
                     _required_string(row, "pathname", default=""),
-                    _required_string(row, "country", default=""),
+                    *_rum_environment_values(row),
                 )
             )
         elif batch.domain == "rum_errors":
@@ -513,7 +549,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                     _required_string(row, "error_message", default=""),
                     _required_string(row, "error_file", default=""),
                     _required_string(row, "pathname", default=""),
-                    _required_string(row, "country", default=""),
+                    *_rum_environment_values(row, with_error_position=True),
                 )
             )
         elif batch.domain == "cmcd":

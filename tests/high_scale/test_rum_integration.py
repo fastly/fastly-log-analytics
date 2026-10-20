@@ -27,7 +27,7 @@ from backend.config import ClickHouseConfig
 from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.registry import HighScaleService
-from backend.high_scale.rum import rum_analytics
+from backend.high_scale.rum import rum_analytics, rum_live_events
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_RUM_CLICKHOUSE_INTEGRATION") != "1", reason="explicit real ClickHouse RUM gate"
@@ -67,7 +67,15 @@ def vital(ts: str, metric: str, value: float, **kwargs: Any) -> dict[str, Any]:
 
 
 def error(ts: str, **kwargs: Any) -> dict[str, Any]:
-    return fact(ts, error_message="fixture exception", error_file="fixture.js", **kwargs)
+    return fact(ts, **{"error_message": "fixture exception", "error_file": "fixture.js", **kwargs})
+
+
+@pytest.fixture
+def run_analytics_and_live(run_analytics: Callable[..., Any]) -> Callable[..., Any]:
+    def run(vitals: list[dict[str, Any]], errors: list[dict[str, Any]]) -> Any:
+        return run_analytics(vitals, errors, live=True)
+
+    return run
 
 
 @pytest.fixture
@@ -79,15 +87,51 @@ def run_analytics() -> Iterator[Callable[..., dict[str, Any]]]:
         errors: list[dict[str, Any]],
         start: str | None = "2026-09-01T00:00:00Z",
         end: str | None = "2026-09-01T02:00:00Z",
-    ) -> dict[str, Any]:
+        filters: dict[str, Any] | None = None,
+        live: bool = False,
+    ) -> Any:
         schema = Path("backend/high_scale/sql/rum_schema.sql").read_text()
-        # Preserve all canonical columns/types; only replication requires Keeper.
+        # Preserve all canonical columns/types; only replication requires Keeper. The 30-day TTL is dropped:
+        # fixtures use fixed 2026-09 timestamps, which a later wall clock would expire at insert time.
         schema = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", schema)
-        seed = schema
-        for table, rows in (("rum_vitals_facts", vitals), ("rum_error_facts", errors)):
+        schema = re.sub(r"\nTTL [^;]*;", ";", schema)
+        publication_schema = Path("backend/high_scale/sql/publication_schema.sql").read_text()
+        publication_schema = re.sub(
+            r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)",
+            r"ReplacingMergeTree(\1)",
+            publication_schema,
+        )
+        seed = publication_schema + "\n" + schema
+        for table, domain, rows in (
+            ("rum_vitals_facts", "rum_vitals", vitals),
+            ("rum_error_facts", "rum_errors", errors),
+        ):
             if rows:
                 seed += f"\nINSERT INTO {table} FORMAT JSONEachRow\n"
                 seed += "\n".join(json.dumps(row) for row in rows) + "\n;\n"
+                # Readers fence on the batch's publication row, so each fixture batch is published visible.
+                seed += "\nINSERT INTO high_scale_batch_publications FORMAT JSONEachRow\n"
+                seed += (
+                    "\n".join(
+                        json.dumps(
+                            {
+                                "batch_id": row["batch_id"],
+                                "service_id": row["service_id"],
+                                "domain": domain,
+                                "generation": "1",
+                                "batch_digest": "fixture",
+                                "expected_rows": 1,
+                                "visible_rows": 1,
+                                "quorum_acked": 1,
+                                "publication_state": "visible",
+                                "manifest_version": 2,
+                                "updated_at": row["ingest_timestamp"],
+                            }
+                        )
+                        for row in rows
+                    )
+                    + "\n;\n"
+                )
 
         def transport(request: httpx.Request) -> httpx.Response:
             form = BytesParser(policy=default).parsebytes(
@@ -128,7 +172,10 @@ def run_analytics() -> Iterator[Callable[..., dict[str, Any]]]:
         client = ClickHouseClient(settings, transport=httpx.MockTransport(transport))
         clients.append(client)
         watermark = ServingWatermark("TestRum", "request", 0, None, None, None, None, None, True)
-        return rum_analytics(HighScaleService("TestRum", client, b"test-secret", watermark), start, end)
+        service = HighScaleService("TestRum", client, b"test-secret", watermark)
+        if live:
+            return rum_live_events(service, start, end, 50, filters)
+        return rum_analytics(service, start, end, filters)
 
     yield run
     for client in clients:
@@ -171,7 +218,79 @@ def test_real_sql_distinct_counts_inclusive_bounds_and_missing_buckets(run_analy
     assert result["worst_pages"][0]["lcp_p75"] == 4.0
     assert result["worst_pages"][0]["error_rate"] == 25.0
     assert result["errors"] == [{"message": "fixture exception", "file": "fixture.js", "line": 0, "col": 0, "count": 2}]
-    assert result["environments"] == {"browsers": {}, "os": {}, "devices": {}}
+    # Beacons that report no environment are counted as Unknown, never as a real browser.
+    assert result["environments"] == {"browsers": {"Unknown": 3}, "os": {"Unknown": 3}, "devices": {"Unknown": 3}}
+
+
+def test_real_sql_environments_error_positions_and_filters(run_analytics) -> None:
+    ts = "2026-09-01T00:30:00Z"
+    shared = str(uuid4())
+    vitals = [
+        vital(ts, "LCP", 1000, request_id=shared, browser="Chrome", os="macOS", device="Desktop", country="US"),
+        vital(ts, "CLS", 0.1, request_id=shared, browser="Chrome", os="macOS", device="Desktop", country="US"),
+        vital(ts, "LCP", 2000, client_id="b", browser="Firefox", os="Linux", device="Desktop", country="DE"),
+        vital(ts, "LCP", 3000, client_id="c", browser="Chrome", os="Android", device="Mobile", country="US"),
+    ]
+    errors = [
+        error(ts, client_id="b", browser="Firefox", error_line=12, error_col=34, country="DE"),
+        error(ts, client_id="b2", browser="Firefox", error_line=12, error_col=34, country="DE"),
+        error(ts, client_id="c", browser="Chrome", error_line=7, error_col=1, country="US"),
+    ]
+
+    result = run_analytics(vitals, errors)
+
+    assert result["environments"] == {
+        "browsers": {"Chrome": 2, "Firefox": 1},
+        "os": {"macOS": 1, "Linux": 1, "Android": 1},
+        "devices": {"Desktop": 2, "Mobile": 1},
+    }
+    assert result["errors"][0] == {
+        "message": "fixture exception",
+        "file": "fixture.js",
+        "line": 12,
+        "col": 34,
+        "count": 2,
+    }
+    assert {"line": 7, "col": 1} == {key: result["errors"][1][key] for key in ("line", "col")}
+
+    german = run_analytics(vitals, errors, filters={"country": {"mode": "include", "values": ["DE"]}})
+    assert german["environments"]["browsers"] == {"Firefox": 1}
+    assert german["error_count"] == 2 and german["pageview_count"] == 1
+
+    not_chrome = run_analytics(vitals, errors, filters={"browser": {"mode": "exclude", "values": ["Chrome"]}})
+    assert not_chrome["environments"]["browsers"] == {"Firefox": 1}
+    assert not_chrome["error_count"] == 2
+
+
+def test_real_sql_live_events_carry_real_environment_fields(run_analytics_and_live) -> None:
+    ts = "2026-09-01T00:30:00Z"
+    events = run_analytics_and_live(
+        [
+            vital(
+                ts,
+                "LCP",
+                2400,
+                browser="Firefox",
+                os="Linux",
+                device="Desktop",
+                city="Berlin",
+                region="BE",
+                pop="FRA",
+                tls="1.3",
+                ttfb=0.042,
+                country="DE",
+            )
+        ],
+        [error("2026-09-01T00:29:00Z", error_message="boom")],
+    )
+
+    assert [event["type"] for event in events] == ["pageview", "error"]
+    first = events[0]
+    assert first["browser"] == "Firefox" and first["os"] == "Linux"
+    assert first["raw_log"]["city"] == "Berlin" and first["raw_log"]["pop"] == "FRA"
+    assert first["raw_log"]["ttfb"] == 42
+    assert first["desc"] == "Metric LCP: 2400.0 (GOOD)"
+    assert events[1]["browser"] == "Unknown" and events[1]["desc"] == "boom"
 
 
 @pytest.mark.parametrize("hours,points", [(48, 49), (49, 3), (24 * 30, 31)])
