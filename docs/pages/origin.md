@@ -56,6 +56,23 @@ The **Origin Health & Shielding** page focuses on backend origin infrastructure,
   - Supports section pruning (`sections: [...]`) with dependency coupling (`_TS_STATUS_PATH_TRIPLE`, `_POP_IP_PAIR`).
   - Accepts `range_token` and `anchor` for deterministic SSR cache hydration.
 
+### High-scale percentile contract:
+Percentiles cannot be combined across minute rows, so the high-scale Origin
+projections (`origin_minute_summary`, `origin_minute_dimensions`) persist, next to
+the exact counts, a mergeable log-histogram sketch per percentile metric
+(`*_sk_v` centroid values and `*_sk_w` counts; `backend/high_scale/_sketch.py`,
+geometric buckets of ratio 1.02). `backend/high_scale/origin.py` merges the
+arrays across the selected window with `quantilesExactWeightedArray`, so a
+p50/p75/p95/p99 is read from the union of every request in the window rather than
+averaged from per-minute percentiles. The relative error is bounded by 1%
+(`RELATIVE_ERROR`); request counts, miss/pass counts and error rates are exact.
+Every percentile section therefore sets `_approx: true` plus an `_approx_note`
+describing exactly that, and the UI badge shows the note. `status_codes` is exact
+and carries no flag. Minutes written before the sketch columns existed have empty
+sketches: their percentiles read as `null` (never a weighted-average guess) until
+rebuilt, see
+[the reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md).
+
 ### Granular & Drill-Down Endpoints:
 - `POST /api/origin/summary`: High-level TTFB/TTLB, error rates, and fetch volume.
 - `POST /api/origin/timeseries`: TTFB/TTLB latency timeseries bucketed by interval.

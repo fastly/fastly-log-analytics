@@ -82,13 +82,32 @@ be converted into successful zero-count or empty-chart responses.
   An empty selected range with older data still returns the full empty axis
   and zero summary counts. Errors-only services are not treated as no-data.
 - Worst pages (maximum 5) and exceptions (maximum 3) use available facts.
-  The current high-scale schema has no browser/OS/device or exception
-  line/column columns: environment maps stay empty; exception line/column
-  use the standard unknown defaults (0), without inventing measurements.
+  `rum_vitals_facts` and `rum_error_facts` persist the beacon's browser, OS,
+  device, city, region, POP, TLS version and TTFB, and `rum_error_facts` also
+  persists the JavaScript error line/column (`backend/high_scale/_rum_fields.py`
+  resolves them from the raw edge-log keys at write time, so a replay of an
+  older archive produces the same columns). `environments` counts distinct
+  beacons per browser/OS/device from the vitals facts; a beacon that reported
+  nothing is counted as `Unknown`, never defaulted to a real browser. Exception
+  line/column come from the stored columns and are `0` only when the beacon
+  did not report them.
+- `GET /rum/analytics` and `GET /rum/live-events` apply the `filters` query
+  parameter (a JSON object of `{column: {mode, values}}`) to every query.
+  Supported columns are the ones present on both fact tables: `browser`, `os`,
+  `device`, `country`, `pathname`, `city`, `region`, `pop`, `tls`. Any other
+  column, or malformed JSON, is a `400` (`rum_filters_unsupported`): a filter
+  is never silently dropped.
+- Live events carry the real environment/geography fields (`Unknown` only for
+  genuinely missing values) and the newest events overall (the union of vitals
+  and errors is ordered and limited as a whole; ClickHouse binds a trailing
+  `ORDER BY`/`LIMIT` to the last `SELECT` only).
+- Every read requires the batch's latest publication row to be `visible`.
 
-This contract does not change ingestion, schemas, filters, admin migration,
-or deployment configuration. Live chart certification is a separate rollout
-gate and is recorded below when it passes.
+Rows written before the environment columns existed read as `Unknown` until
+they are rebuilt; see
+[the reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md).
+Live chart certification is a separate rollout gate and is recorded below
+when it passes.
 
 ### Current verification status
 
@@ -169,7 +188,9 @@ selected real-data window.
   installed compatible image. No listening ports, deployed services, production
   writes, or new Python dependencies are required.
 - The real-engine fixture preserves canonical fact columns/types, replacing
-  only the replicated engine with local MergeTree (no Keeper). It covers
+  only the replicated engine with local MergeTree (no Keeper) and dropping the
+  30-day TTL (fixed 2026-09 fixture timestamps would otherwise be expired at
+  insert time); each fixture batch is published `visible`. It covers
   distinct union counts, visible/service fencing, inclusive sub-hour bounds,
   hourly/daily/30-day axes, whole-day continuous p75, errors-only and
   interactions-only buckets, zero versus missing metrics, units, and available

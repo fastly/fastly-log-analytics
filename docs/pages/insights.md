@@ -118,6 +118,33 @@ The **Insights** page runs 51 automated anomaly and pattern detectors comparing 
 
 ---
 
+### High-scale detections
+
+`backend/high_scale/insights.py` computes every registered detection natively in
+ClickHouse over visible `request_facts`
+(`backend/high_scale/insight_queries.py`, one query per detection returning the exact
+row layout of the standard processors). Cards, thresholds, severities, `meta` and
+summaries therefore come from the same registry code on both data planes. The
+window/baseline/analyst-clamp parameters are honoured, `mask_ips` is applied to
+IP-keyed detections, and:
+
+- A detection whose required log field is absent from the service's recent rows is
+  omitted, as on the standard path.
+- A service with less history than `baseline_hours` gets the standard `info` card
+  ("Requires Nh of historical data") instead of a computed result. `impossible_distance`
+  is the one detection that runs without a baseline.
+- A failing query is an `error` card ("Query failed: ..."), never a `clean` one.
+- Percentiles use t-digest sketches (bounded memory at high-scale volumes); the
+  detections compare ratios and large absolute deltas, so the sketch error is far
+  below every threshold.
+- `POST /api/insights/cache-collapse-detail` returns the real timeline, disposition
+  breakdown, hit/pass rates and recent misses for the URL.
+- The legacy `high_scale_5xx` card is no longer emitted; `error_spikes` supersedes it.
+
+`RUN_HS_READERS_CLICKHOUSE_INTEGRATION=1 uv run pytest
+tests/high_scale/test_clickhouse_readers_integration.py` runs every detection on a real
+ClickHouse engine (disposable `clickhouse-local` processes) over planted anomalies.
+
 ## 6. Backend APIs & Telemetry Attribution
 
 ### Endpoints Hit:

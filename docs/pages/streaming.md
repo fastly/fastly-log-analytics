@@ -44,6 +44,17 @@ The **Live Log Streaming** page delivers a high-speed, interactive terminal-styl
 | **Stream Transport** | FastAPI SSE streaming endpoint (`/api/stream/{service_id}` & `/api/services/{service_id}/stream`). | FastAPI SSE backed by Redis / ClickHouse logs query bridge. |
 | **Buffer Source** | Reads newest rows from local memory ring buffer and DuckDB view. | Reads newest events from ClickHouse / Redis stream. |
 
+High-scale `POST /api/cmcd/aggregates` computes every section from
+`cmcd_projection_facts` (`backend/high_scale/cmcd.py`): overview, the five time series
+(padded to every bucket of the window), top content, rebuffer by country and ASN, object
+type and streaming-format distributions, and the session-duration histogram. The
+projection stores the CMCD key/value map plus the request's `country` and `asn`
+(`backend/high_scale/projections.py`). `filters` on `country`/`asn` are applied; any
+other filter is a `400`. Sections whose CMCD key never appears in the window are omitted,
+as on the standard path. Rows written before the geography columns existed need the
+rebuild in [the reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md)
+before the country/ASN sections populate.
+
 ---
 
 ## 5. Backend APIs & Telemetry Attribution

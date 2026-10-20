@@ -46,6 +46,15 @@ The **Raw Logs Explorer** provides high-throughput, paginated, searchable access
 | **Data Plane** | Reads DuckDB session `logs` view with pushdown predicates and stale-view retry protection. | Reads ClickHouse `request_facts` table with partition filtering. |
 | **Filter Optimization** | Uses partition pruning (`timestamp >= ...`) to minimize parquet reads. | Uses ClickHouse primary keys and partition date bounds. |
 
+High-scale `/api/logs` translates `filters` with the shared
+`backend/high_scale/_filters.py` (keys normalised exactly as the analyst PII filter-lock
+normalises them; every key and value is a typed parameter; include/exclude/null modes
+honoured). A filter `request_facts` cannot express (`_bot_name`, `_ngwaf_bot_name`,
+`_tunnel_requests`, `waf_sig_ind`) is a `400`, not an ignored filter. Reads require the
+batch's latest publication row to be `visible`; `columns` projects the rows; the column
+set is sampled from the newest 1000 matching rows so it is stable across pages; and a
+ClickHouse failure propagates instead of reporting zero rows.
+
 ---
 
 ## 5. Backend APIs & Telemetry Attribution

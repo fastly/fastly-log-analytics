@@ -45,6 +45,14 @@ The **User Sessions Explorer** aggregates client requests into behavioral sessio
 | **Data Plane** | Reads DuckDB session view + `sessions` rollups with `execute_with_stale_view_retry` protection against Trap #35. | Reads Postgres DuckLake / ClickHouse session aggregates via `backend/high_scale/sessions.py`. |
 | **Session Drill-Down** | Reads DuckDB raw log records for the unsealed session time extent with stale-view retry. | Queries ClickHouse `request_facts` partitioned table for the unsealed session time extent. |
 
+High-scale sessions apply `filters` (shared `_filters.py`), `sort_by`/`sort_dir` (same
+column allow-list as the standard path), real pagination, and report a real `total`
+(window `count()` over the filtered sessions, not a page-size guess). `has_rtt`,
+`has_ja4`, `has_edge`, `has_edge_sid` and `has_cmcd` reflect the data; `is_streaming` and
+`streaming_only` read the `cmcd` map (CMCD fields are stored there, not in
+`custom_fields`); edge/shield counts understand the stored boolean spellings (`1`/`true`);
+`asn_names` is hoisted like the standard response.
+
 ---
 
 ## 5. Backend APIs & Telemetry Attribution
