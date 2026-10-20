@@ -134,4 +134,36 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
       await server.close()
     }
   })
+
+  it('disables keep-alive socket reuse (connection: close) and retries once on ECONNRESET', async () => {
+    let attempts = 0
+    let secondConnHeader: string | undefined
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const server = await withServer((req, res) => {
+      attempts += 1
+      if (attempts === 1) {
+        req.socket.destroy()
+        return
+      }
+      secondConnHeader = req.headers.connection
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'application/json')
+      res.end('{"recovered":true}')
+    })
+    mockCookies.mockReturnValue(cookieJar({}))
+    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
+    try {
+      const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+      const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+      expect(out).not.toBeNull()
+      expect(out?.statusCode).toBe(200)
+      expect(out?.body).toBe('{"recovered":true}')
+      expect(attempts).toBe(2)
+      expect(secondConnHeader).toBe('close')
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+      await server.close()
+    }
+  })
 })

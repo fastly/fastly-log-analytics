@@ -42,9 +42,6 @@ const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 // API_PROXY_URL was correct. Proxy functions run fresh per request in the
 // Node.js runtime, so moving it here reads the real env on every call.
 const API_PROXY_PREFIXES = ['/api/', '/js/']
-function apiProxyTarget(): string {
-  return process.env.API_PROXY_URL || process.env.NEXT_PUBLIC_API_PROXY_URL || 'http://caddy:80'
-}
 
 // Skip CSP rebuild on static-asset paths — they don't render HTML and
 // a stray Content-Security-Policy header on every chunk download is
@@ -97,12 +94,15 @@ function buildCsp(nonce: string): string {
 }
 
 export function proxy(request: NextRequest) {
-  const { pathname, search } = request.nextUrl
+  const { pathname } = request.nextUrl
 
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
-  // proxied API responses.
+  // proxied API responses. Route Handlers under app/api/[...path]/route.ts
+  // and app/js/[...path]/route.ts proxy to API_PROXY_URL with agent:false
+  // and graceful SSE/disconnect handling (avoiding Next's internal httpxy
+  // rewrite proxy which logs unhandled ECONNRESET on socket close).
   if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p))) {
-    return NextResponse.rewrite(new URL(`${apiProxyTarget()}${pathname}${search}`))
+    return NextResponse.next()
   }
 
   const contentType = request.headers.get('content-type') || ''

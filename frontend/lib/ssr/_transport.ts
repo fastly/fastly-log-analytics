@@ -250,8 +250,17 @@ export async function ssrUpstreamGet({
       upstreamHeaders['Content-Type'] = 'application/json'
       upstreamHeaders['Content-Length'] = String(Buffer.byteLength(serialisedBody))
     }
+    upstreamHeaders['Connection'] = 'close'
 
-    return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
+    try {
+      return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
+    } catch (firstErr) {
+      const code = (firstErr as NodeJS.ErrnoException | undefined)?.code
+      if (code === 'ECONNRESET' || code === 'EPIPE') {
+        return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
+      }
+      throw firstErr
+    }
   } catch (err) {
     console.warn(`[${logPrefix}] fetch failed; falling back to client fetch:`, err)
     return null
@@ -276,6 +285,10 @@ function rawRequest(
         method,
         headers: reqHeaders,
         timeout: timeoutMs,
+        // Disable Node's default keepAlive globalAgent pooling so SSR never
+        // reuses an idle socket right as Uvicorn's 5s --timeout-keep-alive
+        // closes it across backend-svc:8000 (which triggered ECONNRESET).
+        agent: false,
       },
       (res) => {
         const chunks: Buffer[] = []
