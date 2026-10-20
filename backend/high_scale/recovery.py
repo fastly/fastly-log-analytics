@@ -26,7 +26,7 @@ from backend.high_scale.recovery_capacity import (
     RecoveryCapacityReport,
     evaluate_recovery_capacity,
 )
-from backend.high_scale.replay import replay_manifest, replay_origin_projections
+from backend.high_scale.replay import replay_manifest, replay_origin_projections, replay_performance_projections
 
 logger = structlog.get_logger(__name__)
 
@@ -197,6 +197,63 @@ def rebuild_origin_projections_from_fos(
             )
         except Exception as exc:
             errors.append(f"manifest {manifest.manifest_id} failed to rebuild Origin projections: {exc}")
+            continue
+        rows += result.rows_published
+        replayed += 1
+    available = not errors
+    return RecoveryReport(
+        ingest_accepted=True,
+        triage_available=available,
+        raw_query_available=True,
+        warm_history_available=available,
+        full_rebuild_complete=available,
+        manifests_replayed=replayed,
+        rows_replayed=rows,
+        errors=tuple(errors),
+        rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    )
+
+
+def rebuild_performance_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Populate the Performance waterfall/scatter projections for already-ingested history.
+
+    Pass ``now`` as the moment the projection-writing worker was deployed: manifests
+    ingested after that already published these projections live, and replaying them
+    here would double-count the waterfall sums.
+    """
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
+    )
+    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
+    rows = 0
+    replayed = 0
+    errors: list[str] = []
+    for manifest in manifests:
+        try:
+            result = replay_performance_projections(
+                manifest,
+                archive,
+                publication,
+                rebuild_id=resolved_rebuild_id,
+            )
+        except Exception as exc:
+            errors.append(f"manifest {manifest.manifest_id} failed to rebuild Performance projections: {exc}")
             continue
         rows += result.rows_published
         replayed += 1

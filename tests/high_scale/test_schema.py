@@ -134,3 +134,27 @@ def test_origin_projection_schema_is_bounded_and_mergeable() -> None:
         "ReplicatedMergeTree",
     ):
         assert required in sql
+
+
+def test_performance_projection_schema_covers_waterfall_and_scatter() -> None:
+    root = Path(__file__).parents[2] / "backend/high_scale/sql"
+    sql = (root / "performance_schema.sql").read_text()
+
+    for required in (
+        "performance_minute_dimensions",
+        "performance_minute_summary",
+        "performance_scatter_samples",
+        "component_count",
+        "edge_processing_sum_ms",
+        "origin_wait_sum_ms",
+        "origin_download_sum_ms",
+        "client_download_sum_ms",
+        "sample_key UInt64",
+        "origin_ms Float64",
+        "edge_ms Float64",
+        "publication_state",
+        "TTL bucket_start",
+        "ReplicatedMergeTree",
+    ):
+        assert required in sql
+    assert sql.count("CREATE TABLE IF NOT EXISTS") == 3

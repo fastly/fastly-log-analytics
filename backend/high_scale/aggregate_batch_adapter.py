@@ -82,6 +82,20 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "latency_p99_ms",
         ),
     ),
+    "performance_summary": (
+        "performance_minute_summary",
+        (
+            "component_count",
+            "edge_processing_sum_ms",
+            "origin_wait_sum_ms",
+            "origin_download_sum_ms",
+            "client_download_sum_ms",
+        ),
+    ),
+    "performance_scatter": (
+        "performance_scatter_samples",
+        ("sample_key", "origin_ms", "edge_ms", "cache"),
+    ),
     "security_dimensions": (
         "security_minute_dimensions",
         (

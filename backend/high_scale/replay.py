@@ -12,6 +12,7 @@ from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import event_digest
 from backend.high_scale.origin_projection import build_origin_projection_rows
+from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.publication import ClickHousePublication, PublicationResult
 
 
@@ -78,6 +79,42 @@ def replay_origin_projections(
         result = publication.publish(
             _batch_from_rows(
                 f"rebuild-origin:{rebuild_id}:{manifest.manifest_id}:{suffix}",
+                manifest,
+                projected_rows,
+                domain=domain,
+            )
+        )
+        published += result.rows_visible
+    return ProjectionReplayResult(manifest.manifest_id, len(serving_rows), published)
+
+
+def replay_performance_projections(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    rebuild_id: str,
+) -> ProjectionReplayResult:
+    """Rebuild only the Performance waterfall and scatter projections.
+
+    ``performance_minute_dimensions`` is deliberately not republished: those rows
+    already exist for historical data, and re-adding them would double-count.
+    """
+    if manifest.source.domain != "request":
+        raise ValueError("Performance projections can only be rebuilt from request manifests")
+    rows = _read_manifest_rows(manifest, archive)
+    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    projection = build_performance_projection_rows(serving_rows)
+    published = 0
+    for suffix, domain, projected_rows in (
+        ("summary", "performance_summary", projection.summary_rows),
+        ("scatter", "performance_scatter", projection.scatter_rows),
+    ):
+        if not projected_rows:
+            continue
+        result = publication.publish(
+            _batch_from_rows(
+                f"rebuild-performance:{rebuild_id}:{manifest.manifest_id}:{suffix}",
                 manifest,
                 projected_rows,
                 domain=domain,

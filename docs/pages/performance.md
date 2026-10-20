@@ -44,10 +44,11 @@ The **Edge Performance** page analyzes end-to-end delivery latency across Fastly
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
-| **Data Plane** | Reads DuckDB session view + `perf_dims` / `perf_latency` rollups. | Reads PostgreSQL metadata + ClickHouse `performance_minute_dimensions` rollups. |
-| **Percentile Engine** | `percentile_ms_expr("CAST(elapsed AS DOUBLE)", quantile, approx=True)`. | ClickHouse `quantile(p)(elapsed_ms)` / `performance_minute_dimensions` percentiles. |
-| **Rollup Fast Path** | `runner.try_perf_latency_from_rollup` for top URLs and ASNs (unfiltered >= 48h). Returns `approx: true`. | High-scale service registry delegates to `hs_performance` with pre-aggregated ClickHouse minute rollup data. |
-| **Materialized Spool** | Single `WITH components AS MATERIALIZED (...)` CTE serving both 300-row scatter sample and waterfall averages. | Partitioned ClickHouse table sample with parallel quantile extraction. |
+| **Data Plane** | Reads DuckDB session view + `perf_dims` / `perf_latency` rollups. | Reads PostgreSQL metadata + ClickHouse `performance_minute_dimensions` (top URLs/ASNs), `performance_minute_summary` (waterfall), `performance_scatter_samples` (scatter) and `request_aggregates` (TTL). |
+| **Percentile Engine** | `percentile_ms_expr("CAST(elapsed AS DOUBLE)", quantile, approx=True)`. | Unfiltered: request-weighted average of per-minute percentiles (`_approx: true`). Filtered: exact `quantile(p)(elapsed_ms)` over matching `request_facts` (`_approx: false`). |
+| **Rollup Fast Path** | `runner.try_perf_latency_from_rollup` for top URLs and ASNs (unfiltered >= 48h). Returns `approx: true`. | Every unfiltered section is served from a minute projection. Any active filter switches all requested sections to `request_facts`; a filter field with no facts mapping is rejected with HTTP 400, never ignored. |
+| **Materialized Spool** | Single `WITH components AS MATERIALIZED (...)` CTE serving both 300-row scatter sample and waterfall averages. | Waterfall averages are `sum(component sums) / sum(component_count)`. Scatter is the 300 lowest `sample_key` rows across the window; each ingest batch keeps its own 300 lowest, so the merged result stays a uniform sample. |
+| **Sections / Sort** | `sections` expanded by `_expand_sections`; `sort_by` orders URLs/ASNs. | Same: the router passes the expanded section set and only those queries run; `sort_by` orders URLs/ASNs. ASN rows carry the same `label`. |
 
 ---
 

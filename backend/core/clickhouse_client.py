@@ -58,6 +58,8 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "origin_minute_summary",
         "origin_minute_dimensions",
         "performance_minute_dimensions",
+        "performance_minute_summary",
+        "performance_scatter_samples",
         "security_minute_dimensions",
         "network_minute_dimensions",
     }
@@ -142,6 +144,15 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "ttfb_p95_us",
         "ploss_sum",
         "ploss_count",
+        "component_count",
+        "edge_processing_sum_ms",
+        "origin_wait_sum_ms",
+        "origin_download_sum_ms",
+        "client_download_sum_ms",
+        "sample_key",
+        "origin_ms",
+        "edge_ms",
+        "cache",
     }
 )
 CLICKHOUSE_ALLOWED_TABLES = frozenset({CLICKHOUSE_FACT_TABLE}) | CLICKHOUSE_HIGH_SCALE_TABLES

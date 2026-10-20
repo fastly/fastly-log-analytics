@@ -15588,8 +15588,8 @@ export interface components {
         };
         /**
          * PerformanceAsnRow
-         * @description ``asn`` is an int on the repository paths and the raw dimension string on the
-         *     high-scale path, which also does not resolve a ``label``.
+         * @description ``asn`` is an int, or the raw dimension string when the value is not numeric; ``label``
+         *     is the resolved ASN name on every path.
          */
         PerformanceAsnRow: {
             /** Asn */

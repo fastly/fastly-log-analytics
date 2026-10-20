@@ -643,6 +643,8 @@ class HighScaleIngestController:
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
                     ("performance_dimensions", perf_proj.dimension_rows),
+                    ("performance_summary", perf_proj.summary_rows),
+                    ("performance_scatter", perf_proj.scatter_rows),
                     ("security_dimensions", security_proj.dimension_rows),
                     ("network_dimensions", network_proj.dimension_rows),
                 ):
@@ -698,6 +700,8 @@ class HighScaleIngestController:
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
                     ("performance_dimensions", perf_proj.dimension_rows),
+                    ("performance_summary", perf_proj.summary_rows),
+                    ("performance_scatter", perf_proj.scatter_rows),
                     ("security_dimensions", security_proj.dimension_rows),
                     ("network_dimensions", network_proj.dimension_rows),
                 ):

@@ -523,3 +523,39 @@ def test_controller_can_use_postgres_control_plane_for_durable_state() -> None:
         "archived",
         "acknowledged",
     ]
+
+
+def test_ingest_publishes_performance_waterfall_and_scatter_projections() -> None:
+    ownership = OwnershipStore()
+    aggregate_clickhouse = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=HighScaleLedger(),
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), _ClickHouse()),
+        aggregates=ClickHousePublication(InMemoryBatchManifestStore(), aggregate_clickhouse),
+        worker_id="worker-1",
+        deletion_grace_seconds=60,
+    )
+    payload = gzip.compress(
+        b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok","cache":"MISS","elapsed":250000,'
+        b'"ttfb":0.1,"ottfb":40000,"ottlb":90000}\n'
+    )
+
+    controller.ingest(
+        service_id="svc",
+        domain="request",
+        object_key="raw/request/perf.gz",
+        checksum="sha256:perf",
+        payload=payload,
+        version="v1",
+        now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+    )
+
+    by_domain = {batch.domain: batch for batch in aggregate_clickhouse.batches}
+    summary = by_domain["performance_summary"].rows[0]
+    assert summary["component_count"] == 1
+    assert summary["origin_wait_sum_ms"] == 40.0
+    scatter = by_domain["performance_scatter"].rows[0]
+    assert (scatter["origin_ms"], scatter["edge_ms"], scatter["cache"]) == (100.0, 150.0, "MISS")

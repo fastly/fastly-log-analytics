@@ -210,3 +210,23 @@ def test_performance_aggregates_high_scale_dispatch(client, test_service_source)
         assert resp.status_code == 200
         assert resp.json()["_approx"] is True
         mock_hs_perf.assert_called_once()
+
+
+def test_performance_aggregates_high_scale_receives_expanded_sections(client, test_service_source):
+    mock_registry = MagicMock()
+    mock_registry.resolve.return_value = MagicMock()
+    fake_response = {"top_urls": [], "top_asns": [], "ttl_dist": [], "scatter": [], "waterfall": {}}
+
+    with (
+        patch("backend.high_scale.registry.get_high_scale_service_registry", return_value=mock_registry),
+        patch("backend.high_scale.performance.performance_aggregates", return_value=fake_response) as mock_hs_perf,
+    ):
+        resp = client.post(
+            "/api/performance/aggregates",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"filters": {}, "sort_by": "avg", "sections": ["scatter", "top_urls"]},
+        )
+
+    assert resp.status_code == 200
+    assert mock_hs_perf.call_args.kwargs["sections"] == {"scatter", "waterfall", "top_urls", "top_asns"}
+    assert mock_hs_perf.call_args.args[1].sort_by == "avg"

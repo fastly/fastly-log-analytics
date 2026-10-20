@@ -67,6 +67,20 @@ class _HsClient:
             return [row]
         if "perf:top_asns" in sql:
             return [{**row, "value": "7922"}]
+        if "perf:ttl_dist" in sql:
+            return [{"bucket": "0s", "count": 3, "min_ttl": 0.0}, {"bucket": "<1h", "count": 4, "min_ttl": 45.0}]
+        if "perf:waterfall" in sql:
+            return [
+                {
+                    "component_count": 2,
+                    "edge_processing": 1.0,
+                    "origin_wait": 2.0,
+                    "origin_download": 3.0,
+                    "client_download": 4.0,
+                }
+            ]
+        if "perf:scatter" in sql:
+            return [{"origin_ms": 10.0, "edge_ms": 5.0, "cache": "HIT"}]
         return []
 
 
@@ -78,12 +92,13 @@ def test_high_scale_wire_identical(monkeypatch):
         return cls(**kwargs)
 
     monkeypatch.setattr(PerformanceAggregatesResponse, "with_telemetry", classmethod(_capture))
-    monkeypatch.setattr(
-        hs_performance, "_aggregate", lambda *a, **k: SimpleNamespace(top_values=[("0", 3), ("45", 4), ("90000", 1)])
-    )
+    monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
     service = SimpleNamespace(service_id="svc", client=_HsClient())
     hs_performance.performance_aggregates(service, SimpleNamespace(), None, None)
-    assert captured["top_asns"][0]["asn"] == "7922"
+    assert captured["top_asns"][0]["asn"] == 7922
+    assert captured["top_asns"][0]["label"] == "Comcast (7922)"
     assert_sections_wire_identical(
-        PerformanceAggregatesResponse, captured, non_empty=("top_urls", "top_asns", "ttl_dist")
+        PerformanceAggregatesResponse,
+        captured,
+        non_empty=("top_urls", "top_asns", "ttl_dist", "scatter", "waterfall"),
     )

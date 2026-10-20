@@ -595,3 +595,20 @@ def test_summary_headers_are_observational(clients, monkeypatch, header):
     if header.startswith("{"):
         assert recorded[-1]["rows_read"] == 10
         assert recorded[-1]["bytes_read"] == 100
+
+
+def test_performance_waterfall_and_scatter_tables_and_columns_are_allowlisted():
+    for table in ("performance_minute_summary", "performance_scatter_samples"):
+        assert table in ch.CLICKHOUSE_HIGH_SCALE_TABLES
+    for column in (
+        "component_count",
+        "edge_processing_sum_ms",
+        "origin_wait_sum_ms",
+        "origin_download_sum_ms",
+        "client_download_sum_ms",
+        "sample_key",
+        "origin_ms",
+        "edge_ms",
+        "cache",
+    ):
+        assert column in ch.CLICKHOUSE_HIGH_SCALE_COLUMNS

@@ -182,3 +182,40 @@ def test_maps_origin_projection_domains_to_allowlisted_tables(domain, table) -> 
     facts = client.inserts[1]
     assert facts[0] == table
     assert facts[2][0][-2]
+
+
+def _performance_batch(domain: str) -> HighScaleBatch:
+    bucket = datetime(2026, 9, 14, tzinfo=UTC).isoformat()
+    if domain == "performance_summary":
+        row = {
+            "bucket_start": bucket,
+            "component_count": 2,
+            "edge_processing_sum_ms": 1.0,
+            "origin_wait_sum_ms": 2.0,
+            "origin_download_sum_ms": 3.0,
+            "client_download_sum_ms": 4.0,
+        }
+    else:
+        row = {"bucket_start": bucket, "sample_key": 2**63 + 5, "origin_ms": 1.5, "edge_ms": 2.5, "cache": "HIT"}
+    return HighScaleBatch(
+        batch_id=f"batch-{domain}", service_id="svc", domain=domain, generation="epoch-1", rows=(row,)
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "table", "column"),
+    [
+        ("performance_summary", "performance_minute_summary", "component_count"),
+        ("performance_scatter", "performance_scatter_samples", "sample_key"),
+    ],
+)
+def test_maps_performance_projection_domains_to_allowlisted_tables(domain, table, column) -> None:
+    client = FakeHttpClickHouse()
+
+    result = AggregateBatchAdapter(client).insert(_performance_batch(domain))
+
+    assert result.rows_inserted == 1
+    inserted_table, columns, rows = client.inserts[1]
+    assert inserted_table == table
+    assert column in columns
+    assert len(rows[0]) == len(columns)

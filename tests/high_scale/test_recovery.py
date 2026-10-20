@@ -2,14 +2,21 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore, InsertReceipt
-from backend.high_scale.recovery import rebuild_origin_projections_from_fos, rebuild_serving_state_from_fos
+from backend.high_scale.recovery import (
+    rebuild_origin_projections_from_fos,
+    rebuild_performance_projections_from_fos,
+    rebuild_serving_state_from_fos,
+)
+from backend.high_scale.replay import replay_performance_projections
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
 
@@ -263,3 +270,71 @@ def test_origin_projection_rebuild_is_resumable_without_replaying_request_facts(
         f"rebuild-origin:{first.rebuild_id}:recent-origin:summary",
         f"rebuild-origin:{first.rebuild_id}:recent-origin:dimensions",
     ]
+
+
+def _performance_events() -> tuple[dict, ...]:
+    return (
+        {
+            "event_id": "perf-1",
+            "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+            "url": "/slow",
+            "cache": "MISS",
+            "elapsed": 250_000,
+            "ttfb": 0.1,
+            "ottfb": 40_000,
+            "ottlb": 90_000,
+        },
+    )
+
+
+def test_performance_projection_rebuild_publishes_only_the_new_tables_and_is_resumable() -> None:
+    recent, recent_bytes = _manifest(
+        "recent-perf", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), _performance_events()
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    catalog = _Catalog((recent,))
+    client = ReplayClient()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+
+    first = rebuild_performance_projections_from_fos(catalog, archive, publication, service_id="svc", now=NOW)
+    second = rebuild_performance_projections_from_fos(
+        catalog, archive, publication, service_id="svc", now=NOW, rebuild_id=first.rebuild_id
+    )
+
+    assert first.manifests_replayed == second.manifests_replayed == 1
+    assert first.rows_replayed == second.rows_replayed == 2
+    assert first.full_rebuild_complete is True
+    assert client.insert_calls == [
+        f"rebuild-performance:{first.rebuild_id}:recent-perf:summary",
+        f"rebuild-performance:{first.rebuild_id}:recent-perf:scatter",
+    ]
+
+
+def test_performance_projection_rebuild_reports_a_failed_manifest_without_stopping() -> None:
+    bad, bad_bytes = _manifest("bad-perf", NOW - timedelta(hours=2), NOW - timedelta(hours=1), _performance_events())
+    good, good_bytes = _manifest(
+        "good-perf", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), _performance_events()
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(bad, bad_bytes)
+    archive.publish(good, good_bytes)
+    client = ReplayClient(fail_on={"bad-perf"})
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+
+    report = rebuild_performance_projections_from_fos(
+        _Catalog((bad, good)), archive, publication, service_id="svc", now=NOW
+    )
+
+    assert report.manifests_replayed == 1
+    assert report.full_rebuild_complete is False
+    assert len(report.errors) == 1 and "bad-perf" in report.errors[0]
+
+
+def test_performance_projection_replay_rejects_non_request_manifests() -> None:
+    rum = SimpleNamespace(source=SimpleNamespace(domain="rum_vitals"))
+    archive = ArchivePublication(InMemoryObjectStore())
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ReplayClient())
+
+    with pytest.raises(ValueError, match="request manifests"):
+        replay_performance_projections(rum, archive, publication, rebuild_id="r")

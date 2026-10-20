@@ -139,6 +139,26 @@ available) and the stage-by-stage arithmetic.
   measurement file and exits `3` when the rebuild completed but the claim is
   not valid, so a qualification run can gate on it.
 
+### Performance waterfall/scatter backfill
+
+The Performance page reads `performance_minute_summary` and
+`performance_scatter_samples`. Both are written by workers from the release that
+adds them, so history ingested before that release has no rows until it is
+rebuilt from the archive:
+
+1. Deploy the schema (`python -m backend.core.clickhouse_schema`; the
+   `CREATE TABLE IF NOT EXISTS` statements are idempotent) and then the workers.
+   Note the UTC time the new workers started.
+2. Run `uv run python scripts/backfill_high_scale_performance.py --service-id
+   <id> --until <worker start, ISO-8601 with offset> [--days 30]`. Manifests
+   ingested after `--until` already published live; replaying them would
+   double-count the waterfall sums.
+3. To resume an interrupted run, repeat the command with the printed
+   `rebuild_id` (`--rebuild-id`). Exit `1` means a manifest failed; the report
+   names it.
+
+`performance_minute_dimensions` is not rebuilt (it already holds history).
+
 ## `topology`: profile validation
 
 Design source: capacity and recovery contract, "Capacity profiles" (the

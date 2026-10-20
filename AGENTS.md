@@ -322,6 +322,8 @@ The six capacity helpers each have a production caller, all behind the high-scal
 
 Do not wire a new caller that disables ingest, compaction, replay or deletion on a disk mode without a design that names the work to suspend.
 
+High-scale Performance (`/api/performance/aggregates`) has no stub sections: waterfall reads `performance_minute_summary`, scatter reads `performance_scatter_samples`, and any active filter reroutes every section to `request_facts`. A new projection table needs all of: `sql/*.sql` schema, `CLICKHOUSE_HIGH_SCALE_TABLES`/`_COLUMNS` allowlists in `core/clickhouse_client.py`, an `AggregateBatchAdapter._ORIGIN_COLUMNS` entry, both publish tuples in `ingest_controller.py`, and a replay/backfill path (`scripts/backfill_high_scale_performance.py --until <worker deploy time>`; replaying past that time double-counts the sums). The stored `performance_minute_dimensions.latency_*_ms` columns hold raw microseconds; the reader divides by 1000.
+
 ### Certificate-authenticated administrator connection
 
 The optional mTLS gateway is a separate administrator access surface for Compose

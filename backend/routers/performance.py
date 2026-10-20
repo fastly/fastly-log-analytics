@@ -59,7 +59,7 @@ def performance_aggregates(
     if high_scale_service is not None:
         from backend.high_scale.performance import performance_aggregates as hs_performance
 
-        return hs_performance(high_scale_service, req, start_time, end_time)
+        return hs_performance(high_scale_service, req, start_time, end_time, sections=_expand_sections(req.sections))
     sections = _expand_sections(req.sections)
     res = repo.get_performance_aggregates(
         con=ctx.con,
