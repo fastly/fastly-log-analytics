@@ -65,19 +65,31 @@ def query_endpoint(
 
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
-        # Analysts are an adversary. The high-scale console validates with DuckDB's parser but runs on
-        # ClickHouse, and name-based allow-lists keep desyncing from ClickHouse's name resolution (five
-        # independent reviews each found another gap). Until console queries run as a ClickHouse user whose
-        # grants cover only the fact tables, the free-form console stays admin-only here; analysts keep every
-        # purpose-built analytics endpoint.
+        query_client = None  # None = the service's own (privileged) client, admin sessions only
+        # Analysts are an adversary and the console validates with DuckDB's parser while ClickHouse runs the
+        # text, so name-based guards cannot be the only boundary (five independent reviews each found another
+        # desync). An analyst's SQL therefore runs as that service's own least-privilege ClickHouse identity:
+        # SELECT on the fact tables only, readonly with capped resources, and a restrictive row policy pinned to
+        # the service (see backend/high_scale/console_access.py). Without such an identity there is no console.
         if analyst_session is not None:
-            raise HTTPException(
-                status_code=403,
-                detail=make_error(
-                    "console_unavailable_for_analysts",
-                    "The SQL console is not available to analysts on high-scale deployments.",
-                ),
-            )
+            from backend.high_scale.console_access import get_console_clients
+
+            try:
+                console_client = get_console_clients().client_for(high_scale_service.service_id)
+            except Exception:
+                logger.warning(
+                    "analyst console identity unavailable for %s", high_scale_service.service_id, exc_info=True
+                )
+                console_client = None
+            if console_client is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=make_error(
+                        "console_unavailable_for_analysts",
+                        "The SQL console is not available to analysts on this high-scale deployment.",
+                    ),
+                )
+            query_client = console_client
         from backend.high_scale.query import query_endpoint as hs_query
 
         try:
@@ -88,6 +100,7 @@ def query_endpoint(
                 end_time,
                 mask_ips,
                 session_id=audit_session_id,
+                client=query_client,
             )
         except PermissionError as e:
             raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))

@@ -190,7 +190,10 @@ def query_endpoint(
     mask_ips: bool,
     *,
     session_id: str | None = None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
+    """Run a console query. ``client`` overrides the service's own ClickHouse client (analysts pass theirs)."""
+    client = client if client is not None else service.client
     timer = SectionTimer()
     section_timings = timer.entries
 
@@ -246,12 +249,12 @@ def query_endpoint(
     sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
     settings = {"max_result_rows": str(row_cap), "result_overflow_mode": "break"}
     if fact_tables:
-        _assert_table_filters_enforced(service.client)
+        _assert_table_filters_enforced(client)
         settings["additional_table_filters"] = _table_filters(service.service_id, start_time, end_time, fact_tables)
 
     t0 = time.perf_counter()
     try:
-        res = service.client.execute(sql, settings=settings)
+        res = client.execute(sql, settings=settings)
     except Exception as e:
         raise RuntimeError(str(e)) from e
     timer.mark("execute", t0)

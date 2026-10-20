@@ -584,3 +584,99 @@ def test_query_high_scale_is_closed_to_analysts_until_clickhouse_enforces_the_bo
     assert resp.status_code == 403
     assert resp.json()["detail"]["error"] == "console_unavailable_for_analysts"
     assert calls == [], "nothing may reach ClickHouse for an analyst"
+
+
+def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console):
+    """Post a console query as an analyst against a fake high-scale service; ``console`` is the stand-in manager."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    main_client = SimpleNamespace(execute=lambda sql, params=None, settings=None: main_calls.append(sql) or [])
+    fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=main_client)
+    session = SimpleNamespace(
+        session_id="sess-hs2", pii_policy={"mask_ips": True}, service_ids=[test_service_source["service_id"]]
+    )
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        session=session,
+        path="/api/query",
+        time_bounds=TimeBounds(
+            start=datetime(2026, 6, 17, 9, 0, tzinfo=UTC), end=datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
+        ),
+    )
+    with (
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
+        ),
+        patch("backend.high_scale.console_access.get_console_clients", return_value=console),
+    ):
+        return client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "SELECT count(*) AS n FROM logs"},
+        )
+
+
+@pytest.mark.security_regression
+def test_analyst_console_runs_on_the_services_own_least_privilege_identity(
+    client, in_memory_duckdb, test_service_source
+):
+    from types import SimpleNamespace
+
+    console_calls: list[str] = []
+    console_client = SimpleNamespace(
+        execute=lambda sql, params=None, settings=None: (
+            [{"n": 0}] if "system.one" in sql else console_calls.append(sql) or [{"n": 7}]
+        )
+    )
+    console = SimpleNamespace(client_for=lambda sid: console_client)
+    main_calls: list[str] = []
+
+    resp = _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"] == [{"n": 7}]
+    assert console_calls, "the analyst's query must run on the console identity"
+    assert main_calls == [], "and never on the application's privileged ClickHouse user"
+
+
+@pytest.mark.security_regression
+def test_analyst_console_stays_closed_when_no_console_identity_is_available(
+    client, in_memory_duckdb, test_service_source
+):
+    from types import SimpleNamespace
+
+    main_calls: list[str] = []
+    console = SimpleNamespace(client_for=lambda sid: None)
+
+    resp = _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console)
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "console_unavailable_for_analysts"
+    assert main_calls == []
+
+
+@pytest.mark.security_regression
+def test_analyst_console_stays_closed_when_the_identity_fails_its_isolation_check(
+    client, in_memory_duckdb, test_service_source
+):
+    from types import SimpleNamespace
+
+    def refuse(sid):
+        raise RuntimeError("console identity failed the row isolation check")
+
+    main_calls: list[str] = []
+
+    resp = _analyst_on_high_scale(
+        client, in_memory_duckdb, test_service_source, main_calls, SimpleNamespace(client_for=refuse)
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "console_unavailable_for_analysts"
+    assert main_calls == []

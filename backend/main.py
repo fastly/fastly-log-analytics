@@ -97,6 +97,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from backend import config as svcconfig
 from backend.core import clickhouse_client, clickhouse_observer, request_telemetry
 from backend.core import duckdb as _db
+from backend.high_scale import console_access
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
 
@@ -519,6 +520,7 @@ async def lifespan(app: FastAPI):
     finally:
         await asyncio.to_thread(request_telemetry.force_flush)
         await asyncio.to_thread(clickhouse_observer.stop_clickhouse_observer)
+        await asyncio.to_thread(console_access.close_console_clients)
         await asyncio.to_thread(clickhouse_client.close_clickhouse_client)
 
 
@@ -588,6 +590,12 @@ async def _application_lifespan(app: FastAPI):
     )
     if registered_high_scale:
         logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
+        # Per-service least-privilege ClickHouse identities for analyst SQL (no-op without a console secret).
+        provisioned = await asyncio.to_thread(
+            console_access.provision_configured_services, clickhouse, registered_high_scale
+        )
+        if provisioned:
+            logging.info("[fastapi] Provisioned analyst console access for %d service(s).", len(provisioned))
 
     # Verify dependencies
     try:
