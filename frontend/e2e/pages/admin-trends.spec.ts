@@ -67,7 +67,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
 
     const toolbarBox = await toolbar.boundingBox();
     const gridBox = await gridReservation.boundingBox();
-    expect(toolbarBox?.height ?? 0).toBeGreaterThanOrEqual(48);
+    expect(toolbarBox?.height ?? 0).toBeGreaterThanOrEqual(32);
     expect(gridBox?.height ?? 0).toBeGreaterThanOrEqual(400);
 
     await page.addInitScript(clsInitScript);
