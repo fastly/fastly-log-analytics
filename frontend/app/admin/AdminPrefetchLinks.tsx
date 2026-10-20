@@ -7,7 +7,7 @@ import { client } from '@/lib/api'
 import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/lib/queries/scoring'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buttonVariants } from '@/components/ui/button'
-import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye } from 'lucide-react'
+import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye, Database } from 'lucide-react'
 import { queryKeys } from '@/lib/query-keys'
 
 export function AdminPrefetchLinks() {
@@ -96,6 +96,27 @@ export function AdminPrefetchLinks() {
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
       >
         <Eye className="h-4 w-4 mr-1" /> RUM
+      </Link>
+      <Link
+        href={activeServiceId ? `/admin/clickhouse?service=${activeServiceId}` : '/admin/clickhouse'}
+        prefetch={false}
+        onMouseEnter={() => {
+          if (!activeServiceId) return
+          queryClient.prefetchQuery({
+            queryKey: queryKeys.admin.clickhouseStatus(activeServiceId),
+            queryFn: async ({ signal }) => {
+              const { data, response } = await client.GET('/api/admin/clickhouse/status', {
+                params: { query: { service_id: activeServiceId } },
+                signal,
+              })
+              if (!response.ok && response.status !== 503) throw new Error(`status ${response.status}`)
+              return data
+            },
+          })
+        }}
+        className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+      >
+        <Database className="h-4 w-4 mr-1" /> ClickHouse
       </Link>
     </>
   )

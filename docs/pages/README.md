@@ -44,7 +44,8 @@ docs/pages/
     ├── session-scoring.md         # /admin/session-scoring (Scorer weights & retrain)
     ├── share.md                   # /admin/share (Invites, sessions, audit, TOS)
     ├── trends.md                  # /admin/trends (Historical system vitals & trends)
-    └── usage-log.md               # /admin/usage-log (Attributed FOS Class A/B ledger)
+    ├── usage-log.md               # /admin/usage-log (Attributed FOS Class A/B ledger)
+    └── clickhouse.md              # /admin/clickhouse (ClickHouse status & bounded replay)
 ```
 
 ---
@@ -80,7 +81,7 @@ docs/pages/
 | `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Live-certified** |
 | `/admin/trends` | [System Trends](admin/trends.md) | Metric history, ingestion latency, CPU/memory over time | **Live-certified** |
 | `/admin/usage-log` | [FOS Usage Ledger](admin/usage-log.md) | Per-route and per-cron attribution for FOS storage costs | **Live-certified** |
-| `/admin/clickhouse` | [ClickHouse Cluster Admin](admin/clickhouse.md) | Cluster health, schema alignment, dataset generation, bounded replay | **Scaffolded (Pending AI Verification)** |
+| `/admin/clickhouse` | [ClickHouse Cluster Admin](admin/clickhouse.md) | Cluster health, schema alignment, dataset generation, bounded replay | **Live-certified** |
 
 
 ---

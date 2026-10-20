@@ -3,7 +3,7 @@
 from typing import Literal
 
 import structlog
-from fastapi import HTTPException, Query, Response
+from fastapi import Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 
 from backend import config
@@ -13,6 +13,7 @@ from backend.core.clickhouse_export import FosArtifacts
 from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import full_rebuild, replay_unpublished
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, target_identity
+from backend.deps import require_admin
 from backend.models.admin_clickhouse import (
     ClickHouseReplayErrorResponse,
     ClickHouseReplayRequest,
@@ -44,6 +45,7 @@ def _service(service_id: str, *, writable: bool = False) -> dict:
     "/admin/clickhouse/status",
     response_model=ClickHouseStatusResponse,
     responses={503: {"model": ClickHouseStatusResponse}},
+    dependencies=[Depends(require_admin)],
 )
 def api_clickhouse_status(response: Response, service_id: str | None = Query(default=None, max_length=128)):
     service_id = require_service_id(service_id)
@@ -68,6 +70,7 @@ def api_clickhouse_status(response: Response, service_id: str | None = Query(def
     "/admin/clickhouse/replay",
     response_model=ClickHouseReplayResponse,
     responses={503: {"model": ClickHouseReplayErrorResponse}},
+    dependencies=[Depends(require_admin)],
 )
 def api_clickhouse_replay(req: ClickHouseReplayRequest):
     cfg = _service(req.service_id, writable=True)

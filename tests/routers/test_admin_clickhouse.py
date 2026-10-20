@@ -275,3 +275,40 @@ def test_apply_error_never_injects_fos_debug_urls(boundary, monkeypatch):
     assert response.status_code == 503 and "private" not in response.text
     assert response.json()["_debug_calls"] == []
     debug_calls.assert_not_called()
+
+
+def test_replay_missing_both_dataset_id_and_generation_rejected(boundary):
+    client, store, _, objects, audit, _ = boundary
+    response = client.post(REPLAY, json={"service_id": SERVICE})
+    assert response.status_code == 422
+    assert not store.mock_calls
+    objects.assert_not_called()
+    audit.assert_not_called()
+
+
+def test_analyst_path_b_rejected_with_403_admin_only(monkeypatch):
+    cfg = {"service_id": SERVICE, "access_level": "read_write"}
+    monkeypatch.setattr(api.config, "load_config", lambda sid: cfg if sid == SERVICE else None)
+    store, ch = MagicMock(), MagicMock()
+    monkeypatch.setattr(api, "PgManifest", MagicMock(return_value=store))
+    monkeypatch.setattr(api, "get_clickhouse_client", lambda: ch)
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _attach_analyst_session(request, call_next):
+        request.state.analyst_session = MagicMock(service_ids=[SERVICE])
+        return await call_next(request)
+
+    app.include_router(api.router)
+    with TestClient(app) as client:
+        res_status = client.get(STATUS, params={"service_id": SERVICE})
+        assert res_status.status_code == 403
+        assert res_status.json()["detail"]["error"] == "admin_only"
+
+        res_replay = client.post(REPLAY, json={"service_id": SERVICE, "dataset_id": "d"})
+        assert res_replay.status_code == 403
+        assert res_replay.json()["detail"]["error"] == "admin_only"
+
+        assert not store.mock_calls
+        assert not ch.mock_calls

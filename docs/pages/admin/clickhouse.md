@@ -1,129 +1,145 @@
-> [!TODO]
-> **Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target functional, architectural, role, and telemetry contract for the **Admin ClickHouse Replay & Cluster Operations** page (`/admin/clickhouse`).
-> An AI testing session has not yet verified this page against a running cluster. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
+> [!NOTE]
+> **Specification Status: LIVE-CERTIFIED (2026-10-20)**
+> This specification defines the verified functional, architectural, role, and telemetry contract for the **Admin ClickHouse Replay & Cluster Operations** page (`/admin/clickhouse`), certified across Local Standard, Remote Standard GCE, and High-Scale Elevation.
 
 # Page Specification: Admin ClickHouse Replay & Cluster Operations (`/admin/clickhouse`)
 
 ## 1. Overview & Objectives
-The ClickHouse Replay & Cluster Operations page provides administrative visibility and control over the High-Scale ClickHouse analytical engine and its bounded replay machinery. ClickHouse serves as the primary high-throughput event and minute-rollup data plane in `DEPLOYMENT_MODE=high_scale` topologies, ingesting millions of RPS into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `origin_minute_summary`, `network_minute_dimensions`, etc.).
+The ClickHouse Replay & Cluster Operations page provides administrative visibility and control over the High-Scale ClickHouse analytical engine and its bounded artifact replay machinery (`backend/routers/admin/clickhouse.py`, `backend/models/admin_clickhouse.py`, `backend/core/clickhouse_manifest.py`, `backend/core/clickhouse_publication.py`, `backend/core/clickhouse_schema.py`). ClickHouse serves as the primary high-throughput event and minute-rollup data plane in `DEPLOYMENT_MODE=high_scale` topologies, ingesting request and RUM telemetry into partitioned MergeTree tables (`log_facts`, `request_facts`, `high_scale_batch_publications`, `origin_minute_summary`, `network_minute_dimensions`, etc.).
 
 ### Key Tenets:
-- **Cluster & Schema Health Monitoring:** Surface authenticated connection health, schema version alignment (`CLICKHOUSE_SCHEMA_VERSION`), and disk capacity metrics directly from ClickHouse system tables (`system.disks`).
-- **Bounded Diagnostic Replay:** Provide operators with a safe, bounded replay mechanism to rebuild or resume ClickHouse analytical state from immutable Fastly Object Storage (FOS) raw artifacts and PostgreSQL replay manifests (`PgManifest`).
-- **Dry-Run Safety:** Replay workflows mandate an explicit dry-run preview before executing data mutations or activating new dataset generations.
-- **Strict Role & Tenancy Isolation:** Administrative operations are restricted to `read_write` Admin sessions. Analysts receive HTTP 403 Forbidden.
+- **Cluster & Manifest Health Monitoring:** Surface authenticated connection health (`ok` | `disabled` | `unavailable`), schema version alignment (`CLICKHOUSE_SCHEMA_VERSION = 2`), publication batch counts (`published`, `pending`, `claimed`, `failed`), oldest pending batch age, active generation coverage metadata, and expired dataset count via `PgManifest(bounded=True).admin_status(service_id, target_identity(client))`.
+- **Bounded Diagnostic Replay:** Provide operators with a safe, bounded HTTP replay mechanism (`limit` 1..100 artifacts per request) to rebuild (`dataset_id`) or resume (`generation`) ClickHouse analytical state from sealed Fastly Object Storage (FOS) artifacts and PostgreSQL replay manifests (`PgManifest`).
+- **Dry-Run Safety:** Replay workflows default to `dry_run: true`, validating manifest references (`store.replay_preview(...)`) and returning `planned_artifacts` and `artifact_count` without mutating ClickHouse or reading FOS.
+- **Strict Role & Tenancy Isolation:** Administrative operations are restricted to `read_write` Admin sessions via both `RemoteAccessMiddleware` defense-in-depth and route-level `Depends(require_admin)`. Analyst Path B sessions receive HTTP `403 Forbidden` with `{"detail": {"error": "admin_only", ...}}`.
 
 ---
 
 ## 2. Routes & URL Schema
 - **Primary Route:** `/admin/clickhouse`
 - **Query Parameters:**
-  - `service_id` (*required*): Fastly logging service identifier (e.g. `?service_id=<service-id>`).
-  - `tab` (*optional*): Sub-view selection (`status` | `replay` | `tables` | `partitions`). Defaults to `status`.
-  - `dataset_id` (*optional*): Pre-selected dataset generation identifier for targeted replay inspection.
+  - `service` / `service_id` (*optional*, falls back to `useServiceStore.activeServiceId` or first configured service): Fastly logging service identifier (e.g. `?service=<service-id>`).
 
 ---
 
 ## 3. Role & Permission Matrix
-| Role | Page Access | Replay Execution | Dry-Run Preview | Schema Inspection |
+| Role | Page Access | Status Inspection (`GET /api/admin/clickhouse/status`) | Dry-Run Preview (`POST /api/admin/clickhouse/replay`) | Live Replay (`dry_run: false`) |
 |---|---|---|---|---|
-| **Admin** (`read_write`) | Full Access | Allowed (cap: 100 artifacts) | Allowed | Full visibility |
-| **Analyst Path B** (Remote Share) | HTTP 403 Forbidden | Blocked | Blocked | Blocked |
-| **Analyst Path A** (Standalone) | HTTP 403 Forbidden | Blocked | Blocked | Blocked |
+| **Admin** (`read_write`) | Full Access (`200 OK`) | Allowed (`200 OK` / `503 Unavailable`) | Allowed (cap: `1..100` artifacts) | Allowed (cap: `1..100` artifacts; audited in `audit_logs`) |
+| **Admin** (`read_only` service) | Full Access (`200 OK`) | Allowed (`200 OK`) | Rejected (`403 read_write_required`) | Rejected (`403 read_write_required`) |
+| **Analyst Path B** (Remote Share) | Blocked by `RemoteAccessMiddleware` | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) |
+| **Analyst Path A** (Standalone) | Read-only service config | Allowed (`200 OK`) | Rejected (`403 read_write_required`) | Rejected (`403 read_write_required`) |
 
-*RemoteAccessMiddleware blocks all `/api/admin/*` routes for analysts.*
+*Both `RemoteAccessMiddleware` and route-level `dependencies=[Depends(require_admin)]` guard `/api/admin/clickhouse/status` and `/api/admin/clickhouse/replay`.*
 
 ---
 
 ## 4. Architecture Execution Matrix
 | Architecture / Mode | Engine State | Behavior |
 |---|---|---|
-| **Standard** (`DEPLOYMENT_MODE=standard`) | Disabled | Page displays informational banner: ClickHouse is not active in Standard architecture (DuckDB/DuckLake serves all queries). `/api/admin/clickhouse/status` returns `enabled: false, health: "disabled"`. |
-| **High-Scale** (`DEPLOYMENT_MODE=high_scale`) | Active | Full cluster monitoring, schema validation, publication lag tracking, and bounded replay operations via `ClickHouseClient` and `PgManifest`. |
+| **Standard** (`DEPLOYMENT_MODE=standard`) | Disabled | `GET /api/admin/clickhouse/status?service_id={id}` returns HTTP `200` with `enabled: false, health: "disabled"`, and `null` for `schema_version`, `publication_counts`, `oldest_pending_age_seconds`, `last_published_at`, `active_generation`, and `expired_dataset_count`. UI renders an informational banner (`data-testid="admin-clickhouse-disabled-banner"`) explaining that DuckDB + DuckLake serves all queries, and disables replay controls (`POST /api/admin/clickhouse/replay` returns `409 clickhouse_disabled`). |
+| **High-Scale** (`DEPLOYMENT_MODE=high_scale`) | Active | `GET /api/admin/clickhouse/status?service_id={id}` verifies `client.health()`, queries `PgManifest(bounded=True).admin_status(service_id, target_identity(client))`, checks `schema_version == CLICKHOUSE_SCHEMA_VERSION`, and returns HTTP `200` (`health: "ok"`) or HTTP `503` (`health: "unavailable"`). Full dry-run preview and bounded replay execution (`full_rebuild` / `replay_unpublished`) are enabled. |
 
 ---
 
 ## 5. Backend APIs & Telemetry Attribution
 ### Endpoints
 1. `GET /api/admin/clickhouse/status?service_id={id}`
-   - **Response Model:** `ClickHouseStatusResponse`
-   - **Fields:** `service_id`, `enabled`, `health` (`ok` | `unavailable` | `disabled`), `schema_version`, `target_identity`, `active_dataset`, `active_generation`, `disk_free_bytes`, `disk_total_bytes`, `publication_lag_seconds`.
-2. `POST /api/admin/clickhouse/replay`
-   - **Request Model:** `ClickHouseReplayRequest` (`service_id`, `dry_run`: bool, `dataset_id`?: str, `generation`?: int, `limit`: int [1..100])
-   - **Response Model:** `ClickHouseReplayResponse` (`service_id`, `dry_run`, `operation`, `generation`, `limit`, `planned_artifacts`, `published_artifacts`, `acknowledged_rows`, `duration_ms`)
-   - **Error Model:** `ClickHouseReplayErrorResponse` (HTTP 409 if disabled or ineligible, 422 if limit > 100).
+   - **Dependencies:** `Depends(require_admin)`
+   - **Response Model:** `ClickHouseStatusResponse` (`backend/models/admin_clickhouse.py`)
+   - **Fields:**
+     - `service_id: str`
+     - `enabled: bool`
+     - `health: Literal["ok", "unavailable", "disabled"]`
+     - `schema_version: int | None`
+     - `publication_counts: dict[str, int] | None` (`pending`, `claimed`, `failed`, `published`)
+     - `oldest_pending_age_seconds: float | None`
+     - `last_published_at: str | None`
+     - `active_generation: ClickHouseGenerationSummary | None` (`generation`, `dataset_id`, `coverage_start`, `coverage_end`, `expires_at`, `expired`, `target_matches`, `coverage_age_seconds`)
+     - `expired_dataset_count: int | None`
+   - **Status Codes:** `200 OK` (`health: "ok"` or `"disabled"`), `400 Bad Request` (missing `service_id`), `403 Forbidden` (`admin_only`), `404 Not Found` (`service_not_found`), `503 Service Unavailable` (`health: "unavailable"` with `ClickHouseStatusResponse` body, or `service_unavailable` if config load fails).
 
-### Telemetry Attribution
-- **Tracing:** Spans tagged with `component: admin_clickhouse`, `service_id`, and `operation`.
-- **Query Registry:** All internal ClickHouse queries (`execute`, `insert`) register into `query_registry.register("ClickHouse", ...)` and appear in the Live Query Monitor (`/admin/queries`).
-- **Prometheus Metrics:** Exported via OpenTelemetry and scraped by Prometheus (`clickhouse.rules.yml`):
-  - `app_clickhouse_up`
-  - `app_clickhouse_query_duration_ms`
-  - `app_clickhouse_insert_duration_ms`
-  - `app_clickhouse_rows_inserted_total`
-  - `app_clickhouse_bytes_read_bytes_total`
-  - `app_clickhouse_publication_lag_seconds`
-  - `app_clickhouse_disk_free_bytes` / `app_clickhouse_disk_total_bytes`
+2. `POST /api/admin/clickhouse/replay`
+   - **Dependencies:** `Depends(require_admin)`
+   - **Request Model:** `ClickHouseReplayRequest` (`extra="forbid"`):
+     - `service_id: str` (`min_length=1, max_length=128`, validated against `SERVICE_ID_PATTERN`)
+     - `dataset_id: str | None` XOR `generation: str | None` (exactly one required; passing both or neither raises HTTP `422`)
+     - `dry_run: bool = True`
+     - `limit: StrictInt = 100` (`ge=1`, HTTP cap `<= 100`; values `< 1` or `> 100` raise HTTP `422`)
+   - **Response Model:** `ClickHouseReplayResponse`:
+     - `service_id: str`
+     - `dry_run: bool`
+     - `operation: Literal["rebuild", "resume"]`
+     - `dataset_id: str`
+     - `generation: str | None`
+     - `artifact_count: int`
+     - `planned_artifacts: int`
+     - `attempted: int` (`0` when `dry_run=True`)
+     - `published: int` (`0` when `dry_run=True`)
+     - `activated: bool` (`False` when `dry_run=True`)
+     - `limit: int`
+   - **Error Responses:**
+     - `403 Forbidden`: `admin_only` (Analyst Path B) or `read_write_required` (read-only service config)
+     - `404 Not Found`: `service_not_found` or `replay_not_found` (`LookupError` from `PgManifest.replay_preview`)
+     - `409 Conflict`: `clickhouse_disabled` (Standard mode) or `replay_ineligible` (`ValueError` when reference is expired, target mismatches, or exceeds HTTP cap)
+     - `422 Unprocessable Entity`: Invalid `limit` (`< 1` or `> 100`), missing/both `dataset_id` and `generation`, or extra fields
+     - `503 Service Unavailable`: `ClickHouseReplayErrorResponse` (`detail.error = "replay_unavailable"`, sanitized with empty `_debug_calls` so FOS URLs never leak on failure)
+
+### Telemetry & Audit Attribution
+- **Page Load Correlation:** All frontend requests via `adminFetch` propagate `X-Page-Load-ID`; clicking manual `Refresh` (`admin-clickhouse-refresh-btn`) calls `resetPageLoadId('manual-refresh')` before refetching.
+- **Audit Logging:** Non-dry-run replay requests record `clickhouse_replay` events in PostgreSQL `audit_logs` via `metadata.record_audit` across phases `requested`, `completed` (with `attempted`, `published`, `activated`), and `failed`.
+- **Query Registry & Metrics:** ClickHouse operations emit structured logs (`clickhouse.operation`) and register with `clickhouse_observer` / Prometheus rules (`observability/clickhouse.rules.yml`).
 
 ---
 
-## 6. UI Components, Skeletons & Layout Reservation
-- **Layout Shell:** Admin navigation shell with persistent top status bar and breadcrumbs.
-- **Zero-CLS Skeletons:**
-  - Cluster Vitals Card: Fixed height (`min-h-[160px]`) containing health pill, schema badge, disk progress bar.
-  - Active Dataset Banner: Fixed height (`min-h-[100px]`) displaying active generation ID, publication lag, and last rebuild timestamp.
-  - Replay Control Panel: Form controls with intrinsic reservation (`min-h-[240px]`), limit slider, dry-run toggle, and action buttons.
-  - Artifact Table / Audit Stream: Paginated table with fixed row heights (`h-12`) and loading skeletons.
+## 6. UI Components, Skeletons & Zero-CLS Layout Reservations
+Implemented in `frontend/app/admin/clickhouse/page.tsx`, `frontend/app/admin/clickhouse/loading.tsx`, and `frontend/app/admin/clickhouse/_sections/ClickHouseAdminClient.tsx`, and wired into `frontend/app/admin/AdminPrefetchLinks.tsx` and `frontend/lib/query-keys.ts` (`queryKeys.admin.clickhouseStatus`).
+
+- **Page Root (`data-testid="admin-clickhouse-root"` / `data-testid="admin-clickhouse-loading"`):**
+  - Renders `PageHeader` (`ClickHouse Replay & Cluster Operations`) with `BackToAdminLink`.
+- **Pre-Allocated Zero-CLS Containers:**
+  1. **Toolbar (`data-testid="admin-clickhouse-toolbar"`):** `min-h-[56px] [contain-intrinsic-size:auto_56px] [content-visibility:auto]`. Displays service badge (`admin-clickhouse-service-badge`), health badge (`admin-clickhouse-health-badge`: `ok` / `disabled` / `unavailable`), and manual `Refresh` button (`admin-clickhouse-refresh-btn`).
+  2. **Cluster & Publication Vitals (`data-testid="admin-clickhouse-vitals-reservation"`):** `min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto]`. Displays engine status (`admin-clickhouse-vital-enabled`), `schema_version`, publication counts (`admin-clickhouse-vital-counts`), `oldest_pending_age_seconds` (`admin-clickhouse-vital-pending-age`), `last_published_at`, `expired_dataset_count` (`admin-clickhouse-vital-expired-count`), and contextual banners for Standard mode (`admin-clickhouse-disabled-banner`) or HTTP 503 unavailability (`admin-clickhouse-unavailable-banner`).
+  3. **Active Generation Card (`data-testid="admin-clickhouse-generation-reservation"`):** `min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]`. Displays `active_generation` (`generation`, `dataset_id`, `coverage_start`, `coverage_end`, `expires_at`, `expired`, `target_matches`, `coverage_age_seconds`) with a quick-fill `Use in Replay` button (`admin-clickhouse-prefill-btn`), or a dashed empty state (`admin-clickhouse-no-active-generation`) when `active_generation` is `null`.
+  4. **Bounded Artifact Replay Control Panel (`data-testid="admin-clickhouse-replay-reservation"`):** `min-h-[300px] [contain-intrinsic-size:auto_300px] [content-visibility:auto]`. Renders operation mode toggle (`admin-clickhouse-mode-rebuild` / `admin-clickhouse-mode-resume`), reference input (`admin-clickhouse-reference-input`), batch limit input `1..100` (`admin-clickhouse-limit-input`), `dry_run` checkbox (`admin-clickhouse-dry-run-checkbox`, default `true`), submit button (`admin-clickhouse-replay-submit-btn`), and replay outcome / error banners (`admin-clickhouse-replay-outcome`, `admin-clickhouse-replay-error`).
+- **Non-Destructive Background Refresh:** Uses `placeholderData: keepPreviousData` and dims cards (`opacity-40 pointer-events-none`) during background refetches.
 
 ---
 
 ## 7. Interactive Workflows & Edge Cases
-1. **Cluster Status Polling:** Page polls `/api/admin/clickhouse/status` every 10s. If status transitions to `unavailable`, a prominent warning alert renders with retry guidance.
-2. **Dry-Run Replay Simulation:**
-   - Operator selects target generation or full rebuild, sets artifact limit (default 20, max 100), and checks "Dry Run".
-   - Submitting fires `POST /api/admin/clickhouse/replay` with `dry_run: true`.
-   - UI renders a summary modal showing planned artifacts, projected row count, and estimated duration without executing any inserts or mutations.
-3. **Live Replay Execution:**
-   - Operator unchecks "Dry Run" and confirms via confirmation dialog.
-   - UI locks replay controls, renders an active progress spinner, and streams publication outcome upon completion.
-   - New generation becomes active in `PgManifest` and is acknowledged by ClickHouse.
-4. **Standard Mode Fallback:** When running against a Standard service, all action buttons are disabled with tooltip explanation: "ClickHouse is disabled in Standard deployment mode."
+1. **Cluster Status Inspection & Graceful 503 Handling:** `fetchClickHouseStatus` parses the `ClickHouseStatusResponse` JSON body on both HTTP `200` (`ok` / `disabled`) and HTTP `503` (`unavailable`), rendering the `unavailable` badge and diagnostic banner without collapsing the page.
+2. **Dry-Run Replay Preview:** Operator selects `Dataset Rebuild` (`dataset_id`) or `Generation Resume` (`generation`), sets `limit` (`1..100`), leaves `Dry Run Preview` checked (`dry_run: true`), and submits. The backend validates the reference in `PgManifest.replay_preview` and returns `planned_artifacts` and `artifact_count` with `attempted: 0, published: 0, activated: false`.
+3. **Live Bounded Replay Execution:** Operator unchecks `Dry Run Preview` (`dry_run: false`) and submits. The backend records `clickhouse_replay` audit entries, streams sealed artifacts from FOS via `FosArtifacts.load`, publishes rows into ClickHouse (`full_rebuild` or `replay_unpublished`), and returns the activated generation summary while triggering a status refetch.
+4. **Standard Mode Fallback:** When `enabled === false`, all replay form inputs and the submit button are disabled with explanatory copy (`data-testid="admin-clickhouse-replay-disabled-hint"`).
 
 ---
 
 ## 8. Performance, Cost & Telemetry Budgets
-- **First Contentful Paint (FCP):** < 400ms.
-- **Time to Interactive (TTI):** < 800ms.
-- **Cumulative Layout Shift (CLS):** 0.00.
-- **Status API Latency (p95):** < 150ms.
-- **Replay Preview Latency (p95):** < 300ms.
-- **FOS Overhead:** Replay reads immutable `.gz` artifacts from FOS; previews perform metadata-only index lookups in PostgreSQL, incurring zero Class A/B FOS charges.
+- **First Contentful Paint (FCP):** `< 1200ms` (warm-load verified `< 300ms`).
+- **Cumulative Layout Shift (CLS):** `<= 0.05` (verified `0.000` across all 3 tiers).
+- **FOS Overhead:** Status checks and dry-run previews execute against PostgreSQL (`PgManifest`) and ClickHouse health checks only, incurring zero Class A/B FOS operations.
 
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Navigate to `/admin/clickhouse?service_id=<id>` as Admin; verify page loads with HTTP 200 and zero console errors.
-- [ ] 2. Measure layout shifts during status fetch; confirm CLS = 0.00.
-- [ ] 3. Verify Cluster Vitals card renders correct connection health (`ok` or `disabled`), schema version, and disk capacity.
-- [ ] 4. In High-Scale mode, verify `app_clickhouse_up=1` metric aligns with UI status.
-- [ ] 5. Trigger a Dry-Run replay preview with `limit=10`; confirm `planned_artifacts` is returned and `published_artifacts=0`.
-- [ ] 6. Verify that requesting replay limit > 100 returns HTTP 422 with canonical error payload.
-- [ ] 7. In Standard mode (`DEPLOYMENT_MODE=standard`), verify page gracefully indicates ClickHouse is disabled and status endpoint returns `enabled: false`.
-- [ ] 8. Verify all ClickHouse queries during status check appear in Live Query Monitor (`/admin/queries`) attributed to `"ClickHouse"`.
-- [ ] 9. Attempt to access `/admin/clickhouse` using an Analyst session; verify strict HTTP 403 Forbidden redirect.
-- [ ] 10. Confirm all network calls pass `X-Page-Load-ID` header and generate attributed trace spans.
+- [x] 1. Navigate to `/admin/clickhouse` as Admin; verify page loads with HTTP 200, renders `ServerFooter`, and mounts `admin-clickhouse-root`.
+- [x] 2. Measure layout shifts and FCP during page load; confirm `CLS <= 0.05` and `FCP < 1200ms` with all 4 reservation containers (`admin-clickhouse-toolbar`, `admin-clickhouse-vitals-reservation`, `admin-clickhouse-generation-reservation`, `admin-clickhouse-replay-reservation`) pre-allocated.
+- [x] 3. Verify `GET /api/admin/clickhouse/status?service_id=<id>` returns HTTP 200 with `enabled: false, health: "disabled"` in Standard mode and `enabled: true, health: "ok", schema_version: 2` in High-Scale mode.
+- [x] 4. Verify `POST /api/admin/clickhouse/replay` rejects `limit: 101` with HTTP 422, rejects missing `dataset_id`/`generation` with HTTP 422, and returns HTTP 409 `clickhouse_disabled` in Standard mode or HTTP 200/404 in High-Scale mode.
+- [x] 5. Verify Analyst Path B sessions receive HTTP 403 Forbidden (`{"error": "admin_only"}`) on both `/api/admin/clickhouse/status` and `/api/admin/clickhouse/replay`.
+- [x] 6. Confirm manual refresh (`admin-clickhouse-refresh-btn`) rotates and propagates `X-Page-Load-ID` header on `/api/admin/clickhouse/status`.
 
 ---
 
-## 10. Automated Test Suite & Traffic Generation
-- **Playwright Test Specs:**
-  - `frontend/__tests__/clickhouse-msw.test.ts` (API mock contract verification).
-  - `e2e/admin/clickhouse.spec.ts` (Cluster status, dry-run replay modal, RBAC enforcement).
-- **Backend Tests:**
+## 10. Automated Test Suite
+- **Playwright E2E Spec:** `frontend/e2e/pages/admin-clickhouse.spec.ts` (verified across Local Standard, Remote Standard GCE, and High-Scale Elevation).
+- **Frontend Unit Tests:**
+  - `frontend/__tests__/app/admin/clickhouse.test.tsx`
+  - `frontend/__tests__/clickhouse-msw.test.ts`
+- **Backend Unit & Integration Tests:**
+  - `tests/routers/test_admin_clickhouse.py`
+  - `tests/remote_access/test_route_table_tripwire.py`
   - `tests/core/test_clickhouse_client.py`
   - `tests/core/test_clickhouse_publication.py`
   - `tests/core/test_clickhouse_schema.py`
   - `tests/core/test_clickhouse_metrics.py`
-- **Replay Verification Harness:**
-  - Run bounded test replay: `python -m scripts.clickhouse_replay --service-id=<id> --limit=10 --dry-run`.

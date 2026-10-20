@@ -94,6 +94,8 @@ export const queryKeys = {
       ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', serviceId, prefix] as const,
     fileTreeFor: (type: 'iceberg' | 'raw', serviceId: string | null | undefined) =>
       ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', serviceId] as const,
+    clickhouseStatus: (serviceId: string | null | undefined) =>
+      ['admin', 'clickhouse', 'status', serviceId] as const,
   },
 
   filtered: (
