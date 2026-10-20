@@ -118,11 +118,79 @@ def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
     assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in client.calls[-1][0]
 
 
-def test_rejects_filters_that_cannot_be_preserved_by_origin_projections() -> None:
-    service = SimpleNamespace(service_id="svc", client=_Client())
+class _FactsClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
 
-    with pytest.raises(ValueError, match="filters"):
-        aggregates(service, _request(filters={"country": ["US"]}), None, None, sections={"summary"})
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+        self.calls.append((sql, params or {}))
+        if "origin:facts_summary" in sql:
+            return [
+                {
+                    "requests": 10,
+                    "misses": 6,
+                    "passes": 2,
+                    "origin_5xx": 1,
+                    "status_count": 10,
+                    "latency_q": [1000.0, 1500.0, 2500.0, 3000.0],
+                    "ttlb_n": 10,
+                    "ttlb_q": [2000.0, 4000.0],
+                    "overhead_n": 10,
+                    "overhead_q": 500.0,
+                    "bytes_n": 10,
+                    "bytes_q": 128.0,
+                }
+            ]
+        if "origin:facts_slow_urls" in sql:
+            return [{"value": "/slow", "requests": 5, "latency_q": [1000.0, 2500.0, 3000.0]}]
+        if "origin:facts_status_codes" in sql:
+            return [{"value": 503, "requests": 2}, {"value": 200, "requests": 8}]
+        if "origin:facts_pop_latency" in sql:
+            return [{"value": "SJC", "requests": 4, "origin_5xx": 0, "latency_n": 4, "latency_q": [1000.0, 2000.0]}]
+        raise AssertionError(sql)
+
+
+def test_filtered_requests_read_request_facts_exactly_instead_of_failing() -> None:
+    from backend.models.common import FilterSpec
+
+    client = _FactsClient()
+    service = SimpleNamespace(service_id="svc", client=client)
+    req = _request(filters={"country": FilterSpec(mode="include", values=["US"])})
+
+    result = aggregates(service, req, None, None, sections={"summary", "slow_urls", "status_codes", "pop_latency"})
+
+    sqls = [sql for sql, _ in client.calls]
+    assert sqls and all("FROM (SELECT" in sql and "request_facts" in sql for sql in sqls)
+    assert not any("origin_minute_" in sql for sql in sqls)
+    assert all(params["filter_0_0"] == "US" for _, params in client.calls)
+    assert result["summary"]["_approx"] is False
+    assert result["slow_urls"]["_approx"] is False
+    assert result["summary"]["ottfb_p95_ms"] == 2.5
+    assert result["summary"]["origin_error_rate"] == 0.1
+    assert [row["status"] for row in result["status_codes"]["rows"]] == [503, 200]
+    assert result["status_codes"]["rows"][0]["pct"] == 20.0
+
+
+def test_inactive_filters_still_use_the_projections() -> None:
+    from backend.models.common import FilterSpec
+
+    client = _Client()
+    service = SimpleNamespace(service_id="svc", client=client)
+    req = _request(filters={"country": FilterSpec(mode="include", values=[])})
+
+    aggregates(service, req, None, None, sections={"summary"})
+
+    assert "origin_minute_summary" in client.calls[0][0]
+
+
+def test_unsupported_filter_fields_are_rejected_loudly_not_ignored() -> None:
+    from backend.models.common import FilterSpec
+
+    service = SimpleNamespace(service_id="svc", client=_Client())
+    req = _request(filters={"_bot_name": FilterSpec(mode="include", values=["x"])})
+
+    with pytest.raises(ValueError, match="_bot_name"):
+        aggregates(service, req, None, None, sections={"summary"})
 
 
 def test_only_queries_requested_sections() -> None:

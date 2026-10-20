@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.high_scale import origin_facts
+from backend.high_scale._filters import build_clickhouse_filters
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
@@ -314,27 +316,49 @@ def aggregates(
     *,
     sections: set[str] | None,
 ) -> dict[str, Any]:
-    if req.filters:
-        raise ValueError("high-scale Origin projections do not support filters")
+    filter_sql, filter_params = build_clickhouse_filters(req.filters)
+    facts = (
+        origin_facts.scope(service, start_time, end_time, filter_sql, filter_params) if filter_sql != "1=1" else None
+    )
+    approx = _APPROX if facts is None else {"_approx": False}
+
+    def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):
+        if facts is not None:
+            return origin_facts.latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
+        return _latency_dimension(
+            service,
+            marker=marker,
+            dimension=dimension,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            having=having,
+        )
 
     sections = sections or set(_EMPTY)
     result: dict[str, Any] = {}
     if "summary" in sections:
-        result["summary"] = _summary(service, start_time, end_time)
-    if "timeseries" in sections:
-        result["timeseries"] = _timeseries(service, req, start_time, end_time)
-    if "slow_urls" in sections:
-        result["slow_urls"] = _slow_urls(service, req, start_time, end_time)
-    if "status_codes" in sections:
-        result["status_codes"] = _status_codes(service, start_time, end_time)
-    if "path_breakdown" in sections:
-        rows = _latency_dimension(
-            service,
-            marker="path_breakdown",
-            dimension="edge",
-            start_time=start_time,
-            end_time=end_time,
+        result["summary"] = (
+            _summary(service, start_time, end_time) if facts is None else origin_facts.summary(service, facts)
         )
+    if "timeseries" in sections:
+        result["timeseries"] = (
+            _timeseries(service, req, start_time, end_time)
+            if facts is None
+            else origin_facts.timeseries(service, facts, req)
+        )
+    if "slow_urls" in sections:
+        result["slow_urls"] = (
+            _slow_urls(service, req, start_time, end_time)
+            if facts is None
+            else origin_facts.slow_urls(service, facts, req)
+        )
+    if "status_codes" in sections:
+        result["status_codes"] = (
+            _status_codes(service, start_time, end_time) if facts is None else origin_facts.status_codes(service, facts)
+        )
+    if "path_breakdown" in sections:
+        rows = latency_rows("path_breakdown", "edge")
         result["path_breakdown"] = {
             "has_data": bool(rows),
             "shielding_detected": any(row["value"] == "false" for row in rows),
@@ -347,17 +371,10 @@ def aggregates(
                 }
                 for row in rows
             ],
-            **_APPROX,
+            **approx,
         }
     if "pop_latency" in sections:
-        rows = _latency_dimension(
-            service,
-            marker="pop_latency",
-            dimension="pop",
-            start_time=start_time,
-            end_time=end_time,
-            limit=req.pop_latency_limit,
-        )
+        rows = latency_rows("pop_latency", "pop", limit=req.pop_latency_limit)
         p95s = [value for row in rows if (value := _milliseconds(_quantile(row, "latency", 1))) is not None]
         p95s.sort()
         median_p95 = p95s[len(p95s) // 2] if p95s else 0
@@ -375,15 +392,12 @@ def aggregates(
                 }
                 for row in rows
             ],
-            **_APPROX,
+            **approx,
         }
     if "ip_health" in sections:
-        rows = _latency_dimension(
-            service,
-            marker="ip_health",
-            dimension="oip",
-            start_time=start_time,
-            end_time=end_time,
+        rows = latency_rows(
+            "ip_health",
+            "oip",
             limit=req.ip_health_limit,
             having="sum(origin_minute_dimensions.requests) >= 10",
         )
@@ -400,7 +414,7 @@ def aggregates(
                 for row in rows
                 if int(row["requests"]) > 0
             ],
-            **_APPROX,
+            **approx,
         }
     summary = result.get("summary", _EMPTY["summary"])
     return {"has_data": bool(summary.get("has_data")), **result}

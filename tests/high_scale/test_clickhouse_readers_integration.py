@@ -527,3 +527,79 @@ def test_origin_sketches_merge_to_near_exact_percentiles(fixture: _Fixture, monk
     assert result["timeseries"]["series"] and all(point["value"] for point in result["timeseries"]["series"])
     assert {row["url"] for row in result["slow_urls"]["rows"]} == {"/a", "/b"}
     assert result["pop_latency"]["rows"][0]["pop"] == "SJC"
+
+
+def _origin_request(filters: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        filters=filters,
+        bucket_minutes=60,
+        split_by_leg=False,
+        timeseries_metric="ttfb",
+        timeseries_percentile="p95",
+        slow_urls_limit=5,
+        slow_urls_min_requests=1,
+        ip_health_limit=5,
+        pop_latency_limit=5,
+    )
+
+
+_ORIGIN_SECTIONS = {"summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"}
+
+
+def _filtered_origin(service: SimpleNamespace, filters: dict[str, Any]) -> dict[str, Any]:
+    return origin_aggregates(
+        service,
+        _origin_request(filters),
+        (NOW - timedelta(hours=12)).isoformat(),
+        (NOW + timedelta(minutes=1)).isoformat(),
+        sections=_ORIGIN_SECTIONS,
+    )
+
+
+def test_filtered_origin_is_computed_exactly_from_request_facts(traffic: _Fixture, service: SimpleNamespace) -> None:
+    from backend.models.common import FilterSpec
+
+    result = _filtered_origin(
+        service,
+        {"url": FilterSpec(mode="include", values=["/ok"]), "method": FilterSpec(mode="include", values=["GET"])},
+    )
+
+    summary = result["summary"]
+    assert summary["has_data"] is True and summary["_approx"] is False
+    assert summary["total_misses"] == 0 and summary["total_passes"] == 0
+    assert summary["ottfb_p50_ms"] == summary["ottfb_p95_ms"] == 50.0
+    assert summary["origin_error_rate"] == 0.0
+    assert summary["ottlb_p50_ms"] is None and summary["obytes_p50"] is None
+    assert result["status_codes"]["rows"] == [{"status": 200, "count": 500, "pct": 100.0}]
+    assert result["slow_urls"]["rows"] == [
+        {"url": "/ok", "requests": 500, "p50_ms": 50.0, "p95_ms": 50.0, "p99_ms": 50.0}
+    ]
+    assert result["timeseries"]["has_data"] and all(p["value"] == 50.0 for p in result["timeseries"]["series"])
+    assert sum(p["miss_count"] for p in result["timeseries"]["series"]) == 0
+    assert result["path_breakdown"]["has_data"] is False
+
+
+def test_filtered_origin_with_no_matching_rows_reports_no_data_without_error(
+    traffic: _Fixture, service: SimpleNamespace
+) -> None:
+    from backend.models.common import FilterSpec
+
+    result = _filtered_origin(
+        service,
+        {"url": FilterSpec(mode="include", values=["/ok"]), "method": FilterSpec(mode="include", values=["POST"])},
+    )
+
+    assert result["has_data"] is False
+    assert result["summary"]["has_data"] is False
+    assert result["slow_urls"]["rows"] == [] and result["status_codes"]["rows"] == []
+    assert result["timeseries"]["series"] == []
+
+
+def test_filtered_origin_exclude_mode_and_oip_health(traffic: _Fixture, service: SimpleNamespace) -> None:
+    from backend.models.common import FilterSpec
+
+    result = _filtered_origin(service, {"country": FilterSpec(mode="exclude", values=["NZ"])})
+
+    assert result["summary"]["has_data"] is True
+    assert {row["url"] for row in result["slow_urls"]["rows"]} >= {"/ok"}
+    assert 200 in {row["status"] for row in result["status_codes"]["rows"]}
