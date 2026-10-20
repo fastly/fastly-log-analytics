@@ -74,12 +74,12 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     await expect(generation).toBeVisible();
     await expect(replay).toBeVisible();
 
-    const vitalsBox = await vitals.boundingBox();
-    const generationBox = await generation.boundingBox();
-    const replayBox = await replay.boundingBox();
-    expect(vitalsBox?.height ?? 0).toBeGreaterThanOrEqual(200);
-    expect(generationBox?.height ?? 0).toBeGreaterThanOrEqual(180);
-    expect(replayBox?.height ?? 0).toBeGreaterThanOrEqual(260);
+    // The route's Suspense skeleton and the loaded page share these test ids, so a single sample can
+    // land on the skeleton node as it detaches (boundingBox() === null). Poll until the swap settles.
+    const heightOf = (locator: typeof vitals) => async () => (await locator.boundingBox())?.height ?? 0;
+    await expect.poll(heightOf(vitals)).toBeGreaterThanOrEqual(200);
+    await expect.poll(heightOf(generation)).toBeGreaterThanOrEqual(180);
+    await expect.poll(heightOf(replay)).toBeGreaterThanOrEqual(260);
 
     // Wait for status badge to settle before sampling CLS & FCP
     const healthBadge = page.getByTestId('admin-clickhouse-health-badge');
