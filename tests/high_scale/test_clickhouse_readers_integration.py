@@ -655,18 +655,15 @@ def test_sql_console_cannot_widen_past_the_service_and_window_with_an_or_conditi
     assert _console(service, "SELECT count(*) AS n FROM logs WHERE url = '/other-tenant'")[0]["n"] == 0
 
 
-@pytest.mark.parametrize("comment", ["-- swallow everything after this", "--", "/* unterminated-safe */ -- x"])
-def test_sql_console_trailing_comment_cannot_swallow_scope_or_row_cap(
-    two_tenants: _Fixture, service: SimpleNamespace, comment: str
+@pytest.mark.parametrize(
+    "tail",
+    ["-- swallow everything after this", "/* c */", "/* /* */ UNION SELECT 1 FROM system.tables\n-- */ */"],
+)
+def test_sql_console_rejects_comments_so_a_trailing_one_cannot_swallow_scope_or_row_cap(
+    two_tenants: _Fixture, service: SimpleNamespace, tail: str
 ) -> None:
-    scoped = _console(service, "SELECT count(*) AS n FROM logs")[0]["n"]
-
-    rows = _console(service, f"SELECT url FROM logs {comment}")
-    counted = _console(service, f"SELECT count(*) AS n FROM logs {comment}")[0]["n"]
-
-    assert counted == scoped, "a comment must not widen the service or window scope"
-    assert len(rows) <= 100, "a comment must not remove the row cap"
-    assert all(row["url"] != "/other-tenant" for row in rows)
+    with pytest.raises(PermissionError):
+        _console(service, f"SELECT url FROM logs {tail}")
 
 
 def test_sql_console_row_cap_holds_server_side_for_a_huge_explicit_limit(

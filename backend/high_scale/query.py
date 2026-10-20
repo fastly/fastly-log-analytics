@@ -127,6 +127,37 @@ def _code_only(sql: str) -> str:
     return _LITERAL_OR_COMMENT.sub(" ", sql)
 
 
+_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+_COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
+_RESULT_CLAUSES = re.compile(r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b", re.IGNORECASE)
+
+
+def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
+    """Reject text DuckDB (which validates the SQL) and ClickHouse (which runs it) could tokenise differently.
+
+    DuckDB nests ``/* /* */ */`` and ClickHouse does not, they disagree on ``\\'`` inside strings, on ``$$``
+    heredocs and on non-ASCII whitespace; a statement crafted around any of them passes the table and function
+    checks as a harmless query and runs as another. Comments, backslashes, ``$``, backticks, stray quotes,
+    non-ASCII outside string literals, result clauses (``SETTINGS``, ``FORMAT``, ``INTO OUTFILE``) and
+    schema-qualified fact tables have no use in console queries, so they fail closed and both parsers see
+    exactly the same text.
+    """
+    if "\\" in sql:
+        raise PermissionError("backslashes are not allowed in console queries")
+    code = _STRING_LITERAL.sub(" ", sql)
+    if "'" in code:
+        raise PermissionError("unterminated string literal")
+    if _COMMENT_OR_ESCAPE.search(code):
+        raise PermissionError("comments, '$' and backticks are not allowed in console queries")
+    if re.search(r"[^\x20-\x7e\n\r\t]", code):
+        raise PermissionError("non-ASCII characters are only allowed inside string literals")
+    if _RESULT_CLAUSES.search(code):
+        raise PermissionError("SETTINGS, FORMAT and INTO OUTFILE clauses are not allowed")
+    names = "|".join(sorted(re.escape(name) for name in table_names | frozenset(_FACT_DOMAINS)))
+    if re.search(rf"\.\s*(?:{names})\b", code, flags=re.IGNORECASE):
+        raise PermissionError("schema-qualified table names are not allowed")
+
+
 def _reject_unsafe_functions(sql: str) -> None:
     for match in _SQL_TOKEN.finditer(sql):
         token = match.group(0)
@@ -159,6 +190,7 @@ def query_endpoint(
     allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
 
     _t_val = time.perf_counter()
+    _reject_ambiguous_syntax(raw_sql, allowed_tables)
     with duckdb.connect(":memory:") as parser_con:
         try:
             validate_user_sql(

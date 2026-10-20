@@ -61,11 +61,10 @@ def test_the_users_own_where_clause_is_left_untouched_not_spliced_with_the_scope
     assert "service_id" not in sql
 
 
-@pytest.mark.parametrize("comment", ["-- swallow the rest", "--", "-- LIMIT 999999999 SETTINGS x = 1"])
-def test_a_trailing_line_comment_cannot_swallow_the_row_cap(comment: str) -> None:
-    sql, settings = _run(f"SELECT * FROM logs {comment}", max_rows=7)
+def test_the_row_cap_sits_on_its_own_line_after_the_user_sql() -> None:
+    sql, settings = _run("SELECT * FROM logs", max_rows=7)
 
-    assert sql.endswith("\n) LIMIT 8"), "the cap must start on its own line, outside the user's comment"
+    assert sql.endswith("\n) LIMIT 8")
     assert settings["max_result_rows"] == "8" and settings["result_overflow_mode"] == "break"
     assert "additional_table_filters" in settings
 
@@ -144,12 +143,54 @@ def test_a_passing_probe_is_remembered_per_client() -> None:
     assert sum("system.one" in sql for sql, _ in client.calls) == 1
 
 
-@pytest.mark.parametrize("decoy", ["-- LIMIT 1", "/* LIMIT 1 */", "'LIMIT'", "'it''s a LIMIT'"])
-def test_the_word_limit_in_a_comment_or_literal_does_not_raise_the_users_row_cap(decoy: str) -> None:
-    sql, settings = _run(
-        f"SELECT {decoy if decoy.startswith(chr(39)) else '1'} AS a FROM logs {decoy if not decoy.startswith(chr(39)) else ''}",
-        max_rows=5,
-    )
+@pytest.mark.parametrize("decoy", ["'LIMIT'", "'it''s a LIMIT'"])
+def test_the_word_limit_in_a_literal_does_not_raise_the_users_row_cap(decoy: str) -> None:
+    sql, settings = _run(f"SELECT {decoy} AS a FROM logs", max_rows=5)
 
     assert sql.endswith("\n) LIMIT 6")
     assert settings["max_result_rows"] == "6"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM logs -- swallow the rest",
+        "SELECT * FROM logs /* c */",
+        "SELECT 1 # hash comment",
+        "SELECT * FROM remote/**/('h', 'd', 't')",
+        "SELECT hostName--\n() FROM logs",
+        "SELECT 1 /* /* */ FROM system.tables\n-- */ */",
+        "SELECT * FROM logs WHERE url = 'a\\'' OR 1 = 1 --'",
+        "SELECT $$x$$ FROM logs",
+        "SELECT `ip` FROM logs",
+        "SELECT * FROM logs SETTINGS additional_table_filters = '{}'",
+        "SELECT * FROM logs FORMAT TSV",
+        "SELECT * FROM logs INTO OUTFILE '/tmp/x'",
+        "SELECT * FROM logs WHERE url = 'unterminated",
+        "SELECT * FROM default.logs",
+        "SELECT * FROM fastly_log_analytics.request_facts",
+        "SELECT * FROM logs WHERE country = 'US\u200b'  AND x\u00a0= 1",
+    ],
+)
+def test_syntax_the_two_parsers_could_read_differently_is_rejected_before_validation(sql: str) -> None:
+    client = _Recorder()
+
+    with pytest.raises(PermissionError):
+        _run(sql, client=client)
+
+    assert not client.calls, "nothing may reach ClickHouse"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT city FROM logs WHERE city = 'São Paulo'",
+        "SELECT format('{}', 1) AS f FROM logs",
+        "SELECT url AS settings_url FROM logs",
+        "SELECT 'a -- b /* c */ # d' AS s FROM logs",
+        "SELECT 'it''s' AS s FROM logs",
+        "SELECT logs.url FROM logs",
+    ],
+)
+def test_ordinary_sql_still_runs(sql: str) -> None:
+    _run(sql)
