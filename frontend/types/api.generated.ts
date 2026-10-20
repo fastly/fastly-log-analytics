@@ -42514,7 +42514,7 @@ export interface operations {
     metric_history_batch_api_admin_metric_history_batch_get: {
         parameters: {
             query?: {
-                /** @description Lookback window: 30m, 1h, 24h, 7d, etc. */
+                /** @description Lookback window: 30m, 1h, 6h, 24h, 7d, etc. */
                 since?: string;
             };
             header?: never;

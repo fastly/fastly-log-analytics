@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { TrendingUp } from 'lucide-react'
+import { RefreshCw, TrendingUp } from 'lucide-react'
 
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Sparkline } from '@/components/Sparkline'
@@ -16,9 +16,11 @@ import { queryKeys } from '@/lib/query-keys'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
+export type TrendWindow = '1h' | '6h' | '24h' | '7d'
 
-const WINDOWS: { label: string; value: '1h' | '24h' | '7d' }[] = [
+export const WINDOWS: { label: string; value: TrendWindow }[] = [
   { label: 'Last hour', value: '1h' },
+  { label: 'Last 6h', value: '6h' },
   { label: 'Last 24h', value: '24h' },
   { label: 'Last 7 days', value: '7d' },
 ]
@@ -26,7 +28,7 @@ const WINDOWS: { label: string; value: '1h' | '24h' | '7d' }[] = [
 // Series displayed on the page, top-down. Each entry binds a metric key
 // (global → bare metric name, per-service → metric + '|svc'; we resolve
 // per-service inline below) to a display label, unit, and chart domain.
-const SERIES_LAYOUT: {
+export const SERIES_LAYOUT: {
   title: string
   description: string
   metric: string
@@ -70,15 +72,18 @@ export default function AdminTrendsClient() {
   // (../page.tsx) pre-seeds into ['admin','metric-history-batch','1h'] via
   // HydrationBoundary. If you change this default, update the seed literal in
   // page.tsx too or the SSR seed will silently miss and refetch on mount.
-  const [window, setWindow] = React.useState<'1h' | '24h' | '7d'>('1h')
+  const [window, setWindow] = React.useState<TrendWindow>('1h')
 
-  const { data: trends, isLoading, isFetching, error } = useQuery({
+  const { data: trends, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch(window),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/admin/metric-history/batch', {
+      const { data, response } = await client.GET('/api/admin/metric-history/batch', {
         params: { query: { since: window } },
         signal,
       })
+      if (!response.ok || !data) {
+        throw new Error(`HTTP ${response.status}`)
+      }
       return data as TrendBatch
     },
     // 60s sampler cadence — refetch matches that. Background-tab is off
@@ -89,21 +94,41 @@ export default function AdminTrendsClient() {
   })
 
   const series = trends?.series ?? {}
+  const isRefreshing = isFetching && !isLoading
 
   return (
-    <div className="container mx-auto p-4 space-y-4">
+    <div data-testid="admin-trends-root" className="container mx-auto p-4 space-y-4">
       <PageHeader
         title="Operational Trends"
-        description="Sampled every 60 s. Retained 30 days. Backed by data/system/system_metrics.db."
+        description="Sampled every 60 s. Retained 30 days. Backed by PostgreSQL metric_snapshots."
         icon={TrendingUp}
       >
-        <BackToAdminLink variant="ghost" prefetch={false} />
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-testid="admin-trends-refresh-btn"
+            onClick={() => void refetch()}
+            disabled={isFetching}
+          >
+            <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', isRefreshing && 'animate-spin')} />
+            Refresh
+          </Button>
+          <BackToAdminLink variant="ghost" prefetch={false} />
+        </div>
       </PageHeader>
 
-      <div className="flex gap-2">
+      <div
+        data-testid="admin-trends-toolbar"
+        className="flex flex-wrap items-center gap-2 min-h-[36px] [contain-intrinsic-size:auto_36px] [content-visibility:auto]"
+      >
         {WINDOWS.map((w) => (
           <Button
             key={w.value}
+            type="button"
+            data-testid={`admin-trends-window-${w.value}`}
+            aria-pressed={window === w.value}
             variant={window === w.value ? 'default' : 'outline'}
             size="sm"
             onClick={() => setWindow(w.value)}
@@ -113,7 +138,13 @@ export default function AdminTrendsClient() {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div
+        data-testid="admin-trends-grid-reservation"
+        className={cn(
+          'grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-[680px] [contain-intrinsic-size:auto_680px] [content-visibility:auto]',
+          isRefreshing && 'opacity-40 pointer-events-none transition-opacity',
+        )}
+      >
         {SERIES_LAYOUT.map((cfg) => {
           const points =
             cfg.aggregateBy === 'max-per-ts'
@@ -121,33 +152,38 @@ export default function AdminTrendsClient() {
               : series[cfg.metric] ?? []
           const latest = points.length ? points[points.length - 1].value : null
           return (
-            <AnalyticsCard
-              key={cfg.metric}
-              title={cfg.title}
-              description={cfg.description}
-              isLoading={isLoading}
-              isFetching={isFetching}
-              error={error as AnalyticsCardError | null}
-              isEmpty={!isLoading && !error && points.length === 0}
-            >
-              <div className="flex items-baseline justify-between mb-2">
-                <div className="text-2xl font-semibold tabular-nums">
-                  {latest === null ? '–' : formatValue(latest, cfg.unit)}
+            <div key={cfg.metric} data-testid={`admin-trends-card-${cfg.metric}`}>
+              <AnalyticsCard
+                title={cfg.title}
+                description={cfg.description}
+                isLoading={isLoading}
+                isFetching={isFetching}
+                loadingMessage="Loading system vital trends..."
+                error={error as AnalyticsCardError | null}
+                isEmpty={!isLoading && !error && points.length === 0}
+              >
+                <div className="flex items-baseline justify-between mb-2">
+                  <div
+                    data-testid={`admin-trends-latest-${cfg.metric}`}
+                    className="text-2xl font-semibold tabular-nums"
+                  >
+                    {latest === null ? '–' : formatValue(latest, cfg.unit)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {points.length > 0 ? `${points.length} samples` : isLoading ? 'loading…' : 'no samples yet'}
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  {points.length > 0 ? `${points.length} samples` : isLoading ? 'loading…' : 'no samples yet'}
+                <div className={cn('text-foreground/70', latest === null && 'opacity-40')}>
+                  <Sparkline
+                    points={points}
+                    yDomain={cfg.yDomain}
+                    height={120}
+                    label={cfg.title}
+                    formatValue={(v) => formatValue(v, cfg.unit)}
+                  />
                 </div>
-              </div>
-              <div className={cn('text-foreground/70', latest === null && 'opacity-40')}>
-                <Sparkline
-                  points={points}
-                  yDomain={cfg.yDomain}
-                  height={120}
-                  label={cfg.title}
-                  formatValue={(v) => formatValue(v, cfg.unit)}
-                />
-              </div>
-            </AnalyticsCard>
+              </AnalyticsCard>
+            </div>
           )
         })}
       </div>

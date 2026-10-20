@@ -5,8 +5,8 @@
 // This is the cleanest data-prefetch on the site: the client's window
 // selector defaults to useState('1h') with no searchParams, so the cold
 // queryKey is ALWAYS ['admin','metric-history-batch','1h'] and the seed is
-// consumed 100% of the time. The endpoint is a tiny indexed SQLite read
-// (system_metrics.db, ~10KB, p95 ~10-16ms) — none of the DuckDB / CPU /
+// consumed 100% of the time. The endpoint is a tiny indexed PostgreSQL read
+// (metric_snapshots table, ~10KB, p95 ~10-16ms) — none of the DuckDB / CPU /
 // materialize TTFB caveats that block SSR on the analytics pages apply.
 //
 // Trust topology + Caddy-marker fail-closed defense live in ./_transport.ts

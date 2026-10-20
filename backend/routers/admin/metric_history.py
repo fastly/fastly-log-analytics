@@ -8,7 +8,9 @@ sparklines on the System Health card.
 
 from __future__ import annotations
 
-from fastapi import Depends, Query
+import re
+
+from fastapi import Depends, HTTPException, Query
 
 from backend.core import metric_snapshots
 from backend.deps import require_admin
@@ -18,6 +20,7 @@ from backend.utils.date_utils import parse_relative_time_window
 from ._router import router
 
 _MAX_LOOKBACK_DAYS = 30
+_VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]$", re.IGNORECASE)
 
 
 @router.get(
@@ -26,7 +29,7 @@ _MAX_LOOKBACK_DAYS = 30
     dependencies=[Depends(require_admin)],
 )
 def metric_history_batch(
-    since: str = Query(default="1h", description="Lookback window: 30m, 1h, 24h, 7d, etc."),
+    since: str = Query(default="1h", description="Lookback window: 30m, 1h, 6h, 24h, 7d, etc."),
 ) -> MetricHistoryBatchResponse:
     """Return every recorded series newer than ``since``.
 
@@ -34,6 +37,11 @@ def metric_history_batch(
     ``key`` is ``"metric"`` for global, ``"metric|service_id"`` for
     per-service, ``"metric|service_id|task"`` for per-task.
     """
+    if not since or not _VALID_WINDOW_RE.match(since.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid lookback window '{since}'. Expected <N>m, <N>h, or <N>d (e.g. 30m, 1h, 6h, 24h, 7d).",
+        )
     cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
     raw = metric_snapshots.get_batch(since=cutoff)
     return MetricHistoryBatchResponse(
