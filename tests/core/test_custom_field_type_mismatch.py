@@ -54,7 +54,9 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
     # DuckLake tables persist in the shared per-worker Postgres catalog across
     # tests, so each test needs its own service_id (table name) — a reused one
     # resolves a table whose data dir was never created under this tmp root.
-    fos_source["service_id"] = f"tm{uuid.uuid4().hex[:10]}"
+    unique_id = f"tm{uuid.uuid4().hex[:10]}"
+    fos_source["service_id"] = unique_id
+    fos_source["name"] = unique_id
     fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
     os.makedirs(cache_path, exist_ok=True)

@@ -257,14 +257,18 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
 
     shared = duckdb.connect(":memory:")
     shared.execute("PRAGMA threads=1")
+    shared.execute("SET TimeZone='UTC'")
     shared.execute(_LOG_TABLE_SQL)
 
     def _writer_con(*_a: Any, **_k: Any) -> _Recorder:
-        return _Recorder(shared.cursor(), log, close=True)
+        cur = shared.cursor()
+        cur.execute("SET TimeZone='UTC'")
+        return _Recorder(cur, log, close=True)
 
     def _memory_con(*_a: Any, **_k: Any) -> _Recorder:
         con = duckdb.connect(":memory:")
         con.execute("PRAGMA threads=1")
+        con.execute("SET TimeZone='UTC'")
         return _Recorder(con, log, close=True)
 
     source = {"name": SERVICE, "service_id": SERVICE}

@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
@@ -130,6 +130,8 @@ def network_health(
             )
             shielding = {k: v for k, v in shielding.items() if not k.startswith("debug_")}
             res["shielding_analysis"] = shielding
+        except HTTPException:
+            raise
         except Exception:
             # Do NOT swallow silently: a real failure here (e.g. a SQL
             # regression in get_shielding_analysis) used to be
@@ -321,6 +323,8 @@ def _network_bundle_impl(
                     )
                     shielding = {k: v for k, v in shielding.items() if not k.startswith("debug_")}
                     res["shielding_analysis"] = shielding
+                except HTTPException:
+                    raise
                 except Exception:
                     logger.exception(
                         "shielding_analysis failed for service=%s",

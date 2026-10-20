@@ -727,6 +727,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     # grace window.
     if committed_paths:
         tombstone_buffer_files(source, committed_paths)
+        _core_mod.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
 
     result = {
         "files_committed": len(committed_paths),

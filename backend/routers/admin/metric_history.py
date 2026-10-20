@@ -16,11 +16,12 @@ from backend.core import metric_snapshots
 from backend.deps import require_admin
 from backend.models.admin import MetricHistoryBatchResponse, MetricHistoryPoint
 from backend.utils.date_utils import parse_relative_time_window
+from backend.utils.router_utils import bad_request
 
 from ._router import router
 
 _MAX_LOOKBACK_DAYS = 30
-_VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]$", re.IGNORECASE)
+_VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]\Z", re.IGNORECASE)
 
 
 @router.get(
@@ -37,10 +38,12 @@ def metric_history_batch(
     ``key`` is ``"metric"`` for global, ``"metric|service_id"`` for
     per-service, ``"metric|service_id|task"`` for per-task.
     """
-    if not since or not _VALID_WINDOW_RE.match(since.strip()):
+    if not since or not _VALID_WINDOW_RE.fullmatch(since.strip()):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid lookback window '{since}'. Expected <N>m, <N>h, or <N>d (e.g. 30m, 1h, 6h, 24h, 7d).",
+            detail=bad_request(
+                f"Invalid lookback window '{since}'. Expected <N>m, <N>h, or <N>d (e.g. 30m, 1h, 6h, 24h, 7d)."
+            ),
         )
     cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
     raw = metric_snapshots.get_batch(since=cutoff)

@@ -15,12 +15,12 @@
     "rollups/day_bundled/day=2026-06-14/all_fields.parquet": {
      "rows": 24,
      "schema": "ccb242ec29e2",
-     "sha": "6b69ef968f7c"
+     "sha": "55944ddd4838"
     },
     "rollups/day_bundled/day=2026-06-14/day_bundle_2026-06-14.parquet": {
      "rows": 24,
      "schema": "ccb242ec29e2",
-     "sha": "6b69ef968f7c"
+     "sha": "55944ddd4838"
     },
     "rollups/day_bundled/day_bundle_2026-06-13.parquet": {
      "rows": 24,
@@ -30,7 +30,7 @@
     "rollups/day_bundled/day_bundle_2026-06-14.parquet": {
      "rows": 24,
      "schema": "ccb242ec29e2",
-     "sha": "6b69ef968f7c"
+     "sha": "55944ddd4838"
     }
    },
    "removed": [
@@ -265,6 +265,36 @@
      "rows": 24,
      "schema": "0f25bd452a30",
      "sha": "f2c7fd4146f0"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-18/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "4dd9b5bd3759"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-19/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "06fc45ecbe68"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-20/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "f2c7fd4146f0"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-21/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "4dd9b5bd3759"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-22/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "06fc45ecbe68"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-23/all_fields.parquet": {
+     "rows": 24,
+     "schema": "0f25bd452a30",
+     "sha": "f2c7fd4146f0"
     }
    },
    "removed": [
@@ -310,6 +340,12 @@
     "rollups/hour/field=cache/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=cache/hour=2026-06-14-16/compacted_<id>.parquet",
     "rollups/hour/field=cache/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=cache/hour=2026-06-14-23/compacted_<id>.parquet",
     "rollups/hour/field=country/hour=2026-06-13-00/compacted_<id>.parquet",
     "rollups/hour/field=country/hour=2026-06-13-01/compacted_<id>.parquet",
     "rollups/hour/field=country/hour=2026-06-13-02/compacted_<id>.parquet",
@@ -352,6 +388,12 @@
     "rollups/hour/field=country/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=country/hour=2026-06-14-16/compacted_<id>.parquet",
     "rollups/hour/field=country/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=country/hour=2026-06-14-23/compacted_<id>.parquet",
     "rollups/hour/field=pop/hour=2026-06-13-00/compacted_<id>.parquet",
     "rollups/hour/field=pop/hour=2026-06-13-01/compacted_<id>.parquet",
     "rollups/hour/field=pop/hour=2026-06-13-02/compacted_<id>.parquet",
@@ -394,6 +436,12 @@
     "rollups/hour/field=pop/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=pop/hour=2026-06-14-16/compacted_<id>.parquet",
     "rollups/hour/field=pop/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=pop/hour=2026-06-14-23/compacted_<id>.parquet",
     "rollups/hour/field=status/hour=2026-06-13-00/compacted_<id>.parquet",
     "rollups/hour/field=status/hour=2026-06-13-01/compacted_<id>.parquet",
     "rollups/hour/field=status/hour=2026-06-13-02/compacted_<id>.parquet",
@@ -436,6 +484,12 @@
     "rollups/hour/field=status/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=status/hour=2026-06-14-16/compacted_<id>.parquet",
     "rollups/hour/field=status/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=status/hour=2026-06-14-23/compacted_<id>.parquet",
     "rollups/hour/field=ua/hour=2026-06-13-00/compacted_<id>.parquet",
     "rollups/hour/field=ua/hour=2026-06-13-01/compacted_<id>.parquet",
     "rollups/hour/field=ua/hour=2026-06-13-02/compacted_<id>.parquet",
@@ -478,6 +532,12 @@
     "rollups/hour/field=ua/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=ua/hour=2026-06-14-16/compacted_<id>.parquet",
     "rollups/hour/field=ua/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=ua/hour=2026-06-14-23/compacted_<id>.parquet",
     "rollups/hour/field=url/hour=2026-06-13-00/compacted_<id>.parquet",
     "rollups/hour/field=url/hour=2026-06-13-01/compacted_<id>.parquet",
     "rollups/hour/field=url/hour=2026-06-13-02/compacted_<id>.parquet",
@@ -519,9 +579,15 @@
     "rollups/hour/field=url/hour=2026-06-14-14/compacted_<id>.parquet",
     "rollups/hour/field=url/hour=2026-06-14-15/compacted_<id>.parquet",
     "rollups/hour/field=url/hour=2026-06-14-16/compacted_<id>.parquet",
-    "rollups/hour/field=url/hour=2026-06-14-17/compacted_<id>.parquet"
+    "rollups/hour/field=url/hour=2026-06-14-17/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-18/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-19/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-20/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-21/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-22/compacted_<id>.parquet",
+    "rollups/hour/field=url/hour=2026-06-14-23/compacted_<id>.parquet"
    ],
-   "returned": 42,
+   "returned": 48,
    "sql": [
     "006c19684468",
     "01bdd8f32100",
@@ -541,16 +607,22 @@
     "4d1b2a604e16",
     "61eb7fe9a813",
     "699c8d1aab33",
+    "6e7e073e87af",
     "6ef5f8a9bfcf",
     "73f81b86ffc9",
     "747ee17b741c",
     "79f789902611",
     "8a116fb355dc",
+    "8ecc84b22809",
     "96bcd302ad51",
+    "9dde0e58e3db",
+    "a8c798ae44d4",
+    "ad26eeef7671",
     "b63db1e52d45",
     "b68e47b3543c",
     "b6f8f94b3da3",
     "bccfdacec672",
+    "c37771fda976",
     "c9ae1018f21f",
     "cd8724377628",
     "d3260c9773f5",
@@ -566,15 +638,10 @@
     "f9b3a2485351",
     "f9c0f2a90580"
    ],
-   "sql_count": 42
+   "sql_count": 48
   },
   "compact_closed_days": {
    "changed": {
-    "rollups/day/field=cache/day=2026-06-12/compacted.parquet": {
-     "rows": 4,
-     "schema": "0f25bd452a30",
-     "sha": "8e76fd73498e"
-    },
     "rollups/day/field=cache/day=2026-06-13/compacted.parquet": {
      "rows": 4,
      "schema": "0f25bd452a30",
@@ -583,12 +650,7 @@
     "rollups/day/field=cache/day=2026-06-14/compacted.parquet": {
      "rows": 4,
      "schema": "0f25bd452a30",
-     "sha": "ae5dea506e81"
-    },
-    "rollups/day/field=country/day=2026-06-12/compacted.parquet": {
-     "rows": 3,
-     "schema": "0f25bd452a30",
-     "sha": "15c3b20b20f1"
+     "sha": "7818db97f2d6"
     },
     "rollups/day/field=country/day=2026-06-13/compacted.parquet": {
      "rows": 3,
@@ -598,12 +660,7 @@
     "rollups/day/field=country/day=2026-06-14/compacted.parquet": {
      "rows": 3,
      "schema": "0f25bd452a30",
-     "sha": "f56b515345bd"
-    },
-    "rollups/day/field=pop/day=2026-06-12/compacted.parquet": {
-     "rows": 3,
-     "schema": "0f25bd452a30",
-     "sha": "5c156f3974eb"
+     "sha": "577d4c4e4b27"
     },
     "rollups/day/field=pop/day=2026-06-13/compacted.parquet": {
      "rows": 3,
@@ -613,12 +670,7 @@
     "rollups/day/field=pop/day=2026-06-14/compacted.parquet": {
      "rows": 3,
      "schema": "0f25bd452a30",
-     "sha": "e08926ff4ec2"
-    },
-    "rollups/day/field=status/day=2026-06-12/compacted.parquet": {
-     "rows": 4,
-     "schema": "0f25bd452a30",
-     "sha": "7ba4822b8b64"
+     "sha": "cadff5a256e6"
     },
     "rollups/day/field=status/day=2026-06-13/compacted.parquet": {
      "rows": 4,
@@ -628,12 +680,7 @@
     "rollups/day/field=status/day=2026-06-14/compacted.parquet": {
      "rows": 4,
      "schema": "0f25bd452a30",
-     "sha": "3749c279a304"
-    },
-    "rollups/day/field=ua/day=2026-06-12/compacted.parquet": {
-     "rows": 4,
-     "schema": "0f25bd452a30",
-     "sha": "c1bed654f078"
+     "sha": "3ac7c4b67d98"
     },
     "rollups/day/field=ua/day=2026-06-13/compacted.parquet": {
      "rows": 4,
@@ -643,12 +690,7 @@
     "rollups/day/field=ua/day=2026-06-14/compacted.parquet": {
      "rows": 4,
      "schema": "0f25bd452a30",
-     "sha": "4cf37e681fc1"
-    },
-    "rollups/day/field=url/day=2026-06-12/compacted.parquet": {
-     "rows": 6,
-     "schema": "0f25bd452a30",
-     "sha": "a36d57f7be86"
+     "sha": "eaf4322b226e"
     },
     "rollups/day/field=url/day=2026-06-13/compacted.parquet": {
      "rows": 6,
@@ -658,33 +700,27 @@
     "rollups/day/field=url/day=2026-06-14/compacted.parquet": {
      "rows": 6,
      "schema": "0f25bd452a30",
-     "sha": "66693b72ac5c"
+     "sha": "d6e051976cba"
     }
    },
    "removed": [],
-   "returned": 18,
+   "returned": 12,
    "sql": [
+    "01e9075c8b13",
     "056fb9cba810",
-    "1580da40993a",
+    "0d8725335a05",
+    "1436baa768ca",
+    "156fe2e31b11",
     "17b4f6d7a737",
     "188d8d158d05",
-    "2976e7359ef8",
-    "44464a8c7304",
+    "2763f8e50a65",
     "57f7da3fc797",
     "5fd9cd91cd8d",
-    "8c23a358738d",
-    "935c7a123ab3",
-    "95ec7ed95e50",
-    "9eebda179e21",
-    "a902ab613a81",
-    "b0412de6116a",
-    "b5e5098841aa",
-    "b82b2e646b0a",
-    "c60cd74e3e51",
-    "d9a236227f8b",
-    "f2661db8d30f"
+    "769ed6763864",
+    "bc82c07cd76e",
+    "d9a236227f8b"
    ],
-   "sql_count": 19
+   "sql_count": 13
   },
   "day_compactor:network_quality": {
    "changed": {
@@ -9023,36 +9059,6 @@
     "rollups/backfill_markers.json": {
      "bytes": 224
     },
-    "rollups/hour/field=cache/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
-    "rollups/hour/field=cache/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
-    "rollups/hour/field=cache/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
-    "rollups/hour/field=cache/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
-    "rollups/hour/field=cache/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
-    "rollups/hour/field=cache/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "d9909a6123fd",
-     "sha": "f3c528515862"
-    },
     "rollups/hour/field=cache/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
@@ -9263,35 +9269,35 @@
      "schema": "d9909a6123fd",
      "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
-    "rollups/hour/field=country/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour/field=cache/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "db2cf1bb9404"
+     "sha": "f3c528515862"
     },
     "rollups/hour/field=country/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 3,
@@ -9503,35 +9509,35 @@
      "schema": "d9909a6123fd",
      "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-18/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-18/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "61d5737dacfb"
+     "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-19/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-19/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "164e0527b5fa"
+     "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-20/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-20/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "7a2af216de6c"
+     "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-21/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-21/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "61d5737dacfb"
+     "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-22/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-22/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "164e0527b5fa"
+     "sha": "db2cf1bb9404"
     },
-    "rollups/hour/field=pop/hour=2026-06-12-23/compacted_<id>.parquet": {
+    "rollups/hour/field=country/hour=2026-06-14-23/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "7a2af216de6c"
+     "sha": "db2cf1bb9404"
     },
     "rollups/hour/field=pop/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 3,
@@ -9743,35 +9749,35 @@
      "schema": "d9909a6123fd",
      "sha": "7a2af216de6c"
     },
-    "rollups/hour/field=status/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "61d5737dacfb"
     },
-    "rollups/hour/field=status/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "164e0527b5fa"
     },
-    "rollups/hour/field=status/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "7a2af216de6c"
     },
-    "rollups/hour/field=status/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "61d5737dacfb"
     },
-    "rollups/hour/field=status/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "164e0527b5fa"
     },
-    "rollups/hour/field=status/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 4,
+    "rollups/hour/field=pop/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 3,
      "schema": "d9909a6123fd",
-     "sha": "8d0e0406ffbe"
+     "sha": "7a2af216de6c"
     },
     "rollups/hour/field=status/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
@@ -9983,35 +9989,35 @@
      "schema": "d9909a6123fd",
      "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-18/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-18/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-19/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-19/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-20/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-20/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-21/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-21/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-22/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-22/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
-    "rollups/hour/field=ua/hour=2026-06-12-23/compacted_<id>.parquet": {
+    "rollups/hour/field=status/hour=2026-06-14-23/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "2f6a135b7e32"
+     "sha": "8d0e0406ffbe"
     },
     "rollups/hour/field=ua/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
@@ -10223,35 +10229,35 @@
      "schema": "d9909a6123fd",
      "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
-    "rollups/hour/field=url/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 6,
+    "rollups/hour/field=ua/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "d9909a6123fd",
-     "sha": "be423b3223f5"
+     "sha": "2f6a135b7e32"
     },
     "rollups/hour/field=url/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 6,
@@ -10463,35 +10469,35 @@
      "schema": "d9909a6123fd",
      "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
-    "rollups/hour_ip_spread/field=cache/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "4a641b714bb2"
+    "rollups/hour/field=url/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "d9909a6123fd",
+     "sha": "be423b3223f5"
     },
     "rollups/hour_ip_spread/field=cache/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
@@ -10703,515 +10709,515 @@
      "schema": "45b595091311",
      "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "4a641b714bb2"
     },
-    "rollups/hour_ip_spread/field=country/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 3,
+    "rollups/hour_ip_spread/field=cache/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 4,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "4a641b714bb2"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-01/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-02/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-03/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-04/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-05/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-06/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "56e1ec3f99a7"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-07/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-08/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-09/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-10/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-11/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-12/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-13/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "56e1ec3f99a7"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-14/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-15/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-16/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-17/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-18/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-19/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-20/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "56e1ec3f99a7"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-21/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-22/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-13-23/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-00/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-01/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-02/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-03/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "56e1ec3f99a7"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-04/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-05/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-06/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-07/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-08/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-09/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-10/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f4a759a2e232"
+     "sha": "56e1ec3f99a7"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-11/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "56e1ec3f99a7"
+     "sha": "47f0659141ae"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-12/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "47f0659141ae"
+     "sha": "140b418ae40b"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-13/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "140b418ae40b"
+     "sha": "ae8b3536e2f3"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-14/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "ae8b3536e2f3"
+     "sha": "7cd4f356eacc"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-15/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "7cd4f356eacc"
+     "sha": "1e63cb56ef98"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-16/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1e63cb56ef98"
+     "sha": "f4a759a2e232"
     },
     "rollups/hour_ip_spread/field=country/hour=2026-06-14-17/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
+     "sha": "56e1ec3f99a7"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "47f0659141ae"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "140b418ae40b"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "ae8b3536e2f3"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "7cd4f356eacc"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "1e63cb56ef98"
+    },
+    "rollups/hour_ip_spread/field=country/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
      "sha": "f4a759a2e232"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "5888fe21e42a"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "8b7d5c0259d8"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "1199d9b0afb5"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "e86ad7d0db73"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "2bf4c4f9b6a5"
-    },
-    "rollups/hour_ip_spread/field=pop/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 3,
-     "schema": "45b595091311",
-     "sha": "0986a12f7e92"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "0c0a5fb1cb73"
+     "sha": "5888fe21e42a"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-01/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b41a1e9682d2"
+     "sha": "8b7d5c0259d8"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-02/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "6f14c248513c"
+     "sha": "1199d9b0afb5"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-03/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "aa217f18176d"
+     "sha": "e86ad7d0db73"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-04/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f9182f9779f7"
+     "sha": "2bf4c4f9b6a5"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-05/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b67a48354146"
+     "sha": "0986a12f7e92"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-06/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4461b9baf4de"
+     "sha": "0c0a5fb1cb73"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-07/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "0b6ae176172b"
+     "sha": "b41a1e9682d2"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-08/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "9cc5c3875f11"
+     "sha": "6f14c248513c"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-09/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "777fc880875d"
+     "sha": "aa217f18176d"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-10/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4437532007ad"
+     "sha": "f9182f9779f7"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-11/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "835c9c310032"
+     "sha": "b67a48354146"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-12/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b6c041403a05"
+     "sha": "4461b9baf4de"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-13/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4ed22177b3d9"
+     "sha": "0b6ae176172b"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-14/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "6fe20fbe455e"
+     "sha": "9cc5c3875f11"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-15/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "5888fe21e42a"
+     "sha": "777fc880875d"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-16/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "8b7d5c0259d8"
+     "sha": "4437532007ad"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-17/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1199d9b0afb5"
+     "sha": "835c9c310032"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-18/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "e86ad7d0db73"
+     "sha": "b6c041403a05"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-19/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "2bf4c4f9b6a5"
+     "sha": "4ed22177b3d9"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-20/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "0986a12f7e92"
+     "sha": "6fe20fbe455e"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-21/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "0c0a5fb1cb73"
+     "sha": "5888fe21e42a"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-22/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b41a1e9682d2"
+     "sha": "8b7d5c0259d8"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-13-23/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "6f14c248513c"
+     "sha": "1199d9b0afb5"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-00/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "aa217f18176d"
+     "sha": "e86ad7d0db73"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-01/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "f9182f9779f7"
+     "sha": "2bf4c4f9b6a5"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-02/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b67a48354146"
+     "sha": "0986a12f7e92"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-03/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4461b9baf4de"
+     "sha": "0c0a5fb1cb73"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-04/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "0b6ae176172b"
+     "sha": "b41a1e9682d2"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-05/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "9cc5c3875f11"
+     "sha": "6f14c248513c"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-06/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "777fc880875d"
+     "sha": "aa217f18176d"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-07/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4437532007ad"
+     "sha": "f9182f9779f7"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-08/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "835c9c310032"
+     "sha": "b67a48354146"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-09/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "b6c041403a05"
+     "sha": "4461b9baf4de"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-10/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "4ed22177b3d9"
+     "sha": "0b6ae176172b"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-11/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "6fe20fbe455e"
+     "sha": "9cc5c3875f11"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-12/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "5888fe21e42a"
+     "sha": "777fc880875d"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-13/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "8b7d5c0259d8"
+     "sha": "4437532007ad"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-14/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "1199d9b0afb5"
+     "sha": "835c9c310032"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-15/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "e86ad7d0db73"
+     "sha": "b6c041403a05"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-16/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
-     "sha": "2bf4c4f9b6a5"
+     "sha": "4ed22177b3d9"
     },
     "rollups/hour_ip_spread/field=pop/hour=2026-06-14-17/compacted_<id>.parquet": {
      "rows": 3,
      "schema": "45b595091311",
+     "sha": "6fe20fbe455e"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "5888fe21e42a"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "8b7d5c0259d8"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "1199d9b0afb5"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "e86ad7d0db73"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
+     "sha": "2bf4c4f9b6a5"
+    },
+    "rollups/hour_ip_spread/field=pop/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 3,
+     "schema": "45b595091311",
      "sha": "0986a12f7e92"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
-    },
-    "rollups/hour_ip_spread/field=status/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 4,
-     "schema": "45b595091311",
-     "sha": "6217a9bcd006"
     },
     "rollups/hour_ip_spread/field=status/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
@@ -11423,482 +11429,512 @@
      "schema": "45b595091311",
      "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-18/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-18/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-19/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-19/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-20/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-20/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-21/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-21/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-22/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-22/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "6217a9bcd006"
     },
-    "rollups/hour_ip_spread/field=ua/hour=2026-06-12-23/compacted_<id>.parquet": {
+    "rollups/hour_ip_spread/field=status/hour=2026-06-14-23/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "6217a9bcd006"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-01/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-02/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-03/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-04/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-05/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-06/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "67e3486a7f98"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-07/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-08/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-09/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-10/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-11/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-12/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-13/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "67e3486a7f98"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-14/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-15/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-16/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-17/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-18/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-19/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-20/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "67e3486a7f98"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-21/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-22/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-13-23/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-00/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-01/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-02/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-03/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "67e3486a7f98"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-04/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-05/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-06/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-07/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-08/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-09/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-10/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "92f57b205b7d"
+     "sha": "67e3486a7f98"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-11/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "67e3486a7f98"
+     "sha": "de279308c099"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-12/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "de279308c099"
+     "sha": "32d011a1e664"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-13/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "32d011a1e664"
+     "sha": "ba6bc18564d2"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-14/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "ba6bc18564d2"
+     "sha": "0a69efd16e26"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-15/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "0a69efd16e26"
+     "sha": "1242ec046c8f"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-16/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
-     "sha": "1242ec046c8f"
+     "sha": "92f57b205b7d"
     },
     "rollups/hour_ip_spread/field=ua/hour=2026-06-14-17/compacted_<id>.parquet": {
      "rows": 4,
      "schema": "45b595091311",
+     "sha": "67e3486a7f98"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
+     "sha": "de279308c099"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
+     "sha": "32d011a1e664"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
+     "sha": "ba6bc18564d2"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
+     "sha": "0a69efd16e26"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
+     "sha": "1242ec046c8f"
+    },
+    "rollups/hour_ip_spread/field=ua/hour=2026-06-14-23/compacted_<id>.parquet": {
+     "rows": 4,
+     "schema": "45b595091311",
      "sha": "92f57b205b7d"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-18/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "4e8e9081d883"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-19/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "472614eb481c"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-20/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-21/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "fc10f46d536f"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-22/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "2d8786d7b880"
-    },
-    "rollups/hour_ip_spread/field=url/hour=2026-06-12-23/compacted_<id>.parquet": {
-     "rows": 6,
-     "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-00/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-01/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-02/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-03/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-04/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-05/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-06/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
+     "sha": "932512fd807c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-07/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-08/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-09/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-10/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-11/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-12/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-13/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
+     "sha": "932512fd807c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-14/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-15/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-16/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-17/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-18/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-19/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-20/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
+     "sha": "932512fd807c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-21/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-22/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-13-23/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-00/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-01/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-02/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-03/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
+     "sha": "932512fd807c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-04/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-05/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-06/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-07/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-08/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-09/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-10/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "0ef41cc2b41d"
+     "sha": "932512fd807c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-11/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "932512fd807c"
+     "sha": "4e8e9081d883"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-12/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "4e8e9081d883"
+     "sha": "472614eb481c"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-13/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "472614eb481c"
+     "sha": "2eb01162bb6b"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-14/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2eb01162bb6b"
+     "sha": "fc10f46d536f"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-15/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "fc10f46d536f"
+     "sha": "2d8786d7b880"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-16/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
-     "sha": "2d8786d7b880"
+     "sha": "0ef41cc2b41d"
     },
     "rollups/hour_ip_spread/field=url/hour=2026-06-14-17/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "932512fd807c"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-18/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "4e8e9081d883"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-19/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "472614eb481c"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-20/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "2eb01162bb6b"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-21/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "fc10f46d536f"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-22/compacted_<id>.parquet": {
+     "rows": 6,
+     "schema": "45b595091311",
+     "sha": "2d8786d7b880"
+    },
+    "rollups/hour_ip_spread/field=url/hour=2026-06-14-23/compacted_<id>.parquet": {
      "rows": 6,
      "schema": "45b595091311",
      "sha": "0ef41cc2b41d"
@@ -12163,24 +12199,12 @@
   ]
  },
  "sql_shapes": [
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=cache/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=cache/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=country/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=country/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=pop/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=pop/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=status/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=status/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=ua/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=ua/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet', '<R>/rollups/hour/field=url/hour=<date>/compacted_<id>.parquet'], hive_partitioning=1))\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=url/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'cache')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=cache/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'country')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=country/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'pop')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=pop/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'status')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=status/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'ua')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=ua/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'url')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=url/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'cache')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=cache/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'country')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=country/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'pop')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=pop/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'status')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=status/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'ua')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=ua/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
-  "\n                    COPY (\n                        SELECT field, value, CAST(SUM(count) AS BIGINT) AS count\n                        FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'], hive_partitioning=0) WHERE field = 'url')\n                        GROUP BY field, value\n                    ) TO '<R>/rollups/day/field=url/day=<date>/.tmp_<id>.parquet'\n                    (FORMAT PARQUET, COMPRESSION ZSTD)\n                ",
   "\n        SELECT field, hour, value, ip_sample, ip_count_observed, request_count\n        FROM (\n            SELECT\n                'cache' AS field,\n                strftime(timestamp, '%Y-%m-%d-%H') AS hour,\n                CAST(\"cache\" AS VARCHAR) AS value,\n                array_slice(array_agg(DISTINCT \"ip\"), 1, 5000) AS ip_sample,\n                COUNT(DISTINCT \"ip\") AS ip_count_observed,\n                COUNT(*) AS request_count,\n                ROW_NUMBER() OVER (\n                    PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')\n                    ORDER BY COUNT(*) DESC\n                ) AS rn\n            FROM logs_svc_golden\n            WHERE timestamp < '<date>'\n              AND \"ip\" IS NOT NULL\n              AND \"cache\" IS NOT NULL\n              AND NULLIF(CAST(\"cache\" AS VARCHAR), '') IS NOT NULL\n            GROUP BY 1, 2, 3\n        ) WHERE rn <= 500\n    ",
   "\n        SELECT field, hour, value, ip_sample, ip_count_observed, request_count\n        FROM (\n            SELECT\n                'country' AS field,\n                strftime(timestamp, '%Y-%m-%d-%H') AS hour,\n                CAST(\"country\" AS VARCHAR) AS value,\n                array_slice(array_agg(DISTINCT \"ip\"), 1, 5000) AS ip_sample,\n                COUNT(DISTINCT \"ip\") AS ip_count_observed,\n                COUNT(*) AS request_count,\n                ROW_NUMBER() OVER (\n                    PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')\n                    ORDER BY COUNT(*) DESC\n                ) AS rn\n            FROM logs_svc_golden\n            WHERE timestamp < '<date>'\n              AND \"ip\" IS NOT NULL\n              AND \"country\" IS NOT NULL\n              AND NULLIF(CAST(\"country\" AS VARCHAR), '') IS NOT NULL\n            GROUP BY 1, 2, 3\n        ) WHERE rn <= 500\n    ",
   "\n        SELECT field, hour, value, ip_sample, ip_count_observed, request_count\n        FROM (\n            SELECT\n                'pop' AS field,\n                strftime(timestamp, '%Y-%m-%d-%H') AS hour,\n                CAST(\"pop\" AS VARCHAR) AS value,\n                array_slice(array_agg(DISTINCT \"ip\"), 1, 5000) AS ip_sample,\n                COUNT(DISTINCT \"ip\") AS ip_count_observed,\n                COUNT(*) AS request_count,\n                ROW_NUMBER() OVER (\n                    PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')\n                    ORDER BY COUNT(*) DESC\n                ) AS rn\n            FROM logs_svc_golden\n            WHERE timestamp < '<date>'\n              AND \"ip\" IS NOT NULL\n              AND \"pop\" IS NOT NULL\n              AND NULLIF(CAST(\"pop\" AS VARCHAR), '') IS NOT NULL\n            GROUP BY 1, 2, 3\n        ) WHERE rn <= 500\n    ",
@@ -12244,6 +12268,6 @@
   "COPY (SELECT time_bucket(INTERVAL '1 hour', timestamp) AS bucket,\n               CAST(\"ip\" AS VARCHAR) AS ip,\n               CAST(\"ja4\" AS VARCHAR) AS ja4,\n               MIN(timestamp) AS first_ts,\n               MAX(timestamp) AS last_ts,\n               CAST(COUNT(*) AS BIGINT) AS req_count,\n               CAST(MIN(\"country\") AS VARCHAR) AS country,\n               CAST(MIN(\"asn\") AS INTEGER) AS asn,\n               CAST(SUM(CASE WHEN \"status\" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_4xx,\n               CAST(SUM(CASE WHEN \"status\" >= 500 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_5xx,\n               CAST(COALESCE(SUM(\"resp_bytes\"), 0) AS BIGINT) AS total_bytes,\n               CAST(COALESCE(SUM(\"tcp_rtt\"), 0.0) AS DOUBLE) AS rtt_sum,\n               CAST(COUNT(*) FILTER (WHERE \"tcp_rtt\" IS NOT NULL) AS BIGINT) AS rtt_count,\n               CAST(SUM(CASE WHEN \"edge\" = 1 THEN 1 ELSE 0 END) AS BIGINT) AS edge_count,\n               CAST(SUM(CASE WHEN \"edge\" = 0 THEN 1 ELSE 0 END) AS BIGINT) AS shield_count,\n               CAST(MIN(\"ua\") AS VARCHAR) AS ua_min,\n               CAST(MAX(\"edge_sid\") AS VARCHAR) AS edge_sid_max,\n               CAST(COUNT(*) FILTER (WHERE \"cmcd_sid\" IS NOT NULL AND \"cmcd_sid\" != '') AS BIGINT) AS cmcd_count FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND \"ip\" IS NOT NULL GROUP BY 1, 2, 3) TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_sess_<id>.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY (SELECT time_bucket(INTERVAL '1 minute', timestamp) AS bucket,\n               CAST(COUNT(*) AS BIGINT) AS requests,\n               CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx,\n               CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx,\n               CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits,\n               CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total,\n               CAST(COALESCE(SUM(resp_bytes), 0) AS BIGINT) AS resp_bytes_sum,\n               CAST(COALESCE(SUM(ttfb), 0.0) AS DOUBLE) AS ttfb_sum,\n               CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' GROUP BY 1) TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_ts_<id>.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)",
   "DESCRIBE logs_svc_golden",
-  "SELECT DISTINCT field FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'])"
+  "SELECT DISTINCT field FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet', '<R>/rollups/hour_bundled/hour=<date>/all_fields.parquet'])"
  ]
 }

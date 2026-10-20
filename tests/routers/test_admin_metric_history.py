@@ -82,7 +82,7 @@ def test_metric_history_batch_rejects_invalid_window(bad_window: str):
         r = client.get(f"/api/admin/metric-history/batch?since={bad_window}")
 
     assert r.status_code == 400
-    assert "Invalid lookback window" in r.json()["detail"]
+    assert "Invalid lookback window" in r.json()["detail"]["error"]
 
 
 def test_metric_history_batch_rejects_analyst_path_b():
