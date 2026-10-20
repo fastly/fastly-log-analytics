@@ -92,6 +92,8 @@ class _Req:
 
 class _HsClient:
     def execute(self, sql, params=None):
+        if "INNER JOIN" in sql:  # shielding self-join: covered in tests/high_scale/test_network_parity.py
+            return []
         if "rtt_jitter_us" in sql and "GROUP BY asn" in sql:
             return [
                 {
@@ -168,6 +170,7 @@ def test_high_scale_wire_identical(monkeypatch, fn, model):
         return cls(**kwargs)
 
     monkeypatch.setattr(model, "with_telemetry", classmethod(_capture))
+    monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda _sid, asns: {a: f"AS{a}" for a in asns})
     getattr(hs_network, fn)(_service(), _Req(), _Req.start_time, _Req.end_time)
     non_empty = (
         ("heatmap", "leaderboard", "map_buckets", "cities", "metro_leaderboard", "summary")

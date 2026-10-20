@@ -1,4 +1,7 @@
 from datetime import UTC, datetime
+from unittest.mock import patch
+
+import pytest
 
 from backend.high_scale.network import network_health, network_quality
 from backend.high_scale.registry import HighScaleService
@@ -24,6 +27,8 @@ class FakeClient:
     """Routes each ClickHouse query to representative rows by a unique marker."""
 
     def execute(self, sql, params=None):
+        if "INNER JOIN" in sql:  # shielding self-join: covered in test_network_parity.py
+            return []
         if "rtt_jitter_us" in sql and "GROUP BY asn" in sql:
             # Per-(asn, bucket) heatmap inputs. AS7922 is clean; AS15169 is
             # congested + lossy so the computed health score is < 100.
@@ -127,6 +132,12 @@ class FakeClient:
                 {"value": "US", "label": "US", "rtt_ms": 21.0, "reqs": 160},
             ]
         return []
+
+
+@pytest.fixture(autouse=True)
+def _no_asn_network_lookup():
+    with patch("backend.core.duckdb.get_asn_names", side_effect=lambda _sid, asns: {a: f"AS{a}" for a in asns}):
+        yield
 
 
 def _service() -> HighScaleService:

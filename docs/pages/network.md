@@ -41,8 +41,8 @@ The **Network Path** page provides deep visibility into client network condition
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
-| **Data Plane** | Reads DuckDB session view + `network_rtt` / `network_speed` rollups. | Reads Postgres DuckLake / ClickHouse network tables with fallback support in `backend/high_scale/network.py`. |
-| **ASN Enrichment** | Local PostgreSQL `asn_names` table (ADR-22) enriched via `enrich_asn_labels`. | Shared Postgres / ClickHouse ASN dictionaries. |
+| **Data Plane** | Reads DuckDB session view + `network_rtt` / `network_speed` rollups. | Reads the visible ClickHouse `request_facts` rows live in `backend/high_scale/network.py` (no rollups, no stubs). Health, quality, transport and the bundle honor the request `filters`; `map_asn` pins only the map; `sections` gates the core and shielding scans; quality `scatter` is a deterministic 2,000-row sample; pop-health aggregates per POP over the window (default trailing 24 h); `shielding_analysis` is the edge-to-shield `rid`/`prid` self-join. New-query failures raise instead of returning empty data. `p95_ttfb_ms` is true milliseconds here. |
+| **ASN Enrichment** | Local PostgreSQL `asn_names` table (ADR-22) enriched via `enrich_asn_labels`. | Same `get_asn_names` / `enrich_asn_labels` resolver keyed by service id; unresolved ASNs fall back to `AS<number>`. |
 
 ---
 
