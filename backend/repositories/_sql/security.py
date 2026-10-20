@@ -463,7 +463,7 @@ GET_ACTIVE_PROXY_CLIENTS = """
     WHERE
         (distance_km > (rtt_min_ms * 100.0 + 150.0)) OR
         (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)
-    ORDER BY risk_level DESC, distance_km DESC
+    ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC
     LIMIT 100
 """
 
