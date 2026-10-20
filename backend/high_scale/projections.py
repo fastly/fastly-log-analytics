@@ -27,6 +27,23 @@ def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
         "timestamp": request_event.get("timestamp"),
         "cmcd_version": request_event.get("cmcd_version"),
         "sid": request_event.get("sid"),
+        "country": _country(request_event.get("country")),
+        "asn": _asn(request_event.get("asn")),
         "fields": dict(raw_fields),
     }
     return projection
+
+
+def _country(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _asn(value: object) -> int | None:
+    """A positive AS number, or None: the analytics group by ASN, never by a malformed label."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip()) or None
+    return None

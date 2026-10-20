@@ -132,6 +132,7 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "overhead_sk_w",
         "origin_bytes_sk_v",
         "origin_bytes_sk_w",
+        "asn",
         "latency_sum_ms",
         "latency_p50_ms",
         "latency_p95_ms",

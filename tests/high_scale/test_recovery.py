@@ -12,6 +12,7 @@ from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore, InsertReceipt
 from backend.high_scale.recovery import (
+    rebuild_cmcd_projections_from_fos,
     rebuild_origin_projections_from_fos,
     rebuild_performance_projections_from_fos,
     rebuild_serving_state_from_fos,
@@ -364,3 +365,105 @@ def test_purge_origin_projections_deletes_only_the_service_window_from_origin_ta
         assert "DELETE WHERE service_id={service_id:String} AND bucket_start >= {since:DateTime64(3)}" in sql
         assert "mutations_sync=2" in sql
         assert params == {"service_id": "svc", "since": NOW - timedelta(days=30)}
+
+
+class _RecordingReplayClient(ReplayClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batches: list = []
+
+    def insert(self, batch):
+        self.batches.append(batch)
+        return super().insert(batch)
+
+
+def _cmcd_events() -> tuple[dict, ...]:
+    return (
+        {
+            "event_id": "evt-1",
+            "service_id": "svc",
+            "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+            "country": "US",
+            "asn": 7922,
+            "cmcd": {"sid": "s-1", "br": "1200", "bs": None},
+        },
+        {
+            "event_id": "evt-2",
+            "service_id": "svc",
+            "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+            "country": "DE",
+            "asn": None,
+            "cmcd": {"sid": None, "br": None, "bs": None},
+        },
+        {
+            "event_id": "evt-3",
+            "service_id": "svc",
+            "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+            "country": "FR",
+            "asn": 3215,
+            "cmcd": None,
+        },
+    )
+
+
+def test_cmcd_projection_rebuild_publishes_geography_enriched_rows_and_is_resumable() -> None:
+    recent, recent_bytes = _manifest(
+        "recent-cmcd", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), _cmcd_events()
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    client = _RecordingReplayClient()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+
+    first = rebuild_cmcd_projections_from_fos(_Catalog((recent,)), archive, publication, service_id="svc", now=NOW)
+    second = rebuild_cmcd_projections_from_fos(
+        _Catalog((recent,)), archive, publication, service_id="svc", now=NOW, rebuild_id=first.rebuild_id
+    )
+
+    assert first.full_rebuild_complete is True
+    assert first.manifests_replayed == second.manifests_replayed == 1
+    assert first.rows_replayed == second.rows_replayed == 1
+    assert client.insert_calls == [f"rebuild-cmcd:{first.rebuild_id}:recent-cmcd"]
+    (batch,) = client.batches
+    assert batch.domain == "cmcd"
+    (row,) = batch.rows
+    assert row["request_event_id"] == "evt-1"
+    assert row["country"] == "US" and row["asn"] == 7922
+    assert row["fields"] == {"sid": "s-1", "br": "1200"}
+
+
+def test_cmcd_projection_rebuild_reports_a_failing_manifest_without_stopping() -> None:
+    recent, recent_bytes = _manifest(
+        "recent-cmcd", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), _cmcd_events()
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ReplayClient(fail_on={"rebuild-cmcd"}))
+
+    report = rebuild_cmcd_projections_from_fos(_Catalog((recent,)), archive, publication, service_id="svc", now=NOW)
+
+    assert report.full_rebuild_complete is False
+    assert report.manifests_replayed == 0
+    assert "recent-cmcd" in report.errors[0]
+
+
+def test_purge_cmcd_projections_deletes_only_the_service_window() -> None:
+    from backend.high_scale.recovery import purge_cmcd_projections
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            return []
+
+    client = _Recorder()
+
+    purge_cmcd_projections(client, service_id="svc", since=NOW - timedelta(days=30))
+
+    ((sql, params),) = client.calls
+    assert sql.startswith("ALTER TABLE `cmcd_projection_facts` DELETE WHERE service_id={service_id:String}")
+    assert "event_timestamp >= {since:DateTime64(3)}" in sql
+    assert "mutations_sync=2" in sql
+    assert params == {"service_id": "svc", "since": NOW - timedelta(days=30)}

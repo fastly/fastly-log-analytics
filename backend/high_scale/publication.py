@@ -107,6 +107,8 @@ _DOMAIN_COLUMNS = {
         "batch_id",
         "publication_state",
         "cmcd",
+        "country",
+        "asn",
     ),
 }
 
@@ -365,6 +367,12 @@ def _timestamp(row: Mapping[str, Any], field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _optional_asn(value: Any) -> int | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def _string_map(row: Mapping[str, Any], field: str) -> dict[str, str]:
     value = row.get(field) or {}
     if not isinstance(value, Mapping):
@@ -524,6 +532,8 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                     batch_uuid,
                     "visible",
                     _string_map({"cmcd": row.get("fields", row.get("cmcd"))}, "cmcd"),
+                    _required_string(row, "country", default=""),
+                    _optional_asn(row.get("asn")),
                 )
             )
     return rows

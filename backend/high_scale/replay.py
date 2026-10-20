@@ -13,6 +13,7 @@ from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import event_digest
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
+from backend.high_scale.projections import project_cmcd
 from backend.high_scale.publication import ClickHousePublication, PublicationResult
 
 
@@ -121,6 +122,41 @@ def replay_performance_projections(
             )
         )
         published += result.rows_visible
+    return ProjectionReplayResult(manifest.manifest_id, len(serving_rows), published)
+
+
+def replay_cmcd_projections(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    rebuild_id: str,
+) -> ProjectionReplayResult:
+    """Rebuild one request manifest's ``cmcd_projection_facts`` rows from the archive."""
+    if manifest.source.domain != "request":
+        raise ValueError("CMCD projections can only be rebuilt from request manifests")
+    rows = _read_manifest_rows(manifest, archive)
+    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    projected: list[dict[str, Any]] = []
+    for row in serving_rows:
+        # Parquet unifies the CMCD struct across rows, so absent keys come back as None.
+        fields = {key: value for key, value in (row.get("cmcd") or {}).items() if value is not None}
+        if not fields:
+            continue
+        projection = project_cmcd({**row, "cmcd": fields})
+        if projection is not None:
+            projected.append(projection)
+    published = 0
+    if projected:
+        result = publication.publish(
+            _batch_from_rows(
+                f"rebuild-cmcd:{rebuild_id}:{manifest.manifest_id}",
+                manifest,
+                tuple(projected),
+                domain="cmcd",
+            )
+        )
+        published = result.rows_visible
     return ProjectionReplayResult(manifest.manifest_id, len(serving_rows), published)
 
 

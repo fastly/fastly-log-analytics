@@ -620,3 +620,7 @@ def test_performance_waterfall_and_scatter_tables_and_columns_are_allowlisted():
         "cache",
     ):
         assert column in ch.CLICKHOUSE_HIGH_SCALE_COLUMNS
+
+
+def test_cmcd_projection_geography_columns_are_allowlisted_for_insert():
+    assert {"country", "asn", "cmcd"} <= ch.CLICKHOUSE_TABLE_COLUMNS["cmcd_projection_facts"]

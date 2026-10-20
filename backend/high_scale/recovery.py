@@ -26,7 +26,12 @@ from backend.high_scale.recovery_capacity import (
     RecoveryCapacityReport,
     evaluate_recovery_capacity,
 )
-from backend.high_scale.replay import replay_manifest, replay_origin_projections, replay_performance_projections
+from backend.high_scale.replay import (
+    replay_cmcd_projections,
+    replay_manifest,
+    replay_origin_projections,
+    replay_performance_projections,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -185,6 +190,65 @@ def purge_origin_projections(client: _SqlClient, *, service_id: str, since: date
             "AND bucket_start >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
             {"service_id": service_id, "since": since},
         )
+
+
+def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
+    """Delete one service's CMCD projection rows from ``since`` onward, synchronously.
+
+    Same contract as :func:`purge_origin_projections`: a rebuild publishes under new batch ids, so
+    replacing existing rows (for example to populate the geography columns) must purge them first.
+    """
+    client.execute(
+        "ALTER TABLE `cmcd_projection_facts` DELETE WHERE service_id={service_id:String} "
+        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+        {"service_id": service_id, "since": since},
+    )
+
+
+def rebuild_cmcd_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
+    )
+    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
+    rows = 0
+    replayed = 0
+    errors: list[str] = []
+    for manifest in manifests:
+        try:
+            result = replay_cmcd_projections(manifest, archive, publication, rebuild_id=resolved_rebuild_id)
+        except Exception as exc:
+            errors.append(f"manifest {manifest.manifest_id} failed to rebuild CMCD projections: {exc}")
+            continue
+        rows += result.rows_published
+        replayed += 1
+    available = not errors
+    return RecoveryReport(
+        ingest_accepted=True,
+        triage_available=available,
+        raw_query_available=True,
+        warm_history_available=available,
+        full_rebuild_complete=available,
+        manifests_replayed=replayed,
+        rows_replayed=rows,
+        errors=tuple(errors),
+        rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    )
 
 
 def rebuild_origin_projections_from_fos(

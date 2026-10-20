@@ -1,4 +1,4 @@
-"""Rebuild bounded Origin projections from immutable high-scale archives."""
+"""Rebuild bounded high-scale projections (Origin or CMCD) from immutable archives."""
 
 from __future__ import annotations
 
@@ -13,8 +13,13 @@ from backend import config as app_config
 from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
 from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.publication import ClickHousePublication, PostgresBatchManifestStore
-from backend.high_scale.recovery import purge_origin_projections, rebuild_origin_projections_from_fos
+from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
+from backend.high_scale.recovery import (
+    purge_cmcd_projections,
+    purge_origin_projections,
+    rebuild_cmcd_projections_from_fos,
+    rebuild_origin_projections_from_fos,
+)
 from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
@@ -26,9 +31,15 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--rebuild-id")
     parser.add_argument(
+        "--projection",
+        choices=("origin", "cmcd"),
+        default="origin",
+        help="which projection to rebuild from the request archive",
+    )
+    parser.add_argument(
         "--replace-existing",
         action="store_true",
-        help="delete this service's existing Origin projection rows in the window first "
+        help="delete this service's existing rows of the selected projection in the window first "
         "(required when rows already exist, otherwise every request is counted twice)",
     )
     parser.add_argument(
@@ -60,17 +71,22 @@ def main() -> int:
         if service is None or service.manifest_catalog is None or service.archive is None:
             raise RuntimeError("service is not registered with its archive dependencies")
         control = PostgresControlPlane()
+        adapter_type = ClickHouseBatchAdapter if args.projection == "cmcd" else AggregateBatchAdapter
         publication = ClickHousePublication(
             PostgresBatchManifestStore(control),
-            AggregateBatchAdapter(cast(ClickHouseClient, service.client)),
+            adapter_type(cast(ClickHouseClient, service.client)),
+        )
+        purge = purge_cmcd_projections if args.projection == "cmcd" else purge_origin_projections
+        rebuild = (
+            rebuild_cmcd_projections_from_fos if args.projection == "cmcd" else rebuild_origin_projections_from_fos
         )
         if args.replace_existing:
-            purge_origin_projections(
+            purge(
                 service.client,
                 service_id=args.service_id,
                 since=datetime.now(UTC) - timedelta(days=args.days),
             )
-        report = rebuild_origin_projections_from_fos(
+        report = rebuild(
             service.manifest_catalog,
             service.archive,
             publication,

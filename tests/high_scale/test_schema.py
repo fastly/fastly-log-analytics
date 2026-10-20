@@ -96,6 +96,9 @@ def test_clickhouse_schema_separates_domains_and_fences_visibility() -> None:
     assert "publication_state" in request_sql
     assert "rum_vitals_facts" in rum_sql and "rum_error_facts" in rum_sql
     assert "request_event_id" in cmcd_sql
+    assert "country LowCardinality(String)" in cmcd_sql
+    assert "ALTER TABLE cmcd_projection_facts ADD COLUMN IF NOT EXISTS country LowCardinality(String)" in cmcd_sql
+    assert "ALTER TABLE cmcd_projection_facts ADD COLUMN IF NOT EXISTS asn Nullable(UInt32)" in cmcd_sql
     assert "manifest_committed" in archive_sql
     assert "ReplicatedReplacingMergeTree" in publication_sql
     assert "publication_state" in publication_sql

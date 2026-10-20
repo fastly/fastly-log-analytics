@@ -358,3 +358,31 @@ class TestRowMatchesServingDomain:
 
     def test_request_domain_rows_always_match(self):
         assert row_matches_serving_domain("request", {}) is True
+
+
+def test_cmcd_rows_persist_country_and_asn_after_the_cmcd_map() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = HighScaleBatch(
+        "batch-cmcd",
+        "svc",
+        "cmcd",
+        "4",
+        (
+            {
+                "request_event_id": "request-event-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "fields": {"br": "1000"},
+                "country": "US",
+                "asn": 7922,
+            },
+            {"request_event_id": "request-event-2", "timestamp": "2026-09-11T20:00:01Z", "fields": {"br": "1"}},
+        ),
+    )
+
+    first, second = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    assert _DOMAIN_COLUMNS["cmcd"][-3:] == ("cmcd", "country", "asn")
+    assert len(first) == len(_DOMAIN_COLUMNS["cmcd"])
+    assert first[-2:] == ("US", 7922)
+    assert second[-2:] == ("", None)

@@ -242,3 +242,30 @@ def test_cli_rejects_replace_existing_with_a_resumed_rebuild_id(cli, monkeypatch
         cli.main()
 
     assert excinfo.value.code == 2
+
+
+def test_cli_projection_cmcd_rebuilds_through_the_facts_adapter_and_purges_cmcd_rows(cli, monkeypatch) -> None:
+    calls: list[str] = []
+    adapters: list[str] = []
+    monkeypatch.setattr(cli, "ClickHouseBatchAdapter", lambda client: adapters.append("facts") or MagicMock())
+    monkeypatch.setattr(cli, "AggregateBatchAdapter", lambda client: adapters.append("aggregate") or MagicMock())
+    monkeypatch.setattr(cli, "purge_cmcd_projections", lambda client, **kwargs: calls.append("purge-cmcd"))
+    monkeypatch.setattr(cli, "purge_origin_projections", lambda client, **kwargs: calls.append("purge-origin"))
+
+    def fake_cmcd_rebuild(*args, **kwargs):
+        calls.append("rebuild-cmcd")
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_cmcd_projections_from_fos", fake_cmcd_rebuild)
+    monkeypatch.setattr(
+        cli,
+        "rebuild_origin_projections_from_fos",
+        lambda *a, **k: pytest.fail("origin rebuild must not run for --projection cmcd"),
+    )
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--projection", "cmcd", "--replace-existing"])
+
+    assert cli.main() == 0
+    assert calls == ["purge-cmcd", "rebuild-cmcd"]
+    assert adapters == ["facts"]
