@@ -21,6 +21,7 @@ import json
 import os
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -183,6 +184,7 @@ def _writers() -> list[tuple[str, Callable[[str, dict, list[str]], int]]]:
         network_rtt,
         network_speed,
         network_summary,
+        ngwaf_bots,
         origin_dims,
         origin_latency_ts,
         origin_summary,
@@ -216,6 +218,7 @@ def _writers() -> list[tuple[str, Callable[[str, dict, list[str]], int]]]:
         ("overview", overview.build_overview_bundles),
         ("pop_health", pop_health.build_pop_health_bundles),
         ("verified_bots_ts", verified_bots_ts.build_verified_bots_ts_bundles),
+        ("ngwaf_bots", ngwaf_bots.build_ngwaf_bots_bundles),
     ]
 
 
@@ -240,15 +243,58 @@ def _compactors() -> list[tuple[str, Callable[..., int]]]:
 
 
 _FIELDS = ["country", "url", "status", "pop", "ua", "cache"]
+_BOT_PATTERN = "Googlebot|curl"
+_BOT_VERSION = "v-golden"
 
 
 def _closed_hours() -> list[str]:
     return [f"2026-06-{d}-{h:02d}" for d in (13, 14) for h in range(24)]
 
 
+def _write_ngwaf_cache(path: Path) -> None:
+    """The SQLite ``ngwaf_bots`` cache the writer joins ``waf_req_id`` against."""
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE ngwaf_bots (waf_req_id TEXT, bot_name TEXT, category TEXT)")
+    rows = [(f"req{i}", f"bot{i % 3}", None if i % 5 == 0 else f"cat{i % 2}") for i in range(0, 2880, 7)]
+    rows.append(("req1", None, "untagged"))
+    con.executemany("INSERT INTO ngwaf_bots VALUES (?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def _write_data_partitions(shared: duckdb.DuckDBPyConnection, cache_root: Path, hours: list[str]) -> None:
+    """Committed raw partitions (``data/timestamp_hour=H``) the wellknown-bots writer reads."""
+    for h in hours:
+        d = cache_root / "data" / f"timestamp_hour={h}"
+        d.mkdir(parents=True)
+        start = datetime.strptime(h, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+        shared.execute(
+            f"COPY (SELECT * FROM {TABLE} WHERE timestamp >= TIMESTAMPTZ '{start.isoformat()}' "
+            f"AND timestamp < TIMESTAMPTZ '{(start + timedelta(hours=1)).isoformat()}') "
+            f"TO '{d / 'part-0.parquet'}' (FORMAT PARQUET)"
+        )
+
+
+def _plant_stale_wellknown(shared: duckdb.DuckDBPyConnection, cache_root: Path) -> None:
+    """One data-backed hour stamped with an old version, one orphaned stale hour with no raw data."""
+    root = cache_root / "rollups" / "wellknown_bots"
+    for hour, wipe in (("2026-06-13-05", True), ("2026-06-01-05", False)):
+        d = root / f"hour={hour}"
+        d.mkdir(parents=True, exist_ok=True)
+        if wipe:
+            for f in d.glob("*.parquet"):
+                f.unlink()
+        shared.execute(
+            "COPY (SELECT 'curl/7.68' AS ua, '10.0.0.1' AS ip, 3::BIGINT AS request_count, "
+            f"'old-version' AS pattern_set_version) TO '{d / 'compacted_aaaaaaaaaaaa.parquet'}' (FORMAT PARQUET)"
+        )
+
+
 def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
     from backend.core import rollups
-    from backend.core.rollups import day_bundles, hour_bundles
+    from backend.core.rollups import day_bundles, hour_bundles, wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -259,6 +305,8 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
     shared.execute("PRAGMA threads=1")
     shared.execute("SET TimeZone='UTC'")
     shared.execute(_LOG_TABLE_SQL)
+    ngwaf_db = tmp_path / "ngwaf_bot_cache.db"
+    _write_ngwaf_cache(ngwaf_db)
 
     def _writer_con(*_a: Any, **_k: Any) -> _Recorder:
         cur = shared.cursor()
@@ -301,6 +349,9 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         patch("backend.core.duckdb.get_memory_connection", side_effect=_memory_con),
         patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
         patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
+        patch("backend.utils.bot_sources.get_pattern_set_version", return_value=_BOT_VERSION),
+        patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=_BOT_PATTERN),
     ):
         phase("per_field_copy", lambda: rollups.backfill_rollups(SERVICE, source, _FIELDS))
         phase("bundle_hours", lambda: hour_bundles.bundle_hours(SERVICE, source, hours))
@@ -310,6 +361,14 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
             phase(f"hour_writer:{name}", lambda w=writer: w(SERVICE, source, hours))
         for name, compactor in _compactors():
             phase(f"day_compactor:{name}", lambda c=compactor: c(SERVICE, source))
+        _write_data_partitions(shared, cache_root, hours)
+        seen.update(_snapshot_tree(cache_root))
+        phase(
+            "wellknown_bots:recompute", lambda: wellknown_bots.recompute_wellknown_bots_rollup(SERVICE, source, hours)
+        )
+        _plant_stale_wellknown(shared, cache_root)
+        seen.update(_snapshot_tree(cache_root))
+        phase("wellknown_bots:backfill", lambda: wellknown_bots.backfill_wellknown_bots_rollup(SERVICE, source))
     shared.close()
     return phases, texts
 
