@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 class ServingClient(Protocol):
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
+    def execute(
+        self, sql: str, params: dict[str, Any] | None = None, *, settings: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any]]: ...
 
 
 _WATERMARK_TABLES = {

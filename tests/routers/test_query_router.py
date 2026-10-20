@@ -480,7 +480,11 @@ def test_query_high_scale_validates_ast_and_masks_ips(client, monkeypatch):
 
     monkeypatch.setenv("DEBUG_RESPONSES", "1")
     fake_hs_client = SimpleNamespace(
-        execute=lambda sql: [{"client_ip": "203.0.113.9", "custom_fields['url']": "203.0.113.10"}]
+        execute=lambda sql, params=None, settings=None: (
+            [{"n": 0}]  # the console's fail-closed check that additional_table_filters is enforced
+            if "system.one" in sql
+            else [{"client_ip": "203.0.113.9", "custom_fields['url']": "203.0.113.10"}]
+        )
     )
     fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=fake_hs_client)
 

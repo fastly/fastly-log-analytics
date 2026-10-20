@@ -8,6 +8,7 @@ from typing import Any
 import duckdb
 
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.sql_ident import SAFE_IDENT_RE
 from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import QueryRequest
@@ -27,11 +28,12 @@ def _instant(value: datetime) -> str:
     return f"toDateTime64({_literal(value.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S.%f'))}, 6, 'UTC')"
 
 
-def _scope_settings(service_id: str, start_time: str | None, end_time: str | None, tables: list[str]) -> str:
-    """``SETTINGS additional_table_filters`` pinning every fact table to this service, its visible batches and the window.
+def _table_filters(service_id: str, start_time: str | None, end_time: str | None, tables: list[str]) -> str:
+    """``additional_table_filters`` value pinning every fact table to this service, its visible batches and the window.
 
     ClickHouse applies the predicate to the storage read itself, so no shape of user SQL (an ``OR`` in its own
     ``WHERE``, a subquery, CTE, join or alias) can read another service's rows or widen the granted window.
+    It is sent as an HTTP setting, never as SQL text, so a user comment cannot swallow it.
     """
     start = _range_value(start_time)
     end = _range_value(end_time)
@@ -49,7 +51,94 @@ def _scope_settings(service_id: str, start_time: str | None, end_time: str | Non
         if end is not None:
             clauses.append(f"event_timestamp <= {_instant(end)}")
         entries.append(f"{_literal(table)}: {_literal(' AND '.join(clauses))}")
-    return " SETTINGS additional_table_filters = {" + ", ".join(entries) + "}"
+    return "{" + ", ".join(entries) + "}"
+
+
+def _assert_table_filters_enforced(client: Any) -> None:
+    """Fail closed unless this ClickHouse honours ``additional_table_filters``.
+
+    ``system.one`` holds one row with ``dummy = 0``; a filter of ``dummy = 1`` must therefore hide it.
+    A server that silently ignored the setting would otherwise serve every tenant's rows.
+    """
+    if getattr(client, "_table_filters_verified", False):
+        return
+    rows = client.execute(
+        "SELECT count() AS n FROM system.one",
+        settings={"additional_table_filters": "{'system.one': 'dummy = 1'}"},
+    )
+    if not rows or int(rows[0].get("n", 1)) != 0:
+        raise RuntimeError("the SQL console is disabled: ClickHouse is not enforcing additional_table_filters")
+    try:
+        client._table_filters_verified = True
+    except AttributeError:
+        pass  # a client that cannot carry the marker is simply re-probed, which fails closed
+
+
+# ClickHouse executes whatever function the user names, including table functions that reach other hosts
+# (remote, url, s3, file, ...) and ones that disclose server state (getSetting, hostName, version). The DuckDB
+# parse that validates the SQL knows none of them, so only an explicit allow-list is safe. Encoders that could
+# smuggle a masked column past value-shape masking (hex, base64, reinterpretAs*) are deliberately absent.
+_ALLOWED_FUNCTIONS = frozenset(
+    """
+    count sum avg min max any anylast argmin argmax uniq uniqexact uniqcombined countif sumif avgif minif maxif
+    anyif uniqif quantile quantiles quantileexact quantileexactweighted quantiletiming quantiletdigest median
+    stddevpop stddevsamp varpop varsamp topk grouparray grouparrayif groupuniqarray
+    if multiif coalesce ifnull nullif isnull isnotnull assumenotnull tonullable
+    lower upper lowerutf8 upperutf8 length lengthutf8 char_length substring substr substringutf8 concat concatws
+    replace replaceone replaceall replaceregexpone replaceregexpall position positioncaseinsensitive startswith
+    endswith trim trimleft trimright ltrim rtrim splitbychar splitbystring extract extractall match like ilike
+    tostring format reverse arraystringconcat
+    abs round floor ceil ceiling trunc sqrt pow power exp log log2 log10 intdiv modulo greatest least sign
+    cast toint8 toint16 toint32 toint64 touint8 touint16 touint32 touint64 tofloat32 tofloat64
+    toint32ornull toint64ornull touint32ornull touint64ornull tofloat64ornull toint32orzero toint64orzero
+    touint32orzero touint64orzero tofloat64orzero todate todatetime todatetime64 todatetimebesteffort
+    parsedatetimebesteffort parsedatetime64besteffort
+    tostartofminute tostartoffiveminute tostartoftenminutes tostartoffifteenminutes tostartofhour tostartofday
+    tostartofweek tostartofmonth tostartofinterval date_trunc datetrunc now today tounixtimestamp fromunixtimestamp
+    formatdatetime tohour tominute tosecond todayofweek todayofmonth tomonth toyear dateadd datesub datediff
+    tointervalsecond tointervalminute tointervalhour tointervalday
+    array arrayelement has hasany hasall empty notempty map mapkeys mapvalues mapcontains tuple
+    row_number rank dense_rank lag lead
+    """.split()
+)
+# Words that may legitimately be followed by "(" without being function calls.
+_SQL_KEYWORDS = frozenset(
+    "in as and or not over where from join on select with when then else case end between like ilike using "
+    "partition by order group having union all distinct exists any interval limit offset on inner left right "
+    "full cross intersect except array global prewhere final sample".split()
+)
+_SQL_TOKEN = re.compile(
+    r"""
+    '(?:[^'\\]|\\.|'')*'            # string literal
+    |"(?:[^"\\]|\\.)*"\s*\(        # quoted identifier used as a function name
+    |--[^\n]*                         # line comment
+    |/\*.*?\*/                       # block comment
+    |\b(IDENT)\s*\(                   # function-call candidate
+    """.replace("IDENT", SAFE_IDENT_RE.pattern),
+    re.VERBOSE | re.DOTALL,
+)
+
+
+_LITERAL_OR_COMMENT = re.compile(r"'(?:[^'\\]|\\.|'')*'|--[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _code_only(sql: str) -> str:
+    """``sql`` with string literals and comments blanked, so keyword checks only see real code."""
+    return _LITERAL_OR_COMMENT.sub(" ", sql)
+
+
+def _reject_unsafe_functions(sql: str) -> None:
+    for match in _SQL_TOKEN.finditer(sql):
+        token = match.group(0)
+        name = match.group(1)
+        if name is None:
+            if token.startswith('"'):
+                raise PermissionError("quoted function names are not allowed")
+            continue
+        lowered = name.lower()
+        if lowered in _SQL_KEYWORDS or lowered in _ALLOWED_FUNCTIONS:
+            continue
+        raise PermissionError(f"function {name!r} is not allowed in console queries")
 
 
 def query_endpoint(
@@ -105,15 +194,22 @@ def query_endpoint(
 
     fact_tables = [table for table in _FACT_DOMAINS if re.search(rf"\b{table}\b", sql, flags=re.IGNORECASE)]
 
-    has_explicit_limit = bool(re.search(r"\bLIMIT\b", sql, flags=re.IGNORECASE))
-    if not has_explicit_limit:
-        sql += f" LIMIT {max_rows + 1}"
+    has_explicit_limit = bool(re.search(r"\bLIMIT\b", _code_only(sql), flags=re.IGNORECASE))
+    _reject_unsafe_functions(sql)
+
+    # Always bound the result: wrapping puts the cap outside the user's SQL, and the newline before ``)`` stops a
+    # trailing ``--`` comment from swallowing it. An explicit LIMIT may exceed max_rows (so total_rows stays
+    # meaningful) but never the global ceiling.
+    row_cap = (MAX_QUERY_ROWS if has_explicit_limit else max_rows) + 1
+    sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
+    settings = {"max_result_rows": str(row_cap), "result_overflow_mode": "break"}
     if fact_tables:
-        sql += _scope_settings(service.service_id, start_time, end_time, fact_tables)
+        _assert_table_filters_enforced(service.client)
+        settings["additional_table_filters"] = _table_filters(service.service_id, start_time, end_time, fact_tables)
 
     t0 = time.perf_counter()
     try:
-        res = service.client.execute(sql)
+        res = service.client.execute(sql, settings=settings)
     except Exception as e:
         raise RuntimeError(str(e)) from e
     timer.mark("execute", t0)

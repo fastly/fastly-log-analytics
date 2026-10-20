@@ -144,6 +144,10 @@ def _make_client(seed: str) -> ClickHouseClient:
             "--output_format_json_quote_64bit_integers=0",
         ]
         command += [f"--{name}={value}" for name, value in fields.items() if name.startswith("param_")]
+        # Per-query settings travel as URL settings (see ClickHouseClient.execute(settings=...)).
+        for name in ("additional_table_filters", "max_result_rows", "result_overflow_mode"):
+            if name in request.url.params:
+                command.append(f"--{name}={request.url.params[name]}")
         completed = subprocess.run(
             command, input=seed + "\n" + fields["query"] + ";", text=True, capture_output=True, timeout=120
         )
@@ -649,3 +653,28 @@ def test_sql_console_cannot_widen_past_the_service_and_window_with_an_or_conditi
     assert 0 < scoped < 300, "fixture sanity: the 30 minute window holds only part of one tenant's rows"
     assert attacked == scoped, "a user OR must not escape the injected service and time-window predicates"
     assert _console(service, "SELECT count(*) AS n FROM logs WHERE url = '/other-tenant'")[0]["n"] == 0
+
+
+@pytest.mark.parametrize("comment", ["-- swallow everything after this", "--", "/* unterminated-safe */ -- x"])
+def test_sql_console_trailing_comment_cannot_swallow_scope_or_row_cap(
+    two_tenants: _Fixture, service: SimpleNamespace, comment: str
+) -> None:
+    scoped = _console(service, "SELECT count(*) AS n FROM logs")[0]["n"]
+
+    rows = _console(service, f"SELECT url FROM logs {comment}")
+    counted = _console(service, f"SELECT count(*) AS n FROM logs {comment}")[0]["n"]
+
+    assert counted == scoped, "a comment must not widen the service or window scope"
+    assert len(rows) <= 100, "a comment must not remove the row cap"
+    assert all(row["url"] != "/other-tenant" for row in rows)
+
+
+def test_sql_console_row_cap_holds_server_side_for_a_huge_explicit_limit(
+    two_tenants: _Fixture, service: SimpleNamespace
+) -> None:
+    from backend.repositories.query import MAX_QUERY_ROWS
+
+    rows = _console(service, "SELECT url FROM logs LIMIT 999999999", window_minutes=60 * 12)
+
+    assert 0 < len(rows) <= 100  # QueryRequest(max_rows=100) truncates after the bounded fetch
+    assert MAX_QUERY_ROWS >= len(rows)

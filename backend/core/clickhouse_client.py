@@ -14,6 +14,7 @@ import math
 import re
 import threading
 import time
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
@@ -181,6 +182,17 @@ CLICKHOUSE_TABLE_COLUMNS = {
     **{table: CLICKHOUSE_HIGH_SCALE_COLUMNS for table in CLICKHOUSE_HIGH_SCALE_TABLES},
 }
 _PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Per-query settings callers may add. They travel as HTTP settings (never as SQL text, where a user
+# comment could swallow them) and may only narrow what a query can read or return, never widen it.
+_QUERY_SETTINGS = frozenset(
+    {
+        "additional_table_filters",
+        "max_result_rows",
+        "result_overflow_mode",
+        "max_rows_to_read",
+        "read_overflow_mode",
+    }
+)
 _PARAM_ESCAPES = {
     ord("\\"): "\\\\",
     ord("\n"): "\\n",
@@ -284,10 +296,18 @@ class ClickHouseClient:
             trust_env=False,
         )
 
-    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
-        """Run internal SQL. SELECT-like statements return JSON rows; DDL returns []."""
+    def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
+        """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
+
+        ``settings`` adds allow-listed per-query ClickHouse settings (see ``_QUERY_SETTINGS``).
+        """
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError("ClickHouse SQL must be nonempty")
+        for name, value in (settings or {}).items():
+            if name not in _QUERY_SETTINGS:
+                raise ValueError(f"ClickHouse query setting {name!r} is not allowed")
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
         if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
             raise ValueError("ClickHouse identifier parameters are forbidden")
         form = {"query": sql}
@@ -295,7 +315,7 @@ class ClickHouseClient:
             if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
                 raise ValueError("invalid ClickHouse parameter name")
             form[f"param_{name}"] = _parameter(value)
-        return self._request("execute", data=form)
+        return self._request("execute", data=form, settings=settings)
 
     def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
         """Insert a caller-bounded batch synchronously, without any automatic retry."""
@@ -372,6 +392,7 @@ class ClickHouseClient:
         sql: str | None = None,
         content: bytes | None = None,
         rows_written: int = 0,
+        settings: Mapping[str, str] | None = None,
     ) -> list[dict]:
         started = time.perf_counter()
         query_id = uuid4().hex
@@ -426,6 +447,8 @@ class ClickHouseClient:
                 "max_bytes_before_external_group_by": "134217728",
                 "max_bytes_before_external_sort": "134217728",
             }
+            if settings:
+                query.update(settings)
             if operation == "insert":
                 query.update(
                     {

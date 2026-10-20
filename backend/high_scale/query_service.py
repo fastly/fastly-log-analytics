@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -14,7 +15,9 @@ from backend.utils.telemetry import _QUERIES, _RECORDING_TELEMETRY, get_page_loa
 
 
 class QueryClient(Protocol):
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
+    def execute(
+        self, sql: str, params: dict[str, Any] | None = None, *, settings: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)

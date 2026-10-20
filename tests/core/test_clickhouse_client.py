@@ -630,3 +630,33 @@ def test_rum_environment_columns_are_allowlisted_for_both_rum_fact_tables():
     environment = {"browser", "os", "device", "city", "region", "pop", "tls", "ttfb", "country"}
     assert environment <= ch.CLICKHOUSE_TABLE_COLUMNS["rum_vitals_facts"]
     assert environment | {"error_line", "error_col"} <= ch.CLICKHOUSE_TABLE_COLUMNS["rum_error_facts"]
+
+
+def test_query_settings_travel_as_url_settings_never_inside_the_sql_text(clients):
+    sql = "SELECT 1 AS n"
+    filters = "{'request_facts': 'service_id = \\'svc\\''}"
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        assert query_form(request)["query"] == [sql]
+        return response([{"n": 1}])
+
+    clients(handler).execute(
+        sql, settings={"additional_table_filters": filters, "max_result_rows": "11", "result_overflow_mode": "break"}
+    )
+
+    params = seen[0].url.params
+    assert params["additional_table_filters"] == filters
+    assert params["max_result_rows"] == "11" and params["result_overflow_mode"] == "break"
+    assert params["max_memory_usage"] == "1073741824", "the client's own limits stay in force"
+
+
+@pytest.mark.parametrize(
+    "name", ["readonly", "max_memory_usage", "max_execution_time", "query_id", "database", "not_a_setting"]
+)
+def test_only_allow_listed_query_settings_may_be_supplied(clients, name):
+    client = clients(lambda request: pytest.fail("a rejected setting must not reach the server"))
+
+    with pytest.raises(ValueError, match="setting"):
+        client.execute("SELECT 1", settings={name: "1"})
