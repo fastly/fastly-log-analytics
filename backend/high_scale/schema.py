@@ -44,10 +44,16 @@ def build_request_event_id(row: Mapping[str, Any]) -> str:
     return build_event_id(row, domain="request")
 
 
-def build_rum_event_id(row: Mapping[str, Any], *, rum_kind: str) -> str:
+def build_rum_event_id(row: Mapping[str, Any], *, rum_kind: str, sub_ordinal: int | None = None) -> str:
     if rum_kind not in {"vitals", "errors"}:
         raise ValueError("rum_kind must be 'vitals' or 'errors'")
-    return build_event_id(row, domain=f"rum:{rum_kind}")
+    resolved_sub_ordinal = sub_ordinal if sub_ordinal is not None else row.get("sub_ordinal")
+    domain_tag = (
+        f"rum:{rum_kind}:{resolved_sub_ordinal}"
+        if isinstance(resolved_sub_ordinal, int) and resolved_sub_ordinal > 0
+        else f"rum:{rum_kind}"
+    )
+    return build_event_id(row, domain=domain_tag)
 
 
 def build_cmcd_projection_key(row: Mapping[str, Any]) -> str:

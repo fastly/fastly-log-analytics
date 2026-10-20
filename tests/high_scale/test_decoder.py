@@ -113,3 +113,133 @@ def test_decode_normalizes_dedicated_rum_error_fields_for_serving() -> None:
     assert result.events[0]["error_message"] == "boom"
     assert result.events[0]["error_file"] == "app.js"
     assert result.events[0]["pathname"] == "/checkout"
+
+
+def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
+    from backend.core.rum_ingest import extract_metrics_from_faro_payload
+
+    faro_payload = {
+        "meta": {
+            "browser": {"name": "Firefox", "mobile": True},
+            "os": {"name": "Android"},
+            "page": {"url": "https://shop.example.test/products/42?tab=reviews"},
+        },
+        "measurements": [
+            {
+                "type": "web-vitals",
+                "values": {"lcp": 1820.5, "cls": 0.04, "delta": 12.0},
+                "context": {"rating": "good"},
+            },
+            {
+                "type": "web-vitals",
+                "values": {"inp": 195.0},
+                "meta": {"rating": "needs-improvement"},
+            },
+        ],
+        "events": [
+            {
+                "name": "faro.performance.navigation",
+                "attributes": {"ttfb": 110.25, "fcp": 640.0},
+            },
+            {
+                "name": "add_to_cart_click",
+            },
+        ],
+        "exceptions": [
+            {
+                "value": "TypeError: Cannot read properties of null",
+                "stacktrace": {
+                    "frames": [{"filename": "https://shop.example.test/static/cart.js", "lineno": 88, "colno": 14}]
+                },
+            },
+            {
+                "message": "ReferenceError: checkoutToken is not defined",
+                "stacktrace": {
+                    "frames": [{"filename": "https://shop.example.test/static/pay.js", "lineno": 19, "colno": 3}]
+                },
+            },
+        ],
+    }
+    raw_record = {
+        "timestamp": "2026-04-20T12:00:00Z",
+        "rum_cid": "cid-faro-99",
+        "fastly_req_id": "req-faro-1",
+        "country": "US",
+        "rum_body": json.dumps(faro_payload),
+    }
+    payload_bytes = gzip.compress((json.dumps(raw_record) + "\n").encode("utf-8"))
+
+    standard_extracted = extract_metrics_from_faro_payload(faro_payload, raw_record)
+    standard_vitals = [
+        m for m in standard_extracted if not ((m.get("metric_name") == "exception") or bool(m.get("error_message")))
+    ]
+    standard_errors = [
+        m for m in standard_extracted if (m.get("metric_name") == "exception") or bool(m.get("error_message"))
+    ]
+    assert len(standard_vitals) == 6
+    assert len(standard_errors) == 2
+
+    vitals_source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/faro.gz", "sha256:source", 100, "v7")
+    vitals_result = decode_source_object(vitals_source, payload_bytes, transform_version="normalize.v1")
+
+    assert vitals_result.decoded_rows == 1
+    assert vitals_result.accepted_rows == len(standard_vitals)
+    assert vitals_result.quarantined_rows == 0
+    assert len({ev["event_id"] for ev in vitals_result.events}) == len(standard_vitals)
+    for ev, std in zip(vitals_result.events, standard_vitals, strict=True):
+        assert ev["metric_name"] == std["metric_name"]
+        assert ev["metric_value"] == float(std["metric_value"])
+        assert ev["metric_rating"] == std["metric_rating"]
+        assert ev["pathname"] == std["pathname"] == "/products/42"
+        assert ev["client_id"] == std["cid"] == "cid-faro-99"
+        assert ev["browser"] == std["browser"] == "Firefox"
+        assert ev["os"] == std["os"] == "Android"
+        assert ev["device"] == std["device"] == "Mobile"
+        assert ev["line_ordinal"] == 0
+
+    errors_source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/faro.gz", "sha256:source", 100, "v7")
+    errors_result = decode_source_object(errors_source, payload_bytes, transform_version="normalize.v1")
+
+    assert errors_result.decoded_rows == 1
+    assert errors_result.accepted_rows == len(standard_errors)
+    assert errors_result.quarantined_rows == 0
+    assert len({ev["event_id"] for ev in errors_result.events}) == len(standard_errors)
+    for ev, std in zip(errors_result.events, standard_errors, strict=True):
+        assert ev["error_message"] == std["error_message"]
+        assert ev["error_file"] == std["error_file"]
+        assert ev["error_line"] == std["error_line"]
+        assert ev["error_col"] == std["error_col"]
+        assert ev["pathname"] == std["pathname"] == "/products/42"
+        assert ev["client_id"] == std["cid"] == "cid-faro-99"
+        assert ev["browser"] == std["browser"] == "Firefox"
+        assert ev["os"] == std["os"] == "Android"
+        assert ev["device"] == std["device"] == "Mobile"
+        assert ev["line_ordinal"] == 0
+
+    from backend.high_scale.publication import HighScaleBatch, _rows_for_domain, row_matches_serving_domain
+
+    vitals_serving_rows = tuple(e for e in vitals_result.events if row_matches_serving_domain("rum_vitals", e))
+    assert len(vitals_serving_rows) == len(standard_vitals)
+    vitals_batch = HighScaleBatch(
+        batch_id="b-vitals",
+        service_id="svc",
+        domain="rum_vitals",
+        generation="gen-1",
+        rows=vitals_serving_rows,
+    )
+    ch_vitals_tuples = _rows_for_domain(vitals_batch, "00000000-0000-0000-0000-000000000001")
+    assert len(ch_vitals_tuples) == len(standard_vitals)
+    assert len({row[1] for row in ch_vitals_tuples}) == len(standard_vitals)
+
+    errors_serving_rows = tuple(e for e in errors_result.events if row_matches_serving_domain("rum_errors", e))
+    assert len(errors_serving_rows) == len(standard_errors)
+    errors_batch = HighScaleBatch(
+        batch_id="b-errors",
+        service_id="svc",
+        domain="rum_errors",
+        generation="gen-1",
+        rows=errors_serving_rows,
+    )
+    ch_errors_tuples = _rows_for_domain(errors_batch, "00000000-0000-0000-0000-000000000002")
+    assert len(ch_errors_tuples) == len(standard_errors)
+    assert len({row[1] for row in ch_errors_tuples}) == len(standard_errors)

@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from backend.core.field_registry import DuckType, try_get
+from backend.core.rum_ingest import extract_metrics_from_faro_payload
 from backend.high_scale.archive_models import ArchiveSourceObject
 from backend.high_scale.schema import build_event_id, build_request_event_id, build_rum_event_id
 
@@ -58,21 +59,35 @@ def decode_source_object(
             value = json.loads(raw_line)
             if not isinstance(value, dict):
                 raise ValueError("record is not a JSON object")
-            event = dict(value)
-            event.update(
-                {
-                    "service_id": source.service_id,
-                    "domain": selected_domain,
-                    "source_object_key": source.object_key,
-                    "source_object_version": source_version,
-                    "line_ordinal": line_ordinal,
-                    "transform_version": transform_version,
-                    "raw_json": raw_line.decode("utf-8"),
-                }
+            raw_json_str = raw_line.decode("utf-8")
+            base_meta = {
+                "service_id": source.service_id,
+                "domain": selected_domain,
+                "source_object_key": source.object_key,
+                "source_object_version": source_version,
+                "line_ordinal": line_ordinal,
+                "transform_version": transform_version,
+                "raw_json": raw_json_str,
+            }
+            expanded_faro = (
+                _expand_faro_rum_events(value, selected_domain)
+                if selected_domain in {"rum_vitals", "rum_errors"}
+                else []
             )
-            _normalize_serving_fields(event, selected_domain)
-            event["event_id"] = _event_id(event, selected_domain)
-            events.append(event)
+            if expanded_faro:
+                for sub_ordinal, faro_fields in enumerate(expanded_faro):
+                    event = dict(value)
+                    event.update(faro_fields)
+                    event.update(base_meta)
+                    _normalize_serving_fields(event, selected_domain)
+                    event["event_id"] = _event_id(event, selected_domain, sub_ordinal=sub_ordinal)
+                    events.append(event)
+            else:
+                event = dict(value)
+                event.update(base_meta)
+                _normalize_serving_fields(event, selected_domain)
+                event["event_id"] = _event_id(event, selected_domain)
+                events.append(event)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
             dead_letters.append(DeadLetterRecord(source.object_key, line_ordinal, raw_line, str(exc)))
     return DecodeResult(
@@ -206,6 +221,116 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
         event["error_message"] = event.get("rum_error_message") or event.get("error_message") or ""
         event["error_file"] = event.get("rum_error_file") or event.get("error_file") or ""
         event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
+        raw_line = event.get("rum_error_line", event.get("error_line"))
+        if raw_line is not None and raw_line != "":
+            try:
+                event["error_line"] = int(raw_line)
+            except (ValueError, TypeError):
+                pass
+        raw_col = event.get("rum_error_col", event.get("error_col"))
+        if raw_col is not None and raw_col != "":
+            try:
+                event["error_col"] = int(raw_col)
+            except (ValueError, TypeError):
+                pass
+
+
+def _is_faro_exception_metric(metric: dict[str, Any]) -> bool:
+    return (metric.get("metric_name") == "exception") or bool(metric.get("error_message"))
+
+
+def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[str, Any]]:
+    raw_body = log_data.get("rum_body")
+    if not raw_body:
+        return []
+    try:
+        payload = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            return []
+        extracted = extract_metrics_from_faro_payload(payload, log_data)
+    except Exception:
+        return []
+    if not extracted:
+        return []
+
+    if domain == "rum_vitals":
+        domain_items = [m for m in extracted if not _is_faro_exception_metric(m)]
+    else:
+        domain_items = [m for m in extracted if _is_faro_exception_metric(m)]
+    selected_items = domain_items if domain_items else extracted
+
+    rows: list[dict[str, Any]] = []
+    for metric in selected_items:
+        is_exc = _is_faro_exception_metric(metric)
+        browser_val = metric.get("browser") or log_data.get("browser") or "Chrome"
+        os_val = metric.get("os") or log_data.get("os") or "macOS"
+        device_val = metric.get("device") or log_data.get("device") or "Desktop"
+        cid_val = metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or ""
+        pathname_val = metric.get("pathname") or log_data.get("rum_pathname") or "/"
+        base_fields: dict[str, Any] = {
+            "client_id": cid_val,
+            "rum_cid": cid_val,
+            "pathname": pathname_val,
+            "rum_pathname": pathname_val,
+            "browser": browser_val,
+            "os": os_val,
+            "device": device_val,
+        }
+        if is_exc:
+            raw_line = metric.get("error_line")
+            raw_col = metric.get("error_col")
+            try:
+                err_line = int(raw_line) if raw_line is not None and raw_line != "" else 0
+            except (ValueError, TypeError):
+                err_line = 0
+            try:
+                err_col = int(raw_col) if raw_col is not None and raw_col != "" else 0
+            except (ValueError, TypeError):
+                err_col = 0
+            err_msg = metric.get("error_message") or "Unknown error"
+            err_file = metric.get("error_file") or "unknown.js"
+            base_fields.update(
+                {
+                    "error_message": err_msg,
+                    "rum_error_message": err_msg,
+                    "error_file": err_file,
+                    "rum_error_file": err_file,
+                    "error_line": err_line,
+                    "rum_error_line": err_line,
+                    "error_col": err_col,
+                    "rum_error_col": err_col,
+                    "metric_name": "",
+                    "rum_metric_name": "",
+                    "metric_value": None,
+                    "rum_metric_value": None,
+                    "metric_rating": "",
+                    "rum_metric_rating": "",
+                }
+            )
+        else:
+            raw_val = metric.get("metric_value")
+            try:
+                val = float(raw_val) if raw_val is not None and raw_val != "" else 0.0
+            except (ValueError, TypeError):
+                val = 0.0
+            m_name = metric.get("metric_name") or "unknown"
+            m_rating = metric.get("metric_rating") or ""
+            base_fields.update(
+                {
+                    "metric_name": m_name,
+                    "rum_metric_name": m_name,
+                    "metric_value": val,
+                    "rum_metric_value": val,
+                    "metric_rating": m_rating,
+                    "rum_metric_rating": m_rating,
+                    "error_message": "",
+                    "rum_error_message": "",
+                }
+            )
+        rows.append(base_fields)
+    return rows
 
 
 def _rum_querystring_params(event: dict[str, Any]) -> dict[str, list[str]]:
@@ -223,11 +348,11 @@ def _first_qparam(qparams: dict[str, list[str]], key: str) -> str:
     return values[0] if values else ""
 
 
-def _event_id(event: dict[str, Any], domain: str) -> str:
+def _event_id(event: dict[str, Any], domain: str, *, sub_ordinal: int | None = None) -> str:
     if domain == "request":
         return build_request_event_id(event)
     if domain == "rum_vitals":
-        return build_rum_event_id(event, rum_kind="vitals")
+        return build_rum_event_id(event, rum_kind="vitals", sub_ordinal=sub_ordinal)
     if domain == "rum_errors":
-        return build_rum_event_id(event, rum_kind="errors")
+        return build_rum_event_id(event, rum_kind="errors", sub_ordinal=sub_ordinal)
     return build_event_id(event, domain=domain)
