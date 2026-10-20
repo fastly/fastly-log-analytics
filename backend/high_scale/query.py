@@ -104,7 +104,7 @@ _ALLOWED_FUNCTIONS = frozenset(
 # Words that may legitimately be followed by "(" without being function calls.
 _SQL_KEYWORDS = frozenset(
     "in as and or not over where from join on select with when then else case end between like ilike using "
-    "partition by order group having union all distinct exists any interval limit offset on inner left right "
+    "partition by order group having union all distinct exists any interval limit offset on inner "
     "full cross intersect except array global prewhere final sample".split()
 )
 _SQL_TOKEN = re.compile(
@@ -130,7 +130,11 @@ def _code_only(sql: str) -> str:
 _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 _QUOTE_SCAN = re.compile(r"""'(?:[^']|'')*'|\"""")
 _COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
-_RESULT_CLAUSES = re.compile(r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b", re.IGNORECASE)
+# RECURSIVE: DuckDB's table walker puts a recursive CTE's name in scope for its own anchor branch, where
+# ClickHouse resolves the same name to the real (unfiltered) table of that name.
+_RESULT_CLAUSES = re.compile(
+    r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b", re.IGNORECASE
+)
 
 
 def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
@@ -158,7 +162,7 @@ def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
     if re.search(r"[^\x20-\x7e\n\r\t]", code):
         raise PermissionError("non-ASCII characters are only allowed inside string literals")
     if _RESULT_CLAUSES.search(code):
-        raise PermissionError("SETTINGS, FORMAT and INTO OUTFILE clauses are not allowed")
+        raise PermissionError("SETTINGS, FORMAT, INTO OUTFILE and RECURSIVE are not allowed")
     names = "|".join(sorted(re.escape(name) for name in table_names | frozenset(_FACT_DOMAINS)))
     if re.search(rf"\.\s*(?:{names})\b", code, flags=re.IGNORECASE):
         raise PermissionError("schema-qualified table names are not allowed")

@@ -102,6 +102,8 @@ def test_a_hostile_service_id_cannot_break_out_of_the_filter_literal() -> None:
         "SELECT hostName(), version(), currentUser() FROM logs",
         "SELECT * FROM \"remote\"('h', db.t)",
         "SELECT hex(ip) FROM logs",
+        "SELECT left(ip, 3) FROM logs",
+        "SELECT right(ip, 3) FROM logs",
         "SELECT dictGet('d', 'a', 1) FROM logs",
     ],
 )
@@ -174,6 +176,10 @@ def test_the_word_limit_in_a_literal_does_not_raise_the_users_row_cap(decoy: str
         'SELECT 1 AS "a\'" /* /* */ FROM system.tables\n-- */ , 2 AS "b\'" FROM logs',
         "SELECT 1 AS \"a'\" /* /* */ FROM remote('h', x.y)\n-- */ , 2 AS \"b'\" FROM logs",
         'SELECT "url" FROM logs',
+        # A recursive CTE named after a real table puts that name in scope for its own anchor branch.
+        "WITH RECURSIVE high_scale_batch_publications AS (SELECT * FROM high_scale_batch_publications "
+        "UNION ALL SELECT * FROM high_scale_batch_publications WHERE 1 = 0) SELECT * FROM high_scale_batch_publications",
+        "with recursive t as (select 1 as n union all select n + 1 from t where n < 3) select n from t",
         'SELECT 1 AS "a\'", 2 AS "b\'" FROM logs',
     ],
 )
