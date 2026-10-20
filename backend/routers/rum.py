@@ -74,6 +74,10 @@ _RUM_SETTING_KEYS = ("capture_vitals", "capture_performance", "capture_errors", 
 # direct scan, no write-path in the read path" principle. Override via env.
 _RUM_RAW_WINDOW_MAX_S = int(os.getenv("RUM_RAW_WINDOW_MAX_S", str(6 * 60 * 60)))
 
+_RUM_FILTERS_MESSAGE = (
+    "filters must be a JSON object over browser, os, device, country, pathname, city, region, pop or tls"
+)
+
 router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR_RESPONSES)
 
 # APIRouter without a prefix for serving dynamic JS assets and ingesting beacons
@@ -674,7 +678,9 @@ async def rum_analytics(
         try:
             hs_result = hs_rum_analytics(high_scale_service, start_time, end_time, parse_rum_filters(filters))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=make_error("rum_filters_unsupported", str(exc))) from exc
+            raise HTTPException(
+                status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE)
+            ) from exc
         return _inject_telemetry(hs_result)
 
     service_id = ctx.service_id
@@ -975,7 +981,9 @@ async def rum_live_events(
         try:
             return hs_rum_live(high_scale_service, start_time, end_time, 50, parse_rum_filters(filters))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=make_error("rum_filters_unsupported", str(exc))) from exc
+            raise HTTPException(
+                status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE)
+            ) from exc
 
     service_id = ctx.service_id
 
