@@ -49,3 +49,60 @@ HOUR_WRITERS: tuple[RollupSpec, ...] = (
     RollupSpec("overview", "build_overview_bundles"),
     RollupSpec("network_summary", "build_network_summary_bundles"),
 )
+
+
+@dataclass(frozen=True)
+class DayCompactorSpec:
+    """A closed-day compactor run by the daily ``rollup_compact`` cron and the admin backfill.
+
+    ``compactor`` names a function exported by ``backend.core.rollups`` and is
+    resolved at call time so tests keep patching the package attribute.
+    ``label`` names the rollup in cron error attribution. ``admin_key`` is the
+    ``/admin/backfill-bundle-rollups`` response key for the compacted-day
+    count, or ``None`` when the response does not report it.
+    """
+
+    label: str
+    compactor: str
+    admin_key: str | None = None
+
+
+# Order is the cron's execution order; the compactors are independent of each
+# other (each reads only its own hour bundles).
+DAY_COMPACTORS: tuple[DayCompactorSpec, ...] = (
+    DayCompactorSpec("origin_summary", "compact_origin_summary_closed_days_to_daily", "origin_summary_days"),
+    DayCompactorSpec("network_rtt", "compact_network_rtt_closed_days_to_daily", "network_rtt_days"),
+    DayCompactorSpec("network_speed", "compact_network_speed_closed_days_to_daily", "network_speed_days"),
+    DayCompactorSpec("network_quality", "compact_network_quality_closed_days_to_daily", "network_quality_days"),
+    DayCompactorSpec("verified_bots_ts", "compact_verified_bots_ts_closed_days_to_daily", "verified_bots_ts_days"),
+    DayCompactorSpec("perf_latency", "compact_perf_latency_closed_days_to_daily", "perf_latency_days"),
+    DayCompactorSpec("origin_dims", "compact_origin_dims_closed_days_to_daily", "origin_dims_days"),
+    DayCompactorSpec("origin_latency_ts", "compact_origin_latency_ts_closed_days_to_daily", "origin_latency_ts_days"),
+    DayCompactorSpec("security_dims", "compact_security_dims_closed_days_to_daily", "security_dims_days"),
+    DayCompactorSpec("perf_dims", "compact_perf_dims_closed_days_to_daily", "perf_ttl_dist_days"),
+    DayCompactorSpec("ngwaf_bots", "compact_ngwaf_bots_closed_days_to_daily", "ngwaf_bots_days"),
+    DayCompactorSpec("overview", "compact_overview_closed_days_to_daily", "overview_days"),
+    DayCompactorSpec("pop_health", "compact_pop_health_closed_days_to_daily"),
+)
+
+# ``/admin/backfill-bundle-rollups``: (response key, ``backend.core.rollups``
+# backfill function), in run order. time_series and sessions are backfilled
+# separately (they go through ``backfill_missing_bundles`` directly).
+ADMIN_BACKFILLS: tuple[tuple[str, str], ...] = (
+    ("slow_urls", "backfill_slow_urls_bundles"),
+    ("origin_summary", "backfill_origin_summary_bundles"),
+    ("origin_dims", "backfill_origin_dims_bundles"),
+    ("origin_latency_ts", "backfill_origin_latency_ts_bundles"),
+    ("network_rtt", "backfill_network_rtt_bundles"),
+    ("network_speed", "backfill_network_speed_bundles"),
+    ("network_quality", "backfill_network_quality_bundles"),
+    ("verified_bots_ts", "backfill_verified_bots_ts_bundles"),
+    ("perf_latency", "backfill_perf_latency_bundles"),
+    ("pop_health", "backfill_pop_health_bundles"),
+    ("security_dims", "backfill_security_dims_bundles"),
+    ("perf_ttl_dist", "backfill_perf_dims_bundles"),
+    ("wellknown_bots", "backfill_wellknown_bots_rollup"),
+    ("ngwaf_bots", "backfill_ngwaf_bots_bundles"),
+    ("overview", "backfill_overview_bundles"),
+    ("network_summary", "backfill_network_summary_bundles"),
+)

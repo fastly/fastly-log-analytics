@@ -26,27 +26,16 @@ def _run_rollup_compact_daily(
     manual: bool = False,
     run_id: int | None = None,
 ) -> dict:
+    from backend.core import rollups
     from backend.core.duckdb import get_source_for_service, log_cron_run
     from backend.core.rollups import (
         backfill_day_bundles,
         backfill_missing_hour_bundles,
         backfill_missing_hour_ip_spread,
         compact_closed_days_to_daily,
-        compact_network_quality_closed_days_to_daily,
-        compact_network_rtt_closed_days_to_daily,
-        compact_network_speed_closed_days_to_daily,
-        compact_ngwaf_bots_closed_days_to_daily,
-        compact_origin_dims_closed_days_to_daily,
-        compact_origin_latency_ts_closed_days_to_daily,
-        compact_origin_summary_closed_days_to_daily,
-        compact_overview_closed_days_to_daily,
-        compact_perf_dims_closed_days_to_daily,
-        compact_perf_latency_closed_days_to_daily,
-        compact_pop_health_closed_days_to_daily,
-        compact_security_dims_closed_days_to_daily,
-        compact_verified_bots_ts_closed_days_to_daily,
         retire_compacted_hour_bundles,
     )
+    from backend.core.rollups.spec import DAY_COMPACTORS
     from backend.utils.active_requests import should_defer_cron
 
     if not manual and should_defer_cron("rollup_compact", service_id):
@@ -137,27 +126,13 @@ def _run_rollup_compact_daily(
 
         # 5-17. Per-rollup daily compaction. Each subsystem is isolated so one failure is
         # recorded as a warning without stopping the rest; the results are not used.
-        daily_compactors = (
-            ("origin_summary", compact_origin_summary_closed_days_to_daily),
-            ("network_rtt", compact_network_rtt_closed_days_to_daily),
-            ("network_speed", compact_network_speed_closed_days_to_daily),
-            ("network_quality", compact_network_quality_closed_days_to_daily),
-            ("verified_bots_ts", compact_verified_bots_ts_closed_days_to_daily),
-            ("perf_latency", compact_perf_latency_closed_days_to_daily),
-            ("origin_dims", compact_origin_dims_closed_days_to_daily),
-            ("origin_latency_ts", compact_origin_latency_ts_closed_days_to_daily),
-            ("security_dims", compact_security_dims_closed_days_to_daily),
-            ("perf_dims", compact_perf_dims_closed_days_to_daily),
-            ("ngwaf_bots", compact_ngwaf_bots_closed_days_to_daily),
-            ("overview", compact_overview_closed_days_to_daily),
-            ("pop_health", compact_pop_health_closed_days_to_daily),
-        )
-        for name, compactor in daily_compactors:
+        for spec in DAY_COMPACTORS:
+            compactor = getattr(rollups, spec.compactor)
             try:
                 _call_with_lookback(compactor, service_id, src, lookback_days=30)
             except Exception as e:
-                subsystem_errors.append(f"{name}: {e}")
-                logger.warning("[rollup-compact] %s: %s failed: %s", _display, name, e)
+                subsystem_errors.append(f"{spec.label}: {e}")
+                logger.warning("[rollup-compact] %s: %s failed: %s", _display, spec.label, e)
 
         # Retirement pass: unlink constituent hourly bundles once day bundle verified
         retired_files, retired_bytes = 0, 0

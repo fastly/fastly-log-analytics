@@ -123,43 +123,14 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     """
     import logging
 
-    from backend.core.rollups import (
-        backfill_network_quality_bundles,
-        backfill_network_rtt_bundles,
-        backfill_network_speed_bundles,
-        backfill_network_summary_bundles,
-        backfill_ngwaf_bots_bundles,
-        backfill_origin_dims_bundles,
-        backfill_origin_latency_ts_bundles,
-        backfill_origin_summary_bundles,
-        backfill_overview_bundles,
-        backfill_perf_dims_bundles,
-        backfill_perf_latency_bundles,
-        backfill_pop_health_bundles,
-        backfill_security_dims_bundles,
-        backfill_slow_urls_bundles,
-        backfill_verified_bots_ts_bundles,
-        backfill_wellknown_bots_rollup,
-        compact_network_quality_closed_days_to_daily,
-        compact_network_rtt_closed_days_to_daily,
-        compact_network_speed_closed_days_to_daily,
-        compact_ngwaf_bots_closed_days_to_daily,
-        compact_origin_dims_closed_days_to_daily,
-        compact_origin_latency_ts_closed_days_to_daily,
-        compact_origin_summary_closed_days_to_daily,
-        compact_overview_closed_days_to_daily,
-        compact_perf_dims_closed_days_to_daily,
-        compact_perf_latency_closed_days_to_daily,
-        compact_pop_health_closed_days_to_daily,
-        compact_security_dims_closed_days_to_daily,
-        compact_verified_bots_ts_closed_days_to_daily,
-    )
+    from backend.core import rollups
     from backend.core.rollups._common import (
         SESSIONS_BUNDLE_FILENAME,
         TIME_SERIES_BUNDLE_FILENAME,
         backfill_missing_bundles,
     )
     from backend.core.rollups.sessions import build_session_bundles
+    from backend.core.rollups.spec import ADMIN_BACKFILLS, DAY_COMPACTORS
     from backend.core.rollups.time_series import build_time_series_bundles
 
     sid = source.get("service_id") or source.get("name") or ""
@@ -180,56 +151,17 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         logger=logging.getLogger(__name__),
     )
 
-    n_su = backfill_slow_urls_bundles(sid, source)
-    n_os = backfill_origin_summary_bundles(sid, source)
-    # status_codes reads the existing all_fields.parquet bundle (no dedicated
-    # writer / backfill); only origin_dims (pop / oip / edge) gets an explicit
-    # backfill + day-compact here.
-    n_od = backfill_origin_dims_bundles(sid, source)
-    # origin_latency_ts: the minute-granular origin-latency percentile time
-    # series feeding the timeseries panel (the last section to roll up — its
-    # backfill is what lets the get_aggregates skip-temp guard fire on 30 d
-    # unfiltered).
-    n_olts = backfill_origin_latency_ts_bundles(sid, source)
-    n_nr = backfill_network_rtt_bundles(sid, source)
-    n_ns = backfill_network_speed_bundles(sid, source)
-    n_nq = backfill_network_quality_bundles(sid, source)
-    n_vbts = backfill_verified_bots_ts_bundles(sid, source)
-    n_perf = backfill_perf_latency_bundles(sid, source)
-    n_ph = backfill_pop_health_bundles(sid, source)
-    # security_dims: req_size / conn_reuse / topips / cov — the all-rows live
-    # scans behind /api/security/aggregates' equivalent panels. EXACT.
-    n_sd = backfill_security_dims_bundles(sid, source)
-    # perf_dims: ttl_dist — the all-rows live scan behind /api/performance
-    # /aggregates' ttl_dist histogram panel. EXACT (count SUM + MIN-of-MIN).
-    n_pd = backfill_perf_dims_bundles(sid, source)
-    # wellknown_bots: the regex-prefiltered (ua, ip, count) rollup behind the
-    # security wellknown card. Backfilling historical closed hours lets the
-    # reader clear its 50% coverage floor on 7d/30d so the live regex + its
-    # all-rows temp drop off the request path (collapsing the catalog temp to
-    # the NGWAF-only subset).
-    n_wk = backfill_wellknown_bots_rollup(sid, source)
-    # ngwaf_bots: the write-time waf_req_id ⨝ ngwaf_bot_cache aggregation
-    # behind get_top_bots' ngwaf panel. Backfilling closed hours lets the
-    # reader serve the panel without the per-request direct join. Hours
-    # whose cache rows were already retention-trimmed aggregate to empty —
-    # identical to what the live join returns for them today.
-    n_nb = backfill_ngwaf_bots_bundles(sid, source)
-    n_ov = backfill_overview_bundles(sid, source)
-    n_netsumm = backfill_network_summary_bundles(sid, source)
-    n_os_day = compact_origin_summary_closed_days_to_daily(sid, source)
-    n_od_day = compact_origin_dims_closed_days_to_daily(sid, source)
-    n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
-    n_nr_day = compact_network_rtt_closed_days_to_daily(sid, source)
-    n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
-    n_nq_day = compact_network_quality_closed_days_to_daily(sid, source)
-    n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
-    n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
-    n_ph_day = compact_pop_health_closed_days_to_daily(sid, source)
-    n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
-    n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
-    n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
-    n_ov_day = compact_overview_closed_days_to_daily(sid, source)
+    # The backfill table lives in backend.core.rollups.spec. status_codes has
+    # no entry: it reads the existing all_fields.parquet bundle. Backfilling
+    # origin_latency_ts is what lets the get_aggregates skip-temp guard fire on
+    # 30 d unfiltered; wellknown_bots lets its reader clear the 50% coverage
+    # floor on 7d/30d; ngwaf_bots hours whose cache rows were already
+    # retention-trimmed aggregate to empty, same as the live join returns.
+    counts: dict[str, int] = {key: getattr(rollups, name)(sid, source) for key, name in ADMIN_BACKFILLS}
+    for spec in DAY_COMPACTORS:
+        n_days = getattr(rollups, spec.compactor)(sid, source)
+        if spec.admin_key:
+            counts[spec.admin_key] = n_days
 
     # RUM aggregates backfill
     n_rum = 0
@@ -250,37 +182,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     except Exception as rum_backfill_err:
         logging.getLogger(__name__).warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
 
-    return {
-        "slow_urls": n_su,
-        "origin_summary": n_os,
-        "origin_summary_days": n_os_day,
-        "origin_dims": n_od,
-        "origin_dims_days": n_od_day,
-        "origin_latency_ts": n_olts,
-        "origin_latency_ts_days": n_olts_day,
-        "network_rtt": n_nr,
-        "network_rtt_days": n_nr_day,
-        "network_speed": n_ns,
-        "network_speed_days": n_ns_day,
-        "network_quality": n_nq,
-        "network_quality_days": n_nq_day,
-        "verified_bots_ts": n_vbts,
-        "verified_bots_ts_days": n_vbts_day,
-        "perf_latency": n_perf,
-        "pop_health": n_ph,
-        "perf_latency_days": n_perf_day,
-        "security_dims": n_sd,
-        "security_dims_days": n_sd_day,
-        "perf_ttl_dist": n_pd,
-        "perf_ttl_dist_days": n_pd_day,
-        "ngwaf_bots": n_nb,
-        "ngwaf_bots_days": n_nb_day,
-        "wellknown_bots": n_wk,
-        "overview": n_ov,
-        "overview_days": n_ov_day,
-        "network_summary": n_netsumm,
-        "rum": n_rum,
-    }
+    return {**counts, "rum": n_rum}
 
 
 @router.post(
