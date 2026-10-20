@@ -684,10 +684,12 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
 
     # Sweep tombstones whose grace window elapsed — the sweep cadence is
     # tied to the commit cron on purpose (no separate cron registration).
-    sweep_tombstoned_buffer_files(source, table_name=table_name)
+    swept = sweep_tombstoned_buffer_files(source, table_name=table_name)
 
     files = buffer_files(source, table_name=table_name)
     if not files:
+        if swept:
+            _core_mod.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
     lake_table = ducklake_table_name(source, table_name)

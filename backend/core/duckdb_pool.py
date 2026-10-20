@@ -216,7 +216,7 @@ def _forget_conn(con: duckdb.DuckDBPyConnection) -> None:
         _conn_state.pop(id(con), None)
 
 
-def _safe_buffer_mtime(src: dict | None) -> float | None:
+def _safe_buffer_mtime(src: dict | None) -> float | tuple[float | None, ...] | None:
     """Return mtime of the service's buffer dir, or None if it can't be read.
 
     Used as part of the pool's checkout fingerprint so that the sync cron
@@ -236,14 +236,15 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
         if src.get("name", "").endswith("::rum"):
             path_vitals = _buffer_dir(src, table_name="client_vitals")
             path_errors = _buffer_dir(src, table_name="client_errors")
-            mtimes = []
+            mtimes: list[float | None] = []
             for p in (path_vitals, path_errors):
                 try:
                     mtimes.append(os.path.getmtime(p))
                 except Exception:
+                    mtimes.append(None)
                     if log_once_per("_safe_buffer_mtime: mtimes.append failed (ignored)", 60):
                         logger.debug("_safe_buffer_mtime: mtimes.append failed (ignored)", exc_info=True)
-            return max(mtimes) if mtimes else None
+            return tuple(mtimes) if any(m is not None for m in mtimes) else None
 
         path = _buffer_dir(src)
         return os.path.getmtime(path)
@@ -671,6 +672,15 @@ class _Pool:
             self._cond.notify_all()
         return closed
 
+    def _current_view_fp(self) -> Any:
+        from backend.core.iceberg import view as iceberg_view
+
+        if self.service_key.endswith("::rum"):
+            v = iceberg_view._view_cache.get(f"{self.service_key}::client_vitals")
+            e = iceberg_view._view_cache.get(f"{self.service_key}::client_errors")
+            return (v, e) if (v is not None or e is not None) else None
+        return iceberg_view._view_cache.get(self.service_key)
+
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
         """Re-validate the view binding before handing the connection out.
 
@@ -693,11 +703,11 @@ class _Pool:
         try:
             from backend.core.iceberg import view as iceberg_view
 
-            current = iceberg_view._view_cache.get(self.service_key)
+            current = self._current_view_fp()
             stamped_view = _get_conn_state(con, "view_fingerprint")
             stamped_buf = _get_conn_state(con, "buffer_mtime")
             current_buf = _safe_buffer_mtime(src)
-            if current is not None and current is stamped_view and current_buf == stamped_buf:
+            if current is not None and current == stamped_view and current_buf == stamped_buf:
                 # View AND underlying buffer set match what we bound last
                 # time — nothing to do.
                 return con
@@ -761,7 +771,11 @@ class _Pool:
 
         for con in drained:
             try:
-                iceberg_view._try_fast_path_view(con, src)
+                if self.service_key.endswith("::rum"):
+                    iceberg_view._try_fast_path_view(con, src, target_table="client_vitals")
+                    iceberg_view._try_fast_path_view(con, src, target_table="client_errors")
+                else:
+                    iceberg_view._try_fast_path_view(con, src)
                 self._stamp_fingerprint(con, src)
             except Exception as e:
                 logger.warning(
@@ -798,9 +812,7 @@ class _Pool:
 
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
-            from backend.core.iceberg import view as iceberg_view
-
-            current = iceberg_view._view_cache.get(self.service_key)
+            current = self._current_view_fp()
             buf_mtime = _safe_buffer_mtime(src) if src is not None else None
             _set_conn_state(
                 con,

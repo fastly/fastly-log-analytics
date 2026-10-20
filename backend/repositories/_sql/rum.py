@@ -80,9 +80,9 @@ DISTINCT_ID = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(tim
 
 # --- RUM analytics / live-events (moved verbatim from routers/rum.py) ---
 
-RUM_TEMP_VITALS_CREATE = "CREATE TEMP TABLE t_client_vitals AS SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname FROM client_vitals WHERE {where_sql}"  # str.format template: {where_sql}, {distinct_id}
+RUM_TEMP_VITALS_CREATE = "CREATE OR REPLACE TEMP TABLE t_client_vitals AS SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname FROM client_vitals WHERE {where_sql}"  # str.format template: {where_sql}, {distinct_id}
 
-RUM_TEMP_ERRORS_CREATE = "CREATE TEMP TABLE t_client_errors AS SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col FROM client_errors WHERE {where_sql}"  # str.format template: {where_sql}, {distinct_id}
+RUM_TEMP_ERRORS_CREATE = "CREATE OR REPLACE TEMP TABLE t_client_errors AS SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col FROM client_errors WHERE {where_sql}"  # str.format template: {where_sql}, {distinct_id}
 
 RUM_ROLLUP_ANY_DATA = "SELECT COUNT(*) FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)"
 

@@ -7,15 +7,85 @@ All queries go through QueryRunner to centralize DuckDB access + caching.
 from __future__ import annotations
 
 import logging
+import os
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.core.iceberg import is_stale_view_error
+from backend.core.retry import retry_call
 from backend.repositories._base import QueryRunner
 from backend.repositories._sql import rum as sql_rum
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.telemetry import track_query
 
 logger = logging.getLogger(__name__)
+
+_READ_PARQUET_LIST_RE = re.compile(r"read_parquet\(\s*(?:\[|(?:main\.)?list_value\()(.*?)(?:\]|\))", re.DOTALL)
+_QUOTED_PATH_RE = re.compile(r"'([^']+)'")
+
+
+def _prune_missing_files_from_rum_views(con) -> None:
+    """Fallback view self-heal when ``source`` was not passed to a repository helper."""
+    try:
+        rows = con.execute(
+            "SELECT view_name, sql, temporary FROM duckdb_views() WHERE view_name IN ('client_vitals', 'client_errors')"
+        ).fetchall()
+    except Exception:
+        return
+    for view_name, view_sql, is_temp in rows:
+        if not view_sql or "read_parquet(" not in view_sql:
+            continue
+
+        def _replace_list(match: re.Match[str]) -> str:
+            inner = match.group(1)
+            paths = _QUOTED_PATH_RE.findall(inner)
+            surviving = [p for p in paths if os.path.exists(p)]
+            if not surviving and paths:
+                # Re-glob sibling batch_*.parquet files in the same buffer dir if any remain
+                buf_dir = os.path.dirname(paths[0])
+                if os.path.isdir(buf_dir):
+                    surviving = sorted(
+                        os.path.join(buf_dir, f)
+                        for f in os.listdir(buf_dir)
+                        if f.startswith("batch_") and f.endswith(".parquet")
+                    )
+            if not surviving:
+                return match.group(0)
+            joined = ", ".join(f"'{p}'" for p in surviving)
+            return f"read_parquet([{joined}]"
+
+        new_sql = _READ_PARQUET_LIST_RE.sub(_replace_list, view_sql)
+        if new_sql != view_sql:
+            stmt = new_sql.strip().rstrip(";")
+            if stmt.upper().startswith("CREATE VIEW "):
+                prefix = "CREATE OR REPLACE TEMP VIEW " if is_temp else "CREATE OR REPLACE VIEW "
+                stmt = prefix + stmt[len("CREATE VIEW ") :]
+            elif stmt.upper().startswith("CREATE TEMP VIEW "):
+                stmt = "CREATE OR REPLACE TEMP VIEW " + stmt[len("CREATE TEMP VIEW ") :]
+            try:
+                con.execute(stmt)
+            except Exception:
+                logger.debug("_prune_missing_files_from_rum_views: failed to rebind %s", view_name, exc_info=True)
+
+
+def _run_with_rum_view_retry(con, source: dict | None, fn):
+    """Run ``fn()`` with bounded self-heal retry on stale RUM buffer file errors."""
+
+    def _recover(_exc: BaseException) -> None:
+        if source is not None:
+            from backend.core.iceberg import view as iceberg_view
+
+            iceberg_view.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
+            iceberg_view.update_iceberg_view(con, source, force=True)
+        _prune_missing_files_from_rum_views(con)
+
+    return retry_call(
+        fn,
+        retry_on=is_stale_view_error,
+        attempts=3,
+        before_retry=_recover,
+    )
 
 
 def get_web_vitals_summary(
@@ -72,21 +142,25 @@ def get_worst_sessions(
     return runner.execute(sql_rum.WORST_SESSIONS, [since, until, limit]).fetchall() or []
 
 
-def get_beacon_health(con) -> tuple[int, datetime | None]:
+def get_beacon_health(con, *, source: dict | None = None) -> tuple[int, datetime | None]:
     """``(beacons in the last hour, newest beacon timestamp)`` across vitals + errors.
 
     Takes a raw connection (not a runner) because the caller wraps it in
     ``execute_with_stale_view_retry``, which hands the retry closure the connection.
     """
-    one_hour_ago = datetime.now(UTC) - timedelta(hours=1)
 
-    with track_query(con, sql_rum.BEACON_HEALTH_RECENT, [one_hour_ago], "rum_health_recent") as cur_recent:
-        recent_count = cur_recent.fetchone()[0] or 0
+    def _run() -> tuple[int, datetime | None]:
+        one_hour_ago = datetime.now(UTC) - timedelta(hours=1)
 
-    with track_query(con, sql_rum.BEACON_HEALTH_LAST, [], "rum_health_last") as cur_last:
-        last_dt = cur_last.fetchone()[0]
+        with track_query(con, sql_rum.BEACON_HEALTH_RECENT, [one_hour_ago], "rum_health_recent") as cur_recent:
+            recent_count = cur_recent.fetchone()[0] or 0
 
-    return recent_count, last_dt
+        with track_query(con, sql_rum.BEACON_HEALTH_LAST, [], "rum_health_last") as cur_last:
+            last_dt = cur_last.fetchone()[0]
+
+        return recent_count, last_dt
+
+    return _run_with_rum_view_retry(con, source, _run)
 
 
 def fetch_rum_analytics(
@@ -99,6 +173,7 @@ def fetch_rum_analytics(
     where_sql: str,
     params: list,
     raw_window_max_s: int,
+    source: dict | None = None,
 ) -> dict[str, Any]:
     """Raw aggregate rows for ``/rum/analytics`` (rollup tables when eligible, else raw scan).
 
@@ -106,6 +181,33 @@ def fetch_rum_analytics(
     Short windows and filtered requests always scan the raw beacon tables; otherwise the
     cron-built ``rum_*_aggregates`` rollups serve the read. Never recomputes in-request.
     """
+    return _run_with_rum_view_retry(
+        con,
+        source,
+        lambda: _fetch_rum_analytics_once(
+            con,
+            service_id=service_id,
+            start_time=start_time,
+            end_time=end_time,
+            parsed_filters=parsed_filters,
+            where_sql=where_sql,
+            params=params,
+            raw_window_max_s=raw_window_max_s,
+        ),
+    )
+
+
+def _fetch_rum_analytics_once(
+    con,
+    *,
+    service_id: str,
+    start_time: str,
+    end_time: str,
+    parsed_filters: dict,
+    where_sql: str,
+    params: list,
+    raw_window_max_s: int,
+) -> dict[str, Any]:
     from backend.core.rollups.rum import table_exists
 
     use_rollup = False
@@ -286,24 +388,24 @@ def fetch_rum_analytics(
             "_approx": True,
         }
 
-    # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
-    with track_query(
-        con,
-        sql_rum.RUM_TEMP_VITALS_CREATE.format(where_sql=where_sql),
-        params,
-        "rum_temp_vitals_create",
-    ):
-        pass
-
-    with track_query(
-        con,
-        sql_rum.RUM_TEMP_ERRORS_CREATE.format(where_sql=where_sql),
-        params,
-        "rum_temp_errors_create",
-    ):
-        pass
-
     try:
+        # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
+        with track_query(
+            con,
+            sql_rum.RUM_TEMP_VITALS_CREATE.format(where_sql=where_sql),
+            params,
+            "rum_temp_vitals_create",
+        ):
+            pass
+
+        with track_query(
+            con,
+            sql_rum.RUM_TEMP_ERRORS_CREATE.format(where_sql=where_sql),
+            params,
+            "rum_temp_errors_create",
+        ):
+            pass
+
         # B. Total match counts within bounds (Consolidated)
         with track_query(
             con,
@@ -406,16 +508,26 @@ def fetch_rum_analytics(
         con.execute("DROP TABLE IF EXISTS t_client_errors")
 
 
-def fetch_rum_live_events(con, *, where_sql: str, params: list) -> list[tuple]:
+def fetch_rum_live_events(con, *, where_sql: str, params: list, source: dict | None = None) -> list[tuple]:
     """Newest 50 vitals + error beacons for the live ticker, newest first."""
-    with track_query(con, sql_rum.RUM_LIVE_EVENTS.format(where_sql=where_sql), params * 2, "rum_live_events") as cur:
-        return cur.fetchall()
+
+    def _run() -> list[tuple]:
+        with track_query(
+            con, sql_rum.RUM_LIVE_EVENTS.format(where_sql=where_sql), params * 2, "rum_live_events"
+        ) as cur:
+            return cur.fetchall()
+
+    return _run_with_rum_view_retry(con, source, _run)
 
 
-def get_header_stats(con) -> tuple[int, Any]:
+def get_header_stats(con, *, source: dict | None = None) -> tuple[int, Any]:
     """``(distinct beacon count, newest beacon timestamp)`` over vitals + errors for the header badge (one scan)."""
-    row = con.execute(sql_rum.HEADER_STATS).fetchone()
-    return (row[0] or 0, row[1]) if row else (0, None)
+
+    def _run() -> tuple[int, Any]:
+        row = con.execute(sql_rum.HEADER_STATS).fetchone()
+        return (row[0] or 0, row[1]) if row else (0, None)
+
+    return _run_with_rum_view_retry(con, source, _run)
 
 
 def count_aggregate_buckets(con, service_id: str) -> int | None:

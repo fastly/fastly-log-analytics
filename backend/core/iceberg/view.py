@@ -75,10 +75,11 @@ _service_locks_lock = threading.Lock()
 
 
 def _get_service_lock(source_key: str) -> threading.RLock:
+    base_key = source_key[:-5] if source_key.endswith("::rum") else source_key
     with _service_locks_lock:
-        if source_key not in _service_locks:
-            _service_locks[source_key] = threading.RLock()
-        return _service_locks[source_key]
+        if base_key not in _service_locks:
+            _service_locks[base_key] = threading.RLock()
+        return _service_locks[base_key]
 
 
 # Per-source view cache: source_key -> (metadata_loc, buf_set, schema_fields_tuple, view_sql, time_ms, was_fast_path, source_variant_fp)
@@ -190,19 +191,20 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs
 
 def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -> None:
     """Remove in-memory cache entries for a service."""
-    # Pop the primary and any sub-table view cache keys (e.g. client_vitals, client_errors)
+    base_key = source_key[:-5] if source_key.endswith("::rum") else source_key
+    # Pop the primary and any sub-table view cache keys (e.g. client_vitals, client_errors, ::rum)
     for k in list(_view_cache.keys()):
-        if k == source_key or k.startswith(f"{source_key}::"):
+        if k == base_key or k.startswith(f"{base_key}::"):
             _view_cache.pop(k, None)
 
     if not keep_snapshot_cache:
         for k in list(_snapshot_files_cache.keys()):
-            if k == source_key or k.startswith(f"{source_key}::"):
+            if k == base_key or k.startswith(f"{base_key}::"):
                 _snapshot_files_cache.pop(k, None)
         try:
             from backend.core._duckdb_status import clear_ducklake_stats_cache
 
-            clear_ducklake_stats_cache(source_key)
+            clear_ducklake_stats_cache(base_key)
         except Exception:
             logger.debug("clear_source_caches: clear_ducklake_stats_cache failed (ignored)", exc_info=True)
 
@@ -918,7 +920,7 @@ def update_iceberg_view(
                 except Exception:
                     logger.debug("update_iceberg_view: con.execute failed (ignored)", exc_info=True)
                 return
-            if _persistent_view_exists(con, source, target_table=target_table):
+            if not force and _persistent_view_exists(con, source, target_table=target_table):
                 return
             logger.info(
                 "[iceberg] %s: cache empty and no persistent view for %s; extending lock "
@@ -1047,6 +1049,10 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     if is_read_only or durable_serving:
         create_stmt = f"CREATE OR REPLACE TEMP VIEW {view_name} AS {final_sql}"
     else:
+        try:
+            con.execute(f"DROP VIEW IF EXISTS temp.main.{view_name}")
+        except Exception:
+            pass
         create_stmt = f"CREATE OR REPLACE VIEW {view_name} AS {final_sql}"
 
     try:
@@ -1058,16 +1064,26 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
 
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
+    token = _ducklake_view_token(con)
+    variant_fp = _source_variant_fp(source)
+    schema_fp = tuple(sorted(dynamic_schema_field_names))
     _view_cache[cache_key] = (
-        _ducklake_view_token(con),
+        token,
         frozenset(buf_files),
-        tuple(sorted(dynamic_schema_field_names)),
+        schema_fp,
         create_stmt,
         round((time.time() - t_start) * 1000, 2),
         False,
-        _source_variant_fp(source),
+        variant_fp,
         tuple(committed_parts),
     )
+    try:
+        from backend.core.duckdb_pool import _set_conn_state
+
+        fp_key = f"fast_path_view_fp_{target_table}"
+        _set_conn_state(con, **{fp_key: (token, frozenset(buf_files), schema_fp, variant_fp, target_table)})
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

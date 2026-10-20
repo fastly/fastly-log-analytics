@@ -605,7 +605,11 @@ async def rum_beacon_health(
         rum_source = rum_source_for(ctx.source)
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-            recent_count, last_dt = execute_with_stale_view_retry(rum_con, rum_source, rum_repo.get_beacon_health)
+            recent_count, last_dt = execute_with_stale_view_retry(
+                rum_con,
+                rum_source,
+                lambda con: rum_repo.get_beacon_health(con, source=rum_source),
+            )
 
         last_beacon_time = None
         if last_dt:
@@ -734,6 +738,7 @@ async def rum_analytics(
                 where_sql=where_sql,
                 params=params,
                 raw_window_max_s=_RUM_RAW_WINDOW_MAX_S,
+                source=rum_source,
             )
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
@@ -996,7 +1001,7 @@ async def rum_live_events(
     try:
 
         def _get_live_events(con):
-            return rum_repo.fetch_rum_live_events(con, where_sql=where_sql, params=params)
+            return rum_repo.fetch_rum_live_events(con, where_sql=where_sql, params=params, source=rum_source)
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
             rows = execute_with_stale_view_retry(rum_con, rum_source, _get_live_events)

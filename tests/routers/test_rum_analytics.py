@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(autouse=True)
 def skip_view_update(request):
-    if request.node.name == "test_rum_analytics_cold_start_readonly":
+    if request.node.name in (
+        "test_rum_analytics_cold_start_readonly",
+        "test_rum_live_buffer_unlink_race_self_heals",
+    ):
         yield None
     else:
         with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
@@ -934,3 +937,144 @@ def test_rum_analytics_cold_start_readonly(tmp_path, monkeypatch):
 
     finally:
         ro_con.close()
+
+
+def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
+    """When rum_commit drains and unlinks a batch_*.parquet buffer file after
+    client_vitals / client_errors views were bound to an explicit file list,
+    fetch_rum_live_events, fetch_rum_analytics, and get_beacon_health must
+    catch the stale-view IO Error, re-bind the views against the surviving
+    files, and return the surviving rows instead of dropping live data or
+    leaving leaked temp tables on the connection."""
+    from backend.core import duckdb as db_mod
+    from backend.core.iceberg.view import clear_source_caches, update_iceberg_view
+    from backend.repositories import rum as rum_repo
+
+    monkeypatch.setattr(db_mod, "_cache_dir", lambda s: str(tmp_path / "cache" / s.get("bucket", "default")))
+
+    vitals_ddl = """
+        timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, metric_rating VARCHAR,
+        pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR,
+        city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE
+    """
+    errors_ddl = """
+        timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, error_line INTEGER,
+        error_col INTEGER, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR,
+        cid VARCHAR, req_id VARCHAR, city VARCHAR, region VARCHAR, country VARCHAR,
+        pop VARCHAR, tls VARCHAR, ttfb DOUBLE
+    """
+
+    buf_vitals_dir = tmp_path / "cache" / "bucket-race" / "buffer" / "client_vitals"
+    buf_errors_dir = tmp_path / "cache" / "bucket-race" / "buffer" / "client_errors"
+    buf_vitals_dir.mkdir(parents=True, exist_ok=True)
+    buf_errors_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.datetime.now(datetime.UTC)
+    ts1 = (now - datetime.timedelta(seconds=20)).isoformat()
+    ts2 = (now - datetime.timedelta(seconds=10)).isoformat()
+
+    batch1_v = buf_vitals_dir / "batch_001.parquet"
+    batch2_v = buf_vitals_dir / "batch_002.parquet"
+    batch1_e = buf_errors_dir / "batch_001.parquet"
+    batch2_e = buf_errors_dir / "batch_002.parquet"
+
+    seed_con = duckdb.connect(":memory:")
+    try:
+        seed_con.execute(f"CREATE TABLE cv ({vitals_ddl})")
+        seed_con.execute(
+            "INSERT INTO cv VALUES (?, 'lcp', 1.8, 'good', '/surviving', 'Chrome', 'macOS', 'Desktop', 'cid1', 'req1', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
+            [ts1],
+        )
+        seed_con.execute(f"COPY cv TO '{batch1_v}' (FORMAT PARQUET)")
+        seed_con.execute("DELETE FROM cv")
+        seed_con.execute(
+            "INSERT INTO cv VALUES (?, 'lcp', 2.1, 'good', '/unlinked', 'Chrome', 'macOS', 'Desktop', 'cid2', 'req2', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 35.0)",
+            [ts2],
+        )
+        seed_con.execute(f"COPY cv TO '{batch2_v}' (FORMAT PARQUET)")
+
+        seed_con.execute(f"CREATE TABLE ce ({errors_ddl})")
+        seed_con.execute(
+            "INSERT INTO ce VALUES (?, 'ReferenceError: x', 'app.js', 10, 2, '/surviving', 'Chrome', 'macOS', 'Desktop', 'cid3', 'req3', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
+            [ts1],
+        )
+        seed_con.execute(f"COPY ce TO '{batch1_e}' (FORMAT PARQUET)")
+        seed_con.execute("DELETE FROM ce")
+        seed_con.execute(
+            "INSERT INTO ce VALUES (?, 'TypeError: y', 'app.js', 20, 4, '/unlinked', 'Chrome', 'macOS', 'Desktop', 'cid4', 'req4', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 35.0)",
+            [ts2],
+        )
+        seed_con.execute(f"COPY ce TO '{batch2_e}' (FORMAT PARQUET)")
+    finally:
+        seed_con.close()
+
+    rum_db_path = tmp_path / "svc_race.rum.duckdb"
+    source = {
+        "name": "svc_race::rum",
+        "service_id": "svc_race",
+        "bucket": "bucket-race",
+        "duckdb_path": str(tmp_path / "svc_race.duckdb"),
+        "local_buffer_dir": str(tmp_path / "cache" / "bucket-race" / "buffer"),
+        "access_level": "read_only",
+    }
+
+    con = duckdb.connect(str(rum_db_path), read_only=False)
+    try:
+        clear_source_caches("svc_race")
+        update_iceberg_view(con, source, force=True)
+
+        # Simulate concurrent rum_commit draining and unlinking batch_002.parquet
+        # AFTER the view was already bound to [batch_001.parquet, batch_002.parquet]
+        batch2_v.unlink()
+
+        # 1. fetch_rum_live_events must self-heal and return the surviving vitals + error rows
+        events = rum_repo.fetch_rum_live_events(
+            con,
+            where_sql="timestamp >= ? AND timestamp <= ?",
+            params=[(now - datetime.timedelta(minutes=15)).isoformat(), now.isoformat()],
+            source=source,
+        )
+        assert len(events) >= 2
+        paths = {e[2] for e in events}
+        assert "/surviving" in paths
+
+        # 2. Simulate batch2_e being unlinked AFTER t_client_vitals succeeds inside fetch_rum_analytics
+        # First re-create batch2_v so client_vitals has 2 files, bind view, then unlink batch2_e
+        # so t_client_vitals succeeds and t_client_errors hits the missing file!
+        clear_source_caches("svc_race")
+        update_iceberg_view(con, source, force=True)
+        batch2_e.unlink()
+
+        start_iso = (now - datetime.timedelta(minutes=15)).isoformat()
+        end_iso = now.isoformat()
+        analytics = rum_repo.fetch_rum_analytics(
+            con,
+            service_id="svc_race",
+            start_time=start_iso,
+            end_time=end_iso,
+            parsed_filters={},
+            where_sql="timestamp >= ? AND timestamp <= ?",
+            params=[start_iso, end_iso],
+            raw_window_max_s=7200,
+            source=source,
+        )
+        assert analytics["no_data"] is False
+        assert analytics["total_beacons"] == 2
+        assert analytics["errors_count"] == 1
+
+        # 3. Simulate another unlink before get_beacon_health (even without passing source!)
+        seed_con2 = duckdb.connect(":memory:")
+        try:
+            seed_con2.execute(f"CREATE TABLE cv ({vitals_ddl})")
+            seed_con2.execute(f"COPY cv TO '{batch2_v}' (FORMAT PARQUET)")
+        finally:
+            seed_con2.close()
+        clear_source_caches("svc_race")
+        update_iceberg_view(con, source, force=True)
+        batch2_v.unlink()
+
+        recent_count, last_dt = rum_repo.get_beacon_health(con)
+        assert recent_count >= 1
+        assert last_dt is not None
+    finally:
+        con.close()
