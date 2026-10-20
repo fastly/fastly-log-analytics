@@ -532,3 +532,23 @@ def test_rum_fact_rebuild_replays_the_rum_domain_over_the_requested_window() -> 
         _Catalog(), archive, publication, service_id="svc", domain="rum_errors", now=NOW, window=timedelta(hours=6)
     )
     assert short.full_rebuild_complete is True
+
+
+def test_performance_projection_rebuild_backfills_asn_rows_but_never_republishes_url_rows() -> None:
+    events = tuple({**event, "asn": 7922, "url": "/slow"} for event in _performance_events())
+    recent, recent_bytes = _manifest("asn-perf", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), events)
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    client = ReplayClient()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+
+    report = rebuild_performance_projections_from_fos(
+        _Catalog((recent,)), archive, publication, service_id="svc", now=NOW, rebuild_id="r1"
+    )
+
+    assert report.full_rebuild_complete is True
+    assert client.insert_calls == [
+        "rebuild-performance:r1:asn-perf:summary",
+        "rebuild-performance:r1:asn-perf:scatter",
+        "rebuild-performance:r1:asn-perf:asn",
+    ]

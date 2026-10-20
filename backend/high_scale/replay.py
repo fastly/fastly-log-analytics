@@ -96,10 +96,11 @@ def replay_performance_projections(
     *,
     rebuild_id: str,
 ) -> ProjectionReplayResult:
-    """Rebuild only the Performance waterfall and scatter projections.
+    """Rebuild the Performance waterfall, scatter and ASN-dimension projections.
 
-    ``performance_minute_dimensions`` is deliberately not republished: those rows
-    already exist for historical data, and re-adding them would double-count.
+    URL rows in ``performance_minute_dimensions`` already exist for historical data
+    and are deliberately not republished: re-adding them would double-count. ASN
+    rows never existed before the integer-ASN fix, so they are safe to backfill.
     """
     if manifest.source.domain != "request":
         raise ValueError("Performance projections can only be rebuilt from request manifests")
@@ -110,6 +111,11 @@ def replay_performance_projections(
     for suffix, domain, projected_rows in (
         ("summary", "performance_summary", projection.summary_rows),
         ("scatter", "performance_scatter", projection.scatter_rows),
+        (
+            "asn",
+            "performance_dimensions",
+            tuple(row for row in projection.dimension_rows if row["dimension"] == "asn"),
+        ),
     ):
         if not projected_rows:
             continue

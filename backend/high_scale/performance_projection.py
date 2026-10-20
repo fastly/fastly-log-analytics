@@ -51,6 +51,16 @@ class _WaterfallSums:
     client_download: float = 0.0
 
 
+def _asn_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return _text(value)
+
+
 def build_performance_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> PerformanceProjection:
     dimensions: dict[tuple[datetime, str, str], _Accumulator] = defaultdict(_Accumulator)
     waterfalls: dict[datetime, _WaterfallSums] = defaultdict(_WaterfallSums)
@@ -73,7 +83,7 @@ def build_performance_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> Pe
                 acc.latencies.append(elapsed)
 
         # ASN dimension
-        asn = _text(row.get("asn"))
+        asn = _asn_text(row.get("asn"))
         if asn:
             acc = dimensions[(bucket, "asn", asn)]
             acc.requests += 1

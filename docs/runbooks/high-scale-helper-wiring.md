@@ -161,12 +161,12 @@ rebuilt from the archive:
 2. Run `uv run python scripts/backfill_high_scale_performance.py --service-id
    <id> --until <worker start, ISO-8601 with offset> [--days 30]`. Manifests
    ingested after `--until` already published live; replaying them would
-   double-count the waterfall sums.
+   double-count the waterfall sums and ASN rows.
 3. To resume an interrupted run, repeat the command with the printed
    `rebuild_id` (`--rebuild-id`). Exit `1` means a manifest failed; the report
    names it.
 
-`performance_minute_dimensions` is not rebuilt (it already holds history).
+The rebuild also backfills the `asn` rows of `performance_minute_dimensions`, which never existed before the integer-ASN fix (integer ASNs were silently dropped, so Top ASNs was empty). The `url` rows already hold history and are not republished.
 
 ## `topology`: profile validation
 

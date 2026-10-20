@@ -110,3 +110,12 @@ def test_dimension_rows_are_unchanged():
         ("url", "/b"),
         ("asn", "7922"),
     }
+
+
+def test_integer_asn_from_the_vcl_log_format_still_produces_an_asn_dimension():
+    # The log format emits asn unquoted, so real events carry an int, not "7922".
+    projection = build_performance_projection_rows((_event(asn=7922), _event(event_id="evt-2", asn=15169)))
+
+    asn_values = {row["value"] for row in projection.dimension_rows if row["dimension"] == "asn"}
+
+    assert asn_values == {"7922", "15169"}
