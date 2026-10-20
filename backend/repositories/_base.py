@@ -1457,8 +1457,8 @@ class QueryRunner:
                 continue
             _ts_key = (_service_key, field)
             _now = time.monotonic()
-            _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key, 0.0)
-            if _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
+            _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key)
+            if _last is None or _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
                 _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
                 _logger.debug(
                     "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
@@ -1590,7 +1590,8 @@ class QueryRunner:
         heal_res: list[tuple] = []
         _now_mono = time.monotonic()
         _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
-        if _now_mono - _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key, 0.0) >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
+        _last_heal_warn = _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key)
+        if _last_heal_warn is None or _now_mono - _last_heal_warn >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
             _MISSING_HOUR_HEAL_WARN_TS[_svc_key] = _now_mono
             _logger.warning(
                 "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "

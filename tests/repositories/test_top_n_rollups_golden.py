@@ -558,3 +558,14 @@ def test_top_n_matches_golden(case: Case, tmp_path: Path, monkeypatch: pytest.Mo
         raise AssertionError(f"{case.name}: behavior drifted from golden\n{got}\n{want}\n{drift}")
     for k, v in g_probes.items():
         assert v <= w_probes.get(k, 0), f"{case.name}: {k} probes {v} > golden {w_probes.get(k, 0)}"
+
+
+def test_first_heal_warning_fires_on_a_freshly_booted_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # time.monotonic() is host uptime; a never-warned service must warn even when uptime is
+    # below the throttle interval (a cold CI runner or freshly rebooted VM).
+    case = next(c for c in CASES if c.name == "no_root")
+    monkeypatch.setattr(_base.time, "monotonic", lambda: 5.0)
+    with time_machine.travel(FROZEN, tick=False):
+        got, _ = _run(case, tmp_path, _Probe())
+
+    assert any("live-healing" in line[1] for line in got["logs"])
