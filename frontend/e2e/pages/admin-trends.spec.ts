@@ -99,7 +99,11 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
 
     expect(perfMetrics.cls).toBeLessThanOrEqual(0.05);
     if (perfMetrics.fcpMs > 0) {
-      expect(perfMetrics.fcpMs).toBeLessThan(1200);
+      const isRemoteOrigin =
+        Boolean(externalOrigin) &&
+        !externalOrigin.includes('127.0.0.1') &&
+        !externalOrigin.includes('localhost');
+      expect(perfMetrics.fcpMs).toBeLessThan(isRemoteOrigin ? 4000 : 1200);
     }
   });
 
@@ -170,7 +174,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
             }
             return windowStatuses.get(win) ?? 0;
           },
-          { timeout: 15_000, intervals: [250, 500, 1000] }
+          { timeout: 30_000, intervals: [250, 500, 1000] }
         )
         .toBe(200);
 

@@ -110,7 +110,10 @@ CREATE TABLE IF NOT EXISTS metric_snapshots (
 )
 """
 
-_METRIC_SNAPSHOTS_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_metric_lookup ON metric_snapshots (metric, ts)",)
+_METRIC_SNAPSHOTS_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_metric_lookup ON metric_snapshots (metric, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_metric_snapshots_ts ON metric_snapshots (ts)",
+)
 
 _SEED_INITIAL_TOS_DDL = """
 INSERT INTO share_tos_versions (version, text, published_at)

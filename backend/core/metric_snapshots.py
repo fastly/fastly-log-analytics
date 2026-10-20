@@ -139,7 +139,7 @@ def get_batch(*, since: datetime | str) -> dict:
                 SELECT metric, service_id, task, ts, value
                 FROM metric_snapshots
                 WHERE ts >= %s
-                ORDER BY metric, service_id, task, ts ASC
+                ORDER BY ts ASC
                 """,
                 (iso_z(since),),
             ).fetchall()

@@ -11,10 +11,11 @@ from __future__ import annotations
 import re
 
 from fastapi import Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from backend.core import metric_snapshots
 from backend.deps import require_admin
-from backend.models.admin import MetricHistoryBatchResponse, MetricHistoryPoint
+from backend.models.admin import MetricHistoryBatchResponse
 from backend.utils.date_utils import parse_relative_time_window
 from backend.utils.router_utils import bad_request
 
@@ -31,7 +32,7 @@ _VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]\Z", re.IGNORECASE)
 )
 def metric_history_batch(
     since: str = Query(default="1h", description="Lookback window: 30m, 1h, 6h, 24h, 7d, etc."),
-) -> MetricHistoryBatchResponse:
+) -> JSONResponse:
     """Return every recorded series newer than ``since``.
 
     Response shape: ``{series: {key: [{ts, value}, ...], ...}}`` where
@@ -47,6 +48,4 @@ def metric_history_batch(
         )
     cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
     raw = metric_snapshots.get_batch(since=cutoff)
-    return MetricHistoryBatchResponse(
-        series={k: [MetricHistoryPoint(**r) for r in v] for k, v in raw.items()},
-    )
+    return JSONResponse(content={"series": raw})
