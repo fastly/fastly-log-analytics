@@ -2881,98 +2881,81 @@
       "passes": 0
     },
     "debug_calls": [],
-    "debug_queries": [
-      {
-        "engine": "DuckDB",
-        "sql": "WITH base AS (\n            SELECT cache,\n                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,\n                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w\n            FROM logs_golden_svc\n            WHERE \"url\" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)\n        )\n        SELECT\n            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,\n            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,\n            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,\n            COUNT(*) FILTER (WHERE is_w) AS w_total,\n            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,\n            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,\n            SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,\n            COUNT(*) FILTER (WHERE is_b) AS b_total\n        FROM base",
-        "time_ms": 0.63
-      },
-      {
-        "engine": "DuckDB",
-        "sql": "SELECT\n            time_bucket(INTERVAL '15 minutes', timestamp) AS bucket,\n            COUNT(*) AS total_requests,\n            SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) AS real_hits,\n            SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) AS misses\n        FROM logs_golden_svc\n        WHERE \"url\" = ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)\n        GROUP BY bucket\n        ORDER BY bucket ASC",
-        "time_ms": 0.76
-      },
-      {
-        "engine": "DuckDB",
-        "sql": "SELECT\n            timestamp,\n            cache,\n            pop,\n            ip,\n            status\n        FROM logs_golden_svc\n        WHERE \"url\" = ? AND starts_with(cache, 'MISS') AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)\n        ORDER BY timestamp DESC\n        LIMIT 50",
-        "time_ms": 0.79
-      }
-    ],
     "recent_misses": [
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.009000-06:00"
+        "timestamp": "2026-06-15T11:30:00.009000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.008000-06:00"
+        "timestamp": "2026-06-15T11:30:00.008000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.007000-06:00"
+        "timestamp": "2026-06-15T11:30:00.007000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.006000-06:00"
+        "timestamp": "2026-06-15T11:30:00.006000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.005000-06:00"
+        "timestamp": "2026-06-15T11:30:00.005000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.004000-06:00"
+        "timestamp": "2026-06-15T11:30:00.004000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.003000-06:00"
+        "timestamp": "2026-06-15T11:30:00.003000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.002000-06:00"
+        "timestamp": "2026-06-15T11:30:00.002000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00.001000-06:00"
+        "timestamp": "2026-06-15T11:30:00.001000+00:00"
       },
       {
         "cache": "MISS",
         "ip": "192.0.2.1",
         "pop": "IAD",
         "status": 200,
-        "timestamp": "2026-06-15T05:30:00-06:00"
+        "timestamp": "2026-06-15T11:30:00+00:00"
       }
     ],
     "timeline": [
       {
-        "bucket": "2026-06-14T18:00:00-06:00",
+        "bucket": "2026-06-15T00:00:00+00:00",
         "expected_hits": 25.0,
         "hit_rate": 1.0,
         "misses": 0,
@@ -2980,7 +2963,7 @@
         "total_requests": 25
       },
       {
-        "bucket": "2026-06-15T05:30:00-06:00",
+        "bucket": "2026-06-15T11:30:00+00:00",
         "expected_hits": 10.0,
         "hit_rate": 0.0,
         "misses": 10,

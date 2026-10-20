@@ -573,6 +573,7 @@ def test_all_registered_insights_golden_characterization(in_memory_duckdb):
     match the exact golden snapshot across admin, analyst-clamped/masked, and
     cache-collapse detail queries.
     """
+    in_memory_duckdb.execute("SET TimeZone = 'UTC'")
     src = {"name": "golden-svc", "service_id": "svc-golden"}
     table_name = _safe_table(src["name"])
     rows = _build_comprehensive_anomaly_rows()

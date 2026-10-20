@@ -67,19 +67,37 @@
 # name: test_insights_botnet_grouping_sql
   '''
   
-          WITH base AS (
+          WITH base AS NOT MATERIALIZED (
               SELECT "ja4", "ip",
                   (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                   (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
               FROM t_logs WHERE "ja4" IS NOT NULL AND "ja4" != ''
+          ),
+          win AS (
+              SELECT "ja4",
+                  COUNT(DISTINCT "ip") AS w_ips,
+                  COUNT(*) AS w_reqs
+              FROM base
+              WHERE is_w
+              GROUP BY "ja4"
+              HAVING COUNT(DISTINCT "ip") >= 5
+          ),
+          base_b AS (
+              SELECT b."ja4",
+                  COUNT(DISTINCT b."ip") AS b_ips
+              FROM base b
+              JOIN win w ON b."ja4" = w."ja4"
+              WHERE b.is_b
+              GROUP BY b."ja4"
           )
-          SELECT "ja4",
-              COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
-              COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-              COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips,
-              w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST(24, 1.0) * 1, 1) AS ip_ratio
-          FROM base GROUP BY "ja4"
-          HAVING w_ips >= 5 AND w_ips > COALESCE(b_ips, 0) / GREATEST(24, 1.0) * 1 * 3
+          SELECT w."ja4",
+              w.w_ips,
+              w.w_reqs,
+              COALESCE(b.b_ips, 0) AS b_ips,
+              w.w_ips * 1.0 / GREATEST(COALESCE(b.b_ips, 0) / GREATEST(24, 1.0) * 1, 1) AS ip_ratio
+          FROM win w
+          LEFT JOIN base_b b ON w."ja4" = b."ja4"
+          WHERE w.w_ips > COALESCE(b.b_ips, 0) / GREATEST(24, 1.0) * 1 * 3
           ORDER BY ip_ratio DESC LIMIT 10
       
   '''
