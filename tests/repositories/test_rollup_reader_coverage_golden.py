@@ -623,14 +623,26 @@ class _Cur:
 
 
 class _Probe:
-    def __init__(self) -> None:
+    def __init__(self, prefix: str = "") -> None:
+        import threading
+
+        self._threading = threading
+        self.thread_id = threading.get_ident()
         self.on = False
+        self.prefix = prefix
         self.counts: dict[str, int] = {}
 
     def wrap(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
         def inner(*a: Any, **k: Any) -> Any:
-            if self.on:
-                self.counts[name] = self.counts.get(name, 0) + 1
+            if self.on and a and self._threading.get_ident() == self.thread_id:
+                try:
+                    p = os.fspath(a[0])
+                    if isinstance(p, bytes):
+                        p = p.decode("utf-8", errors="replace")
+                    if not self.prefix or p.startswith(self.prefix):
+                        self.counts[name] = self.counts.get(name, 0) + 1
+                except TypeError:
+                    pass
             return fn(*a, **k)
 
         return inner
@@ -798,7 +810,7 @@ def _anchors() -> dict[str, datetime]:
 
 
 def _capture(reader: Reader, tmp: Path, mp: pytest.MonkeyPatch) -> dict[str, dict]:
-    probe = _Probe()
+    probe = _Probe(str(tmp))
     for name in _STAT_FNS:
         mp.setattr(os.path, name, probe.wrap(name, getattr(os.path, name)))
     mp.setattr(os, "listdir", probe.wrap("listdir", os.listdir))

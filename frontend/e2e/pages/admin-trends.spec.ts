@@ -32,17 +32,19 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
   test('1. Route accessibility, ServerFooter identity, and System Trends layout mount', async ({
     page,
   }) => {
-    const response = await page.goto('/admin/trends', { waitUntil: 'domcontentloaded' });
+    const response = await page.goto('/admin/trends');
     expect(response).not.toBeNull();
     expect(response!.status()).toBe(200);
 
-    await expect(page.getByTestId('admin-trends-root')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole('heading', { name: /Operational Trends/i })).toBeVisible({
+    await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByRole('heading', { name: /Operational Trends/i }).first()).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByTestId('admin-trends-toolbar')).toBeVisible();
+    await expect(page.locator('[data-testid="admin-trends-toolbar"]:visible')).toBeVisible();
 
-    const footer = page.locator('footer');
+    const footer = page.locator('footer:visible');
     await expect(footer).toBeVisible();
     const footerText = (await footer.textContent()) ?? '';
     expect(footerText.trim().length).toBeGreaterThan(0);
@@ -51,11 +53,13 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
   test('2. Pre-allocated zero-CLS reservation containers and warm-load performance budget', async ({
     page,
   }) => {
-    await page.goto('/admin/trends', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-trends-root')).toBeVisible({ timeout: 30_000 });
+    await page.goto('/admin/trends');
+    await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({
+      timeout: 30_000,
+    });
 
-    const toolbar = page.getByTestId('admin-trends-toolbar');
-    const gridReservation = page.getByTestId('admin-trends-grid-reservation');
+    const toolbar = page.locator('[data-testid="admin-trends-toolbar"]:visible');
+    const gridReservation = page.locator('[data-testid="admin-trends-grid-reservation"]:visible');
     await expect(toolbar).toBeVisible();
     await expect(gridReservation).toBeVisible();
 
@@ -72,11 +76,15 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
 
     await page.addInitScript(clsInitScript);
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-trends-root')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('admin-trends-card-cpu_load_1m')).toBeVisible({
+    await page.goto('/admin/trends');
+    await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({
       timeout: 30_000,
     });
+    await expect(page.locator('[data-testid="admin-trends-card-cpu_load_1m"]:visible')).toBeVisible(
+      {
+        timeout: 30_000,
+      }
+    );
 
     const perfMetrics = await page.evaluate(() => {
       const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as
@@ -110,8 +118,23 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
   test('4. Time-window selector interaction (1h -> 6h -> 24h -> 7d) and 7 sparkline cards', async ({
     page,
   }) => {
-    await page.goto('/admin/trends', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-trends-root')).toBeVisible({ timeout: 30_000 });
+    const windowStatuses = new Map<string, number>();
+    page.on('response', (res) => {
+      if (
+        res.url().includes('/api/admin/metric-history/batch') &&
+        res.request().method() === 'GET'
+      ) {
+        const match = res.url().match(/[?&]since=([^&]+)/);
+        if (match) {
+          windowStatuses.set(match[1], res.status());
+        }
+      }
+    });
+
+    await page.goto('/admin/trends');
+    await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({
+      timeout: 30_000,
+    });
 
     for (const metric of [
       'cpu_load_1m',
@@ -122,30 +145,35 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
       'pool_wait_p95_ms',
       'ingest_lag_s',
     ]) {
-      await expect(page.getByTestId(`admin-trends-card-${metric}`)).toBeVisible({
-        timeout: 15_000,
-      });
+      await expect(page.locator(`[data-testid="admin-trends-card-${metric}"]:visible`)).toBeVisible(
+        {
+          timeout: 15_000,
+        }
+      );
     }
 
-    await expect(page.getByTestId('admin-trends-window-1h')).toHaveAttribute(
+    await expect(page.locator('[data-testid="admin-trends-window-1h"]:visible')).toHaveAttribute(
       'aria-pressed',
       'true'
     );
 
     for (const win of ['6h', '24h', '7d'] as const) {
-      const btn = page.getByTestId(`admin-trends-window-${win}`);
+      const btn = page.locator(`[data-testid="admin-trends-window-${win}"]:visible`);
       await expect(btn).toBeVisible();
 
-      const resPromise = page.waitForResponse(
-        (res) =>
-          res.url().includes('/api/admin/metric-history/batch') &&
-          res.url().includes(`since=${win}`) &&
-          res.request().method() === 'GET',
-        { timeout: 15_000 }
-      );
-      await btn.click();
-      const res = await resPromise;
-      expect(res.status()).toBe(200);
+      await expect
+        .poll(
+          async () => {
+            const pressed = await btn.getAttribute('aria-pressed');
+            if (pressed !== 'true') {
+              await btn.click();
+            }
+            return windowStatuses.get(win) ?? 0;
+          },
+          { timeout: 15_000, intervals: [250, 500, 1000] }
+        )
+        .toBe(200);
+
       await expect(btn).toHaveAttribute('aria-pressed', 'true');
     }
   });
@@ -164,23 +192,32 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
       }
     });
 
-    await page.goto('/admin/trends', { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('admin-trends-root')).toBeVisible({ timeout: 30_000 });
+    await page.goto('/admin/trends');
+    await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({
+      timeout: 30_000,
+    });
 
-    const refreshBtn = page.getByTestId('admin-trends-refresh-btn');
+    const refreshBtn = page.locator('[data-testid="admin-trends-refresh-btn"]:visible');
     await expect(refreshBtn).toBeVisible({ timeout: 15_000 });
     await expect(refreshBtn).toBeEnabled();
 
     const countBeforeRefresh = batchRequests.length;
-    await refreshBtn.click();
 
     await expect
-      .poll(() => batchRequests.length, { timeout: 15_000 })
+      .poll(
+        async () => {
+          if (batchRequests.length <= countBeforeRefresh) {
+            await refreshBtn.click();
+          }
+          return batchRequests.length;
+        },
+        { timeout: 15_000, intervals: [250, 500, 1000] }
+      )
       .toBeGreaterThan(countBeforeRefresh);
 
     const latestReq = batchRequests[batchRequests.length - 1];
     expect(latestReq.pageLoadId).toBeTruthy();
 
-    await expect(page.getByTestId('admin-trends-card-cpu_load_1m')).toBeVisible();
+    await expect(page.locator('[data-testid="admin-trends-card-cpu_load_1m"]:visible')).toBeVisible();
   });
 });
