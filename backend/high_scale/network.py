@@ -22,6 +22,7 @@ from backend.models.network import (
     TransportMetrics,
     TransportProtocolShare,
 )
+from backend.models.origin import OriginShieldingAnalysisResponse
 from backend.utils.geo import format_city_label
 
 
@@ -185,6 +186,27 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         for r in sorted(kept.values(), key=lambda r: int(r["requests"]), reverse=True)
     ]
     return ShieldingAnalysis(has_data=True, rows=rows, total_routes=len(pairs), truncated=len(pairs) > len(rows))
+
+
+def origin_shielding_analysis(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> OriginShieldingAnalysisResponse:
+    """Serve ``/api/origin/shielding-analysis`` from ClickHouse with the Network card's query."""
+    end = _range_value(end_time) or datetime.now(UTC)
+    start = _range_value(start_time) or (end - timedelta(days=1))
+    analysis = _shielding_analysis(service, start, end, getattr(req, "filters", None))
+    limit = int(getattr(req, "limit", 50) or 50)
+    rows = analysis.rows[:limit]
+    truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
+    return OriginShieldingAnalysisResponse.with_telemetry(
+        has_data=analysis.has_data,
+        requires_fields=analysis.requires_fields or [],
+        edge_only=bool(analysis.edge_only),
+        rows=rows,
+        total_routes=analysis.total_routes,
+        truncated=truncated,
+        error=False,
+    )
 
 
 def network_health(

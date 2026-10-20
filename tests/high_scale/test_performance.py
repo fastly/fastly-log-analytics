@@ -91,6 +91,17 @@ def test_waterfall_is_the_summary_weighted_average_not_an_empty_stub():
     assert params["service_id"] == "svc"
 
 
+def test_unfiltered_waterfall_does_not_alias_an_aggregate_over_the_column_it_divides_by():
+    # ClickHouse resolves `sum(c) AS c` then `sum(c)` to the alias and rejects the
+    # nested aggregate (HTTP 500). Fakes cannot catch it, so assert the SQL shape.
+    client = _Client({"waterfall": [{"n_components": 1, "edge_processing": 1.0}]})
+
+    _run(client, sections={"waterfall"})
+
+    sql, _ = client.sql_for("waterfall")
+    assert "AS component_count" not in sql
+
+
 def test_waterfall_with_no_rows_reports_zero_averages_like_the_standard_path():
     res = _run(
         _Client(

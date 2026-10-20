@@ -362,3 +362,42 @@ def test_bundle_honors_section_selection():
     assert resp.health is None and resp.quality is None and resp.transport is None
     assert resp.pop_health == []
     assert len(client.calls) == 1
+
+
+def _origin_shield_pairs(sql, params):
+    if "INNER JOIN" not in sql:
+        return []
+    return [
+        {"edge_pop": pop, "shield_pop": "IAD", "requests": n, "p50_ms": 10.0 * n, "p95_ms": 20.0, "p99_ms": 30.0}
+        for pop, n in (("DEN", 400), ("LHR", 300), ("SYD", 200))
+    ]
+
+
+def test_origin_shielding_analysis_returns_real_rows_and_honors_limit():
+    from backend.high_scale.network import origin_shielding_analysis
+    from backend.models.origin import OriginShieldingAnalysisRequest
+
+    service, _ = _service(_origin_shield_pairs)
+    req = OriginShieldingAnalysisRequest(limit=2)
+    coords = {"DEN": (39.86, -104.67), "IAD": (38.94, -77.46), "LHR": (51.47, -0.45), "SYD": (-33.9, 151.2)}
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=coords):
+        resp = origin_shielding_analysis(service, req, _START_S, _END_S)
+
+    assert resp.has_data is True
+    assert [r.edge_pop for r in resp.rows] == ["DEN", "LHR"]
+    assert resp.total_routes == 3
+    assert resp.truncated is True
+    assert resp.error is False
+
+
+def test_origin_shielding_analysis_reports_edge_only_when_no_shield_traffic_exists():
+    from backend.high_scale.network import origin_shielding_analysis
+    from backend.models.origin import OriginShieldingAnalysisRequest
+
+    service, _ = _service(lambda sql, params: [{"n": 0}] if "LIMIT 1" in sql else [])
+
+    resp = origin_shielding_analysis(service, OriginShieldingAnalysisRequest(), _START_S, _END_S)
+
+    assert resp.has_data is False
+    assert resp.edge_only is True
+    assert resp.rows == []

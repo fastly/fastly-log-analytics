@@ -250,7 +250,7 @@ def _waterfall(
     else:
         where, params = _where(service.service_id, "performance_summary", start_time, end_time)
         sql = (
-            "/* perf:waterfall */ SELECT sum(component_count) AS component_count, "
+            "/* perf:waterfall */ SELECT sum(component_count) AS n_components, "
             "sum(edge_processing_sum_ms) / nullIf(sum(component_count), 0) AS edge_processing, "
             "sum(origin_wait_sum_ms) / nullIf(sum(component_count), 0) AS origin_wait, "
             "sum(origin_download_sum_ms) / nullIf(sum(component_count), 0) AS origin_download, "

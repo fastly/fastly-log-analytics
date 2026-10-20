@@ -244,6 +244,11 @@ def origin_shielding_analysis(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.network import origin_shielding_analysis as hs_shielding_analysis
+
+        return hs_shielding_analysis(high_scale_service, req, start_time, end_time)
     res = repo.get_shielding_analysis(
         con=ctx.con,
         src=ctx.source,
