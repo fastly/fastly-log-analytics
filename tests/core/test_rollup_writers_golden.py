@@ -395,6 +395,17 @@ def test_writers_match_golden(tmp_path: Path) -> None:
     assert got.keys() == want.keys()
     for name in want:
         if got[name] != want[name]:
+            import difflib
+
             new = [h for h in got[name]["sql"] if h not in want[name]["sql"]]
             detail = "\n".join(f"new statement: {texts.get(h)}" for h in new[:3])
-            raise AssertionError(f"phase {name!r} drifted from golden\n{detail}")
+            lines = difflib.unified_diff(
+                json.dumps(want[name], indent=1, sort_keys=True).splitlines(),
+                json.dumps(got[name], indent=1, sort_keys=True).splitlines(),
+                "golden",
+                "got",
+                lineterm="",
+                n=2,
+            )
+            diff = "\n".join(list(lines)[:60])
+            raise AssertionError(f"phase {name!r} drifted from golden\n{detail}\n{diff}")
