@@ -105,19 +105,37 @@ ERROR_SPIKES = """
 # ── 2. Botnet Grouping ────────────────────────────────────────────────────────
 
 BOTNET_GROUPING = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "{fp_col}", "ip",
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE "{fp_col}" IS NOT NULL AND "{fp_col}" != ''
+        ),
+        win AS (
+            SELECT "{fp_col}",
+                COUNT(DISTINCT "ip") AS w_ips,
+                COUNT(*) AS w_reqs
+            FROM base
+            WHERE is_w
+            GROUP BY "{fp_col}"
+            HAVING COUNT(DISTINCT "ip") >= 5
+        ),
+        base_b AS (
+            SELECT b."{fp_col}",
+                COUNT(DISTINCT b."ip") AS b_ips
+            FROM base b
+            JOIN win w ON b."{fp_col}" = w."{fp_col}"
+            WHERE b.is_b
+            GROUP BY b."{fp_col}"
         )
-        SELECT "{fp_col}",
-            COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
-            COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-            COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips,
-            w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1) AS ip_ratio
-        FROM base GROUP BY "{fp_col}"
-        HAVING w_ips >= 5 AND w_ips > COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 3
+        SELECT w."{fp_col}",
+            w.w_ips,
+            w.w_reqs,
+            COALESCE(b.b_ips, 0) AS b_ips,
+            w.w_ips * 1.0 / GREATEST(COALESCE(b.b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1) AS ip_ratio
+        FROM win w
+        LEFT JOIN base_b b ON w."{fp_col}" = b."{fp_col}"
+        WHERE w.w_ips > COALESCE(b.b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 3
         ORDER BY ip_ratio DESC LIMIT 10
     """
 
@@ -414,37 +432,69 @@ TAIL_LATENCY = """
 # ── 19. Cipher Fingerprint Clustering ─────────────────────────────────────────
 
 CIPHER_SPREAD = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "tls_ciphers_sha", "ip",
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE "tls_ciphers_sha" IS NOT NULL AND "tls_ciphers_sha" != ''
+        ),
+        win AS (
+            SELECT "tls_ciphers_sha",
+                COUNT(DISTINCT "ip") AS w_ips,
+                COUNT(*) AS w_reqs
+            FROM base
+            WHERE is_w
+            GROUP BY "tls_ciphers_sha"
+            HAVING COUNT(DISTINCT "ip") >= 5
+        ),
+        base_b AS (
+            SELECT b."tls_ciphers_sha",
+                COUNT(DISTINCT b."ip") AS b_ips
+            FROM base b
+            JOIN win w ON b."tls_ciphers_sha" = w."tls_ciphers_sha"
+            WHERE b.is_b
+            GROUP BY b."tls_ciphers_sha"
         )
-        SELECT "tls_ciphers_sha",
-            COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
-            COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-            COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips
-        FROM base GROUP BY "tls_ciphers_sha"
-        HAVING w_ips >= 5 AND w_ips > COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 3
-        ORDER BY (w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1)) DESC LIMIT 10
+        SELECT w."tls_ciphers_sha",
+            w.w_ips,
+            w.w_reqs,
+            COALESCE(b.b_ips, 0) AS b_ips
+        FROM win w
+        LEFT JOIN base_b b ON w."tls_ciphers_sha" = b."tls_ciphers_sha"
+        WHERE w.w_ips > COALESCE(b.b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 3
+        ORDER BY (w.w_ips * 1.0 / GREATEST(COALESCE(b.b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1)) DESC LIMIT 10
     """
 
 # ── 20. Request Size Anomaly ──────────────────────────────────────────────────
 
 REQUEST_SIZE_ANOMALY = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "ip", req_header_bytes,
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE req_header_bytes > 0
         ),
-        stats AS (
+        win AS (
             SELECT "ip",
-                MAX(req_header_bytes) FILTER (WHERE is_w) AS max_bytes,
-                AVG(req_header_bytes) FILTER (WHERE is_w) AS avg_bytes,
-                COUNT(*) FILTER (WHERE is_w) AS w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY req_header_bytes) FILTER (WHERE is_b) AS b_p95
-            FROM base GROUP BY "ip"
+                MAX(req_header_bytes) AS max_bytes,
+                AVG(req_header_bytes) AS avg_bytes,
+                COUNT(*) AS w_total
+            FROM base WHERE is_w
+            GROUP BY "ip"
+            HAVING COUNT(*) >= 3
+        ),
+        base_b AS (
+            SELECT b."ip",
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.req_header_bytes) AS b_p95
+            FROM base b
+            JOIN win w ON b."ip" = w."ip"
+            WHERE b.is_b
+            GROUP BY b."ip"
+        ),
+        stats AS (
+            SELECT w."ip", w.max_bytes, w.avg_bytes, w.w_total, b.b_p95
+            FROM win w
+            JOIN base_b b ON w."ip" = b."ip"
         )
         SELECT "ip", max_bytes, avg_bytes, w_total, b_p95 FROM stats
         WHERE w_total >= 3 AND max_bytes > b_p95 * 3
@@ -454,19 +504,33 @@ REQUEST_SIZE_ANOMALY = """
 # ── 21. Connection Reuse Anomaly ──────────────────────────────────────────────
 
 CONNECTION_ABUSE = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "ip", conn_requests,
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE conn_requests > 0
         ),
-        stats AS (
+        win AS (
             SELECT "ip",
-                MAX(conn_requests) FILTER (WHERE is_w) AS max_reqs,
-                AVG(conn_requests) FILTER (WHERE is_w) AS avg_reqs,
-                COUNT(*) FILTER (WHERE is_w) AS w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY conn_requests) FILTER (WHERE is_b) AS b_p95
-            FROM base GROUP BY "ip"
+                MAX(conn_requests) AS max_reqs,
+                AVG(conn_requests) AS avg_reqs,
+                COUNT(*) AS w_total
+            FROM base WHERE is_w
+            GROUP BY "ip"
+            HAVING COUNT(*) >= 5 AND MAX(conn_requests) >= 50
+        ),
+        base_b AS (
+            SELECT b."ip",
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.conn_requests) AS b_p95
+            FROM base b
+            JOIN win w ON b."ip" = w."ip"
+            WHERE b.is_b
+            GROUP BY b."ip"
+        ),
+        stats AS (
+            SELECT w."ip", w.max_reqs, w.avg_reqs, w.w_total, b.b_p95
+            FROM win w
+            JOIN base_b b ON w."ip" = b."ip"
         )
         SELECT "ip", max_reqs, avg_reqs, w_total, b_p95 FROM stats
         WHERE w_total >= 5 AND max_reqs > b_p95 * 3 AND max_reqs >= 50
@@ -691,13 +755,15 @@ REPEATED_PATTERNS = """
           AND "ip" IS NOT NULL AND "ip" <> ''
           AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
     ),
-    secs AS (  -- distinct active seconds (collapses same-second parallel bursts)
-        SELECT ip, sec FROM kept GROUP BY ip, sec
-    ),
-    meta AS (  -- informational only (NOT gated): UA diversity, event count, span
+    meta AS (  -- pre-filter candidates on event count and rps gate before window-function sort
         SELECT ip, COUNT(DISTINCT ua) AS distinct_ua, COUNT(*) AS n_events,
                (MAX(sec) - MIN(sec)) AS span_s
         FROM kept GROUP BY ip
+        HAVING COUNT(*) >= 13
+           AND (COUNT(*) * 1.0 / NULLIF(MAX(sec) - MIN(sec), 0)) < 2.0
+    ),
+    secs AS (  -- distinct active seconds (collapses same-second parallel bursts)
+        SELECT k.ip, k.sec FROM kept k JOIN meta d USING(ip) GROUP BY k.ip, k.sec
     ),
     gaps AS (
         SELECT ip, sec - LAG(sec) OVER (PARTITION BY ip ORDER BY sec) AS gap FROM secs
@@ -705,9 +771,9 @@ REPEATED_PATTERNS = """
     g AS (SELECT ip, gap FROM gaps WHERE gap IS NOT NULL),
     agg AS (
         SELECT ip, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
-               STDDEV_SAMP(gap) AS sd_gap, MEDIAN(gap) AS med, MODE(gap) AS mode_gap,
-               QUANTILE_CONT(gap,0.25) AS q1, QUANTILE_CONT(gap,0.75) AS q3
+               STDDEV_SAMP(gap) AS sd_gap, MODE(gap) AS mode_gap
         FROM g GROUP BY ip          -- NOTE: alias MODE() as mode_gap; bare `mode` is reserved
+        HAVING COUNT(*) >= 12
     ),
     modal AS (
         SELECT g.ip, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
@@ -745,13 +811,15 @@ REPEATED_PATTERNS_FP = """
           AND "{fp_col}" IS NOT NULL AND "{fp_col}" != ''
           AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
     ),
-    secs AS (
-        SELECT entity, sec FROM kept GROUP BY entity, sec
-    ),
     meta AS (
         SELECT entity, COUNT(DISTINCT ip) AS distinct_ip, COUNT(*) AS n_events,
                (MAX(sec) - MIN(sec)) AS span_s
         FROM kept GROUP BY entity
+        HAVING COUNT(*) >= 13
+           AND (COUNT(*) * 1.0 / NULLIF(MAX(sec) - MIN(sec), 0)) < 2.0
+    ),
+    secs AS (
+        SELECT k.entity, k.sec FROM kept k JOIN meta d USING(entity) GROUP BY k.entity, k.sec
     ),
     gaps AS (
         SELECT entity, sec - LAG(sec) OVER (PARTITION BY entity ORDER BY sec) AS gap FROM secs
@@ -759,9 +827,9 @@ REPEATED_PATTERNS_FP = """
     g AS (SELECT entity, gap FROM gaps WHERE gap IS NOT NULL),
     agg AS (
         SELECT entity, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
-               STDDEV_SAMP(gap) AS sd_gap, MEDIAN(gap) AS med, MODE(gap) AS mode_gap,
-               QUANTILE_CONT(gap,0.25) AS q1, QUANTILE_CONT(gap,0.75) AS q3
+               STDDEV_SAMP(gap) AS sd_gap, MODE(gap) AS mode_gap
         FROM g GROUP BY entity
+        HAVING COUNT(*) >= 12
     ),
     modal AS (
         SELECT g.entity, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
@@ -893,31 +961,53 @@ CREDENTIAL_ENUMERATION = f"""
 # floor is 20 ms of added jitter. row[0] is the ASN so the repository's asn_names
 # hydration (triggered by "asn" in the insight id) resolves ISP names.
 NETWORK_ASN_HEALTH = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "asn" AS asn, ploss, rtt_var, retrans,
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name}
             WHERE "asn" IS NOT NULL
+        ),
+        win AS (
+            SELECT asn,
+                AVG(ploss) AS w_ploss,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY rtt_var) AS w_jitter,
+                AVG(retrans) AS w_retrans,
+                COUNT(*) AS w_total
+            FROM base
+            WHERE is_w
+            GROUP BY asn
+            HAVING COUNT(*) >= 50
+        ),
+        base_b AS (
+            SELECT b.asn,
+                AVG(b.ploss) AS b_ploss,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.rtt_var) AS b_jitter,
+                AVG(b.retrans) AS b_retrans,
+                COUNT(*) AS b_total
+            FROM base b
+            JOIN win w ON b.asn = w.asn
+            WHERE b.is_b
+            GROUP BY b.asn
+            HAVING COUNT(*) >= 100
         )
-        SELECT asn,
-            AVG(ploss) FILTER (WHERE is_w) AS w_ploss,
-            AVG(ploss) FILTER (WHERE is_b) AS b_ploss,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY rtt_var) FILTER (WHERE is_w) AS w_jitter,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY rtt_var) FILTER (WHERE is_b) AS b_jitter,
-            AVG(retrans) FILTER (WHERE is_w) AS w_retrans,
-            AVG(retrans) FILTER (WHERE is_b) AS b_retrans,
-            COUNT(*) FILTER (WHERE is_w) AS w_total,
-            COUNT(*) FILTER (WHERE is_b) AS b_total
-        FROM base
-        GROUP BY asn
-        HAVING w_total >= 50 AND b_total >= 100
-           AND (
-                (COALESCE(w_ploss, 0) >= 0.02 AND COALESCE(w_ploss, 0) >= COALESCE(b_ploss, 0) * 2 + 0.005)
-             OR (w_jitter >= b_jitter * 2 AND w_jitter - b_jitter >= 20000)
-             OR (COALESCE(w_retrans, 0) >= COALESCE(b_retrans, 0) * 2 + 0.5)
+        SELECT w.asn,
+            w.w_ploss,
+            b.b_ploss,
+            w.w_jitter,
+            b.b_jitter,
+            w.w_retrans,
+            b.b_retrans,
+            w.w_total,
+            b.b_total
+        FROM win w
+        JOIN base_b b ON w.asn = b.asn
+        WHERE (
+                (COALESCE(w.w_ploss, 0) >= 0.02 AND COALESCE(w.w_ploss, 0) >= COALESCE(b.b_ploss, 0) * 2 + 0.005)
+             OR (w.w_jitter >= b.b_jitter * 2 AND w.w_jitter - b.b_jitter >= 20000)
+             OR (COALESCE(w.w_retrans, 0) >= COALESCE(b.b_retrans, 0) * 2 + 0.5)
            )
-        ORDER BY COALESCE(w_ploss, 0) DESC, w_jitter DESC
+        ORDER BY COALESCE(w.w_ploss, 0) DESC, w.w_jitter DESC
         LIMIT 15
     """
 
@@ -1211,21 +1301,38 @@ PAYLOAD_COMPRESSION_REGRESSION = f"""
 # session id. The IP is masked for analysts in the processor. Needs the
 # `cookie_session` field. 2 ``?`` (window start).
 SESSION_HARVESTING = """
-        WITH base AS (
+        WITH base AS NOT MATERIALIZED (
             SELECT "ip" AS ip, "cookie_session" AS cs,
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name}
             WHERE "ip" IS NOT NULL AND "ip" <> '' AND "cookie_session" IS NOT NULL AND "cookie_session" <> ''
+        ),
+        win AS (
+            SELECT ip,
+                COUNT(DISTINCT cs) AS w_sessions,
+                COUNT(*) AS w_reqs
+            FROM base
+            WHERE is_w
+            GROUP BY ip
+            HAVING COUNT(DISTINCT cs) >= 20
+        ),
+        base_b AS (
+            SELECT b.ip,
+                COUNT(DISTINCT b.cs) AS b_sessions
+            FROM base b
+            JOIN win w ON b.ip = w.ip
+            WHERE b.is_b
+            GROUP BY b.ip
         )
-        SELECT ip,
-            COUNT(DISTINCT cs) FILTER (WHERE is_w) AS w_sessions,
-            COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-            COUNT(DISTINCT cs) FILTER (WHERE is_b) AS b_sessions
-        FROM base GROUP BY ip
-        HAVING COUNT(DISTINCT cs) FILTER (WHERE is_w) >= 20
-           AND COUNT(DISTINCT cs) FILTER (WHERE is_w) > COALESCE(COUNT(DISTINCT cs) FILTER (WHERE is_b), 0) * 2 + 10
-        ORDER BY w_sessions DESC LIMIT 15
+        SELECT w.ip,
+            w.w_sessions,
+            w.w_reqs,
+            COALESCE(b.b_sessions, 0) AS b_sessions
+        FROM win w
+        LEFT JOIN base_b b ON w.ip = b.ip
+        WHERE w.w_sessions > COALESCE(b.b_sessions, 0) * 2 + 10
+        ORDER BY w.w_sessions DESC LIMIT 15
     """
 
 # ── 45. Origin Connect vs Read Timeout Split (timeout_split) ───────────────────
@@ -1275,7 +1382,7 @@ TIMEOUT_SPLIT = """
 # repository.py for the row-schema docstring).
 
 COALESCED_CITY_AGGREGATES = """
-    WITH base AS (
+    WITH raw_base AS NOT MATERIALIZED (
         SELECT
             "city",
             {region_sel} AS region,
@@ -1287,6 +1394,18 @@ COALESCED_CITY_AGGREGATES = """
             (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
         FROM {table_name}
         WHERE "city" IS NOT NULL AND "city" != ''
+    ),
+    win_cities AS (
+        SELECT "city"
+        FROM raw_base
+        WHERE is_w
+        GROUP BY "city"
+        HAVING COUNT(*) >= 5
+    ),
+    base AS (
+        SELECT r.*
+        FROM raw_base r
+        JOIN win_cities wc ON r."city" = wc."city"
     )
     SELECT
         label, "city", region, country,
@@ -1302,6 +1421,7 @@ COALESCED_CITY_AGGREGATES = """
         COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total
     FROM base
     GROUP BY ALL
+    HAVING COUNT(*) FILTER (WHERE is_w) >= 5
     """
 
 # ── Coalesced URL aggregates ─────────────────────────────────────────────────
@@ -1311,7 +1431,7 @@ COALESCED_CITY_AGGREGATES = """
 # (normalized against the whole-population p95) — kept on its own template.
 
 COALESCED_URL_AGGREGATES = """
-    WITH base AS (
+    WITH raw_base AS NOT MATERIALIZED (
         SELECT
             "url",
             status,
@@ -1321,6 +1441,18 @@ COALESCED_URL_AGGREGATES = """
             (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
         FROM {table_name}
         WHERE "url" IS NOT NULL
+    ),
+    win_urls AS (
+        SELECT "url"
+        FROM raw_base
+        WHERE is_w
+        GROUP BY "url"
+        HAVING COUNT(*) >= 3
+    ),
+    base AS (
+        SELECT r.*
+        FROM raw_base r
+        JOIN win_urls wu ON r."url" = wu."url"
     )
     SELECT
         "url",
@@ -1355,7 +1487,7 @@ COALESCED_URL_AGGREGATES = """
               FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50
     FROM base
     GROUP BY "url"
-    HAVING (COUNT(*) FILTER (WHERE is_w) > 0) OR (COUNT(*) FILTER (WHERE is_b) > 0)
+    HAVING COUNT(*) FILTER (WHERE is_w) >= 3
     """
 
 
@@ -1386,18 +1518,26 @@ COALESCED_URL_AGGREGATES = """
 # the returned set stays small; the caller further bounds memory with per-insight
 # top-K heaps.
 COALESCED_IP_SECURITY_AGGREGATES = f"""
-    WITH base AS (
+    WITH url_flags AS (
         SELECT
-            "ip" AS ip,
-            "url" AS url,
-            status,
-            epoch("timestamp")::BIGINT AS sec,
+            "url",
             regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_sensitive,
-            regexp_matches("url", '{AUTH_PATHS_REGEX}', 'i') AS is_auth,
-            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-        FROM {{table_name}}
-        WHERE "ip" IS NOT NULL AND "ip" <> '' AND "url" IS NOT NULL
+            regexp_matches("url", '{AUTH_PATHS_REGEX}', 'i') AS is_auth
+        FROM (SELECT DISTINCT "url" FROM {{table_name}} WHERE "url" IS NOT NULL)
+    ),
+    base AS (
+        SELECT
+            t."ip" AS ip,
+            t."url" AS url,
+            t.status,
+            epoch(t."timestamp")::BIGINT AS sec,
+            u.is_sensitive,
+            u.is_auth,
+            (t.timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {{table_name}} t
+        JOIN url_flags u ON t."url" = u."url"
+        WHERE t."ip" IS NOT NULL AND t."ip" <> ''
     )
     SELECT
         ip,
@@ -1417,6 +1557,7 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
         COUNT(DISTINCT url) FILTER (WHERE is_w AND status = 404) AS cd_distinct_404,
         COUNT(*) FILTER (WHERE is_b AND status = 404) AS cd_b_404
     FROM base
+    WHERE is_w OR is_sensitive OR status = 404 OR (is_auth AND status IN (401, 403))
     GROUP BY ip
     HAVING (COUNT(*) FILTER (WHERE is_sensitive) > 0)
         OR (COUNT(*) FILTER (WHERE is_auth AND is_w) > 0)
@@ -1425,38 +1566,91 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
 
 
 CRAWLER_DISPARITY = """
-        WITH crawler_traffic AS (
+        WITH ua_info AS (
             SELECT
+                ua,
+                (contains(l_ua, 'bot') OR contains(l_ua, 'crawler') OR contains(l_ua, 'spider')
+                 OR contains(l_ua, 'ahrefs') OR contains(l_ua, 'semrush')) AS is_crawler,
+                (NOT contains(l_ua, 'bot') AND NOT contains(l_ua, 'crawler') AND NOT contains(l_ua, 'spider')) AS is_human,
+                contains(l_ua, 'claude-user') AS is_claude_user,
                 CASE
-                    WHEN contains(lower(ua), 'claude-searchbot') THEN 'Anthropic (Claude)'
-                    WHEN contains(lower(ua), 'amzn-searchbot') THEN 'Amazon (Rufus/Alexa)'
-                    WHEN contains(lower(ua), 'gptbot') OR contains(lower(ua), 'chatgpt-user') THEN 'OpenAI'
-                    WHEN contains(lower(ua), 'semrushbot') THEN 'Semrush'
-                    WHEN contains(lower(ua), 'ahrefsbot') THEN 'Ahrefs'
+                    WHEN contains(l_ua, 'claude-searchbot') THEN 'Anthropic (Claude)'
+                    WHEN contains(l_ua, 'amzn-searchbot') THEN 'Amazon (Rufus/Alexa)'
+                    WHEN contains(l_ua, 'gptbot') OR contains(l_ua, 'chatgpt-user') THEN 'OpenAI'
+                    WHEN contains(l_ua, 'semrushbot') THEN 'Semrush'
+                    WHEN contains(l_ua, 'ahrefsbot') THEN 'Ahrefs'
                     ELSE 'Other Crawler'
-                END AS bot_brand,
-                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_crawls,
-                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_crawls
-            FROM {table_name}
-            WHERE contains(lower(ua), 'bot') OR contains(lower(ua), 'crawler') OR contains(lower(ua), 'spider')
-               OR contains(lower(ua), 'ahrefs') OR contains(lower(ua), 'semrush')
+                END AS crawler_brand
+            FROM (SELECT DISTINCT ua, lower(ua) AS l_ua FROM {table_name} WHERE ua IS NOT NULL)
+        ),
+        crawler_win AS (
+            SELECT
+                u.crawler_brand AS bot_brand,
+                COUNT(*) AS w_crawls
+            FROM {table_name} t
+            JOIN ua_info u ON t.ua = u.ua
+            WHERE t.timestamp >= CAST(? AS TIMESTAMPTZ)
+              AND u.is_crawler
             GROUP BY bot_brand
+            HAVING w_crawls >= 100
+        ),
+        crawler_base AS (
+            SELECT
+                u.crawler_brand AS bot_brand,
+                COUNT(*) AS b_crawls
+            FROM {table_name} t
+            JOIN ua_info u ON t.ua = u.ua
+            JOIN crawler_win cw ON u.crawler_brand = cw.bot_brand
+            WHERE t.timestamp < CAST(? AS TIMESTAMPTZ)
+              AND u.is_crawler
+            GROUP BY u.crawler_brand
+        ),
+        crawler_traffic AS (
+            SELECT
+                cw.bot_brand,
+                cw.w_crawls,
+                COALESCE(cb.b_crawls, 0) AS b_crawls
+            FROM crawler_win cw
+            LEFT JOIN crawler_base cb ON cw.bot_brand = cb.bot_brand
+        ),
+        ref_info AS (
+            SELECT
+                referer,
+                CASE
+                    WHEN contains(l_ref, 'claude.ai') THEN 'Anthropic (Claude)'
+                    WHEN contains(l_ref, 'amazon.com') OR contains(l_ref, 'amazon.co') THEN 'Amazon (Rufus/Alexa)'
+                    WHEN contains(l_ref, 'openai.com') OR contains(l_ref, 'chatgpt.com') THEN 'OpenAI'
+                    WHEN contains(l_ref, 'semrush.com') THEN 'Semrush'
+                    WHEN contains(l_ref, 'ahrefs.com') THEN 'Ahrefs'
+                    ELSE NULL
+                END AS ref_brand
+            FROM (
+                SELECT DISTINCT referer, lower(referer) AS l_ref
+                FROM {table_name}
+                WHERE referer IS NOT NULL AND EXISTS (SELECT 1 FROM crawler_traffic)
+            )
+        ),
+        referred_raw AS (
+            SELECT
+                t.ip,
+                t.timestamp,
+                CASE
+                    WHEN u.is_claude_user THEN 'Anthropic (Claude)'
+                    ELSE COALESCE(r.ref_brand, 'Other Crawler')
+                END AS bot_brand
+            FROM {table_name} t
+            JOIN ua_info u ON t.ua = u.ua
+            LEFT JOIN ref_info r ON t.referer = r.referer
+            WHERE u.is_human AND EXISTS (SELECT 1 FROM crawler_traffic)
         ),
         referred_traffic AS (
             SELECT
-                CASE
-                    WHEN contains(lower(referer), 'claude.ai') OR contains(lower(ua), 'claude-user') THEN 'Anthropic (Claude)'
-                    WHEN contains(lower(referer), 'amazon.com') OR contains(lower(referer), 'amazon.co') THEN 'Amazon (Rufus/Alexa)'
-                    WHEN contains(lower(referer), 'openai.com') OR contains(lower(referer), 'chatgpt.com') THEN 'OpenAI'
-                    WHEN contains(lower(referer), 'semrush.com') THEN 'Semrush'
-                    WHEN contains(lower(referer), 'ahrefs.com') THEN 'Ahrefs'
-                    ELSE 'Other Crawler'
-                END AS bot_brand,
-                COUNT(DISTINCT ip) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_referrals,
-                COUNT(DISTINCT ip) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_referrals
-            FROM {table_name}
-            WHERE NOT contains(lower(ua), 'bot') AND NOT contains(lower(ua), 'crawler') AND NOT contains(lower(ua), 'spider')
-            GROUP BY bot_brand
+                rr.bot_brand,
+                COUNT(DISTINCT rr.ip) FILTER (WHERE rr.timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_referrals,
+                COUNT(DISTINCT rr.ip) FILTER (WHERE rr.timestamp < CAST(? AS TIMESTAMPTZ)) AS b_referrals
+            FROM referred_raw rr
+            JOIN crawler_traffic c ON rr.bot_brand = c.bot_brand
+            GROUP BY rr.bot_brand
         )
         SELECT
             c.bot_brand AS label,
@@ -1472,27 +1666,57 @@ CRAWLER_DISPARITY = """
 
 
 STALE_BROWSER_VERSION = r"""
-        WITH ua_parsed AS (
+        WITH stale_uas AS (
             SELECT
-                ip,
                 ua,
-                regexp_extract(ua, 'Chrome/([0-9]+)\.', 1) AS chrome_version,
-                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name}
-            WHERE contains(lower(ua), 'chrome') AND NOT contains(lower(ua), 'bot')
-              AND NOT contains(lower(ua), 'crawler') AND NOT contains(lower(ua), 'spider')
+                chrome_version
+            FROM (
+                SELECT
+                    ua,
+                    regexp_extract(ua, 'Chrome/([0-9]+)\.', 1) AS chrome_version
+                FROM (SELECT DISTINCT ua, lower(ua) AS l_ua FROM {table_name} WHERE ua IS NOT NULL)
+                WHERE contains(l_ua, 'chrome') AND NOT contains(l_ua, 'bot')
+                  AND NOT contains(l_ua, 'crawler') AND NOT contains(l_ua, 'spider')
+            )
+            WHERE chrome_version IS NOT NULL AND chrome_version != ''
+              AND CAST(chrome_version AS INTEGER) < 131
+        ),
+        ua_parsed AS NOT MATERIALIZED (
+            SELECT
+                t.ip,
+                s.chrome_version,
+                (t.timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {table_name} t
+            JOIN stale_uas s ON t.ua = s.ua
+        ),
+        win AS (
+            SELECT
+                chrome_version,
+                COUNT(*) AS w_reqs,
+                COUNT(DISTINCT ip) AS w_ips
+            FROM ua_parsed
+            WHERE is_w
+            GROUP BY chrome_version
+            HAVING COUNT(*) >= 500
+        ),
+        base_b AS (
+            SELECT
+                b.chrome_version,
+                COUNT(*) AS b_reqs
+            FROM ua_parsed b
+            JOIN win w ON b.chrome_version = w.chrome_version
+            WHERE b.is_b
+            GROUP BY b.chrome_version
         ),
         version_aggregates AS (
             SELECT
-                chrome_version,
-                COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-                COUNT(DISTINCT ip) FILTER (WHERE is_w) AS w_ips,
-                COUNT(*) FILTER (WHERE is_b) AS b_reqs,
-                COUNT(DISTINCT ip) FILTER (WHERE is_b) AS b_ips
-            FROM ua_parsed
-            WHERE chrome_version IS NOT NULL AND chrome_version != ''
-            GROUP BY chrome_version
+                w.chrome_version,
+                w.w_reqs,
+                w.w_ips,
+                COALESCE(b.b_reqs, 0) AS b_reqs
+            FROM win w
+            LEFT JOIN base_b b ON w.chrome_version = b.chrome_version
         )
         SELECT
             'Chrome ' || chrome_version AS label,
@@ -1508,7 +1732,7 @@ STALE_BROWSER_VERSION = r"""
 
 
 ORPHANED_DEEP_CRAWL = """
-        WITH deep_requests AS (
+        WITH deep_requests AS NOT MATERIALIZED (
             SELECT
                 ip,
                 url,
@@ -1519,23 +1743,41 @@ ORPHANED_DEEP_CRAWL = """
             WHERE url LIKE '/%/%/%'
               AND url NOT LIKE '%.%'
               AND (referer IS NULL OR referer = '' OR referer = '-')
+        ),
+        win AS (
+            SELECT
+                ip,
+                COUNT(*) AS w_reqs,
+                COUNT(DISTINCT url) AS w_distinct_urls
+            FROM deep_requests
+            WHERE is_w
+            GROUP BY ip
+            HAVING COUNT(*) >= 50 AND COUNT(DISTINCT url) >= 10
+        ),
+        base_b AS (
+            SELECT
+                b.ip,
+                COUNT(*) AS b_reqs
+            FROM deep_requests b
+            JOIN win w ON b.ip = w.ip
+            WHERE b.is_b
+            GROUP BY b.ip
         )
         SELECT
-            ip AS label,
-            COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-            COUNT(DISTINCT url) FILTER (WHERE is_w) AS w_distinct_urls,
-            COUNT(*) FILTER (WHERE is_b) AS b_reqs,
-            w_reqs * 1.0 / GREATEST(COUNT(DISTINCT url) FILTER (WHERE is_w), 1.0) AS requests_per_url,
-            w_reqs * 1.0 / GREATEST(COALESCE(b_reqs, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1.0) AS surge_ratio
-        FROM deep_requests
-        GROUP BY ip
-        HAVING w_reqs >= 50 AND COUNT(DISTINCT url) FILTER (WHERE is_w) >= 10
-        ORDER BY w_reqs DESC LIMIT 15
+            w.ip AS label,
+            w.w_reqs,
+            w.w_distinct_urls,
+            COALESCE(b.b_reqs, 0) AS b_reqs,
+            w.w_reqs * 1.0 / GREATEST(w.w_distinct_urls, 1.0) AS requests_per_url,
+            w.w_reqs * 1.0 / GREATEST(COALESCE(b.b_reqs, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1.0) AS surge_ratio
+        FROM win w
+        LEFT JOIN base_b b ON w.ip = b.ip
+        ORDER BY w.w_reqs DESC LIMIT 15
     """
 
 
 RESIDENTIAL_FINGERPRINT_DISPERSION = """
-        WITH fingerprint_asn_maps AS (
+        WITH fingerprint_asn_maps AS NOT MATERIALIZED (
             SELECT
                 ja4,
                 ip,
@@ -1546,17 +1788,37 @@ RESIDENTIAL_FINGERPRINT_DISPERSION = """
             FROM {table_name}
             WHERE ja4 IS NOT NULL AND ja4 != ''
               AND (p_type IS NULL OR p_type != 'hosting')
+        ),
+        win AS (
+            SELECT
+                ja4,
+                COUNT(DISTINCT ip) AS w_ips,
+                COUNT(DISTINCT asn) AS w_asns,
+                COUNT(*) AS w_requests
+            FROM fingerprint_asn_maps
+            WHERE is_w
+            GROUP BY ja4
+            HAVING COUNT(DISTINCT ip) >= 30 AND COUNT(DISTINCT asn) >= 5
+        ),
+        base_b AS (
+            SELECT
+                b.ja4,
+                COUNT(DISTINCT b.ip) AS b_ips,
+                COUNT(DISTINCT b.asn) AS b_asns
+            FROM fingerprint_asn_maps b
+            JOIN win w ON b.ja4 = w.ja4
+            WHERE b.is_b
+            GROUP BY b.ja4
         )
         SELECT
-            ja4 AS label,
-            COUNT(DISTINCT ip) FILTER (WHERE is_w) AS w_ips,
-            COUNT(DISTINCT asn) FILTER (WHERE is_w) AS w_asns,
-            COUNT(*) FILTER (WHERE is_w) AS w_requests,
-            COUNT(DISTINCT ip) FILTER (WHERE is_b) AS b_ips,
-            w_asns * 1.0 / GREATEST(COUNT(DISTINCT asn) FILTER (WHERE is_b), 1.0) AS asn_expansion_ratio
-        FROM fingerprint_asn_maps
-        GROUP BY ja4
-        HAVING w_ips >= 30 AND w_asns >= 5
+            w.ja4 AS label,
+            w.w_ips,
+            w.w_asns,
+            w.w_requests,
+            COALESCE(b.b_ips, 0) AS b_ips,
+            w.w_asns * 1.0 / GREATEST(COALESCE(b.b_asns, 0), 1.0) AS asn_expansion_ratio
+        FROM win w
+        LEFT JOIN base_b b ON w.ja4 = b.ja4
         ORDER BY asn_expansion_ratio DESC LIMIT 10
     """
 

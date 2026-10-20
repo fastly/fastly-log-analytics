@@ -677,9 +677,13 @@ def get_insights(
             needed_cols_set.update(d.required_fields)
     # Support cols processors read from context but no insight lists in
     # required_fields (ja3/ja4 fingerprint selection in botnet_grouping; geo
-    # columns referenced via build_geo_select_clause). Filtered by actual_cols
-    # in the cols_sql line below so missing columns don't break the projection.
-    needed_cols_set.update({"ja3", "ja4", "region"})
+    # columns referenced via build_geo_select_clause). When ja4 is present in
+    # the service schema, fp_col resolves to ja4 and ja3 is never read by any
+    # insight, so skip materializing 30 days of ja3 strings into the scratch
+    # table. Filtered by actual_cols in the cols_sql line below so missing
+    # columns don't break the projection.
+    fp_support_col = "ja4" if "ja4" in actual_cols else "ja3"
+    needed_cols_set.update({fp_support_col, "region"})
     needed_cols = sorted(needed_cols_set)
     cols_sql = ", ".join(f'"{c}"' for c in needed_cols if c in actual_cols)
     if not cols_sql:
