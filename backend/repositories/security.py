@@ -478,12 +478,47 @@ def get_top_bots(
     shared_temp_table: str | None = None,
 ) -> dict:
     """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
+    import hashlib as _hashlib
+    import json as _json
     import time as _time
+
+    from backend.repositories import dashboard as _dashboard_repo
 
     timer = SectionTimer()
     section_timings = timer.entries
 
     source_name = src["name"]
+    cache_key: str | None = None
+    if (
+        _dashboard_repo.DASHBOARD_CACHE_TTL > 0
+        and start_time is not None
+        and end_time is not None
+        and shared_temp_table is None
+    ):
+        _key_payload = _json.dumps(
+            {
+                "s": start_time,
+                "e": end_time,
+                "f": {
+                    k: (
+                        getattr(v, "mode", v.get("mode") if isinstance(v, dict) else "include"),
+                        sorted(
+                            str(x)
+                            for x in (getattr(v, "values", None) or (v.get("values") if isinstance(v, dict) else []))
+                        ),
+                    )
+                    for k, v in sorted((filters or {}).items())
+                },
+                "n": n,
+            },
+            separators=(",", ":"),
+        )
+        cache_key = f"top_bots:{_hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
+        cached_entry = _dashboard_repo._dashboard_cache.get(cache_key)
+        if cached_entry is not None:
+            _cached_at, cached_res = cached_entry
+            return cached_res.copy()
+
     table_name = _safe_table(source_name)
     runner = QueryRunner(con, src)
 
@@ -503,151 +538,160 @@ def get_top_bots(
     # QueryRunner owns the durable-mode coverage gate. Keeping this path
     # enabled lets ready high-scale services avoid a full-range UA scan.
     use_rollups = not filters
+    if use_rollups:
+        runner.begin_shared_active_hour_temps()
 
-    # ── Arcjet UA matching ──────────────────────────────────────────
-    # Rollup-served when no filters apply. The hour bundles already
-    # carry top-500 UAs per hour; UNION + GROUP-BY across the window
-    # is sub-second even on 30d (vs ~1.1s for the ua column scan via
-    # the iceberg view on prod). Real bots send enough traffic that
-    # their UAs almost always land in top-500 for at least some hours,
-    # so the rollup gives equivalent arcjet matches to the raw scan.
-    # Filtered requests bypass this path (rollup is filter-free) and
-    # fall through to the temp-scan branch below.
-    ua_rollup_rows: list[tuple[str, int]] | None = None
-    if use_rollups and "ua" in actual_cols:
-        try:
-            _t = _time.perf_counter()
-            rolled, _ = runner.execute_top_n_rollups(
-                ["ua"],
-                start_time,
-                end_time,
-                limit=_BOT_UA_CLASSIFY_LIMIT,
-                per_field_limits={"ua": _BOT_UA_CLASSIFY_LIMIT},
-                actual_cols=actual_cols,
-            )
-            timer.mark("top_bots:ua_rollup_query", _t)
-            ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
-            if not ua_rollup_rows:
-                # Rollup is empty (cold service, no backfill yet) —
-                # fall back to the raw temp scan so we still produce
-                # bot matches on first dashboard load.
-                ua_rollup_rows = None
-        except Exception as e:
-            _logger.warning("[security] UA rollup read failed, falling back: %s", e)
-            ua_rollup_rows = None
-
-    def _classify(rows: list[tuple[str, int]]) -> list[dict]:
-        return classify_ua_counts(rows, n)
-
-    if ua_rollup_rows is not None:
-        _t = _time.perf_counter()
-        try:
-            arcjet_bots = _classify(ua_rollup_rows)
-        except Exception as e:
-            _logger.error("[security] arcjet rollup match failed: %s", e)
-        timer.mark("top_bots:arcjet_match", _t)
-
-    # ── NGWAF cache bot names + filtered-UA fallback ────────────────
-    # NGWAF JOIN needs raw waf_req_id (high-cardinality, no rollup),
-    # so it still builds a temp. When the rollup-served UA path
-    # didn't run (filters present, or "ua" not in schema), the temp
-    # also carries `ua` so the filtered-UA branch can scan it.
-    ngwaf_attached = False
-    if "waf_req_id" in actual_cols:
-        try:
-            ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
-        except Exception:
-            _logger.debug(
-                "get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
-            )  # materialization failed — fall back gracefully
-
-    needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
-    cols_needed: list[str] = []
-    if needs_filtered_ua_scan:
-        cols_needed.append("ua")
-    if ngwaf_attached and "waf_req_id" in actual_cols:
-        cols_needed.append("waf_req_id")
-
-    if cols_needed == ["waf_req_id"]:
-        # The UA branch was rollup-served, so the NGWAF join would be the
-        # temp's ONLY consumer — materializing the window's waf_req_ids
-        # (318ms of the 2026-07-06 24h trace) to probe them once is pure
-        # overhead.
-        #
-        # Rollup fast path first: the per-hour ngwaf_bots parquets carry the
-        # write-time (waf_req_id ⨝ bot cache) aggregation, so eligible
-        # unfiltered windows skip even the single direct join (~115ms on
-        # prod 24h). Falls back to the direct base-table join on any miss —
-        # one scan, no materialization, same result (the IS NOT NULL floor
-        # in the template matches the INNER JOIN semantics).
-        rolled_ngwaf: list[dict] | None = None
-        if use_rollups:
-            _t = _time.perf_counter()
-            try:
-                rolled_ngwaf = runner.try_ngwaf_top_bots_from_rollup(
-                    start_time, end_time, has_filters=bool(filters), n=n
-                )
-            except Exception as e:
-                _logger.warning("[security] ngwaf_bots rollup read failed, falling back: %s", e)
-                rolled_ngwaf = None
-            timer.mark("top_bots:ngwaf_rollup", _t)
-        if rolled_ngwaf is not None:
-            ngwaf_bots = rolled_ngwaf
-        else:
+    try:
+        # ── Arcjet UA matching ──────────────────────────────────────────
+        # Rollup-served when no filters apply. The hour bundles already
+        # carry top-500 UAs per hour; UNION + GROUP-BY across the window
+        # is sub-second even on 30d (vs ~1.1s for the ua column scan via
+        # the iceberg view on prod). Real bots send enough traffic that
+        # their UAs almost always land in top-500 for at least some hours,
+        # so the rollup gives equivalent arcjet matches to the raw scan.
+        # Filtered requests bypass this path (rollup is filter-free) and
+        # fall through to the temp-scan branch below.
+        ua_rollup_rows: list[tuple[str, int]] | None = None
+        if use_rollups and "ua" in actual_cols:
             try:
                 _t = _time.perf_counter()
-                q = SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n)
-                res = runner.execute(q, params).fetchall()
-                ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                timer.mark("top_bots:ngwaf_join_direct", _t)
+                rolled, _ = runner.execute_top_n_rollups(
+                    ["ua"],
+                    start_time,
+                    end_time,
+                    limit=_BOT_UA_CLASSIFY_LIMIT,
+                    per_field_limits={"ua": _BOT_UA_CLASSIFY_LIMIT},
+                    actual_cols=actual_cols,
+                )
+                timer.mark("top_bots:ua_rollup_query", _t)
+                ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
+                if not ua_rollup_rows:
+                    # Rollup is empty (cold service, no backfill yet) —
+                    # fall back to the raw temp scan so we still produce
+                    # bot matches on first dashboard load.
+                    ua_rollup_rows = None
             except Exception as e:
-                _logger.error("[security] NGWAF top bots failed: %s", e)
-    elif cols_needed:
-        _t = _time.perf_counter()
-        from contextlib import nullcontext
+                _logger.warning("[security] UA rollup read failed, falling back: %s", e)
+                ua_rollup_rows = None
 
-        ctx = (
-            nullcontext(shared_temp_table)
-            if shared_temp_table
-            else runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params)
-        )
-        with ctx as temp_table:
-            timer.mark("top_bots:temp_table_create", _t)
-            if temp_table is None:
-                return {
-                    "bots": arcjet_bots,
-                    "ngwaf_bots": ngwaf_bots,
-                    "section_timings": section_timings,
-                    **runner.telemetry(),
-                }
-            if needs_filtered_ua_scan:
+        def _classify(rows: list[tuple[str, int]]) -> list[dict]:
+            return classify_ua_counts(rows, n)
+
+        if ua_rollup_rows is not None:
+            _t = _time.perf_counter()
+            try:
+                arcjet_bots = _classify(ua_rollup_rows)
+            except Exception as e:
+                _logger.error("[security] arcjet rollup match failed: %s", e)
+            timer.mark("top_bots:arcjet_match", _t)
+
+        # ── NGWAF cache bot names + filtered-UA fallback ────────────────
+        # NGWAF JOIN needs raw waf_req_id (high-cardinality, no rollup),
+        # so it still builds a temp. When the rollup-served UA path
+        # didn't run (filters present, or "ua" not in schema), the temp
+        # also carries `ua` so the filtered-UA branch can scan it.
+        ngwaf_attached = False
+        if "waf_req_id" in actual_cols:
+            try:
+                ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
+            except Exception:
+                _logger.debug(
+                    "get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
+                )  # materialization failed — fall back gracefully
+
+        needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
+        cols_needed: list[str] = []
+        if needs_filtered_ua_scan:
+            cols_needed.append("ua")
+        if ngwaf_attached and "waf_req_id" in actual_cols:
+            cols_needed.append("waf_req_id")
+
+        if cols_needed == ["waf_req_id"]:
+            # The UA branch was rollup-served, so the NGWAF join would be the
+            # temp's ONLY consumer — materializing the window's waf_req_ids
+            # (318ms of the 2026-07-06 24h trace) to probe them once is pure
+            # overhead.
+            #
+            # Rollup fast path first: the per-hour ngwaf_bots parquets carry the
+            # write-time (waf_req_id ⨝ bot cache) aggregation, so eligible
+            # unfiltered windows skip even the single direct join (~115ms on
+            # prod 24h). Falls back to the direct base-table join on any miss —
+            # one scan, no materialization, same result (the IS NOT NULL floor
+            # in the template matches the INNER JOIN semantics).
+            rolled_ngwaf: list[dict] | None = None
+            if use_rollups:
+                _t = _time.perf_counter()
                 try:
-                    _t = _time.perf_counter()
-                    q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table, limit=_BOT_UA_CLASSIFY_LIMIT)
-                    rows = runner.execute(q).fetchall()
-                    timer.mark("top_bots:top_uas_query", _t)
-                    _t = _time.perf_counter()
-                    arcjet_bots = _classify(rows)
-                    timer.mark("top_bots:arcjet_match", _t)
+                    rolled_ngwaf = runner.try_ngwaf_top_bots_from_rollup(
+                        start_time, end_time, has_filters=bool(filters), n=n
+                    )
                 except Exception as e:
-                    _logger.error("[security] arcjet top bots failed: %s", e)
-
-            if ngwaf_attached:
+                    _logger.warning("[security] ngwaf_bots rollup read failed, falling back: %s", e)
+                    rolled_ngwaf = None
+                timer.mark("top_bots:ngwaf_rollup", _t)
+            if rolled_ngwaf is not None:
+                ngwaf_bots = rolled_ngwaf
+            else:
                 try:
                     _t = _time.perf_counter()
-                    q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
-                    res = runner.execute(q).fetchall()
+                    q = SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n)
+                    res = runner.execute(q, params).fetchall()
                     ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                    timer.mark("top_bots:ngwaf_join", _t)
+                    timer.mark("top_bots:ngwaf_join_direct", _t)
                 except Exception as e:
                     _logger.error("[security] NGWAF top bots failed: %s", e)
+        elif cols_needed:
+            _t = _time.perf_counter()
+            from contextlib import nullcontext
 
-    return {
+            ctx = (
+                nullcontext(shared_temp_table)
+                if shared_temp_table
+                else runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params)
+            )
+            with ctx as temp_table:
+                timer.mark("top_bots:temp_table_create", _t)
+                if temp_table is None:
+                    return {
+                        "bots": arcjet_bots,
+                        "ngwaf_bots": ngwaf_bots,
+                        "section_timings": section_timings,
+                        **runner.telemetry(),
+                    }
+                if needs_filtered_ua_scan:
+                    try:
+                        _t = _time.perf_counter()
+                        q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table, limit=_BOT_UA_CLASSIFY_LIMIT)
+                        rows = runner.execute(q).fetchall()
+                        timer.mark("top_bots:top_uas_query", _t)
+                        _t = _time.perf_counter()
+                        arcjet_bots = _classify(rows)
+                        timer.mark("top_bots:arcjet_match", _t)
+                    except Exception as e:
+                        _logger.error("[security] arcjet top bots failed: %s", e)
+
+                if ngwaf_attached:
+                    try:
+                        _t = _time.perf_counter()
+                        q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
+                        res = runner.execute(q).fetchall()
+                        ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                        timer.mark("top_bots:ngwaf_join", _t)
+                    except Exception as e:
+                        _logger.error("[security] NGWAF top bots failed: %s", e)
+    finally:
+        if use_rollups:
+            runner.end_shared_active_hour_temps()
+
+    res_dict = {
         "bots": arcjet_bots,
         "ngwaf_bots": ngwaf_bots,
         "section_timings": section_timings,
         **runner.telemetry(),
     }
+    if cache_key is not None and (arcjet_bots or ngwaf_bots):
+        _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict)
+    return res_dict
 
 
 def get_security_aggregates(

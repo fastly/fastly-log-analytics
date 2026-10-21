@@ -235,3 +235,61 @@ def test_page_telemetry_records_query_runner_queries(monkeypatch: pytest.MonkeyP
     assert recorded[0]["engine"] == "duckdb"
     assert "SELECT 1 AS x" in recorded[0]["sql"]
     assert recorded[0]["page_load_id"] == "test-page-load-01"
+
+
+def test_rolling_window_uses_daily_time_series_bundle_when_day0_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rolling windows (where Day 0 starts mid-day with < 24 hours) still read day_bundled time_series.parquet."""
+    from backend.core.rollups.day_bundles import compact_time_series_closed_days_to_daily
+
+    monkeypatch.setattr(db_core, "_cache_dir", lambda _src: str(tmp_path))
+    service = "svc_rolling_ts"
+    src = {"name": service, "service_id": service}
+    con = duckdb.connect(":memory:")
+    con.execute(
+        f"CREATE TABLE logs_{service} (timestamp TIMESTAMPTZ, status INTEGER, cache VARCHAR, resp_bytes BIGINT, ttfb DOUBLE)"
+    )
+    hour_root = _hour_bundled_root(src)
+
+    now = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    days = [(now - timedelta(days=i)).date().isoformat() for i in range(7, 0, -1)]
+    for d in days:
+        for h in range(24):
+            _write_time_series_hour(con, hour_root, f"{d}-{h:02d}", reqs=5)
+    compacted = compact_time_series_closed_days_to_daily(service, src, lookback_days=10)
+    assert compacted == 7
+
+    rollup_coverage.clear_listdir_cache()
+    # Rolling 6.5-day window starting mid-day on days[0] (12:00Z -> 12 hours on day 0 + 6*24 hours on days 1..6 = 156 hours)
+    runner = repo_base.QueryRunner(con, src)
+    ts = runner.try_time_series_from_rollup(
+        chart_metric="requests",
+        interval="1 hour",
+        start_time=f"{days[0]}T12:00:00Z",
+        end_time=f"{now.date().isoformat()}T00:00:00Z",
+        table_name=f"logs_{service}",
+        where_clause="1=1",
+        params=[],
+        unfiltered_window=True,
+    )
+    assert ts is not None
+    assert sum(int(pt["value"]) for pt in ts) == (12 + 6 * 24) * 5
+    queries = [q["sql"] for q in runner.telemetry()["debug_queries"]]
+    assert any("read_parquet([7 files])" in q for q in queries), f"Expected 7 daily files in queries: {queries}"
+
+
+def test_invalidate_service_clears_aggregates_and_top_bots_cache() -> None:
+    """dashboard.invalidate_service drops both aggregates and top_bots cache entries for that service."""
+    from backend.repositories import dashboard as dashboard_repo
+
+    dashboard_repo._dashboard_cache["abc123:svc_test"] = (1.0, {"total_rows": 10})
+    dashboard_repo._dashboard_cache["top_bots:def456:svc_test"] = (1.0, {"bots": [{"name": "Bot"}]})
+    dashboard_repo._dashboard_cache["other:svc_keep"] = (1.0, {"total_rows": 5})
+
+    dashboard_repo.invalidate_service("svc_test")
+
+    assert "abc123:svc_test" not in dashboard_repo._dashboard_cache
+    assert "top_bots:def456:svc_test" not in dashboard_repo._dashboard_cache
+    assert "other:svc_keep" in dashboard_repo._dashboard_cache
+    dashboard_repo.invalidate_service("svc_keep")

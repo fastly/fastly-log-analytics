@@ -307,6 +307,45 @@ def _fields_to_fetch(req: AggregatesRequest, want_map: bool, want_top_n: bool) -
     return top_fields, to_query
 
 
+def _facts_time_series(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    norm_interval: str,
+    metric: str,
+    where_clause: str,
+    params: dict[str, Any],
+) -> list[TimeSeriesPoint]:
+    interval_sql = "toStartOfMinute(event_timestamp)"
+    if norm_interval == "1 second":
+        interval_sql = "toStartOfSecond(event_timestamp)"
+    elif norm_interval == "5 minutes":
+        interval_sql = "toStartOfFiveMinutes(event_timestamp)"
+    elif norm_interval == "1 hour":
+        interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
+    elif norm_interval == "1 day":
+        interval_sql = "toStartOfDay(event_timestamp)"
+
+    if metric == "5xx":
+        metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
+    elif metric == "4xx":
+        metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
+    elif metric == "hit_rate":
+        metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
+    else:
+        metric_sql = "count()"
+
+    ts_rows = service.client.execute(
+        f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts "
+        f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
+        params,
+    )
+    return [
+        TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+        for r in ts_rows
+    ]
+
+
 def _filtered_aggregates(
     service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
 ):
@@ -364,37 +403,19 @@ def _filtered_aggregates(
     map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])] if want_map else []
 
     norm_interval = _normalize_chart_interval(req.chart_interval)
-    time_series = []
-    if want_time_series:
-        interval_sql = "toStartOfMinute(event_timestamp)"
-        if norm_interval == "1 second":
-            interval_sql = "toStartOfSecond(event_timestamp)"
-        elif norm_interval == "5 minutes":
-            interval_sql = "toStartOfFiveMinutes(event_timestamp)"
-        elif norm_interval == "1 hour":
-            interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
-        elif norm_interval == "1 day":
-            interval_sql = "toStartOfDay(event_timestamp)"
-
-        metric = req.chart_metric or "requests"
-        if metric == "5xx":
-            metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
-        elif metric == "4xx":
-            metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
-        elif metric == "hit_rate":
-            metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
-        else:
-            metric_sql = "count()"
-
-        ts_rows = service.client.execute(
-            f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts "
-            f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
+    time_series = (
+        _facts_time_series(
+            service,
+            start_time,
+            end_time,
+            norm_interval,
+            req.chart_metric or "requests",
+            where_clause,
             params,
         )
-        time_series = [
-            TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
-            for r in ts_rows
-        ]
+        if want_time_series
+        else []
+    )
 
     return AggregatesResponse.with_telemetry(
         data=data,
@@ -435,7 +456,7 @@ def _aggregates_batch(
 
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
     norm_interval = _normalize_chart_interval(req.chart_interval)
-    if req.filters or norm_interval == "1 second" or (req.chart_metric and req.chart_metric != "requests"):
+    if req.filters or norm_interval == "1 second":
         return _filtered_aggregates(service, req, start_time, end_time)
 
     want_time_series, want_map, want_top_n = _panels(req)
@@ -466,7 +487,31 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         if want_map and map_response is not None
         else []
     )
-    time_series = _time_series(service, start_time, end_time, norm_interval) if want_time_series else []
+    if not want_time_series:
+        time_series = []
+    elif req.chart_metric and req.chart_metric != "requests":
+        start = _range_value(start_time)
+        end = _range_value(end_time)
+        clauses = list(visible_fact_clauses("request"))
+        params: dict[str, Any] = {"service_id": service.service_id}
+        if start is not None and end is not None:
+            from datetime import timedelta
+
+            end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+            clauses.append("event_timestamp >= {start:DateTime64(3)}")
+            clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+            params.update({"start": start, "end_upper": end_upper})
+        time_series = _facts_time_series(
+            service,
+            start_time,
+            end_time,
+            norm_interval,
+            req.chart_metric,
+            " AND ".join(clauses),
+            params,
+        )
+    else:
+        time_series = _time_series(service, start_time, end_time, norm_interval)
     return AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
@@ -496,10 +541,10 @@ def bundle(
     res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
     res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
 
-    if res_aggregates is not None:
+    if res_aggregates is not None and hasattr(res_aggregates, "debug_queries"):
         res_aggregates.debug_queries = []
         res_aggregates.debug_calls = []
-    if res_top_bots is not None:
+    if res_top_bots is not None and hasattr(res_top_bots, "debug_queries"):
         res_top_bots.debug_queries = []
         res_top_bots.debug_calls = []
 

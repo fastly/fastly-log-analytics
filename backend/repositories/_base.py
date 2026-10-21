@@ -1001,6 +1001,20 @@ class QueryRunner:
                 if ws == live_start and we == live_end and projected_set <= cols_have:
                     self._last_active_direct_n_files = 0
                     return name
+            for cols_have, ws, we, name in self._shared_active_temps:
+                if ws <= live_start and we >= live_end and projected_set <= cols_have:
+                    sub_name = f"t_active_direct_{_uuid.uuid4().hex}"
+                    sub_where = (
+                        f"timestamp >= TIMESTAMPTZ '{live_start.isoformat()}' "
+                        f"AND timestamp < TIMESTAMPTZ '{live_end.isoformat()}'"
+                    )
+                    try:
+                        self.con.execute(f'CREATE TEMP TABLE {sub_name} AS SELECT * FROM "{name}" WHERE {sub_where}')
+                        self._shared_active_temps.append((cols_have, live_start, live_end, sub_name))
+                        self._last_active_direct_n_files = 0
+                        return sub_name
+                    except Exception:
+                        pass
 
         # Enumerate candidate parquets EXPLICITLY (not a glob) so buffer
         # files that cannot contain live-window rows are pruned by mtime:
@@ -1539,7 +1553,12 @@ class QueryRunner:
             # covers — and both get summed into the same bucket, double-counting.
             live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
             _t_lt = time.perf_counter()
-            tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
+            temp_proj_fields = (
+                live_topn_fields + ["waf_req_id"]
+                if "waf_req_id" in actual_cols and "waf_req_id" not in live_topn_fields
+                else live_topn_fields
+            )
+            tmp_name = self._create_active_hour_temp_direct(temp_proj_fields, actual_cols, live_start, live_end)
             if tmp_name == "__empty__":
                 tmp_name = None
             elif tmp_name is None:
@@ -1801,12 +1820,11 @@ class QueryRunner:
             for day, day_hours in sorted(cov.by_day().items()):
                 if day >= cov.active_hour_str[:10]:
                     break
-                if len(day_hours) < 24:
-                    break
                 day_ts_file = rollup_coverage._day_bundle_file(day_root, day, TIME_SERIES_BUNDLE_FILENAME)
                 day_ov_file = (
                     rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
                     if can_use_overview
+                    and (len(day_hours) == 24 or (st.minute == 0 and st.second == 0 and st.microsecond == 0))
                     else None
                 )
                 if day_ts_file:
@@ -2089,10 +2107,12 @@ class QueryRunner:
             for day, day_hours in sorted(cov.by_day().items()):
                 if day >= cov.active_hour_str[:10]:
                     break
-                if len(day_hours) < 24:
-                    break
                 day_ts_file = rollup_coverage._day_bundle_file(day_root, day, TIME_SERIES_BUNDLE_FILENAME)
-                day_ov_file = rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
+                day_ov_file = (
+                    rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
+                    if (len(day_hours) == 24 or (st.minute == 0 and st.second == 0 and st.microsecond == 0))
+                    else None
+                )
                 if day_ts_file:
                     day_ts_paths.append(day_ts_file)
                     covered_until_hour = day_hours[-1]

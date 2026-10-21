@@ -58,10 +58,11 @@ logger = logging.getLogger(__name__)
 # the write gate inert without removing the surrounding code (easy to revert
 # or replace with a less-aggressive policy later — e.g. only cache when
 # total_rows > 0, or only cache windows ending more than 5 min in the past).
-# Short-TTL response cache (default 5s, configurable via FLA_DASHBOARD_CACHE_TTL).
+# Short-TTL response cache (default 15s, configurable via FLA_DASHBOARD_CACHE_TTL).
+# Invalidated immediately on every ingest tick via invalidate_service(service_name).
 # Only caches non-empty responses (`total_rows > 0`) so transient empty states
 # (sync mid-commit, view rebind race) are never cached.
-DASHBOARD_CACHE_TTL: int = int(os.getenv("FLA_DASHBOARD_CACHE_TTL", "5"))  # seconds; 0 disables read+write
+DASHBOARD_CACHE_TTL: int = int(os.getenv("FLA_DASHBOARD_CACHE_TTL", "15"))  # seconds; 0 disables read+write
 _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max(DASHBOARD_CACHE_TTL, 1))
 
 
@@ -234,7 +235,7 @@ def get_aggregates(
             },
             separators=(",", ":"),
         )
-        cache_key = hashlib.sha256(f"{_key_payload}:{source_name}".encode()).hexdigest()
+        cache_key = f"{hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
         # BoundedTTLCache's ``__contains__`` / ``[]`` already enforce TTL
         # internally, so an entry that reads as present is by definition
         # still fresh — no need for the legacy ``now - cached_at`` check.
@@ -471,6 +472,20 @@ def get_aggregates(
                 # the perf win. If we ever need exact per-field totals here,
                 # add a `__total__` aggregate row to each rollup parquet.
                 try:
+                    _count_proj = (
+                        fields
+                        if include_top_n
+                        else [
+                            "conn_requests",
+                            "status",
+                            "cache",
+                            "elapsed",
+                            "resp_bytes",
+                            "req_bytes",
+                            "req_header_bytes",
+                            "ttfb",
+                        ]
+                    )
                     rollup_count = runner.try_count_from_rollup(
                         start_time,
                         end_time,
@@ -478,8 +493,8 @@ def get_aggregates(
                         _where,
                         _params,
                         unfiltered_window=True,
-                        projected_fields=fields if include_top_n else None,
-                        actual_cols=actual_cols if include_top_n else None,
+                        projected_fields=_count_proj,
+                        actual_cols=actual_cols,
                     )
                     if rollup_count is not None:
                         return rollup_count
