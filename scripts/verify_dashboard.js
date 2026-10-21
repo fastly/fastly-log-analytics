@@ -213,6 +213,18 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
 
+  // Keep the per-section timings the aggregate endpoints return so the PERF
+  // line can say which section is slow, not just that the request was.
+  const sectionTimings = {};
+  page.on('response', async response => {
+    const url = response.url();
+    if (!url.includes('/aggregates') || response.status() !== 200) return;
+    try {
+      const body = await response.json();
+      if (body && body.section_timings) sectionTimings[new URL(url).pathname] = body.section_timings;
+    } catch (e) { /* non-JSON or already disposed */ }
+  });
+
   let bodyText = "";
   let hasMarker = false;
   let hasChart = false;
@@ -251,7 +263,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     console.warn(`⚠️ [${name}] ${emptyPanels} panel(s) show an empty state; page has populated charts so proceeding.`);
   }
   console.log(`[${name} Verification] Verified: panels present and charts populated with real data. 🟢`);
-  await logPagePerf(page, name);
+  await logPagePerf(page, name, sectionTimings);
   await page.close();
   await context.close();
 }
@@ -259,7 +271,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
 // One-line, non-fatal page-performance record for the Phase 4 audit workbooks:
 // navigation timings, paint/LCP/CLS, and per-endpoint API timings with duplicate
 // counts, as the page was loaded for the data check above (cold first load).
-async function logPagePerf(page, name) {
+async function logPagePerf(page, name, sectionTimings = {}) {
   try {
     const perf = await page.evaluate(() => new Promise(resolve => {
       const nav = performance.getEntriesByType('navigation')[0];
@@ -297,6 +309,7 @@ async function logPagePerf(page, name) {
         });
       }, 500);
     }));
+    perf.sectionTimings = sectionTimings;
     console.log(`[PERF ${name}] ${JSON.stringify(perf)}`);
   } catch (err) {
     console.log(`[PERF ${name}] unavailable: ${err.message}`);
