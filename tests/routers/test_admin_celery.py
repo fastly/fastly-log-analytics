@@ -259,3 +259,126 @@ def test_task_routes_and_known_queues_consistency():
     routed = {spec["queue"] for spec in app.conf.task_routes.values()}
     routed.add(app.conf.task_default_queue or "celery")
     assert routed <= set(KNOWN_QUEUES)
+
+
+class TestIngestLedgerInspectorEndpoints:
+    def test_list_retry_and_purge_ingest_ledger_entries(self, client):
+        """Verify GET /api/admin/celery/ledger, POST /api/admin/celery/ledger/retry,
+        and POST /api/admin/celery/ledger/purge list, requeue, and delete dead_letter
+        and quarantined rows while leaving committed rows untouched."""
+        from backend.core.metadata.base import get_con
+
+        sid = "svc-ledger-test"
+        con = get_con(sid)
+        cur = con.cursor()
+        cur.execute("DELETE FROM ingest_ledger WHERE service_id = ?", (sid,))
+        cur.execute(
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, size_bytes, status, attempts, last_error, error_kind, "
+            "claimed_at, discovered_at, originating_task, originating_run_id) "
+            "VALUES (?, ?, ?, 'dead_letter', 1, ?, 'object_missing', 1729400010.0, 1729400000.0, 'rum_discovery', 99)",
+            (
+                sid,
+                "raw/rum/year=2026/month=10/day=20/hour=04/minute=28/dead-rum.log.gz",
+                1024,
+                "object missing from FOS (already ingested+deleted, or expired)",
+            ),
+        )
+        cur.execute(
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, size_bytes, status, attempts, last_error, error_kind, "
+            "claimed_at, discovered_at, originating_task, originating_run_id) "
+            "VALUES (?, ?, ?, 'quarantined', 3, ?, 'corrupt_gzip', 1729400020.0, 1729400005.0, 'log_discovery', 100)",
+            (
+                sid,
+                "raw/request/year=2026/month=10/day=20/hour=04/minute=29/bad-req.log.gz",
+                2048,
+                "Not a gzipped file",
+            ),
+        )
+        cur.execute(
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, size_bytes, status, attempts, committed_at, discovered_at) "
+            "VALUES (?, ?, ?, 'committed', 1, 1729400030.0, 1729400000.0)",
+            (
+                sid,
+                "raw/request/year=2026/month=10/day=20/hour=04/minute=30/good-req.log.gz",
+                4096,
+            ),
+        )
+        con.commit()
+
+        try:
+            with patch("backend.config.list_configs", return_value=[{"service_id": sid}]):
+                # 1. Default problem filter returns dead_letter + quarantined (2 rows)
+                resp = client.get("/api/admin/celery/ledger")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["total"] == 2
+                assert len(body["items"]) == 2
+                by_key = {item["object_key"]: item for item in body["items"]}
+                rum_item = by_key["raw/rum/year=2026/month=10/day=20/hour=04/minute=28/dead-rum.log.gz"]
+                assert rum_item["source_type"] == "rum"
+                assert rum_item["status"] == "dead_letter"
+                assert rum_item["error_kind"] == "object_missing"
+                assert "object missing from FOS" in rum_item["last_error"]
+                assert rum_item["originating_task"] == "rum_discovery"
+                assert rum_item["originating_run_id"] == 99
+
+                req_item = by_key["raw/request/year=2026/month=10/day=20/hour=04/minute=29/bad-req.log.gz"]
+                assert req_item["source_type"] == "request"
+                assert req_item["status"] == "quarantined"
+                assert req_item["error_kind"] == "corrupt_gzip"
+
+                # 2. Retry the RUM dead_letter item -> resets to discovered & dispatches convert_batch_rum_files
+                with (
+                    patch("backend.core.ingest.convert_batch_files.delay") as mock_req_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_rum_delay,
+                ):
+                    retry_resp = client.post(
+                        "/api/admin/celery/ledger/retry",
+                        json={
+                            "items": [
+                                {
+                                    "service_id": sid,
+                                    "object_key": "raw/rum/year=2026/month=10/day=20/hour=04/minute=28/dead-rum.log.gz",
+                                }
+                            ]
+                        },
+                    )
+                    assert retry_resp.status_code == 200
+                    retry_data = retry_resp.json()
+                    assert retry_data["ok"] is True
+                    assert retry_data["affected"] == 1
+                    assert retry_data["dispatched"] == 1
+                    mock_rum_delay.assert_called_once_with(
+                        sid, ["raw/rum/year=2026/month=10/day=20/hour=04/minute=28/dead-rum.log.gz"]
+                    )
+                    mock_req_delay.assert_not_called()
+
+                # Now only 1 problem row (quarantined) remains
+                after_retry = client.get("/api/admin/celery/ledger").json()
+                assert after_retry["total"] == 1
+                assert after_retry["items"][0]["status"] == "quarantined"
+
+                # 3. Purge remaining problem rows -> deletes quarantined row, preserves committed & discovered
+                purge_resp = client.post(
+                    "/api/admin/celery/ledger/purge",
+                    json={"status": "problem"},
+                )
+                assert purge_resp.status_code == 200
+                purge_data = purge_resp.json()
+                assert purge_data["ok"] is True
+                assert purge_data["affected"] == 1
+
+                after_purge = client.get("/api/admin/celery/ledger").json()
+                assert after_purge["total"] == 0
+                assert after_purge["items"] == []
+
+                all_rows = client.get("/api/admin/celery/ledger?status=all").json()
+                assert all_rows["total"] == 2
+                statuses = {r["status"] for r in all_rows["items"]}
+                assert statuses == {"discovered", "committed"}
+        finally:
+            cur.execute("DELETE FROM ingest_ledger WHERE service_id = ?", (sid,))
+            con.commit()

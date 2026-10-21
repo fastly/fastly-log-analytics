@@ -13,6 +13,8 @@ describe('queryKeys.admin shapes', () => {
     ['shareLive', k.shareLive(), ['admin', 'share', 'live']],
     ['metricHistoryBatch', k.metricHistoryBatch('1h'), ['admin', 'metric-history-batch', '1h']],
     ['celeryStatus', k.celeryStatus(), ['admin', 'celery-status']],
+    ['celeryLedger', k.celeryLedger('problem', 's', 0), ['admin', 'celery-ledger', 'problem', 's', 0]],
+    ['celeryLedgerAll', k.celeryLedgerAll(), ['admin', 'celery-ledger']],
     ['healthSnapshot', k.healthSnapshot(), ['admin', 'health-snapshot']],
     ['metadataStorage', k.metadataStorage(), ['admin', 'metadata-storage']],
     ['debugSettings', k.debugSettings(), ['admin', 'debug-settings']],

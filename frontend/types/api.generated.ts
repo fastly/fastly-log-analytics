@@ -2242,6 +2242,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/celery/ledger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Celery Ledger List
+         * @description List entries in ``ingest_ledger`` across services (defaults to dead_letter + quarantined).
+         */
+        get: operations["api_celery_ledger_list_api_admin_celery_ledger_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/celery/ledger/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Celery Ledger Retry
+         * @description Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and
+         *     best-effort dispatch Celery convert batches.
+         */
+        post: operations["api_celery_ledger_retry_api_admin_celery_ledger_retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/celery/ledger/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Celery Ledger Purge
+         * @description Delete ``dead_letter`` / ``quarantined`` entries from ``ingest_ledger``.
+         */
+        post: operations["api_celery_ledger_purge_api_admin_celery_ledger_purge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/clickhouse/status": {
         parameters: {
             query?: never;
@@ -10939,6 +11000,103 @@ export interface components {
              * @enum {string}
              */
             status: "caught_up" | "backfilling" | "stalled" | "no_data";
+        };
+        /**
+         * IngestLedgerActionRequest
+         * @description Target either specific ``items`` or all rows matching ``status`` (optionally
+         *     scoped to ``service_id``).
+         */
+        IngestLedgerActionRequest: {
+            /** Items */
+            items?: components["schemas"]["IngestLedgerItemTarget"][] | null;
+            /** Status */
+            status?: ("dead_letter" | "quarantined" | "problem") | null;
+            /** Service Id */
+            service_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** IngestLedgerActionResponse */
+        IngestLedgerActionResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /**
+             * Affected
+             * @default 0
+             */
+            affected: number;
+            /**
+             * Dispatched
+             * @default 0
+             */
+            dispatched: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * IngestLedgerEntry
+         * @description Single row from ``ingest_ledger`` exposed on ``/api/admin/celery/ledger``.
+         */
+        IngestLedgerEntry: {
+            /** Service Id */
+            service_id: string;
+            /** Object Key */
+            object_key: string;
+            /**
+             * Source Type
+             * @enum {string}
+             */
+            source_type: "request" | "rum";
+            /** Status */
+            status: string;
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /** Error Kind */
+            error_kind?: string | null;
+            /** Last Error */
+            last_error?: string | null;
+            /** Claimed By */
+            claimed_by?: string | null;
+            /** Claimed At */
+            claimed_at?: number | null;
+            /** Discovered At */
+            discovered_at?: number | null;
+            /** Committed At */
+            committed_at?: number | null;
+            /** Next Attempt At */
+            next_attempt_at?: number | null;
+            /** Originating Task */
+            originating_task?: string | null;
+            /** Originating Run Id */
+            originating_run_id?: number | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** IngestLedgerItemTarget */
+        IngestLedgerItemTarget: {
+            /** Service Id */
+            service_id: string;
+            /** Object Key */
+            object_key: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** IngestLedgerListResponse */
+        IngestLedgerListResponse: {
+            /** Items */
+            items: components["schemas"]["IngestLedgerEntry"][];
+            /** Total */
+            total: number;
+        } & {
+            [key: string]: unknown;
         };
         /** IngestedFile */
         IngestedFile: {
@@ -34741,6 +34899,324 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CeleryStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_celery_ledger_list_api_admin_celery_ledger_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by ledger status ('problem', 'all', 'dead_letter', 'quarantined', 'discovered', 'claimed', 'committed') */
+                status?: string | null;
+                /** @description Optional service_id filter */
+                service_id?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestLedgerListResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_celery_ledger_retry_api_admin_celery_ledger_retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IngestLedgerActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestLedgerActionResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_celery_ledger_purge_api_admin_celery_ledger_purge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IngestLedgerActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestLedgerActionResponse"];
                 };
             };
             /** @description Bad request */

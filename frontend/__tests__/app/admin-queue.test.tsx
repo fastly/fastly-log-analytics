@@ -7,10 +7,12 @@ import AdminQueuePage from '@/app/admin/queue/page'
 import Loading from '@/app/admin/queue/loading'
 
 const mockGet = vi.fn()
+const mockPost = vi.fn()
 
 vi.mock('@/lib/api', () => ({
   client: {
     GET: (...args: unknown[]) => mockGet(...args),
+    POST: (...args: unknown[]) => mockPost(...args),
   },
 }))
 
@@ -121,6 +123,28 @@ describe('AdminQueuePage (/admin/queue)', () => {
           response: { ok: true, status: 200 },
         }
       }
+      if (path === '/api/admin/celery/ledger') {
+        return {
+          data: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/2026-10-20T04_28_00.000-test.log.gz',
+                source_type: 'rum',
+                status: 'quarantined',
+                attempts: 1,
+                error_kind: 'corrupt_gzip',
+                last_error: 'Not a gzipped file',
+                originating_task: 'rum_discovery',
+                originating_run_id: 42,
+                discovered_at: 1700000000,
+              },
+            ],
+            total: 1,
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
       return { data: {}, response: { ok: true, status: 200 } }
     })
 
@@ -197,5 +221,100 @@ describe('AdminQueuePage (/admin/queue)', () => {
     expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
     expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
     expect(screen.getByText(/No schedules found/i)).toBeInTheDocument()
+  })
+
+  it('displays dead-letter entries in the ledger inspector and handles Retry and Dismiss actions', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        return {
+          data: {
+            broker_reachable: true,
+            workers: { count: 1, active_tasks: {}, stats: {}, registered: {}, scheduled: {} },
+            queues: { celery: 0, 'q.ingest': 0, 'q.control': 0 },
+            schedules: [],
+            ledger: {
+              discovered: 0,
+              claimed: 0,
+              committed: 120,
+              quarantined: 0,
+              dead_letter: 3,
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/celery/ledger') {
+        return {
+          data: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz',
+                source_type: 'rum',
+                status: 'dead_letter',
+                attempts: 1,
+                error_kind: 'object_missing',
+                last_error: 'object missing from FOS (already ingested+deleted, or expired)',
+                originating_task: 'rum_discovery',
+                originating_run_id: 24368,
+                claimed_at: 1729400000,
+              },
+            ],
+            total: 1,
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        return { data: { series: {} }, response: { ok: true, status: 200 } }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    mockPost.mockImplementation(async () => ({
+      data: { ok: true, affected: 1, dispatched: 1 },
+      response: { ok: true, status: 200 },
+    }))
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-ledger-entries')).toBeInTheDocument()
+    })
+
+    expect(
+      screen.getByText('raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('object_missing')).toBeInTheDocument()
+    expect(
+      screen.getByText('object missing from FOS (already ingested+deleted, or expired)'),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('admin-queue-ledger-retry-row'))
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        '/api/admin/celery/ledger/retry',
+        expect.objectContaining({
+          body: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz',
+              },
+            ],
+          },
+        }),
+      )
+    })
+
+    fireEvent.click(screen.getByTestId('admin-queue-ledger-purge-all'))
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        '/api/admin/celery/ledger/purge',
+        expect.objectContaining({
+          body: { status: 'problem' },
+        }),
+      )
+    })
   })
 })

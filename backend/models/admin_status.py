@@ -8,7 +8,7 @@ may hold non-JSON natives, so they keep the ``jsonable_encoder`` encoding.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from backend.models._base import JsonAny, JsonDict, WireSafeModel
 
@@ -48,6 +48,51 @@ class CeleryStatusResponse(WireSafeModel):
     queues: dict[str, int] | None = None
     schedules: list[CeleryScheduleEntry] | None = None
     ledger: dict[str, int] | None = None
+
+
+class IngestLedgerEntry(WireSafeModel):
+    """Single row from ``ingest_ledger`` exposed on ``/api/admin/celery/ledger``."""
+
+    service_id: str
+    object_key: str
+    source_type: Literal["request", "rum"]
+    status: str
+    attempts: int = 0
+    error_kind: str | None = None
+    last_error: str | None = None
+    claimed_by: str | None = None
+    claimed_at: float | None = None
+    discovered_at: float | None = None
+    committed_at: float | None = None
+    next_attempt_at: float | None = None
+    originating_task: str | None = None
+    originating_run_id: int | None = None
+    size_bytes: int | None = None
+
+
+class IngestLedgerListResponse(WireSafeModel):
+    items: list[IngestLedgerEntry]
+    total: int
+
+
+class IngestLedgerItemTarget(WireSafeModel):
+    service_id: str
+    object_key: str
+
+
+class IngestLedgerActionRequest(WireSafeModel):
+    """Target either specific ``items`` or all rows matching ``status`` (optionally
+    scoped to ``service_id``)."""
+
+    items: list[IngestLedgerItemTarget] | None = None
+    status: Literal["dead_letter", "quarantined", "problem"] | None = None
+    service_id: str | None = None
+
+
+class IngestLedgerActionResponse(WireSafeModel):
+    ok: bool = True
+    affected: int = 0
+    dispatched: int = 0
 
 
 class DuckdbStatusResponse(WireSafeModel):

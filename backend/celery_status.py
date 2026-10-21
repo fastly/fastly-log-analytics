@@ -170,3 +170,275 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
         "schedules": schedules,
         "ledger": ledger,
     }
+
+
+_LEDGER_PROBLEM_STATUSES = ("dead_letter", "quarantined")
+_LEDGER_VALID_STATUSES = ("discovered", "claimed", "committed", "quarantined", "dead_letter")
+_LEDGER_DISPATCH_BATCH_SIZE = 25
+
+
+def _is_rum_object_key(object_key: str) -> bool:
+    return object_key.startswith("raw/rum/") or "/raw/rum/" in object_key
+
+
+def _resolve_ledger_service_ids(service_id: str | None = None) -> list[str]:
+    if service_id:
+        return [service_id]
+    from backend.config import list_configs
+
+    seen: list[str] = []
+    for svc in list_configs():
+        sid = svc.get("service_id") or svc.get("name")
+        if sid and sid not in seen:
+            seen.append(sid)
+    return seen
+
+
+def list_ingest_ledger_entries(
+    status: str | None = "problem",
+    service_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List rows from ``ingest_ledger`` across configured services (or a single
+    service), defaulting to problem rows (``dead_letter`` + ``quarantined``)."""
+    from backend.core.metadata.base import get_con
+
+    norm_status = (status or "problem").strip().lower()
+    entries: list[dict[str, Any]] = []
+    total = 0
+    seen_keys: set[tuple[str, str]] = set()
+    per_service_limit = max(1, int(offset) + int(limit))
+
+    for sid in _resolve_ledger_service_ids(service_id):
+        try:
+            con = get_con(sid)
+            cur = con.cursor()
+            if norm_status == "all":
+                where_sql = "WHERE service_id = ?"
+                params: tuple[Any, ...] = (sid,)
+            elif norm_status in _LEDGER_VALID_STATUSES:
+                where_sql = "WHERE service_id = ? AND status = ?"
+                params = (sid, norm_status)
+            else:
+                where_sql = "WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')"
+                params = (sid,)
+
+            cur.execute(f"SELECT count(*) FROM ingest_ledger {where_sql}", params)
+            count_row = cur.fetchone()
+            total += int(count_row[0]) if count_row and count_row[0] is not None else 0
+
+            cur.execute(
+                f"SELECT service_id, object_key, status, attempts, error_kind, last_error, "
+                f"claimed_by, claimed_at, discovered_at, committed_at, next_attempt_at, "
+                f"originating_task, originating_run_id, size_bytes "
+                f"FROM ingest_ledger {where_sql} "
+                f"ORDER BY COALESCE(claimed_at, discovered_at, committed_at, 0) DESC, object_key DESC "
+                f"LIMIT ?",
+                (*params, per_service_limit),
+            )
+            for row in cur.fetchall():
+                row_sid = str(row[0])
+                obj_key = str(row[1])
+                if (row_sid, obj_key) in seen_keys:
+                    continue
+                seen_keys.add((row_sid, obj_key))
+                entries.append(
+                    {
+                        "service_id": row_sid,
+                        "object_key": obj_key,
+                        "source_type": "rum" if _is_rum_object_key(obj_key) else "request",
+                        "status": str(row[2]),
+                        "attempts": int(row[3] or 0),
+                        "error_kind": row[4],
+                        "last_error": row[5],
+                        "claimed_by": row[6],
+                        "claimed_at": float(row[7]) if row[7] is not None else None,
+                        "discovered_at": float(row[8]) if row[8] is not None else None,
+                        "committed_at": float(row[9]) if row[9] is not None else None,
+                        "next_attempt_at": float(row[10]) if row[10] is not None else None,
+                        "originating_task": row[11],
+                        "originating_run_id": int(row[12]) if row[12] is not None else None,
+                        "size_bytes": int(row[13]) if row[13] is not None else None,
+                    }
+                )
+        except Exception as e:
+            logger.debug("[celery_status] list_ingest_ledger_entries failed for %s: %s", sid, e)
+            continue
+
+    entries.sort(
+        key=lambda item: (
+            float(item.get("claimed_at") or item.get("discovered_at") or item.get("committed_at") or 0.0),
+            str(item.get("object_key") or ""),
+        ),
+        reverse=True,
+    )
+    return {
+        "items": entries[offset : offset + limit],
+        "total": total,
+    }
+
+
+def purge_ingest_ledger_entries(
+    items: list[dict[str, str]] | None = None,
+    status: str | None = None,
+    service_id: str | None = None,
+) -> dict[str, Any]:
+    """Delete ``dead_letter`` / ``quarantined`` rows from ``ingest_ledger``.
+    Never deletes ``discovered``, ``claimed``, or ``committed`` rows."""
+    from backend.core.metadata.base import get_con
+
+    affected = 0
+    if items:
+        by_service: dict[str, list[str]] = {}
+        for item in items:
+            sid = (item.get("service_id") or "").strip()
+            key = (item.get("object_key") or "").strip()
+            if sid and key:
+                by_service.setdefault(sid, []).append(key)
+        for sid, keys in by_service.items():
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                for key in keys:
+                    cur.execute(
+                        "DELETE FROM ingest_ledger "
+                        "WHERE service_id = ? AND object_key = ? "
+                        "AND status IN ('dead_letter', 'quarantined')",
+                        (sid, key),
+                    )
+                    if cur.rowcount and cur.rowcount > 0:
+                        affected += int(cur.rowcount)
+                con.commit()
+            except Exception as e:
+                logger.warning("[celery_status] purge_ingest_ledger_entries failed for %s: %s", sid, e)
+    else:
+        norm_status = (status or "problem").strip().lower()
+        for sid in _resolve_ledger_service_ids(service_id):
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                if norm_status in _LEDGER_PROBLEM_STATUSES:
+                    cur.execute(
+                        "DELETE FROM ingest_ledger WHERE service_id = ? AND status = ?",
+                        (sid, norm_status),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM ingest_ledger WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')",
+                        (sid,),
+                    )
+                if cur.rowcount and cur.rowcount > 0:
+                    affected += int(cur.rowcount)
+                con.commit()
+            except Exception as e:
+                logger.warning("[celery_status] bulk purge_ingest_ledger_entries failed for %s: %s", sid, e)
+
+    return {"ok": True, "affected": affected, "dispatched": 0}
+
+
+def retry_ingest_ledger_entries(
+    items: list[dict[str, str]] | None = None,
+    status: str | None = None,
+    service_id: str | None = None,
+) -> dict[str, Any]:
+    """Reset ``dead_letter`` / ``quarantined`` rows in ``ingest_ledger`` back to
+    ``discovered`` (with ``attempts=0`` and cleared error fields) and best-effort
+    dispatch Celery convert batches for immediate retry."""
+    from backend.core.metadata.base import get_con
+
+    requeued_by_service: dict[str, list[str]] = {}
+    affected = 0
+
+    if items:
+        by_service: dict[str, list[str]] = {}
+        for item in items:
+            sid = (item.get("service_id") or "").strip()
+            key = (item.get("object_key") or "").strip()
+            if sid and key:
+                by_service.setdefault(sid, []).append(key)
+        for sid, keys in by_service.items():
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                for key in keys:
+                    cur.execute(
+                        "UPDATE ingest_ledger "
+                        "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
+                        "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
+                        "WHERE service_id = ? AND object_key = ? "
+                        "AND status IN ('dead_letter', 'quarantined')",
+                        (sid, key),
+                    )
+                    if cur.rowcount and cur.rowcount > 0:
+                        affected += int(cur.rowcount)
+                        requeued_by_service.setdefault(sid, []).append(key)
+                con.commit()
+            except Exception as e:
+                logger.warning("[celery_status] retry_ingest_ledger_entries failed for %s: %s", sid, e)
+    else:
+        norm_status = (status or "problem").strip().lower()
+        for sid in _resolve_ledger_service_ids(service_id):
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                if norm_status in _LEDGER_PROBLEM_STATUSES:
+                    cur.execute(
+                        "SELECT object_key FROM ingest_ledger WHERE service_id = ? AND status = ?",
+                        (sid, norm_status),
+                    )
+                    keys = [str(r[0]) for r in cur.fetchall()]
+                    if keys:
+                        cur.execute(
+                            "UPDATE ingest_ledger "
+                            "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
+                            "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
+                            "WHERE service_id = ? AND status = ?",
+                            (sid, norm_status),
+                        )
+                        if cur.rowcount and cur.rowcount > 0:
+                            affected += int(cur.rowcount)
+                            requeued_by_service.setdefault(sid, []).extend(keys)
+                        con.commit()
+                else:
+                    cur.execute(
+                        "SELECT object_key FROM ingest_ledger "
+                        "WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')",
+                        (sid,),
+                    )
+                    keys = [str(r[0]) for r in cur.fetchall()]
+                    if keys:
+                        cur.execute(
+                            "UPDATE ingest_ledger "
+                            "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
+                            "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
+                            "WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')",
+                            (sid,),
+                        )
+                        if cur.rowcount and cur.rowcount > 0:
+                            affected += int(cur.rowcount)
+                            requeued_by_service.setdefault(sid, []).extend(keys)
+                        con.commit()
+            except Exception as e:
+                logger.warning("[celery_status] bulk retry_ingest_ledger_entries failed for %s: %s", sid, e)
+
+    dispatched = 0
+    if requeued_by_service:
+        try:
+            from backend.core.ingest import convert_batch_files, convert_batch_rum_files
+
+            for sid, keys in requeued_by_service.items():
+                req_keys = [k for k in keys if not _is_rum_object_key(k)]
+                rum_keys = [k for k in keys if _is_rum_object_key(k)]
+                for i in range(0, len(req_keys), _LEDGER_DISPATCH_BATCH_SIZE):
+                    batch = req_keys[i : i + _LEDGER_DISPATCH_BATCH_SIZE]
+                    convert_batch_files.delay(sid, batch)
+                    dispatched += len(batch)
+                for i in range(0, len(rum_keys), _LEDGER_DISPATCH_BATCH_SIZE):
+                    batch = rum_keys[i : i + _LEDGER_DISPATCH_BATCH_SIZE]
+                    convert_batch_rum_files.delay(sid, batch)
+                    dispatched += len(batch)
+        except Exception as e:
+            logger.debug("[celery_status] best-effort Celery dispatch on ledger retry skipped: %s", e)
+
+    return {"ok": True, "affected": affected, "dispatched": dispatched}

@@ -5,11 +5,21 @@ sampler and health snapshot can reuse it without importing through the
 routers package. Admin-only via RemoteAccessMiddleware path gating.
 """
 
-from fastapi import Depends
+from fastapi import Depends, Query
 
-from backend.celery_status import get_celery_status
+from backend.celery_status import (
+    get_celery_status,
+    list_ingest_ledger_entries,
+    purge_ingest_ledger_entries,
+    retry_ingest_ledger_entries,
+)
 from backend.deps import require_admin
-from backend.models.admin_status import CeleryStatusResponse
+from backend.models.admin_status import (
+    CeleryStatusResponse,
+    IngestLedgerActionRequest,
+    IngestLedgerActionResponse,
+    IngestLedgerListResponse,
+)
 from backend.routers.admin._router import router
 
 
@@ -32,3 +42,44 @@ def api_celery_status():
         res["_debug_sqlite"] = ds
         res["_debug_postgres"] = ds
     return res
+
+
+@router.get(
+    "/admin/celery/ledger",
+    response_model=IngestLedgerListResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_list(
+    status: str | None = Query(
+        default="problem",
+        description="Filter by ledger status ('problem', 'all', 'dead_letter', 'quarantined', 'discovered', 'claimed', 'committed')",
+    ),
+    service_id: str | None = Query(default=None, description="Optional service_id filter"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """List entries in ``ingest_ledger`` across services (defaults to dead_letter + quarantined)."""
+    return list_ingest_ledger_entries(status=status, service_id=service_id, limit=limit, offset=offset)
+
+
+@router.post(
+    "/admin/celery/ledger/retry",
+    response_model=IngestLedgerActionResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_retry(body: IngestLedgerActionRequest):
+    """Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and
+    best-effort dispatch Celery convert batches."""
+    items = [item.model_dump() for item in body.items] if body.items else None
+    return retry_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)
+
+
+@router.post(
+    "/admin/celery/ledger/purge",
+    response_model=IngestLedgerActionResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_purge(body: IngestLedgerActionRequest):
+    """Delete ``dead_letter`` / ``quarantined`` entries from ``ingest_ledger``."""
+    items = [item.model_dump() for item in body.items] if body.items else None
+    return purge_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)

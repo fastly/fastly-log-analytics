@@ -38,6 +38,9 @@ export const queryKeys = {
     shareLive: () => ['admin', 'share', 'live'] as const,
     metricHistoryBatch: (window: string) => ['admin', 'metric-history-batch', window] as const,
     celeryStatus: () => ['admin', 'celery-status'] as const,
+    celeryLedger: (statusFilter: string, serviceId: string | null | undefined, offset: number) =>
+      ['admin', 'celery-ledger', statusFilter, serviceId ?? null, offset] as const,
+    celeryLedgerAll: () => ['admin', 'celery-ledger'] as const,
     healthSnapshot: () => ['admin', 'health-snapshot'] as const,
     metadataStorage: () => ['admin', 'metadata-storage'] as const,
     debugSettings: () => ['admin', 'debug-settings'] as const,

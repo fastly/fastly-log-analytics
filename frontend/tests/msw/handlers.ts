@@ -640,6 +640,18 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/celery/status`, () =>
     HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
+  http.get(
+    `${API_BASE}/api/admin/celery/ledger`,
+    okFor('/api/admin/celery/ledger', 'get', { items: [], total: 0 }),
+  ),
+  http.post(
+    `${API_BASE}/api/admin/celery/ledger/retry`,
+    okFor('/api/admin/celery/ledger/retry', 'post', { ok: true, affected: 0, dispatched: 0 }),
+  ),
+  http.post(
+    `${API_BASE}/api/admin/celery/ledger/purge`,
+    okFor('/api/admin/celery/ledger/purge', 'post', { ok: true, affected: 0, dispatched: 0 }),
+  ),
   http.post(`${API_BASE}/api/admin/duckdb/recycle`, okFor('/api/admin/duckdb/recycle', 'post', { ok: true, status: 'skipped' })),
   http.get(`${API_BASE}/api/admin/duckdb/status`, okFor('/api/admin/duckdb/status', 'get', { ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
   http.post(
