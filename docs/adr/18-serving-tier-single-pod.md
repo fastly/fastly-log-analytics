@@ -61,7 +61,7 @@ For jobs whose output is **pod-local**, the same mutex guarantees the opposite o
 
 The rollup jobs are the worst case, because rollups are a *performance* mechanism with a working fallback. One pod ends up with bundled rollups; the rest find no bundle and fall back to scanning raw parquet — the same runtime fallback described in trap #24, which exists precisely because it is much slower than the bundled read. Nothing is wrong-looking on those pods: correct answers, silently and dramatically slower, exactly where the 1M-RPS target needs rollups most. A latency regression that appears on a fraction of requests proportional to `(N-1)/N` and cannot be reproduced by hitting one pod directly is close to the worst possible shape for on-call.
 
-Note the split ADR-15 §3 describes is between RedBeat-routed and APScheduler-routed jobs, and it is correct as designed — these jobs stay on the in-process APScheduler *on purpose*, so they touch the right pod's files. The defect is not the routing. It is that the lease, taken inside the job body, is scoped fleet-wide while the job's effect is scoped to one pod. Correct behavior for this class is a **per-pod** lease (a pod identity in the lease key), or no lease at all, and no such option exists today.
+Note that pod-local jobs stay on the in-process APScheduler *on purpose*, so they touch the right pod's files. The defect is not the routing. It is that the lease, taken inside the job body, is scoped fleet-wide while the job's effect is scoped to one pod. Correct behavior for this class is a **per-pod** lease (a pod identity in the lease key), or no lease at all, and no such option exists today.
 
 ## Options considered
 
@@ -149,7 +149,7 @@ must use `lsof`/process inspection to identify the actual holder.
 
 - `replicaCount` in the chart applies to the stateless frontend only. Scaling the backend requires resolving this ADR first, not editing a value.
 - Any future work that says "scale out the backend" must address blockers 1–3 together. Fixing one in isolation makes the failure quieter, not rarer.
-- New cron jobs must be classified by **where their output lands**, not only by ADR-15 §3's RedBeat/APScheduler routing. A job taking the shared lease while writing pod-local output is the bug in blocker 3, and it is currently easy to write by copying any existing job body.
+- New cron jobs must be classified by **where their output lands**. A job taking the shared lease while writing pod-local output is the bug in blocker 3, and it is currently easy to write by copying any existing job body.
 
 ## Lower-severity documented gaps (not fixed here)
 

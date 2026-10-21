@@ -25,20 +25,9 @@ ADR-03 (Tenancy) and the original ingest design assume one backend process per s
 
 Independently of metadata, `DUCKLAKE_CATALOG` must be a Postgres DSN whenever `DEPLOYMENT_MODE=high_throughput` (enforced by `config.validate_deployment_mode()`, see [ADR-14](14-ducklake-replacement.md)). These are two separate Postgres roles serving two separate concerns — cron/ingest bookkeeping vs. the commit-path catalog — that happen to both require a real multi-writer database once you have more than one writer process. They may point at the same Postgres instance (and even the same database — every DuckLake table is `ducklake_`-prefixed, so it does not collide with the metadata schema; `docker-compose.multipod.yml` shares one), but the code does not assume they do: `_ducklake_attach` reads `DUCKLAKE_CATALOG` and nothing else. It briefly fell back to `METADATA_DSN`, which made this claim false in `DEPLOYMENT_MODE=standard`; the fallback was removed rather than the claim weakened, because standard mode would then silently plant the catalog inside the metadata database and abandon the `.ducklake` file holding the real table state.
 
-### 3. Cron work is split by write target, not by "internal vs. external" mode
+### 3. Unified In-Process APScheduler + Celery Worker Dispatch
 
-A naive multi-pod cutover would route every scheduled job through Celery/RedBeat once "external" mode is on. That's wrong: jobs like rollup computation, local compaction, alert evaluation, and snapshot maintenance read and write the **pod-local** DuckDB file and cache — routing them to a worker pool would have them fight the backend's own readers for that file's single-writer lock, or simply operate on the wrong pod's data.
-
-`backend/cron/scheduler.py` encodes the split explicitly:
-
-```python
-_REDBEAT_JOB_PREFIXES = (
-    "log_discovery_", "commit_", "ledger_sweep_", "full_sync_", "gap_heal_",
-    "rum_discovery_", "ledger_rum_sweep_",   # added by 587d0b5f (RUM ledger port)
-)
-```
-
-Jobs whose name starts with one of these prefixes route to RedBeat (Celery's Redis-backed periodic scheduler) and run on worker processes — they only ever touch the ingest ledger and FOS, never a pod-local file. Everything else stays on the backend's own in-process APScheduler, in every mode, including "external." `_add_job()` enforces this at registration time; `get_job()` only returns `None` for RedBeat-routed job IDs (APScheduler-routed jobs are always locally introspectable).
+Scheduled triggers run on the single serving pod's unified in-process APScheduler across both `standard` and `high_scale` modes. Jobs like rollup computation, local compaction, alert evaluation, and snapshot maintenance read and write the **pod-local** DuckDB file and cache directly on the serving pod, while high-scale discovery and sweep jobs enqueue batch conversion tasks onto Celery workers via Valkey.
 
 ### 4. Cron leases must be atomic under Postgres autocommit
 
@@ -57,7 +46,7 @@ CREATE UNIQUE INDEX idx_job_runs_running_lease ON job_runs(service_id, job_name)
 - A deployment can run single-pod/SQLite (default), or multi-pod with `METADATA_DSN` + `DUCKLAKE_CATALOG` both pointed at Postgres and `DEPLOYMENT_MODE=high_throughput`. There is no partial state where only one of the two is Postgres-backed while high-throughput mode is enabled — `validate_deployment_mode()` refuses to boot in that configuration. (This was asserted here before the `METADATA_DSN` half of the gate existed; it is now enforced and covered by `tests/test_validate_deployment_mode.py`.)
 - **"Multi-pod" in this ADR means the INGEST tier.** The serving tier — the backend Deployment that answers API requests — remains single-pod for reasons this ADR does not address: the per-service `.duckdb` file is process-exclusive, and several cron jobs write pod-local output under a cross-pod lease. See [ADR-18](18-serving-tier-single-pod.md) before scaling backend replicas past 1.
 - The Postgres metadata schema is created at startup, by every process that needs it. `metadata/base.py` wires `_init_schema` as the SQLite pool's `schema_fn` only, so SQLite self-initializes and Postgres did not — making `scripts/setup_pg_schema.py` a mandatory deploy step, which, when skipped, produced a stack that booted clean and then failed every metadata query with `relation "cron_runs" does not exist`. `backend/core/metadata/pg_schema.py::ensure_pg_schema()` now closes that gap: the backend lifespan and each Celery worker's `worker_process_init` call it, it runs once per process, and it tolerates the `duplicate_table` / `duplicate_object` / `unique_violation` SQLSTATEs that concurrent pods can still produce from `CREATE ... IF NOT EXISTS`. The DDL lives in that module so the script and the boot path can never drift; the script remains the explicit ops entry point. Any table added by a SQLite migration rather than by `_SCHEMA` still needs an explicit DDL entry there (`slow_queries` and `committed_buffers` both do).
-- Every future scheduled job must be classified into the RedBeat/APScheduler split at the point it's added — a job that touches the pod-local DuckDB file or cache but gets accidentally prefixed into `_REDBEAT_JOB_PREFIXES` will silently run on the wrong pod's data.
+- Every future scheduled job runs on the serving pod's in-process APScheduler and dispatches worker tasks only when operating on shared Postgres/FOS state.
 - Any future lease/dedup mechanism added to `job_runs` or a similar table must default to "assume concurrent writers," not "assume SQLite's file lock will save us" — that assumption already broke once here.
 
 ## Out of scope

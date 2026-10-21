@@ -21,7 +21,7 @@ discovered → claimed → committed
 
 - **`discover_prefix()`** LISTs a FOS prefix and inserts new object keys as `discovered`. This is the only writer of new rows.
 - **A convert task claims a row** (`claimed`, `claimed_by`, `claimed_at` stamped) before doing the actual transform-and-commit work, then marks it `committed` (`committed_at`, `snapshot_ref`) on success, or increments `attempts`/`last_error` and routes to `quarantined`/`dead_letter` on failure. Discovery and the sweeper dispatch **batches** of `LEDGER_CONVERT_BATCH_SIZE` keys (`convert_batch_objects()`, one DuckLake commit for the whole batch — see "Batched convert" below); `convert_object()` remains the single-key form the sweeper's dead-key retries and in-flight messages across a deploy still use.
-- **`sweep_ledger_once()` is the crash net**, run on its own RedBeat schedule (`ledger_sweep_{id}`, see [ADR-15](15-multi-writer-topology.md)'s job-prefix split). It performs three independent recoveries every tick:
+- **`sweep_ledger_once()` is the crash net**, run on its own APScheduler schedule (`ledger_sweep_{id}`, see [ADR-15](15-multi-writer-topology.md)). It performs three independent recoveries every tick:
   1. Rows stuck `claimed` past `LEDGER_RECLAIM_AFTER_S` (worker died mid-convert) are reset to `discovered` — committed *before* re-dispatch, so a slow-but-alive worker's real claim can't race the reset and get silently reverted.
   2. Rows stuck `discovered` past `LEDGER_REDISPATCH_AFTER_S` (their Celery message was lost — broker restart, crash after the DB insert but before the task landed) are re-dispatched.
   3. A lookback-window FOS LIST is diffed against the ledger to catch objects discovery itself never saw (a missed LIST page, a discovery task that crashed before completing).
@@ -52,4 +52,4 @@ The failure semantics split by blast radius. A key that is *gone from FOS* is de
 ## Out of scope
 
 - Per-object retry backoff scheduling (currently: `attempts`/`last_error` are recorded, but backoff timing is Celery's default retry policy, not ledger-driven).
-- ~~RUM ingest (`client_vitals`/`client_errors`)~~ — **ported** in commit `587d0b5f`: `backend/cron/jobs/rum_ledger.py` drives beacon discovery/commit through this same ledger, with `rum_discovery_` and `ledger_rum_sweep_` added to `_REDBEAT_JOB_PREFIXES`. The v2 `rum_sync`/`rum_commit` jobs remain as the sync-mode path.
+- ~~RUM ingest (`client_vitals`/`client_errors`)~~ — **ported** in commit `587d0b5f`: `backend/cron/jobs/rum_ledger.py` drives beacon discovery/commit through this same ledger (`rum_discovery_` and `ledger_rum_sweep_`). The v2 `rum_sync`/`rum_commit` jobs remain as the sync-mode path.

@@ -1,4 +1,4 @@
-"""Admin endpoint exposing Celery worker/queue/RedBeat/ledger status.
+"""Admin endpoint exposing Celery worker/queue, APScheduler, and ledger status.
 
 The computation lives in backend/celery_status.py (top-level) so the SSE
 sampler and health snapshot can reuse it without importing through the
@@ -30,7 +30,7 @@ from backend.routers.admin._router import router
     dependencies=[Depends(require_admin)],
 )
 def api_celery_status():
-    """Expose Celery queue depths, worker status, RedBeat schedule, and
+    """Expose Celery queue depths, worker status, APScheduler schedule, and
     ingest-ledger summary."""
     res = dict(get_celery_status())
     from backend.models.common import _debug_responses_enabled

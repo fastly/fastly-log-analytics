@@ -91,7 +91,7 @@ Name of the PVC holding configs/data/cache.
 {{- end }}
 
 {{/*
-Env block shared by backend, worker, and beat: broker/DSN via secretKeyRef
+Env block shared by backend and worker: broker/DSN via secretKeyRef
 plus the DuckLake settings.
 
 In high-scale mode the metadata DSN is marked non-optional. That is the only check the
@@ -103,8 +103,6 @@ instead of starting it and letting validate_deployment_mode() CrashLoop it.
 {{- $highScale := eq .Values.config.deploymentMode "high_scale" -}}
 - name: DEPLOYMENT_MODE
   value: {{ .Values.config.deploymentMode | quote }}
-- name: SCHEDULER_MODE
-  value: {{ .Values.config.schedulerMode | quote }}
 {{- if include "fastly-log-analytics.hasSecret" . }}
 - name: CELERY_BROKER_URL
   valueFrom:

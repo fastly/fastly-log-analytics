@@ -36,7 +36,6 @@ _PG = "postgresql://fla:pw@postgres:5432/ducklake"
 # a scatter of --set flags.
 CELERY = (
     "config.deploymentMode=high_scale",
-    "config.schedulerMode=external",
     "config.sseBackplane=valkey",
     f"config.ducklakeCatalog={_PG}",
     f"secrets.metadataDsn={_PG}",
@@ -114,7 +113,6 @@ def test_default_values_render_a_self_contained_install():
     assert env["DEPLOYMENT_MODE"]["value"] == "standard"
     assert "INGEST_MODE" not in env
     assert "SERVING_MODE" not in env
-    assert env["SCHEDULER_MODE"]["value"] == "inprocess"
     assert env["SSE_BACKPLANE"]["value"] == "local"
 
     # No datastore wiring at all: an empty DUCKLAKE_CATALOG or a secretKeyRef
@@ -124,10 +122,10 @@ def test_default_values_render_a_self_contained_install():
     assert "METADATA_DSN" not in env
     assert not [doc for doc in docs if doc["kind"] == "Secret"]
 
-    # No worker/beat pods to sit in CrashLoopBackOff against a broker that
+    # No worker pods to sit in CrashLoopBackOff against a broker that
     # the default install does not have.
     names = _deployments(docs)
-    assert not [name for name in names if "worker" in name or "beat" in name], names
+    assert not [name for name in names if "worker" in name], names
 
 
 def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
@@ -221,16 +219,6 @@ def test_unrecognised_deployment_mode_fails_at_template_time():
     assert "Celery" in stderr
 
 
-def test_external_scheduler_outside_celery_mode_fails_at_template_time():
-    """SCHEDULER_MODE=external routes the discovery/ingest family to RedBeat;
-    with no worker fleet consuming it, ingest stops and the scheduler still
-    reports success."""
-    stderr = _render_error("config.schedulerMode=external")
-
-    assert "config.schedulerMode=external" in stderr
-    assert "config.deploymentMode=high_scale" in stderr
-
-
 def test_valkey_backplane_without_a_broker_fails_at_template_time():
     stderr = _render_error("config.sseBackplane=valkey")
 
@@ -242,9 +230,8 @@ def test_celery_mode_renders_the_full_ingest_fleet():
     names = _deployments(docs)
 
     assert [name for name in names if "worker" in name], names
-    assert [name for name in names if "beat" in name], names
 
-    for component in ("backend", "worker", "beat"):
+    for component in ("backend", "worker"):
         env = _env(_deployment(docs, component))
         assert env["DEPLOYMENT_MODE"]["value"] == "high_scale"
         assert "INGEST_MODE" not in env

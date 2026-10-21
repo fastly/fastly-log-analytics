@@ -18,7 +18,6 @@ image:
 
 config:
   deploymentMode: high_scale
-  schedulerMode: external
   sseBackplane: valkey
   ducklakeCatalog: "postgresql://fla:PLACEHOLDER@postgres:5432/ducklake"
   # NOT the pod CIDR -- this is Google Cloud Load Balancer's documented

@@ -129,9 +129,9 @@ services:
       service: postgres
     image: postgres:17-alpine
     # max_connections raised from the default 100: the metadata pool is sized
-    # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker +
-    # beat each hold their own, while DuckLake's catalog connections draw on
-    # the same budget. 100 is not enough for 3 * 32 + DuckLake + exporters.
+    # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker
+    # each hold their own, while DuckLake's catalog connections draw on
+    # the same budget. 100 is not enough for 2 * 32 + DuckLake + exporters.
     command:
     - postgres
     - -c

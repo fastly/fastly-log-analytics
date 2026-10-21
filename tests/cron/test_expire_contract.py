@@ -498,8 +498,7 @@ def test_manual_endpoint_rejects_read_only_service():
     assert exc.value.status_code == 403
 
 
-@pytest.mark.parametrize("mode", ["inprocess", "external"])
-def test_dev_no_crons_blocks_expire_registration_and_execution(mode, monkeypatch, tmp_path):
+def test_dev_no_crons_blocks_expire_registration_and_execution(monkeypatch, tmp_path):
     service_id = "svc-expire-contract"
     src = _source(tmp_path, service_id)
     cfg = {
@@ -510,7 +509,6 @@ def test_dev_no_crons_blocks_expire_registration_and_execution(mode, monkeypatch
     }
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     scheduler = Scheduler()
-    scheduler.mode = mode
     monkeypatch.setattr("backend.config.list_configs", lambda: [cfg])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _sid: src)
     monkeypatch.setattr("backend.core.duckdb.is_configured", lambda _source: True)
@@ -520,7 +518,6 @@ def test_dev_no_crons_blocks_expire_registration_and_execution(mode, monkeypatch
     scheduler._sync_jobs()
 
     assert f"expire_{service_id}" not in scheduler._job_ids
-    assert scheduler._routes_to_redbeat(f"expire_{service_id}") is False
 
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock())
     monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", MagicMock())
@@ -531,7 +528,7 @@ def test_dev_no_crons_blocks_expire_registration_and_execution(mode, monkeypatch
     iceberg_mod.run_cloud_maintenance.assert_not_called()
 
 
-def test_external_mode_registers_expire_on_the_serving_scheduler(monkeypatch, tmp_path):
+def test_registers_expire_on_the_serving_scheduler(monkeypatch, tmp_path):
     service_id = "svc-expire-contract"
     src = _source(tmp_path, service_id)
     src["access_level"] = "read_write"
@@ -543,7 +540,6 @@ def test_external_mode_registers_expire_on_the_serving_scheduler(monkeypatch, tm
     }
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     scheduler = Scheduler()
-    scheduler.mode = "external"
     monkeypatch.setattr("backend.config.list_configs", lambda: [cfg])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _sid: src)
     monkeypatch.setattr("backend.core.duckdb.is_configured", lambda _source: True)
@@ -558,7 +554,6 @@ def test_external_mode_registers_expire_on_the_serving_scheduler(monkeypatch, tm
 
     job_id = f"expire_{service_id}"
     assert registrations[job_id] == (expire._run_expire_snapshots, "interval")
-    assert scheduler._routes_to_redbeat(job_id) is False
 
 
 def test_usage_log_classifies_bulk_fos_deletes_as_class_a():

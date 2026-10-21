@@ -9,8 +9,7 @@ Verifies all contract requirements and operational invariants:
 2. Dynamic registration gating on cron_insights_prewarmer.enabled (default true) and
    rescheduling on interval_seconds update.
 3. Dual-role registration: registered for both Admin (read_write) and Analyst Path A (read_only).
-4. Pod safety: strictly runs on web serving pod's APScheduler, never on Celery workers
-   (_routes_to_redbeat is False, not in _REDBEAT_JOB_PREFIXES).
+4. Pod safety: runs on the web serving pod's APScheduler.
 5. Local safety: permitted under FLA_DEV_NO_CRONS=1 as a local-safe read-only cache prewarmer
    (registered via _register_dev_local_safe_jobs, does not skip under dev_mode_no_crons).
 6. Politeness deferral via should_defer_cron("insights_prewarmer", service_id).
@@ -259,24 +258,18 @@ def test_contract_dual_role_registration_admin_and_analyst():
     assert "insights_prewarmer_svc-role-analyst" in s._job_ids, "Analyst Path A must register insights_prewarmer"
 
 
-# ── Requirement 4: Pod Safety (Never Celery / RedBeat) ─────────────────────────
+# ── Requirement 4: Pod Safety (APScheduler in High-Scale mode) ───────────────
 
 
-def test_contract_pod_safety_never_routes_to_redbeat():
-    """Requirement 4: In distributed High-Scale mode (DEPLOYMENT_MODE=high_scale / mode=external),
-    insights_prewarmer must NEVER be routed to RedBeat or Celery workers. It runs strictly on the web
-    serving pod's APScheduler to prewarm pod-local in-memory cache.
+def test_contract_pod_safety_registers_on_apscheduler():
+    """Requirement 4: In distributed High-Scale mode (DEPLOYMENT_MODE=high_scale),
+    insights_prewarmer runs strictly on the web serving pod's APScheduler to
+    prewarm pod-local in-memory cache.
     """
     s = Scheduler()
-    s.mode = "external"
-
-    # Verify routing predicate
-    assert not s._routes_to_redbeat("insights_prewarmer_svc-1")
-    assert not "insights_prewarmer_svc-1".startswith(s._REDBEAT_JOB_PREFIXES)
 
     cfg = _fake_cfg("svc-highscale-pod", access_level="read_write")
     with (
-        patch("redbeat.RedBeatSchedulerEntry.save"),
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-highscale-pod")),
         patch("backend.core.duckdb.is_configured", return_value=True),
@@ -285,7 +278,6 @@ def test_contract_pod_safety_never_routes_to_redbeat():
     ):
         s._sync_jobs()
 
-    # Must be registered in APScheduler, NOT Celery RedBeat
     assert "insights_prewarmer_svc-highscale-pod" in s._job_ids
     job = s._sched.get_job("insights_prewarmer_svc-highscale-pod")
     assert job is not None

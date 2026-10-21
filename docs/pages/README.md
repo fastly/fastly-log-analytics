@@ -71,7 +71,7 @@ docs/pages/
 | `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Live-certified** |
 | `/admin` | [Admin Overview](admin/overview.md) | Sync status, compaction, storage usage, services CRUD | **Live-certified** |
 | `/admin/queries` | [Live Query Monitor](admin/queries.md) | Running & recent DuckDB/Postgres/ClickHouse queries, durations, locks | **Live-certified** |
-| `/admin/queue` | [Task Queue](admin/queue.md) | Ingestion ledger claims, Celery queue depth, RedBeat | **Live-certified** |
+| `/admin/queue` | [Task Queue](admin/queue.md) | Ingestion ledger claims, Celery queue depth, in-process schedules | **Live-certified** |
 | `/admin/rum` | [RUM Ingestion](admin/rum.md) | Beacon ingestion status, sample rates, client scripts | **Live-certified** |
 | `/admin/session-scoring` | [Session Scoring Config](admin/session-scoring.md) | Matrix weights, threshold overrides, model retrain | **Live-certified** |
 | `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Live-certified** |
@@ -174,7 +174,7 @@ Every page's underlying queries, aggregations, and data pipelines must function 
   - Serving queries execute against thread-local DuckDB connections stitching the local buffer and DuckLake table.
   - PostgreSQL 16 (`METADATA_DSN`, per ADR-22) manages operational service metadata, cron logs, usage tracking, and NGWAF bot caches.
 - **High-Scale Deployment Mode (`DEPLOYMENT_MODE=high_scale`):**
-  - Distributed Celery + Valkey + RedBeat worker ingest with shared Postgres DuckLake catalog (`DUCKLAKE_CATALOG`) and `ingest_ledger`.
+  - Distributed Celery + Valkey worker ingest with shared Postgres DuckLake catalog (`DUCKLAKE_CATALOG`) and `ingest_ledger`.
   - **ClickHouse Serving & Fact Engine:** Ingests massive event streams into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `cmcd_projection_facts`, and minute-level dimensions for origin, security, network, and performance). Supports bounded diagnostic replay via `PgManifest`.
   - Serving queries execute against ephemeral in-memory DuckDB instances reading durable DuckLake parquet directly from cloud storage, with ClickHouse fact exploration via `/high-scale/request-facts`.
 - **No Local Filesystem Assumptions:** Analytics pages and queries must never assume local cache files or local buffer parquet exist when running under the high-scale topology.
@@ -199,7 +199,7 @@ Fastly Log Analytics features an integrated observability and telemetry architec
 ### 5.6 Full Tooling & Automation Ecosystem Contract
 All page specifications, tests, and deployment verification procedures must account for our full operational tooling stack:
 - **Fastly VCL Linter & Dialect Simulator (`falco`):** Any VCL generated for log format strings, custom field expressions (`vcl_log_expression`), or edge snippets must pass `falco lint` and simulation tests before edge deployment.
-- **Distributed Ingestion & Scheduler (Celery, RedBeat, Valkey/Redis):** Asynchronous task distribution, high-scale ingest workers, crash-net recovery sweeps (`ledger_sweep`), and shared distributed state.
+- **Distributed Ingestion & Scheduler (Celery, APScheduler, Valkey/Redis):** Asynchronous task distribution, high-scale ingest workers, crash-net recovery sweeps (`ledger_sweep`), and shared distributed state.
 - **Telemetry & Monitoring (OpenTelemetry, Prometheus, Grafana):** OTel tracing propagation, Prometheus scrape rules (`observability/clickhouse.rules.yml`, `observability/prometheus.yml`), and multi-pod dashboards (`observability/dashboards/fla-multipod.json`).
 - **End-to-End Testing & Verification (Playwright, Vitest, Pytest):** Dual-role Playwright E2E suites verifying Admin vs Analyst Path B access, network HAR performance capture, Core Web Vitals audits (LCP, INP, CLS), and unit tests (`pytest -n` with strict database test isolation).
 
@@ -207,7 +207,7 @@ All page specifications, tests, and deployment verification procedures must acco
 In addition to user-facing page requests, Fastly Log Analytics relies on 25 background automation jobs that continuously drive ingest, compaction, table optimization, snapshot expiry, and metadata housekeeping across Standard and High-Scale modes.
 - **Authoritative Specification:** See [docs/cron/README.md](../cron/README.md) for the exhaustive breakdown of all scheduled jobs, intervals, database locks, execution lifecycles, and testing runbooks.
 - **Cron Testing Mandate:** Any testing session or automated test suite verifying system health MUST verify:
-  1. **Scheduler Registration:** All expected jobs for the deployment mode (`standard` vs `high_scale`) are registered in `APScheduler` or `RedBeat`.
+  1. **Scheduler Registration:** All expected jobs for the deployment mode (`standard` vs `high_scale`) are registered in `APScheduler`.
   2. **Manual Triggerability:** Admin trigger endpoints (`POST /api/admin/sync/{id}`, `POST /api/admin/commit/{id}`, etc.) respond with HTTP 200 and complete successfully.
   3. **Zero Dark Cron Work:** All database operations and FOS API calls made by background jobs must be attributed in `usage_log.db` and recorded in `cron_runs`.
   4. **Error Recovery & Dead-Letter:** Crash-recovery jobs (`ledger_sweep`, `gap_heal`) must be verified to reclaim orphaned tasks without data loss.

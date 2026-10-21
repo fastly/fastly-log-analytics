@@ -22,7 +22,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Every 15 minutes (`minutes=15`).
 - **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "high_scale"`.
-- **Worker Routing:** Evaluated via RedBeat on the Celery worker fleet (`_REDBEAT_JOB_PREFIXES`).
+- **Worker Routing:** Scheduled on the in-process APScheduler and dispatches conversion tasks to the Celery worker fleet.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=300s`.
 
@@ -32,7 +32,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Not applicable in synchronous SQLite mode. Cleanly skips if called. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Worker | Scans PostgreSQL `ingest_ledger` where `object_key LIKE '%raw/rum/%'`. | PostgreSQL row-level locks on `ingest_ledger`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | APScheduler + Celery Worker | Scans PostgreSQL `ingest_ledger` where `object_key LIKE '%raw/rum/%'`. | PostgreSQL row-level locks on `ingest_ledger`. |
 
 ---
 

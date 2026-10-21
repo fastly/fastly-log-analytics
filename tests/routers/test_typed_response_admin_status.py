@@ -27,7 +27,7 @@ def test_celery_status_matches_producer(client, monkeypatch):
             "count": 1,
         },
         "queues": {"q.ingest": 3},
-        "schedules": [{"name": "job", "task": "backend.tasks.job"}],
+        "inprocess_schedules": [{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
         "ledger": {"committed": 5},
     }
     monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)
@@ -41,7 +41,7 @@ def test_celery_status_workers_error_branch(client, monkeypatch):
         "broker_reachable": False,
         "workers": {"active_tasks": {}, "stats": {}, "registered": {}, "scheduled": {}, "count": 0, "error": "down"},
         "queues": {},
-        "schedules": [],
+        "inprocess_schedules": [],
         "ledger": {},
     }
     monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)

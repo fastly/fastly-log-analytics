@@ -54,7 +54,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   for (const [key, value] of Object.entries(rejected)) vi.stubEnv(key, value)
   for (const key of ['FLA_DEV_NO_CRONS', 'FASTLY_MOCK_MODE']) vi.stubEnv(key, '0')
-  vi.stubEnv('SCHEDULER_MODE', 'external')
   vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
   vi.stubEnv('SSE_BACKPLANE', 'valkey')
   vi.stubEnv('OTEL_EXPORTER', 'otlp')
@@ -102,7 +101,6 @@ describe('backend harness child isolation', () => {
         DEBUG_RESPONSES: 'true',
         FASTLY_MOCK_MODE: '1',
         FLA_DEV_NO_CRONS: '1',
-        SCHEDULER_MODE: 'inprocess',
         DEPLOYMENT_MODE: 'standard',
         SSE_BACKPLANE: 'local',
         OTEL_EXPORTER: 'none',

@@ -140,7 +140,7 @@ def get_pg_pool() -> ConnectionPool:
         # threads against a pool of 32, which is exactly how PoolTimeout came
         # back after the first sizing pass. 64 clears 40 + slack.
         #
-        # Keep METADATA_PG_POOL_MAX * (backend + worker + beat processes) below
+        # Keep METADATA_PG_POOL_MAX * (backend + worker processes) below
         # the server's max_connections (192 of 300 at this default), and
         # remember DuckLake's own catalog connections share that budget.
         max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "64"))

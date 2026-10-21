@@ -25,7 +25,7 @@ not the scheduler ID used by this branch.
 | Mode | Scheduler and execution | Commit work | Data and metadata |
 |---|---|---|---|
 | **Standard** | In-process APScheduler | `commit_buffer` drains the local buffer to DuckLake. It uses the per-service commit lock, bounded file chunks, and a separate DuckLake write attach for each chunk. | Rows commit to the configured DuckLake data path. The catalog and operational metadata use PostgreSQL. Consumed local buffer paths are tombstoned and swept after the grace window; they are not immediately unlinked by the commit. |
-| **High-Scale (`high_scale`)** | In external scheduler mode, `commit_{service_id}` is routed through RedBeat to a Celery worker and runs inline while the cron lease is held. | Worker ingest has already written rows to DuckLake. The commit job calls `merge_lake_files`, which flushes inlined rows to durable Parquet before adjacent-file compaction, then publishes ledger progress. It calls `finalize_committed_raw` afterward; raw deletion obeys its configured grace period. | DuckLake uses the shared PostgreSQL catalog and configured durable data path. The job does not drain Standard buffer files. |
+| **High-Scale (`high_scale`)** | Scheduled on the in-process APScheduler (`commit_{service_id}`) while the cron lease is held. | Worker ingest has already written rows to DuckLake. The commit job calls `merge_lake_files`, which flushes inlined rows to durable Parquet before adjacent-file compaction, then publishes ledger progress. It calls `finalize_committed_raw` afterward; raw deletion obeys its configured grace period. | DuckLake uses the shared PostgreSQL catalog and configured durable data path. The job does not drain Standard buffer files. |
 
 Standard and High-Scale are separate commit paths. Do not route High-Scale
 through `commit_buffer` or treat its worker-side ledger writes as equivalent
@@ -40,8 +40,7 @@ natively preventing upstream duckdb/ducklake#1495 across concurrent attachments.
 
 The scheduler registers `commit_{service_id}` at the configured interval with
 `max_instances=1`, `coalesce=True`, 30-second jitter, and
-`misfire_grace_time=commit_interval_mins * 60`. In external mode, the
-`commit_` prefix is one of the explicitly routed RedBeat job families.
+`misfire_grace_time=commit_interval_mins * 60`.
 
 The cron skips missing configuration/source, read-only services (unless
 explicitly forced), and disabled `cron_sync` (unless forced). A cron-run lease

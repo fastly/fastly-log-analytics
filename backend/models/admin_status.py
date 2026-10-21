@@ -34,11 +34,6 @@ class CeleryWorkers(WireSafeModel):
     error: str | None = None
 
 
-class CeleryScheduleEntry(WireSafeModel):
-    name: str
-    task: str
-
-
 class InProcessScheduleEntry(WireSafeModel):
     name: str
     trigger: str
@@ -62,11 +57,9 @@ class CeleryStatusResponse(WireSafeModel):
     summed across services, so both keep open string keys."""
 
     deployment_mode: Literal["standard", "high_scale"] = "standard"
-    scheduler_mode: Literal["inprocess", "external"] = "inprocess"
     broker_reachable: bool | None = None
     workers: CeleryWorkers | None = None
     queues: dict[str, int] | None = None
-    schedules: list[CeleryScheduleEntry] | None = None
     ledger: dict[str, int] | None = None
     inprocess_schedules: list[InProcessScheduleEntry] | None = None
     inprocess_active_runs: list[InProcessActiveRun] | None = None

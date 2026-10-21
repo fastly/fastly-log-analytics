@@ -778,7 +778,7 @@ Comprehensive system, resource, and pipeline diagnostic tool designed to verify 
 
 **Audited Dimensions:**
 - **System Vitals:** CPU load averages (1m / 5m / 15m) normalized against total vCPUs, RAM usage percentages, and root/data mount disk saturation.
-- **Scheduler Health:** APScheduler / RedBeat heartbeat tick age, flagging schedulers lagging beyond threshold (>30s) or in-flight job freezes.
+- **Scheduler Health:** APScheduler heartbeat tick age, flagging schedulers lagging beyond threshold (>30s) or in-flight job freezes.
 - **Cron History & Failures:** Scans the last 24h of task execution logs in metadata DBs, alerting on failed jobs (e.g. read-only constraint violations, sync timeouts).
 - **Ingestion Currency vs FOS State:** Compares latest request/RUM timestamps to wall clock. Accurately distinguishes between genuine bucket idle states (0 raw `.gz` files in FOS bucket) and stalled ingest pipelines.
 - **Parquet Storage & Compaction:** Monitors hourly partition sprawl in local cache, daily/weekly rollup tier status, and durable DuckLake/Iceberg data file count and byte footprint.

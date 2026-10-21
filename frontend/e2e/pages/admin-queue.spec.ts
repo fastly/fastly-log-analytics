@@ -9,7 +9,7 @@
  *    [content-visibility:auto]) and warm-load performance budget (CLS <= 0.05, FCP < 1200ms).
  * 3. Backend data contracts: /api/admin/celery/status and /api/admin/metric-history/batch?since=1h.
  * 4. Queue depth sparklines, queue depths table, active workers, ingest ledger status cards, and
- *    RedBeat schedules sections rendering cleanly across Standard and High-Scale modes.
+ *    In-Process schedules sections rendering cleanly across Standard and High-Scale modes.
  * 5. Interactive manual refresh workflow (data-testid="admin-queue-refresh-btn") with
  *    X-Page-Load-ID telemetry attribution.
  */
@@ -185,7 +185,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     expect(typeof statusBody.workers).toBe('object')
     expect(typeof statusBody.workers.count).toBe('number')
     expect(typeof statusBody.queues).toBe('object')
-    expect(Array.isArray(statusBody.schedules)).toBe(true)
+    expect(Array.isArray(statusBody.inprocess_schedules)).toBe(true)
     expect(typeof statusBody.ledger).toBe('object')
     for (const [, count] of Object.entries(statusBody.ledger as Record<string, unknown>)) {
       expect(typeof count).toBe('number')
@@ -199,7 +199,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     }
   })
 
-  test('4. Mode-aware sections (Standard In-Process vs High-Scale Celery/RedBeat) and Ingest Ledger render cleanly', async ({
+  test('4. Mode-aware sections (Standard In-Process vs High-Scale Celery) and Ingest Ledger render cleanly', async ({
     page,
   }) => {
     await page.goto('/admin/queue')
@@ -239,11 +239,6 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
       await expect(
         page.locator('[data-testid="admin-queue-workers-reservation"]:visible'),
       ).toContainText(/Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
-
-      // In-Process Schedules card
-      await expect(
-        page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
-      ).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
     } else {
       await expect(brokerBadge).toContainText(
         /Broker Reachable|Broker Unreachable \/ Standard Mode/i,
@@ -269,12 +264,12 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
       await expect(
         page.locator('[data-testid="admin-queue-workers-reservation"]:visible'),
       ).toContainText(/Active Workers \(\d+\)/i, { timeout: 15_000 })
-
-      // RedBeat Schedules card
-      await expect(
-        page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
-      ).toContainText(/RedBeat Schedules \(\d+\)/i, { timeout: 15_000 })
     }
+
+    // Unified In-Process Schedules card is visible in both modes
+    await expect(
+      page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
+    ).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
 
     // Ingest Ledger Status card is visible in both modes
     const ledgerSection = page.locator('[data-testid="admin-queue-ledger-reservation"]:visible')

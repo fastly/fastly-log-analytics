@@ -1,31 +1,26 @@
-import json
 from unittest.mock import MagicMock, patch
 
 
-def _mock_redis(queues: dict[str, int], redbeat: dict[str, str]):
-    """Build a MagicMock redis client backing scan_iter/type/llen/hget."""
+def _mock_redis(queues: dict[str, int]):
+    """Build a MagicMock redis client backing scan_iter/type/llen."""
     r = MagicMock()
 
     def scan_iter(match=None, count=None):
         if match == "q.*":
             return iter([k for k in queues if k.startswith("q.")])
-        if match == "redbeat:*":
-            return iter(list(redbeat.keys()) + ["redbeat::schedule", "redbeat::lock"])
         return iter([])
 
     r.scan_iter.side_effect = scan_iter
     r.type.side_effect = lambda k: "list" if k in queues else "none"
     r.llen.side_effect = lambda k: queues.get(k, 0)
-    r.hget.side_effect = lambda k, f: json.dumps({"task": redbeat[k]}) if f == "definition" and k in redbeat else None
     return r
 
 
 def test_celery_status_success(client):
     queues = {"q.ingest": 5, "celery": 2}
-    redbeat = {"redbeat:job1": "backend.tasks.job1"}
     with (
         patch("backend.celery_app.app.control.inspect") as mock_inspect,
-        patch("backend.celery_status._get_redis", return_value=_mock_redis(queues, redbeat)),
+        patch("backend.celery_status._get_redis", return_value=_mock_redis(queues)),
     ):
         mock_i = MagicMock()
         mock_i.active.return_value = {
@@ -49,8 +44,6 @@ def test_celery_status_success(client):
         assert data["queues"]["q.ingest"] == 5
         assert data["queues"]["celery"] == 2
         assert data["queues"]["q.control"] == 0
-        # RedBeat statics (redbeat::schedule / redbeat::lock) are excluded.
-        assert data["schedules"] == [{"name": "job1", "task": "backend.tasks.job1"}]
 
 
 def test_celery_status_broker_down_is_distinguishable(client):
@@ -70,14 +63,13 @@ def test_celery_status_broker_down_is_distinguishable(client):
         assert data["workers"]["count"] == 0
         assert "error" in data["workers"]
         assert data["queues"] == {}
-        assert data["schedules"] == []
 
 
 def test_celery_status_idle_system(client):
     """Reachable broker with nothing queued reports zeros, not emptiness."""
     with (
         patch("backend.celery_app.app.control.inspect") as mock_inspect,
-        patch("backend.celery_status._get_redis", return_value=_mock_redis({}, {})),
+        patch("backend.celery_status._get_redis", return_value=_mock_redis({})),
     ):
         mock_i = MagicMock()
         mock_i.active.return_value = {}

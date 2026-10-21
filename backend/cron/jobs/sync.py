@@ -283,8 +283,7 @@ def _run_log_discovery_cron(
             run_id = run.run_id
 
             if svcconfig.is_high_scale_mode(src):
-                # Celery/ledger data plane: run discovery INLINE (this job already
-                # executes on a worker via RedBeat in external mode) so the
+                # Celery/ledger data plane: run discovery INLINE so the
                 # cron_runs row carries the real outcome — files discovered, real
                 # duration, real errors — instead of a fake instant "dispatched"
                 # success that blinds recent_cron_failures and deep health.

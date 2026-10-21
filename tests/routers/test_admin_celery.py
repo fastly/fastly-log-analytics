@@ -5,7 +5,7 @@ Covers:
 1. Queue depths across KNOWN_QUEUES ("celery", "q.ingest", "q.control") and
    dynamically discovered ``q.*`` queues.
 2. Worker status (active_tasks, stats, registered, scheduled, count, error).
-3. RedBeat schedules (``redbeat:<name>`` hashes vs ``redbeat::*`` statics).
+3. In-process APScheduler schedules (`inprocess_schedules`).
 4. Ingest ledger state counts (discovered, claimed, committed, quarantined,
    dead_letter) scoped by ``service_id`` across multiple services in the shared
    ADR-22 PostgreSQL metadata database without double-counting.
@@ -19,7 +19,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -31,33 +30,26 @@ from backend.deps import require_admin
 from backend.utils.remote_access import _is_blocked_path
 
 
-def _mock_redis(queues: dict[str, int], redbeat: dict[str, str]):
-    """Build a MagicMock redis client backing scan_iter/type/llen/hget."""
+def _mock_redis(queues: dict[str, int]):
+    """Build a MagicMock redis client backing scan_iter/type/llen."""
     r = MagicMock()
 
     def scan_iter(match=None, count=None):
         if match == "q.*":
             return iter([k for k in queues if k.startswith("q.")])
-        if match == "redbeat:*":
-            return iter(list(redbeat.keys()) + ["redbeat::schedule", "redbeat::lock"])
         return iter([])
 
     r.scan_iter.side_effect = scan_iter
     r.type.side_effect = lambda k: "list" if k in queues else "none"
     r.llen.side_effect = lambda k: queues.get(k, 0)
-    r.hget.side_effect = lambda k, f: json.dumps({"task": redbeat[k]}) if f == "definition" and k in redbeat else None
     return r
 
 
 class TestCeleryStatusHighScaleAndStandard:
     def test_high_scale_celery_status_full_payload(self, client):
         """High-Scale / active Celery deployment returns queue depths, active workers,
-        RedBeat schedules, and per-service ingest ledger state counts."""
+        and per-service ingest ledger state counts."""
         queues = {"q.ingest": 14, "q.control": 1, "celery": 3, "q.custom": 2}
-        redbeat = {
-            "redbeat:discover-svc-a": "backend.tasks.ingest.discover_service",
-            "redbeat:commit-svc-a": "backend.tasks.commit.commit_service",
-        }
         ledger_rows_by_svc = {
             "svc-a": [("discovered", 4), ("claimed", 2), ("committed", 120), ("quarantined", 1)],
             "svc-b": [("committed", 80), ("dead_letter", 3)],
@@ -78,7 +70,7 @@ class TestCeleryStatusHighScaleAndStandard:
 
         with (
             patch("backend.celery_app.app.control.inspect") as mock_inspect,
-            patch("backend.celery_status._get_redis", return_value=_mock_redis(queues, redbeat)),
+            patch("backend.celery_status._get_redis", return_value=_mock_redis(queues)),
             patch(
                 "backend.config.list_configs",
                 return_value=[{"service_id": "svc-a"}, {"service_id": "svc-b"}],
@@ -124,10 +116,6 @@ class TestCeleryStatusHighScaleAndStandard:
                 "q.custom": 2,
                 "q.ingest": 14,
             }
-            assert data["schedules"] == [
-                {"name": "discover-svc-a", "task": "backend.tasks.ingest.discover_service"},
-                {"name": "commit-svc-a", "task": "backend.tasks.commit.commit_service"},
-            ]
             # Verify multi-service ledger aggregation does not double-count shared rows
             assert data["ledger"] == {
                 "discovered": 4,
@@ -139,10 +127,10 @@ class TestCeleryStatusHighScaleAndStandard:
 
     def test_standard_mode_idle_broker_fallback(self, client):
         """Standard mode with reachable idle Valkey reports 0 queue depths, 0 workers,
-        empty schedules, and empty ledger."""
+        and empty ledger."""
         with (
             patch("backend.celery_app.app.control.inspect") as mock_inspect,
-            patch("backend.celery_status._get_redis", return_value=_mock_redis({}, {})),
+            patch("backend.celery_status._get_redis", return_value=_mock_redis({})),
             patch("backend.config.list_configs", return_value=[]),
         ):
             mock_i = MagicMock()
@@ -158,7 +146,6 @@ class TestCeleryStatusHighScaleAndStandard:
             assert data["broker_reachable"] is True
             assert data["workers"]["count"] == 0
             assert data["queues"] == {"celery": 0, "q.control": 0, "q.ingest": 0}
-            assert data["schedules"] == []
             assert data["ledger"] == {}
 
     def test_standard_mode_unreachable_broker_fallback(self, client):
@@ -180,11 +167,10 @@ class TestCeleryStatusHighScaleAndStandard:
             assert data["workers"]["count"] == 0
             assert "Broker connection timeout" in data["workers"]["error"]
             assert data["queues"] == {}
-            assert data["schedules"] == []
             assert data["ledger"] == {}
 
     def test_standard_mode_inprocess_scheduler_and_ingest_telemetry(self, client):
-        """Standard mode returns deployment_mode='standard', scheduler_mode='inprocess',
+        """Standard mode returns deployment_mode='standard',
         inprocess_schedules, inprocess_active_runs, and standard_ingest summary."""
         fake_job = SimpleNamespace(
             id="log_discovery_svc-a",
@@ -226,7 +212,6 @@ class TestCeleryStatusHighScaleAndStandard:
             data = resp.json()
             assert data["broker_reachable"] is False
             assert data["deployment_mode"] == "standard"
-            assert data["scheduler_mode"] == "inprocess"
             assert data["inprocess_schedules"] == [
                 {
                     "name": "log_discovery_svc-a",

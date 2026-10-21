@@ -8,14 +8,8 @@ Template-time coherence gates for the deployment topology.
 {{- if not (has $mode (list "standard" "high_scale")) -}}
 {{- fail (printf "config.deploymentMode must be \"standard\" or \"high_scale\"; got %q." $mode) -}}
 {{- end -}}
-{{- if not (has (.Values.config.schedulerMode | default "") (list "inprocess" "external")) -}}
-{{- fail (printf "config.schedulerMode must be \"inprocess\" or \"external\"; got %q." (.Values.config.schedulerMode | default "")) -}}
-{{- end -}}
 {{- if not (has (.Values.config.sseBackplane | default "") (list "local" "valkey")) -}}
 {{- fail (printf "config.sseBackplane must be \"local\" or \"valkey\"; got %q." (.Values.config.sseBackplane | default "")) -}}
-{{- end -}}
-{{- if and (eq .Values.config.schedulerMode "external") (ne $mode "high_scale") -}}
-{{- fail (printf "config.schedulerMode=external requires config.deploymentMode=high_scale. Set config.deploymentMode=high_scale (and its prerequisites), or config.schedulerMode=inprocess." $mode) -}}
 {{- end -}}
 {{- $hasBroker := or .Values.secrets.existingSecret .Values.secrets.celeryBrokerUrl -}}
 {{- if and (eq .Values.config.sseBackplane "valkey") (not $hasBroker) -}}

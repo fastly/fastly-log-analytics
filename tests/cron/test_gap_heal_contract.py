@@ -10,7 +10,7 @@ Verifies all requirements and checklist items from docs/cron/jobs/gap-heal.md (Â
 6. Active request politeness deferral (should_defer_cron), bypassed when force=True.
 7. Under FLA_DEV_NO_CRONS=1, verify job does not register or execute.
 8. Telemetry & usage_log process context attribution ("gap_heal" / "cron.full_sync").
-9. Scheduler registration, dynamic rescheduling on interval_minutes changes, and RedBeat routing in high-scale mode.
+9. Scheduler registration and dynamic rescheduling on interval_minutes changes.
 """
 
 from __future__ import annotations
@@ -420,9 +420,9 @@ def test_contract_8_telemetry_and_usage_log_attribution(monkeypatch):
     assert captured_context[0] == "gap_heal"
 
 
-def test_contract_9_scheduler_registration_and_redbeat():
+def test_contract_9_scheduler_registration():
     """Checklist Item 9:
-    Scheduler registration, dynamic rescheduling on interval_minutes changes, and RedBeat routing.
+    Scheduler registration and dynamic rescheduling on interval_minutes changes.
     """
     cfg = {
         "service_id": "svc-sched-gap",
@@ -449,10 +449,6 @@ def test_contract_9_scheduler_registration_and_redbeat():
         s._sync_jobs()
 
     assert "gap_heal_svc-sched-gap" in s._job_ids
-
-    # Verify RedBeat routing in external mode
-    s.mode = "external"
-    assert s._routes_to_redbeat("gap_heal_svc-sched-gap") is True
 
     # Verify disabled configuration skips job
     cfg_disabled = {

@@ -2230,7 +2230,7 @@ export interface paths {
         };
         /**
          * Api Celery Status
-         * @description Expose Celery queue depths, worker status, RedBeat schedule, and
+         * @description Expose Celery queue depths, worker status, APScheduler schedule, and
          *     ingest-ledger summary.
          */
         get: operations["api_celery_status_api_admin_celery_status_get"];
@@ -8097,15 +8097,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** CeleryScheduleEntry */
-        CeleryScheduleEntry: {
-            /** Name */
-            name: string;
-            /** Task */
-            task: string;
-        } & {
-            [key: string]: unknown;
-        };
         /**
          * CeleryStatusResponse
          * @description ``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
@@ -8118,12 +8109,6 @@ export interface components {
              * @enum {string}
              */
             deployment_mode: "standard" | "high_scale";
-            /**
-             * Scheduler Mode
-             * @default inprocess
-             * @enum {string}
-             */
-            scheduler_mode: "inprocess" | "external";
             /** Broker Reachable */
             broker_reachable?: boolean | null;
             workers?: components["schemas"]["CeleryWorkers"] | null;
@@ -8131,8 +8116,6 @@ export interface components {
             queues?: {
                 [key: string]: number;
             } | null;
-            /** Schedules */
-            schedules?: components["schemas"]["CeleryScheduleEntry"][] | null;
             /** Ledger */
             ledger?: {
                 [key: string]: number;

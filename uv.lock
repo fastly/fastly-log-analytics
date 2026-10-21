@@ -548,21 +548,6 @@ redis = [
 ]
 
 [[package]]
-name = "celery-redbeat"
-version = "2.4.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "celery" },
-    { name = "python-dateutil" },
-    { name = "redis" },
-    { name = "tenacity" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/03/13/9aefb6cb39266b28ab2b2a8f24382fd7d82399e20578c5ba2238e63c4445/celery_redbeat-2.4.2.tar.gz", hash = "sha256:a590fef7ef39d7e4511174ce8bafe310e07ef6cdf84a240cd311946815bd90bb", size = 36671, upload-time = "2026-07-27T01:28:09.389Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/3d/bb4adef34e7691ebd2e80c1e8df1fb3f3bf43b388de714219ac6a580a4d2/celery_redbeat-2.4.2-py2.py3-none-any.whl", hash = "sha256:4124d221a798ad983df0874bfa0d2e9beca41ca9ef91e92d073770bb193da000", size = 16526, upload-time = "2026-07-27T01:28:08.164Z" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.10.19"
 source = { registry = "https://pypi.org/simple" }
@@ -1033,7 +1018,6 @@ dependencies = [
     { name = "boto3" },
     { name = "cachetools" },
     { name = "celery", extra = ["redis"] },
-    { name = "celery-redbeat" },
     { name = "cryptography" },
     { name = "cymruwhois" },
     { name = "duckdb" },
@@ -1106,7 +1090,6 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.34" },
     { name = "cachetools", specifier = ">=6.2" },
     { name = "celery", extras = ["redis"], specifier = ">=5.6.3" },
-    { name = "celery-redbeat", specifier = ">=2.4" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "cymruwhois", specifier = ">=1.6" },
     { name = "duckdb", specifier = ">=1.5,<2" },

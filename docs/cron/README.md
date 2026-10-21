@@ -21,7 +21,7 @@ Every scheduled background job in this system must adhere to these non-negotiabl
 4. **Strict Concurrency & Pod Safety:**
    - Long-running cloud write jobs (`optimize`, `expire`, `commit`) must prevent overlapping executions for the same service using the job's lease or lock; a task-scoped lease does not serialize every cron type.
    - In distributed deployments (`DEPLOYMENT_MODE=high_scale`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
-   - Cron 8 (`expire`) also stays on the serving pod's APScheduler in High-Scale mode; it is not routed through RedBeat or Celery.
+   - Cron 8 (`expire`) also stays on the serving pod's APScheduler in High-Scale mode; it is not routed to Celery workers.
 5. **Local-Only Safety Gate (`FLA_DEV_NO_CRONS=1`):**
    - Development environments and AI test sessions must be capable of running safely without racing production FOS buckets or generating external write costs.
    - When `FLA_DEV_NO_CRONS=1` is set, all cloud-writing jobs (`log_discovery`, `commit`, `optimize`, `expire`, `full_sync`, `gap_heal`) are completely bypassed. Only local-safe jobs (`local_compact`, `rollup_compact`, `rollup_heal`, `partial_hour_merge`, `duckdb_recycle`, `metric_snapshot`) are permitted to run.
@@ -61,14 +61,13 @@ flowchart TD
     end
 
     subgraph HighScaleMode["High-Scale Mode (DEPLOYMENT_MODE=high_scale)"]
-        RedBeat["RedBeat Periodic Scheduler<br/>(Redis / Valkey)"]
         CeleryFleet["Celery Worker Fleet<br/>(Horizontal Scale)"]
-        WebAPScheduler["Web Pod APScheduler<br/>(Pod-Local Jobs Only)"]
+        WebAPScheduler["Web Pod APScheduler<br/>(Unified Job Scheduler)"]
         PGLedger["PostgreSQL Ingest Ledger<br/>& DuckLake Catalog"]
         CHCluster["ClickHouse Cluster<br/>(Serving & Facts)"]
         FOSCloud["Fastly Object Storage (FOS)<br/>s3://{bucket}/"]
 
-        RedBeat -->|Enqueues Tasks| CeleryFleet
+        WebAPScheduler -->|Enqueues Tasks| CeleryFleet
         CeleryFleet -->|State Machine| PGLedger
         CeleryFleet -->|Ingests & Merges| FOSCloud
         CeleryFleet -->|Replicates Facts| CHCluster
@@ -99,24 +98,24 @@ Below is the master catalog of all 24 active scheduled background tasks. Standar
 
 | Job Identifier | Default Cadence | Executor Threadpool | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
 |---|---|---|---|---|---|---|
-| `log_discovery_{id}` | Derived (`log_period // 2`, min 5s) | streaming [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [log-discovery.md](jobs/log-discovery.md) (Verified) |
-| `commit_{id}` | Every 5 min (configurable) | streaming [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [commit.md](jobs/commit.md) (Verified) |
+| `log_discovery_{id}` | Derived (`log_period // 2`, min 5s) | streaming [10] / Celery | APScheduler | APScheduler + Celery | Admin | [log-discovery.md](jobs/log-discovery.md) (Verified) |
+| `commit_{id}` | Every 5 min (configurable) | streaming [10] / Celery | APScheduler | APScheduler + Celery | Admin | [commit.md](jobs/commit.md) (Verified) |
 | `local_compact_{id}` | Every 2 min (`LOCAL_COMPACT_INTERVAL_MIN`) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](jobs/local-compact.md) (Verified) |
 | `partial_hour_merge_{id}` | Every 30 sec (`PARTIAL_HOUR_MERGE_INTERVAL_SEC`) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](jobs/partial-hour-merge.md) (Verified) |
 | `rollup_heal_{id}` | Hourly at :05 | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) (Verified) |
 | `rollup_compact_{id}` | Daily 02:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) (Verified) |
 | `optimize_{id}` | Daily 04:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [optimize.md](jobs/optimize.md) (Verified) |
 | `expire_{id}` | Hourly (`expire_interval_mins=60`) | default [10] | APScheduler | Serving-pod APScheduler | Admin | [expire.md](jobs/expire.md) (Verified) |
-| `full_sync_{id}` | Every 6h (:30 UTC) | default [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
-| `gap_heal_{id}` | Every 30 min (configurable) | default [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
+| `full_sync_{id}` | Every 6h (:30 UTC) | default [10] / Celery | APScheduler | APScheduler + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
+| `gap_heal_{id}` | Every 30 min (configurable) | default [10] / Celery | APScheduler | APScheduler + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
 | `metadata_cleanup_{id}` | Daily 03:15 UTC (configurable) | maintenance [3] | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
 | `alerts_evaluation_{id}` | Every `log_period` sec (configurable) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
 | `insights_prewarmer_{id}` | Every 240 sec (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
 | `sync_metadata_{id}` | Every `log_period` sec (configurable) | streaming [10] | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
-| `ledger_sweep_{id}` | Every 15 min (configurable) | RedBeat/Celery | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
-| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Derived / 60 sec (min 5s) | streaming [10] (Standard) / RedBeat/Celery (High-Scale) | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (Verified); [High-Scale mode](jobs/rum-discovery.md) (Verified) |
+| `ledger_sweep_{id}` | Every 15 min (configurable) | default [10] / Celery | Disabled | APScheduler + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
+| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Derived / 60 sec (min 5s) | streaming [10] (Standard) / Celery (High-Scale) | APScheduler | APScheduler + Celery | Admin | [Standard mode](jobs/rum-sync.md) (Verified); [High-Scale mode](jobs/rum-discovery.md) (Verified) |
 | `rum_commit_{id}` | Post-sync immediate & 1m periodic | default [10] | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) (Verified) |
-| `ledger_rum_sweep_{id}` | Every 15 min (configurable) | RedBeat/Celery | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) (Verified) |
+| `ledger_rum_sweep_{id}` | Every 15 min (configurable) | default [10] / Celery | Disabled | APScheduler + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) (Verified) |
 | `metric_snapshot` | Every 60 sec (jitter 5s) | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin & Analyst A | [metric-snapshot.md](jobs/metric-snapshot.md) (Verified) |
 | `rdns_enrichment` | Every 5 min (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin | [rdns-enrichment.md](jobs/rdns-enrichment.md) (Verified) |
 | `bot_data_refresh` | Daily 02:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin | [bot-data-refresh.md](jobs/bot-data-refresh.md) (Verified) |
@@ -183,7 +182,7 @@ When verifying background jobs during automated test suites or dedicated AI test
 
 ### Verification Checklist:
 - [ ] **1. Scheduler Registration Audit:**
-  - Inspect `scheduler.get_jobs()` or `redbeat_schedule_entries()`.
+  - Inspect `scheduler.get_jobs()`.
   - Confirm all 24 active jobs are registered according to their deployment mode, role, and activation gates (e.g. `alerts_evaluation` only registers when alerts exist).
 - [ ] **2. Manual API Triggering:**
   - Execute manual POST triggers for each job and verify HTTP 200 response:

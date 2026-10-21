@@ -18,7 +18,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Evaluated every `rum_disc_interval_secs` (derived from `rum.sync_interval_seconds` or `log_period`, min: 5s).
 - **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "high_scale"`.
-- **Worker Routing:** Evaluated and scheduled via RedBeat (`_REDBEAT_JOB_PREFIXES`) on the Celery worker fleet.
+- **Worker Routing:** Scheduled on the in-process APScheduler and dispatches conversion tasks to the Celery worker fleet.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
 
@@ -28,7 +28,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Synchronous mode uses `rum_sync_{service_id}` instead (see [rum-sync.md](rum-sync.md)). Cleanly returns if invoked. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Workers | Discovers FOS `raw/rum/` keys, writes to PostgreSQL `ingest_ledger`, dispatches Celery conversion jobs. | PostgreSQL row-level locks on `ingest_ledger`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | APScheduler + Celery Workers | Discovers FOS `raw/rum/` keys, writes to PostgreSQL `ingest_ledger`, dispatches Celery conversion jobs. | PostgreSQL row-level locks on `ingest_ledger`. |
 
 ---
 

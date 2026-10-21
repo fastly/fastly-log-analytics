@@ -38,7 +38,7 @@ The **Admin Overview** page (`/admin`) is the administrative mission control for
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
-| **Sync Status (`/api/admin/sync-status`, `/api/sync-status`)** | Reads PostgreSQL `cron_runs` (`METADATA_DSN`), local Parquet buffer state, and DuckDB/DuckLake snapshot extents. | Reads PostgreSQL `cron_runs` / `ingest_ledger`, RedBeat/Celery worker state, and ClickHouse watermark extents. |
+| **Sync Status (`/api/admin/sync-status`, `/api/sync-status`)** | Reads PostgreSQL `cron_runs` (`METADATA_DSN`), local Parquet buffer state, and DuckDB/DuckLake snapshot extents. | Reads PostgreSQL `cron_runs` / `ingest_ledger`, Celery worker state, and ClickHouse watermark extents. |
 | **System Health (`/api/admin/system-metrics`, `/api/admin/health`, `/api/admin/health-snapshot`)** | Reports process RSS/CPU, host disk/memory, DuckDB pool stats, and PostgreSQL metadata DB sizes. | Reports serving pod vitals, Celery worker queue depths, ClickHouse/PostgreSQL health, and storage metrics. |
 | **Manual Triggers (`/api/admin/{sync,commit,compact,optimize}/{service_id}`)** | Invokes `sync_from_fos`, `commit_to_iceberg` (DuckLake), `compact_local_buffers`, or `optimize_table` in a background thread with SSE progress events. | Dispatches discovery/maintenance tasks or runs DuckLake/ClickHouse maintenance with PostgreSQL `cron_runs` audit tracking. |
 

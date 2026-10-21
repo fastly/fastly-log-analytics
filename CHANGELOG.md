@@ -97,7 +97,7 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 
 ### Changed
 
-- **Scheduled jobs are split by write target.** Jobs that only touch the ledger and object storage run on Celery workers via RedBeat; jobs that read or write node-local state stay on each node's in-process scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
+- **Scheduled jobs run on the unified in-process APScheduler.** Jobs that fan out conversion work dispatch tasks to Celery workers; jobs that read or write node-local state execute directly on the serving pod's scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
 - Retention deletion, snapshot expiry, table info, and the snapshot calendar all read and write DuckLake rather than the previous catalog.
 
 ### Breaking

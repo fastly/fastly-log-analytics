@@ -89,7 +89,7 @@ For horizontally-scaled ingestion in Kubernetes clusters, `DEPLOYMENT_MODE=high_
 
 ```mermaid
 graph TD
-    A[Fastly Object Storage] -->|LIST| B(discover_prefix, RedBeat-scheduled)
+    A[Fastly Object Storage] -->|LIST| B(discover_prefix, APScheduler-scheduled)
     B -->|INSERT discovered rows| L[(ingest_ledger)]
     L -->|convert.delay per row| W1[Celery worker]
     L -->|convert.delay per row| W2[Celery worker N]

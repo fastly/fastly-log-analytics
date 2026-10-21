@@ -1048,7 +1048,6 @@ def _default_sse_backplane() -> str:
 
 
 SSE_BACKPLANE = _default_sse_backplane()
-SCHEDULER_MODE = os.getenv("SCHEDULER_MODE", "inprocess")
 
 
 def high_scale_shared_source_enabled(cfg: dict | None) -> bool:

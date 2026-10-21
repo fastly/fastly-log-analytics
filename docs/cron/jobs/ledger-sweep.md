@@ -24,7 +24,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Not applicable in synchronous SQLite mode. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`UPDATE ... WHERE status='claimed'`). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | APScheduler + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`UPDATE ... WHERE status='claimed'`). |
 
 ---
 

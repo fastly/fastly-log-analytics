@@ -114,11 +114,9 @@ egress rules. No operator-specific values or CRDs are included.
 worker whose `DEPLOYMENT_MODE=high_scale` lacks a Postgres `DUCKLAKE_CATALOG` or
 `METADATA_DSN`. `templates/validate.yaml` reproduces those conditions at
 render time, so `helm install`/`helm template` fails with a message naming the
-value to set instead of deploying backend, worker and beat pods that all
-CrashLoop. It also rejects the combinations that fail *silently* at runtime:
-an unrecognised `deploymentMode`, or `schedulerMode=external` outside
-high-scale mode (RedBeat-routed jobs with no
-worker fleet to consume them), and `sseBackplane=valkey` with no broker URL.
+value to set instead of deploying backend and worker pods that all
+CrashLoop. It also rejects combinations that fail *silently* at runtime:
+an unrecognised `deploymentMode` or `sseBackplane=valkey` with no broker URL.
 
 The one case it cannot check is an `existingSecret` missing a key — the chart
 cannot read a Secret it did not create. In celery mode both `secretKeyRef`s

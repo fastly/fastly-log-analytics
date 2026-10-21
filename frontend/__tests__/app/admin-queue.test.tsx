@@ -57,7 +57,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
     expect(screen.getByTestId('admin-queue-refresh-btn')).toBeDisabled()
   })
 
-  it('renders High-Scale queue depths, active workers, ingest ledger cards, RedBeat schedules, and supports manual Refresh', async () => {
+  it('renders High-Scale queue depths, active workers, ingest ledger cards, in-process schedules, and supports manual Refresh', async () => {
     let statusCalls = 0
     let batchCalls = 0
 
@@ -88,10 +88,11 @@ describe('AdminQueuePage (/admin/queue)', () => {
               'q.control': 2,
               'q.ingest': 9,
             },
-            schedules: [
+            inprocess_schedules: [
               {
-                name: 'discover-svc-alpha',
-                task: 'backend.tasks.ingest.discover_service',
+                name: 'log_discovery_svc-alpha',
+                trigger: 'interval[0:00:10]',
+                next_run_at: 1700000010,
               },
             ],
             ledger: {
@@ -166,8 +167,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
     expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5')
     expect(screen.getByTestId('admin-queue-ledger-committed')).toHaveTextContent('140')
 
-    expect(screen.getByTestId('admin-queue-schedules-table')).toBeInTheDocument()
-    expect(screen.getByText('discover-svc-alpha')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
+    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
 
     const refreshBtn = screen.getByTestId('admin-queue-refresh-btn')
     expect(refreshBtn).not.toBeDisabled()
@@ -194,7 +195,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
               error: 'Valkey unreachable',
             },
             queues: {},
-            schedules: [],
+            inprocess_schedules: [],
             ledger: {},
           },
           response: { ok: true, status: 200 },
@@ -220,17 +221,16 @@ describe('AdminQueuePage (/admin/queue)', () => {
     expect(screen.getByText(/No queues found or Celery mode is inactive/i)).toBeInTheDocument()
     expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
     expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
-    expect(screen.getByText(/No schedules found/i)).toBeInTheDocument()
+    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
   })
 
-  it('renders Standard Mode in-process scheduler & ingest telemetry and hides Celery/RedBeat sections when deployment_mode is standard', async () => {
+  it('renders Standard Mode in-process scheduler & ingest telemetry and hides Celery sections when deployment_mode is standard', async () => {
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         return {
           data: {
             broker_reachable: false,
             deployment_mode: 'standard',
-            scheduler_mode: 'inprocess',
             workers: {
               count: 0,
               active_tasks: {},
@@ -240,7 +240,6 @@ describe('AdminQueuePage (/admin/queue)', () => {
               error: 'Celery broker not configured in standard mode',
             },
             queues: {},
-            schedules: [],
             inprocess_schedules: [
               {
                 name: 'log_discovery_svc-alpha',
@@ -288,9 +287,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
       )
     })
 
-    // High-scale Celery/RedBeat sections and false-alarm broker warning should be hidden
+    // High-scale Celery queue sections and false-alarm broker warning should be hidden
     expect(screen.queryByText(/^Queue Depths$/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/RedBeat Schedules/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
 
@@ -314,7 +312,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
             broker_reachable: true,
             workers: { count: 1, active_tasks: {}, stats: {}, registered: {}, scheduled: {} },
             queues: { celery: 0, 'q.ingest': 0, 'q.control': 0 },
-            schedules: [],
+            inprocess_schedules: [],
             ledger: {
               discovered: 0,
               claimed: 0,

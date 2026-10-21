@@ -1,4 +1,4 @@
-"""Celery/RedBeat/ledger status snapshot, shared by the admin route, the
+"""Celery/APScheduler/ledger status snapshot, shared by the admin route, the
 admin SSE feeder, and the health snapshot.
 
 Lives at backend top level (beside ``celery_app``) so non-router callers
@@ -12,14 +12,10 @@ Design notes:
   broker for every other client.
 - ``broker_reachable`` distinguishes "idle" from "Valkey is down" — the old
   shape collapsed both to empty dicts.
-- RedBeat entries are hashes at ``redbeat:<name>`` whose ``definition`` field
-  is JSON (celery-redbeat's storage format); ``redbeat::schedule`` and
-  ``redbeat::lock`` are internal statics, not entries.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -40,11 +36,7 @@ def _get_redis():
     global _redis_client
     from backend import config as svcconfig
 
-    if (
-        not svcconfig.is_high_scale_mode()
-        and os.environ.get("SCHEDULER_MODE", "inprocess") != "external"
-        and not os.environ.get("CELERY_BROKER_URL")
-    ):
+    if not svcconfig.is_high_scale_mode() and not os.environ.get("CELERY_BROKER_URL"):
         raise ConnectionError("Celery broker not configured in standard mode")
     with _redis_lock:
         if _redis_client is None:
@@ -82,31 +74,6 @@ def celery_queue_depths() -> tuple[dict[str, int], bool]:
     except Exception as e:
         logger.debug("[celery_status] broker unreachable for queue depths: %s", e)
         return {}, False
-
-
-_REDBEAT_STATIC_PREFIX = "redbeat::"  # schedule zset + lock, not entries
-_REDBEAT_ENTRY_PREFIX = "redbeat:"
-
-
-def redbeat_schedule_entries() -> list[dict[str, str]]:
-    """List RedBeat schedule entries as {name, task} dicts."""
-    entries: list[dict[str, str]] = []
-    try:
-        r = _get_redis()
-        for key in r.scan_iter(match=f"{_REDBEAT_ENTRY_PREFIX}*", count=500):
-            if key.startswith(_REDBEAT_STATIC_PREFIX):
-                continue
-            try:
-                definition = r.hget(key, "definition")
-                task = ""
-                if definition:
-                    task = json.loads(definition).get("task", "")
-                entries.append({"name": key[len(_REDBEAT_ENTRY_PREFIX) :], "task": task})
-            except Exception:
-                continue
-    except Exception as e:
-        logger.debug("[celery_status] broker unreachable for redbeat entries: %s", e)
-    return entries
 
 
 def ingest_ledger_summary() -> dict[str, int]:
@@ -264,9 +231,6 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
 
     is_high_scale = bool(svcconfig.is_high_scale_mode())
     deployment_mode = "high_scale" if is_high_scale else "standard"
-    scheduler_mode = (
-        "external" if is_high_scale or os.environ.get("SCHEDULER_MODE", "inprocess") == "external" else "inprocess"
-    )
 
     queues, broker_reachable = celery_queue_depths()
 
@@ -289,12 +253,10 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
         except Exception as e:
             workers_error = str(e)[:200]
 
-    schedules: list[dict[str, Any]] = redbeat_schedule_entries() if broker_reachable else []
     ledger = ingest_ledger_summary()
 
     return {
         "deployment_mode": deployment_mode,
-        "scheduler_mode": scheduler_mode,
         "broker_reachable": broker_reachable,
         "workers": {
             "active_tasks": active,
@@ -305,7 +267,6 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
             **({"error": workers_error} if workers_error else {}),
         },
         "queues": queues,
-        "schedules": schedules,
         "ledger": ledger,
         "inprocess_schedules": inprocess_schedule_entries(),
         "inprocess_active_runs": inprocess_active_runs_entries(),

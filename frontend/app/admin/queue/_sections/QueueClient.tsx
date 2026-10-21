@@ -20,7 +20,6 @@ import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 type ActiveTask = components['schemas']['CeleryActiveTask']
-type ScheduleEntry = components['schemas']['CeleryScheduleEntry']
 type InProcessScheduleEntry = components['schemas']['InProcessScheduleEntry']
 type InProcessActiveRun = components['schemas']['InProcessActiveRun']
 type LedgerEntry = components['schemas']['IngestLedgerEntry']
@@ -87,23 +86,6 @@ const TASK_COLUMNS: ColumnDef<ActiveTask>[] = [
     cell: ({ row }) => (
       <span className="text-xs">{formatLocalDateTime(row.original.time_start * 1000)}</span>
     ),
-  },
-]
-
-const SCHEDULE_COLUMNS: ColumnDef<ScheduleEntry>[] = [
-  {
-    id: 'name',
-    header: 'Schedule Name',
-    accessorFn: (s) => s.name,
-    size: 320,
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.name}</span>,
-  },
-  {
-    id: 'task',
-    header: 'Task',
-    accessorFn: (s) => s.task,
-    size: 420,
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.task}</span>,
   },
 ]
 
@@ -388,7 +370,6 @@ export function QueueClient() {
   const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const queues = data?.queues ? Object.entries(data.queues).sort((a, b) => a[0].localeCompare(b[0])) : []
   const activeWorkers = data?.workers?.active_tasks ? Object.entries(data.workers.active_tasks) : []
-  const schedules = data?.schedules || []
   const workerCount = data?.workers?.count ?? 0
   const inprocessSchedules = data?.inprocess_schedules || []
   const inprocessActiveRuns = data?.inprocess_active_runs || []
@@ -1085,75 +1066,39 @@ export function QueueClient() {
         data-testid="admin-queue-schedules-reservation"
         className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
       >
-        {isStandardMode ? (
-          <AnalyticsCard
-            title={`In-Process Schedules (${inprocessSchedules.length})`}
-            helpTitle="In-Process Schedules"
-            className="min-h-[200px]"
-            isLoading={isLoading}
-            isFetching={isFetching}
-            loadingMessage="Loading scheduler telemetry..."
-            error={error as AnalyticsCardError | null}
-            helpContent={
-              <div className="space-y-4 text-sm">
-                <p>
-                  Displays all registered background schedules running in-process via APScheduler in Standard deployment mode.
-                </p>
-                <p>
-                  These recurrent jobs handle log discovery, DuckLake commits, local compaction, rollup healing, cloud maintenance, and alert evaluation.
-                </p>
-              </div>
-            }
-          >
-            {inprocessSchedules.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No in-process schedules registered.</p>
-            ) : (
-              <div data-testid="admin-queue-inprocess-schedules-table">
-                <DataTableReadonly
-                  columns={INPROCESS_SCHEDULE_COLUMNS}
-                  data={inprocessSchedules}
-                  hideToolbar
-                  showPagination={false}
-                  tableCaption="In-process APScheduler jobs"
-                />
-              </div>
-            )}
-          </AnalyticsCard>
-        ) : (
-          <AnalyticsCard
-            title={`RedBeat Schedules (${schedules.length})`}
-            helpTitle="RedBeat Schedules"
-            className="min-h-[200px]"
-            isLoading={isLoading}
-            isFetching={isFetching}
-            loadingMessage="Loading queue telemetry..."
-            error={error as AnalyticsCardError | null}
-            helpContent={
-              <div className="space-y-4 text-sm">
-                <p>
-                  Displays all registered background schedules (crons/intervals) stored in Valkey/Redis via RedBeat.
-                </p>
-                <p>
-                  These are responsible for ticking recurrent operations like syncing logs, compacting storage, and gathering metrics.
-                </p>
-              </div>
-            }
-          >
-            {schedules.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No schedules found.</p>
-            ) : (
-              <div data-testid="admin-queue-schedules-table">
-                <DataTableReadonly
-                  columns={SCHEDULE_COLUMNS}
-                  data={schedules}
-                  hideToolbar
-                  showPagination={false}
-                  tableCaption="RedBeat schedules"
-                />
-              </div>
-            )}
-          </AnalyticsCard>
-        )}
+        <AnalyticsCard
+          title={`In-Process Schedules (${inprocessSchedules.length})`}
+          helpTitle="In-Process Schedules"
+          className="min-h-[200px]"
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading scheduler telemetry..."
+          error={error as AnalyticsCardError | null}
+          helpContent={
+            <div className="space-y-4 text-sm">
+              <p>
+                Displays all registered background schedules running in-process via APScheduler across both Standard and High-Scale deployment modes.
+              </p>
+              <p>
+                These recurrent jobs handle log discovery, DuckLake commits, local compaction, rollup healing, cloud maintenance, and alert evaluation.
+              </p>
+            </div>
+          }
+        >
+          {inprocessSchedules.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No in-process schedules registered.</p>
+          ) : (
+            <div data-testid="admin-queue-inprocess-schedules-table">
+              <DataTableReadonly
+                columns={INPROCESS_SCHEDULE_COLUMNS}
+                data={inprocessSchedules}
+                hideToolbar
+                showPagination={false}
+                tableCaption="In-process APScheduler jobs"
+              />
+            </div>
+          )}
+        </AnalyticsCard>
       </div>
     </div>
   )
