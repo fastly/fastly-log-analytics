@@ -25,6 +25,7 @@ docs/pages/
 ├── security.md                    # /security (WAF, bots, TLS fingerprints, attacks)
 ├── insights.md                    # /insights (Automated anomaly detection & baselines)
 ├── network.md                     # /network (RTT, packet loss, congestion, ASNs)
+├── streaming.md                   # /streaming (CMCD video quality analytics)
 ├── rum.md                         # /rum (Real User Monitoring & Core Web Vitals)
 ├── sessions.md                    # /sessions (Client session scoring & clustering)
 ├── sessions-stream.md             # /sessions/stream (Real-time session stream)
@@ -60,6 +61,7 @@ docs/pages/
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 51 automated anomaly detectors across 5 category tabs | **Live-certified** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
+| `/streaming` | [Streaming](streaming.md) | CMCD viewers, rebuffering, bitrate, throughput, top content | Spec written; re-certification pending |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |
