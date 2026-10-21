@@ -430,7 +430,9 @@ def get_cmcd_aggregates(
         # ── Rebuffer by Country (single scan, no self-join) ───────────────
         if _want("rebuffer_by_country") and has_country and has_bs:
             _t = _time.perf_counter()
-            mtp_agg = "APPROX_QUANTILE(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"
+            # MEDIAN, not APPROX_QUANTILE: this aggregate runs once per (country, session) group, and
+            # a t-digest per tiny group is ~9x slower (1.1 s vs 0.12 s on 3M rows / 72k groups).
+            mtp_agg = "MEDIAN(cmcd_mtp) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"
             sql = f"""
                 WITH per_session AS (
                     SELECT country, cmcd_sid,
