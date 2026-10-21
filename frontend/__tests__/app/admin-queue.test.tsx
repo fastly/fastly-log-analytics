@@ -223,6 +223,87 @@ describe('AdminQueuePage (/admin/queue)', () => {
     expect(screen.getByText(/No schedules found/i)).toBeInTheDocument()
   })
 
+  it('renders Standard Mode in-process scheduler & ingest telemetry and hides Celery/RedBeat sections when deployment_mode is standard', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        return {
+          data: {
+            broker_reachable: false,
+            deployment_mode: 'standard',
+            scheduler_mode: 'inprocess',
+            workers: {
+              count: 0,
+              active_tasks: {},
+              stats: {},
+              registered: {},
+              scheduled: {},
+              error: 'Celery broker not configured in standard mode',
+            },
+            queues: {},
+            schedules: [],
+            inprocess_schedules: [
+              {
+                name: 'log_discovery_svc-alpha',
+                trigger: 'interval[0:00:10]',
+                next_run_at: 1700000010,
+              },
+              {
+                name: 'commit_svc-alpha',
+                trigger: 'interval[0:05:00]',
+                next_run_at: 1700000300,
+              },
+            ],
+            inprocess_active_runs: [
+              {
+                run_id: 101,
+                service_id: 'svc-alpha',
+                task: 'sync',
+                started_at: 1700000000,
+              },
+            ],
+            standard_ingest: {
+              ingested_files: 1250,
+              quarantined_items: 2,
+            },
+            ledger: {
+              committed: 1250,
+              quarantined: 2,
+              dead_letter: 0,
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        return { data: { series: {} }, response: { ok: true, status: 200 } }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent(
+        'Standard Mode · In-Process Scheduler',
+      )
+    })
+
+    // High-scale Celery/RedBeat sections and false-alarm broker warning should be hidden
+    expect(screen.queryByTestId('admin-queue-depths-reservation')).not.toBeInTheDocument()
+    expect(screen.queryByText(/RedBeat Schedules/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
+
+    // Standard mode cards and tables should be rendered
+    expect(screen.getByTestId('admin-queue-standard-ingest-summary')).toBeInTheDocument()
+    expect(screen.getByText('1,250')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-standard-scheduler-summary')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-inprocess-active-table')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
+    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
+    expect(screen.getByText('commit_svc-alpha')).toBeInTheDocument()
+  })
+
   it('displays dead-letter entries in the ledger inspector and handles Retry and Dismiss actions', async () => {
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {

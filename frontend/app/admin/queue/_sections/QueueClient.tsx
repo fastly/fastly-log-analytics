@@ -16,10 +16,13 @@ import type { components } from '@/types/api.generated'
 
 import { useAdminEventStream } from '@/hooks/useAdminEventStream'
 import { queryKeys } from '@/lib/query-keys'
+import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 type ActiveTask = components['schemas']['CeleryActiveTask']
 type ScheduleEntry = components['schemas']['CeleryScheduleEntry']
+type InProcessScheduleEntry = components['schemas']['InProcessScheduleEntry']
+type InProcessActiveRun = components['schemas']['InProcessActiveRun']
 type LedgerEntry = components['schemas']['IngestLedgerEntry']
 type QueueDepth = [name: string, count: number]
 type LedgerStatusFilter = 'problem' | 'all' | 'dead_letter' | 'quarantined' | 'discovered' | 'claimed' | 'committed'
@@ -101,6 +104,77 @@ const SCHEDULE_COLUMNS: ColumnDef<ScheduleEntry>[] = [
     accessorFn: (s) => s.task,
     size: 420,
     cell: ({ row }) => <span className="font-mono text-xs">{row.original.task}</span>,
+  },
+]
+
+const INPROCESS_SCHEDULE_COLUMNS: ColumnDef<InProcessScheduleEntry>[] = [
+  {
+    id: 'name',
+    header: 'Job ID',
+    accessorFn: (s) => s.name,
+    size: 320,
+    cell: ({ row }) => <span className="font-mono text-xs font-medium">{row.original.name}</span>,
+  },
+  {
+    id: 'trigger',
+    header: 'Trigger / Cadence',
+    accessorFn: (s) => s.trigger,
+    size: 280,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground">{row.original.trigger}</span>
+    ),
+  },
+  {
+    id: 'next_run_at',
+    header: 'Next Scheduled Run',
+    accessorFn: (s) => s.next_run_at ?? 0,
+    size: 240,
+    cell: ({ row }) => (
+      <span className="text-xs tabular-nums">
+        {row.original.next_run_at ? formatLocalDateTime(row.original.next_run_at * 1000) : '—'}
+      </span>
+    ),
+  },
+]
+
+const INPROCESS_ACTIVE_COLUMNS: ColumnDef<InProcessActiveRun>[] = [
+  {
+    id: 'run_id',
+    header: 'Run ID',
+    accessorFn: (r) => r.run_id,
+    size: 140,
+    enableSorting: false,
+    cell: ({ row }) => <span className="font-mono text-xs">#{row.original.run_id}</span>,
+  },
+  {
+    id: 'task',
+    header: 'Task',
+    accessorFn: (r) => r.task ?? '—',
+    size: 260,
+    enableSorting: false,
+    cell: ({ row }) => <span className="font-mono text-xs font-medium">{row.original.task ?? '—'}</span>,
+  },
+  {
+    id: 'service_id',
+    header: 'Service ID',
+    accessorFn: (r) => r.service_id ?? 'global',
+    size: 260,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground">{row.original.service_id ?? 'global'}</span>
+    ),
+  },
+  {
+    id: 'started_at',
+    header: 'Started At',
+    accessorFn: (r) => r.started_at ?? 0,
+    size: 220,
+    enableSorting: false,
+    cell: ({ row }) => (
+      <span className="text-xs tabular-nums">
+        {row.original.started_at ? formatLocalDateTime(row.original.started_at * 1000) : '—'}
+      </span>
+    ),
   },
 ]
 
@@ -311,10 +385,15 @@ export function QueueClient() {
     }
   }, [ledgerFilter, refreshLedgerAfterAction])
 
+  const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const queues = data?.queues ? Object.entries(data.queues).sort((a, b) => a[0].localeCompare(b[0])) : []
   const activeWorkers = data?.workers?.active_tasks ? Object.entries(data.workers.active_tasks) : []
   const schedules = data?.schedules || []
   const workerCount = data?.workers?.count ?? 0
+  const inprocessSchedules = data?.inprocess_schedules || []
+  const inprocessActiveRuns = data?.inprocess_active_runs || []
+  const standardIngestedFiles = data?.standard_ingest?.ingested_files ?? 0
+  const standardQuarantinedItems = data?.standard_ingest?.quarantined_items ?? 0
 
   const queuePoints = trends?.series?.['celery_queue_depth'] ?? []
   const workerPoints = trends?.series?.['celery_active_tasks'] ?? []
@@ -332,23 +411,29 @@ export function QueueClient() {
             <>
               <Skeleton className="h-5 w-28 rounded-full" />
               <span className="text-xs text-muted-foreground">
-                Inspecting Celery task broker...
+                Inspecting scheduler &amp; ingest status...
               </span>
             </>
           ) : (
             <Badge
-              variant={data?.broker_reachable ? 'outline' : 'secondary'}
+              variant={data?.broker_reachable || isStandardMode ? 'outline' : 'secondary'}
               data-testid="admin-queue-broker-badge"
               className={
                 data?.broker_reachable
                   ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                  : undefined
+                  : isStandardMode
+                    ? 'text-sky-600 dark:text-sky-400 border-sky-500/30'
+                    : undefined
               }
             >
-              {data?.broker_reachable ? 'Broker Reachable' : 'Broker Unreachable / Standard Mode'}
+              {data?.broker_reachable
+                ? 'Broker Reachable'
+                : isStandardMode
+                  ? 'Standard Mode · In-Process Scheduler'
+                  : 'Broker Unreachable / Standard Mode'}
             </Badge>
           )}
-          {data?.workers?.error ? (
+          {!isStandardMode && data?.workers?.error ? (
             <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">
               Inspect warning: {data.workers.error}
             </span>
@@ -376,155 +461,267 @@ export function QueueClient() {
         data-testid="admin-queue-trends-reservation"
         className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
       >
-        <AnalyticsCard
-          title="Total Queue Depth (1h)"
-          description="Aggregate sum of all Celery queue lengths."
-          className="min-h-[200px]"
-          isLoading={trendsLoading}
-          isFetching={trendsFetching}
-          loadingMessage="Loading queue telemetry..."
-          error={trendsError as AnalyticsCardError | null}
-          isEmpty={!trendsLoading && !trendsError && queuePoints.length === 0}
-        >
-          <div className="flex items-baseline justify-between mb-2">
-            <div className="text-2xl font-semibold tabular-nums">
-              {latestQueue === null ? '–' : latestQueue}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {queuePoints.length > 0 ? `${queuePoints.length} samples` : 'no samples yet'}
-            </div>
-          </div>
-          <div className="text-foreground/70">
-            <Sparkline
-              points={queuePoints}
-              height={80}
-              label="Queue Depth"
-              formatValue={(v) => String(v)}
-            />
-          </div>
-        </AnalyticsCard>
+        {isStandardMode ? (
+          <>
+            <AnalyticsCard
+              title="Standard Ingest Summary"
+              description="Tracked synchronous file ingestion and quarantine state across all services."
+              className="min-h-[200px]"
+              isLoading={isLoading}
+              isFetching={isFetching}
+              loadingMessage="Loading ingest telemetry..."
+              error={error as AnalyticsCardError | null}
+            >
+              <div className="grid grid-cols-2 gap-4 pt-2" data-testid="admin-queue-standard-ingest-summary">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                  <div className="text-xs text-muted-foreground uppercase">Ingested Files</div>
+                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                    {standardIngestedFiles.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    Tracked in PostgreSQL ingested_files
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                  <div className="text-xs text-muted-foreground uppercase">Quarantined Items</div>
+                  <div
+                    className={`text-2xl font-semibold tabular-nums mt-1 ${
+                      standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''
+                    }`}
+                  >
+                    {standardQuarantinedItems.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    Corrupt files &amp; lines preserved on disk
+                  </div>
+                </div>
+              </div>
+            </AnalyticsCard>
 
-        <AnalyticsCard
-          title="Active Tasks (1h)"
-          description="Total actively executing Celery tasks across all workers."
-          className="min-h-[200px]"
-          isLoading={trendsLoading}
-          isFetching={trendsFetching}
-          loadingMessage="Loading queue telemetry..."
-          error={trendsError as AnalyticsCardError | null}
-          isEmpty={!trendsLoading && !trendsError && workerPoints.length === 0}
-        >
-          <div className="flex items-baseline justify-between mb-2">
-            <div className="text-2xl font-semibold tabular-nums">
-              {latestWorker === null ? '–' : latestWorker}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {workerPoints.length > 0 ? `${workerPoints.length} samples` : 'no samples yet'}
-            </div>
-          </div>
-          <div className="text-foreground/70">
-            <Sparkline
-              points={workerPoints}
-              height={80}
-              label="Active Tasks"
-              formatValue={(v) => String(v)}
-            />
-          </div>
-        </AnalyticsCard>
+            <AnalyticsCard
+              title="In-Process Scheduler Overview"
+              description="APScheduler background cron tasks and active PostgreSQL job leases."
+              className="min-h-[200px]"
+              isLoading={isLoading}
+              isFetching={isFetching}
+              loadingMessage="Loading scheduler telemetry..."
+              error={error as AnalyticsCardError | null}
+            >
+              <div className="grid grid-cols-2 gap-4 pt-2" data-testid="admin-queue-standard-scheduler-summary">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                  <div className="text-xs text-muted-foreground uppercase">Registered Schedules</div>
+                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                    {inprocessSchedules.length}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    Active APScheduler jobs
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                  <div className="text-xs text-muted-foreground uppercase">Active Cron Runs</div>
+                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                    {inprocessActiveRuns.length}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    Currently executing in-process jobs
+                  </div>
+                </div>
+              </div>
+            </AnalyticsCard>
+          </>
+        ) : (
+          <>
+            <AnalyticsCard
+              title="Total Queue Depth (1h)"
+              description="Aggregate sum of all Celery queue lengths."
+              className="min-h-[200px]"
+              isLoading={trendsLoading}
+              isFetching={trendsFetching}
+              loadingMessage="Loading queue telemetry..."
+              error={trendsError as AnalyticsCardError | null}
+              isEmpty={!trendsLoading && !trendsError && queuePoints.length === 0}
+            >
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="text-2xl font-semibold tabular-nums">
+                  {latestQueue === null ? '–' : latestQueue}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {queuePoints.length > 0 ? `${queuePoints.length} samples` : 'no samples yet'}
+                </div>
+              </div>
+              <div className="text-foreground/70">
+                <Sparkline
+                  points={queuePoints}
+                  height={80}
+                  label="Queue Depth"
+                  formatValue={(v) => String(v)}
+                />
+              </div>
+            </AnalyticsCard>
+
+            <AnalyticsCard
+              title="Active Tasks (1h)"
+              description="Total actively executing Celery tasks across all workers."
+              className="min-h-[200px]"
+              isLoading={trendsLoading}
+              isFetching={trendsFetching}
+              loadingMessage="Loading queue telemetry..."
+              error={trendsError as AnalyticsCardError | null}
+              isEmpty={!trendsLoading && !trendsError && workerPoints.length === 0}
+            >
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="text-2xl font-semibold tabular-nums">
+                  {latestWorker === null ? '–' : latestWorker}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {workerPoints.length > 0 ? `${workerPoints.length} samples` : 'no samples yet'}
+                </div>
+              </div>
+              <div className="text-foreground/70">
+                <Sparkline
+                  points={workerPoints}
+                  height={80}
+                  label="Active Tasks"
+                  formatValue={(v) => String(v)}
+                />
+              </div>
+            </AnalyticsCard>
+          </>
+        )}
       </div>
 
-      <div
-        data-testid="admin-queue-depths-reservation"
-        className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
-      >
-        <AnalyticsCard
-          title="Queue Depths"
-          helpTitle="Queue Depths"
-          className="min-h-[200px]"
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Inspecting Celery task broker..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                This table shows the current number of pending messages waiting to be processed in each Celery queue.
-              </p>
-              <ul className="list-disc pl-5 space-y-2">
-                <li><strong>celery:</strong> The default fallback queue.</li>
-                <li><strong>q.ingest:</strong> Primary ingest queue for discovering and batch-processing log files.</li>
-                <li><strong>q.control:</strong> Control-plane queue for commits, compaction, and maintenance tasks.</li>
-              </ul>
-            </div>
-          }
+      {!isStandardMode ? (
+        <div
+          data-testid="admin-queue-depths-reservation"
+          className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
         >
-          {queues.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No queues found or Celery mode is inactive.</p>
-          ) : (
-            <div data-testid="admin-queue-depths-table">
-              <DataTableReadonly
-                columns={QUEUE_COLUMNS}
-                data={queues}
-                hideToolbar
-                showPagination={false}
-                tableCaption="Celery queue depths"
-              />
-            </div>
-          )}
-        </AnalyticsCard>
-      </div>
+          <AnalyticsCard
+            title="Queue Depths"
+            helpTitle="Queue Depths"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Inspecting Celery task broker..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  This table shows the current number of pending messages waiting to be processed in each Celery queue.
+                </p>
+                <ul className="list-disc pl-5 space-y-2">
+                  <li><strong>celery:</strong> The default fallback queue.</li>
+                  <li><strong>q.ingest:</strong> Primary ingest queue for discovering and batch-processing log files.</li>
+                  <li><strong>q.control:</strong> Control-plane queue for commits, compaction, and maintenance tasks.</li>
+                </ul>
+              </div>
+            }
+          >
+            {queues.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No queues found or Celery mode is inactive.</p>
+            ) : (
+              <div data-testid="admin-queue-depths-table">
+                <DataTableReadonly
+                  columns={QUEUE_COLUMNS}
+                  data={queues}
+                  hideToolbar
+                  showPagination={false}
+                  tableCaption="Celery queue depths"
+                />
+              </div>
+            )}
+          </AnalyticsCard>
+        </div>
+      ) : null}
 
       <div
         data-testid="admin-queue-workers-reservation"
         className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
       >
-        <AnalyticsCard
-          title={`Active Workers (${workerCount})`}
-          helpTitle="Active Workers"
-          className="min-h-[200px]"
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Inspecting Celery task broker..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                Displays all currently running Celery worker nodes and the tasks they are actively executing.
+        {isStandardMode ? (
+          <AnalyticsCard
+            title={`Active In-Process Jobs (${inprocessActiveRuns.length})`}
+            helpTitle="Active In-Process Jobs"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Inspecting active cron leases..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  Displays all background cron tasks currently holding an active execution lease in PostgreSQL (`job_runs`).
+                </p>
+                <p>
+                  In Standard deployment mode, background sync, commit, compaction, and maintenance tasks execute in-process via APScheduler rather than external Celery workers.
+                </p>
+              </div>
+            }
+          >
+            {inprocessActiveRuns.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No background cron jobs are actively executing right now (scheduler is idle between ticks).
               </p>
-              <p>
-                If a worker is listed but has no active tasks, it is idle and waiting for messages from the queue.
-              </p>
-            </div>
-          }
-        >
-          {activeWorkers.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No active workers found.</p>
-          ) : (
-            <div className="space-y-6" data-testid="admin-queue-workers-list">
-              {activeWorkers.map(([workerName, tasks]) => (
-                <div key={workerName}>
-                  <h4 className="font-mono text-sm font-semibold mb-2 flex items-center">
-                    {workerName}
-                    <Badge variant="outline" className="ml-2">
-                      {tasks.length} active task{tasks.length === 1 ? '' : 's'}
-                    </Badge>
-                  </h4>
-                  {tasks.length > 0 ? (
-                    <DataTableReadonly
-                      columns={TASK_COLUMNS}
-                      data={tasks}
-                      hideToolbar
-                      showPagination={false}
-                      tableCaption={`Active tasks on ${workerName}`}
-                    />
-                  ) : (
-                    <p className="text-xs text-muted-foreground italic">Idle</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </AnalyticsCard>
+            ) : (
+              <div data-testid="admin-queue-inprocess-active-table">
+                <DataTableReadonly
+                  columns={INPROCESS_ACTIVE_COLUMNS}
+                  data={inprocessActiveRuns}
+                  hideToolbar
+                  showPagination={false}
+                  tableCaption="Active in-process cron jobs"
+                />
+              </div>
+            )}
+          </AnalyticsCard>
+        ) : (
+          <AnalyticsCard
+            title={`Active Workers (${workerCount})`}
+            helpTitle="Active Workers"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Inspecting Celery task broker..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  Displays all currently running Celery worker nodes and the tasks they are actively executing.
+                </p>
+                <p>
+                  If a worker is listed but has no active tasks, it is idle and waiting for messages from the queue.
+                </p>
+              </div>
+            }
+          >
+            {activeWorkers.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No active workers found.</p>
+            ) : (
+              <div className="space-y-6" data-testid="admin-queue-workers-list">
+                {activeWorkers.map(([workerName, tasks]) => (
+                  <div key={workerName}>
+                    <h4 className="font-mono text-sm font-semibold mb-2 flex items-center">
+                      {workerName}
+                      <Badge variant="outline" className="ml-2">
+                        {tasks.length} active task{tasks.length === 1 ? '' : 's'}
+                      </Badge>
+                    </h4>
+                    {tasks.length > 0 ? (
+                      <DataTableReadonly
+                        columns={TASK_COLUMNS}
+                        data={tasks}
+                        hideToolbar
+                        showPagination={false}
+                        tableCaption={`Active tasks on ${workerName}`}
+                      />
+                    ) : (
+                      <p className="text-xs text-muted-foreground italic">Idle</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </AnalyticsCard>
+        )}
       </div>
 
       <div
@@ -854,45 +1051,82 @@ export function QueueClient() {
             </div>
           )}
         </AnalyticsCard>
+        <QuarantineSection />
       </div>
 
       <div
         data-testid="admin-queue-schedules-reservation"
         className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
       >
-        <AnalyticsCard
-          title={`RedBeat Schedules (${schedules.length})`}
-          helpTitle="RedBeat Schedules"
-          className="min-h-[200px]"
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading queue telemetry..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                Displays all registered background schedules (crons/intervals) stored in Valkey/Redis via RedBeat.
-              </p>
-              <p>
-                These are responsible for ticking recurrent operations like syncing logs, compacting storage, and gathering metrics.
-              </p>
-            </div>
-          }
-        >
-          {schedules.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No schedules found.</p>
-          ) : (
-            <div data-testid="admin-queue-schedules-table">
-              <DataTableReadonly
-                columns={SCHEDULE_COLUMNS}
-                data={schedules}
-                hideToolbar
-                showPagination={false}
-                tableCaption="RedBeat schedules"
-              />
-            </div>
-          )}
-        </AnalyticsCard>
+        {isStandardMode ? (
+          <AnalyticsCard
+            title={`In-Process Schedules (${inprocessSchedules.length})`}
+            helpTitle="In-Process Schedules"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Loading scheduler telemetry..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  Displays all registered background schedules running in-process via APScheduler in Standard deployment mode.
+                </p>
+                <p>
+                  These recurrent jobs handle log discovery, DuckLake commits, local compaction, rollup healing, cloud maintenance, and alert evaluation.
+                </p>
+              </div>
+            }
+          >
+            {inprocessSchedules.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No in-process schedules registered.</p>
+            ) : (
+              <div data-testid="admin-queue-inprocess-schedules-table">
+                <DataTableReadonly
+                  columns={INPROCESS_SCHEDULE_COLUMNS}
+                  data={inprocessSchedules}
+                  hideToolbar
+                  showPagination={false}
+                  tableCaption="In-process APScheduler jobs"
+                />
+              </div>
+            )}
+          </AnalyticsCard>
+        ) : (
+          <AnalyticsCard
+            title={`RedBeat Schedules (${schedules.length})`}
+            helpTitle="RedBeat Schedules"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Loading queue telemetry..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  Displays all registered background schedules (crons/intervals) stored in Valkey/Redis via RedBeat.
+                </p>
+                <p>
+                  These are responsible for ticking recurrent operations like syncing logs, compacting storage, and gathering metrics.
+                </p>
+              </div>
+            }
+          >
+            {schedules.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No schedules found.</p>
+            ) : (
+              <div data-testid="admin-queue-schedules-table">
+                <DataTableReadonly
+                  columns={SCHEDULE_COLUMNS}
+                  data={schedules}
+                  hideToolbar
+                  showPagination={false}
+                  tableCaption="RedBeat schedules"
+                />
+              </div>
+            )}
+          </AnalyticsCard>
+        )}
       </div>
     </div>
   )

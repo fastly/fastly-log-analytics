@@ -38,6 +38,14 @@ KNOWN_QUEUES = ("celery", "q.ingest", "q.control")
 def _get_redis():
     """Lazily create (and cache) one sync Redis client for status reads."""
     global _redis_client
+    from backend import config as svcconfig
+
+    if (
+        not svcconfig.is_high_scale_mode()
+        and os.environ.get("SCHEDULER_MODE", "inprocess") != "external"
+        and not os.environ.get("CELERY_BROKER_URL")
+    ):
+        raise ConnectionError("Celery broker not configured in standard mode")
     with _redis_lock:
         if _redis_client is None:
             import redis
@@ -128,9 +136,115 @@ def ingest_ledger_summary() -> dict[str, int]:
     return ledger
 
 
+def inprocess_schedule_entries() -> list[dict[str, Any]]:
+    """List registered in-process APScheduler jobs as {name, trigger, next_run_at} dicts."""
+    entries: list[dict[str, Any]] = []
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        sched = get_scheduler()
+        inner_sched = getattr(sched, "_sched", None) or getattr(sched, "scheduler", None)
+        for job in inner_sched.get_jobs() if inner_sched is not None else []:
+            next_run = getattr(job, "next_run_time", None)
+            next_ts: float | None = None
+            if next_run is not None:
+                try:
+                    next_ts = float(next_run.timestamp())
+                except Exception:
+                    next_ts = None
+            entries.append(
+                {
+                    "name": str(job.id),
+                    "trigger": str(job.trigger),
+                    "next_run_at": next_ts,
+                }
+            )
+        entries.sort(key=lambda item: item["name"])
+    except Exception as e:
+        logger.debug("[celery_status] inprocess_schedule_entries failed: %s", e)
+    return entries
+
+
+def inprocess_active_runs_entries() -> list[dict[str, Any]]:
+    """Return currently executing in-process cron runs from cron_progress."""
+    out: list[dict[str, Any]] = []
+    try:
+        from backend.cron_progress import list_active_runs
+
+        for item in list_active_runs():
+            run_id = item.get("run_id")
+            if run_id is None:
+                continue
+            started_at = item.get("started_at")
+            out.append(
+                {
+                    "run_id": int(run_id),
+                    "service_id": str(item["service_id"]) if item.get("service_id") else None,
+                    "task": str(item["task"]) if item.get("task") else None,
+                    "started_at": float(started_at) if isinstance(started_at, (int, float)) else None,
+                }
+            )
+    except Exception as e:
+        logger.debug("[celery_status] inprocess_active_runs_entries failed: %s", e)
+    return out
+
+
+def standard_ingest_summary() -> dict[str, int]:
+    """Aggregate standard-mode ingested_files and ingest_quarantine counts across all configured services."""
+    ingested_files = 0
+    quarantined_items = 0
+    try:
+        from backend.config import list_configs
+        from backend.core.metadata.base import get_con
+
+        seen: set[str] = set()
+        for svc in list_configs():
+            sid = svc.get("service_id") or svc.get("name")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT count(*) FROM ingested_files WHERE service_id = ?",
+                    (sid,),
+                )
+                rows = cur.fetchall()
+                if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
+                    ingested_files += int(rows[0][0])
+            except Exception:
+                pass
+            try:
+                con = get_con(sid)
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT count(*) FROM ingest_quarantine WHERE service_id = ?",
+                    (sid,),
+                )
+                rows = cur.fetchall()
+                if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
+                    quarantined_items += int(rows[0][0])
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
+    return {
+        "ingested_files": ingested_files,
+        "quarantined_items": quarantined_items,
+    }
+
+
 def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
+    from backend import config as svcconfig
     from backend.celery_app import app
+
+    is_high_scale = bool(svcconfig.is_high_scale_mode())
+    deployment_mode = "high_scale" if is_high_scale else "standard"
+    scheduler_mode = (
+        "external" if is_high_scale or os.environ.get("SCHEDULER_MODE", "inprocess") == "external" else "inprocess"
+    )
 
     queues, broker_reachable = celery_queue_depths()
 
@@ -157,6 +271,8 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     ledger = ingest_ledger_summary()
 
     return {
+        "deployment_mode": deployment_mode,
+        "scheduler_mode": scheduler_mode,
         "broker_reachable": broker_reachable,
         "workers": {
             "active_tasks": active,
@@ -169,6 +285,9 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
         "queues": queues,
         "schedules": schedules,
         "ledger": ledger,
+        "inprocess_schedules": inprocess_schedule_entries(),
+        "inprocess_active_runs": inprocess_active_runs_entries(),
+        "standard_ingest": standard_ingest_summary(),
     }
 
 

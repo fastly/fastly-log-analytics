@@ -8,7 +8,7 @@ export default function AdminQueuePage() {
     <div className="space-y-6" data-testid="admin-queue-root">
       <PageHeader
         title="Queue & Workers"
-        description="Monitor Celery queue depths, active workers, and scheduled tasks."
+        description="Monitor background job schedules, active workers, queue depths, and dead-letter / quarantine state."
       >
         <BackToAdminLink />
       </PageHeader>

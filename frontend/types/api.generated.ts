@@ -8112,6 +8112,18 @@ export interface components {
          *     summed across services, so both keep open string keys.
          */
         CeleryStatusResponse: {
+            /**
+             * Deployment Mode
+             * @default standard
+             * @enum {string}
+             */
+            deployment_mode: "standard" | "high_scale";
+            /**
+             * Scheduler Mode
+             * @default inprocess
+             * @enum {string}
+             */
+            scheduler_mode: "inprocess" | "external";
             /** Broker Reachable */
             broker_reachable?: boolean | null;
             workers?: components["schemas"]["CeleryWorkers"] | null;
@@ -8125,6 +8137,11 @@ export interface components {
             ledger?: {
                 [key: string]: number;
             } | null;
+            /** Inprocess Schedules */
+            inprocess_schedules?: components["schemas"]["InProcessScheduleEntry"][] | null;
+            /** Inprocess Active Runs */
+            inprocess_active_runs?: components["schemas"]["InProcessActiveRun"][] | null;
+            standard_ingest?: components["schemas"]["StandardIngestSummary"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -10980,6 +10997,30 @@ export interface components {
             filters: {
                 [key: string]: string | number | null;
             };
+        } & {
+            [key: string]: unknown;
+        };
+        /** InProcessActiveRun */
+        InProcessActiveRun: {
+            /** Run Id */
+            run_id: number;
+            /** Service Id */
+            service_id?: string | null;
+            /** Task */
+            task?: string | null;
+            /** Started At */
+            started_at?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** InProcessScheduleEntry */
+        InProcessScheduleEntry: {
+            /** Name */
+            name: string;
+            /** Trigger */
+            trigger: string;
+            /** Next Run At */
+            next_run_at?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -19937,6 +19978,21 @@ export interface components {
             ips: number;
             /** Surge Ratio */
             surge_ratio: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** StandardIngestSummary */
+        StandardIngestSummary: {
+            /**
+             * Ingested Files
+             * @default 0
+             */
+            ingested_files: number;
+            /**
+             * Quarantined Items
+             * @default 0
+             */
+            quarantined_items: number;
         } & {
             [key: string]: unknown;
         };

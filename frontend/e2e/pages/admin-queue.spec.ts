@@ -137,9 +137,14 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     })
 
     // Verify all zero-CLS reservation containers are mounted with contain-intrinsic-size and content-visibility:auto
+    const statusRes = await page.request.get('/api/admin/celery/status')
+    const statusBody = statusRes.ok() ? await statusRes.json() : {}
+    const isStandardMode =
+      statusBody.deployment_mode === 'standard' && !statusBody.broker_reachable
+
     const reservations = [
       'admin-queue-trends-reservation',
-      'admin-queue-depths-reservation',
+      ...(isStandardMode ? [] : ['admin-queue-depths-reservation']),
       'admin-queue-workers-reservation',
       'admin-queue-ledger-reservation',
       'admin-queue-schedules-reservation',
@@ -199,7 +204,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     }
   })
 
-  test('4. Queue depth sparklines, queue depths table, active workers, ingest ledger status cards, and RedBeat schedules render cleanly', async ({
+  test('4. Mode-aware sections (Standard In-Process vs High-Scale Celery/RedBeat) and Ingest Ledger render cleanly', async ({
     page,
   }) => {
     await page.goto('/admin/queue')
@@ -207,46 +212,78 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
       timeout: 30_000,
     })
 
-    // Broker connectivity badge is visible
+    const statusRes = await page.request.get('/api/admin/celery/status')
+    expect(statusRes.status()).toBe(200)
+    const statusBody = await statusRes.json()
+    const isStandardMode =
+      statusBody.deployment_mode === 'standard' && !statusBody.broker_reachable
+
+    // Broker / Mode connectivity badge is visible
     const brokerBadge = page.locator('[data-testid="admin-queue-broker-badge"]:visible')
     await expect(brokerBadge).toBeVisible({ timeout: 15_000 })
-    await expect(brokerBadge).toContainText(
-      /Broker Reachable|Broker Unreachable \/ Standard Mode/i,
-    )
 
-    // Sparkline cards
-    await expect(
-      page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
-    ).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
-    await expect(
-      page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
-    ).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
+    if (isStandardMode) {
+      await expect(brokerBadge).toContainText(/Standard Mode · In-Process Scheduler/i)
 
-    // Queue Depths card (either table when queues exist or empty fallback message)
-    const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
-    await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
-    await expect(depthsCard).toContainText(
-      /Queue Name|No queues found or Celery mode is inactive/i,
-      { timeout: 15_000 },
-    )
+      // Standard summary cards
+      await expect(
+        page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
+      ).toContainText(/Standard Ingest Summary/i, { timeout: 15_000 })
+      await expect(
+        page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
+      ).toContainText(/In-Process Scheduler Overview/i, { timeout: 15_000 })
 
-    // Active Workers card
-    await expect(
-      page.locator('[data-testid="admin-queue-workers-reservation"]:visible'),
-    ).toContainText(/Active Workers \(\d+\)/i, { timeout: 15_000 })
+      // Celery Queue Depths card is hidden in Standard Mode
+      await expect(page.locator('[data-testid="admin-queue-depths-reservation"]')).toHaveCount(0)
 
-    // Ingest Ledger Status card (either populated ledger state cards or empty ledger message)
+      // Active In-Process Jobs card
+      await expect(
+        page.locator('[data-testid="admin-queue-workers-reservation"]:visible'),
+      ).toContainText(/Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
+
+      // In-Process Schedules card
+      await expect(
+        page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
+      ).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
+    } else {
+      await expect(brokerBadge).toContainText(
+        /Broker Reachable|Broker Unreachable \/ Standard Mode/i,
+      )
+
+      // Sparkline cards
+      await expect(
+        page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
+      ).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
+      await expect(
+        page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
+      ).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
+
+      // Queue Depths card (either table when queues exist or empty fallback message)
+      const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
+      await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
+      await expect(depthsCard).toContainText(
+        /Queue Name|No queues found or Celery mode is inactive/i,
+        { timeout: 15_000 },
+      )
+
+      // Active Workers card
+      await expect(
+        page.locator('[data-testid="admin-queue-workers-reservation"]:visible'),
+      ).toContainText(/Active Workers \(\d+\)/i, { timeout: 15_000 })
+
+      // RedBeat Schedules card
+      await expect(
+        page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
+      ).toContainText(/RedBeat Schedules \(\d+\)/i, { timeout: 15_000 })
+    }
+
+    // Ingest Ledger Status card is visible in both modes
     const ledgerSection = page.locator('[data-testid="admin-queue-ledger-reservation"]:visible')
     await expect(ledgerSection).toContainText(/Ingest Ledger Status/i, { timeout: 15_000 })
     await expect(ledgerSection).toContainText(
       /Ledger is empty|discovered|claimed|committed|quarantined|dead_letter/i,
       { timeout: 15_000 },
     )
-
-    // RedBeat Schedules card
-    await expect(
-      page.locator('[data-testid="admin-queue-schedules-reservation"]:visible'),
-    ).toContainText(/RedBeat Schedules \(\d+\)/i, { timeout: 15_000 })
   })
 
   test('5. Interactive manual refresh workflow with X-Page-Load-ID telemetry attribution', async ({

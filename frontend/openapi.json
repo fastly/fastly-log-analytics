@@ -56676,6 +56676,24 @@
       },
       "CeleryStatusResponse": {
         "properties": {
+          "deployment_mode": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "high_scale"
+            ],
+            "title": "Deployment Mode",
+            "default": "standard"
+          },
+          "scheduler_mode": {
+            "type": "string",
+            "enum": [
+              "inprocess",
+              "external"
+            ],
+            "title": "Scheduler Mode",
+            "default": "inprocess"
+          },
           "broker_reachable": {
             "anyOf": [
               {
@@ -56738,6 +56756,44 @@
               }
             ],
             "title": "Ledger"
+          },
+          "inprocess_schedules": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/InProcessScheduleEntry"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inprocess Schedules"
+          },
+          "inprocess_active_runs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/InProcessActiveRun"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inprocess Active Runs"
+          },
+          "standard_ingest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StandardIngestSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": true,
@@ -64445,6 +64501,83 @@
           "filters"
         ],
         "title": "ImpossibleDistanceMeta"
+      },
+      "InProcessActiveRun": {
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "title": "Run Id"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "title": "InProcessActiveRun"
+      },
+      "InProcessScheduleEntry": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "trigger": {
+            "type": "string",
+            "title": "Trigger"
+          },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "trigger"
+        ],
+        "title": "InProcessScheduleEntry"
       },
       "IngestCatchupStatus": {
         "properties": {
@@ -90384,6 +90517,23 @@
           "surge_ratio"
         ],
         "title": "StaleBrowserVersionMeta"
+      },
+      "StandardIngestSummary": {
+        "properties": {
+          "ingested_files": {
+            "type": "integer",
+            "title": "Ingested Files",
+            "default": 0
+          },
+          "quarantined_items": {
+            "type": "integer",
+            "title": "Quarantined Items",
+            "default": 0
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "StandardIngestSummary"
       },
       "StreamMetrics": {
         "properties": {

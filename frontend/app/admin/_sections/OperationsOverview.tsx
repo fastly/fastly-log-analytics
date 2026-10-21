@@ -357,24 +357,39 @@ function CeleryStatusCard() {
     refetchInterval: POLL_MS,
   })
 
+  const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const workers = data?.workers?.count ?? 0
   const ingestQ = data?.queues?.['q.ingest'] ?? 0
   const controlQ = data?.queues?.['q.control'] ?? 0
   const deadLetters = data?.ledger?.dead_letter ?? 0
-  const quarantined = data?.ledger?.quarantined ?? 0
+  const quarantined =
+    (data?.ledger?.quarantined ?? 0) + (data?.standard_ingest?.quarantined_items ?? 0)
+  const schedCount = data?.inprocess_schedules?.length ?? 0
+  const activeRuns = data?.inprocess_active_runs?.length ?? 0
+  const ingestedFiles = data?.standard_ingest?.ingested_files ?? 0
 
-  let primaryText = `${workers} workers`
-  let primaryTone: CardTone = workers > 0 ? 'default' : 'warning'
-  let secondaryText = `ingest: ${ingestQ} · control: ${controlQ}`
+  let primaryText = isStandardMode ? `${schedCount} scheduled` : `${workers} workers`
+  let primaryTone: CardTone = isStandardMode
+    ? 'default'
+    : workers > 0
+      ? 'default'
+      : 'warning'
+  let secondaryText = isStandardMode
+    ? `${activeRuns} active · ${ingestedFiles.toLocaleString()} ingested · in-process`
+    : `ingest: ${ingestQ} · control: ${controlQ}`
 
   if (deadLetters > 0) {
     primaryText = `${deadLetters} dead letters`
     primaryTone = 'critical'
-    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = isStandardMode
+      ? `${schedCount} scheduled · in-process`
+      : `${workers} workers · ingest: ${ingestQ}`
   } else if (quarantined > 0) {
     primaryText = `${quarantined} quarantined`
     primaryTone = 'attention'
-    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = isStandardMode
+      ? `${schedCount} scheduled · in-process`
+      : `${workers} workers · ingest: ${ingestQ}`
   }
 
   return (

@@ -39,15 +39,38 @@ class CeleryScheduleEntry(WireSafeModel):
     task: str
 
 
+class InProcessScheduleEntry(WireSafeModel):
+    name: str
+    trigger: str
+    next_run_at: float | None = None
+
+
+class InProcessActiveRun(WireSafeModel):
+    run_id: int
+    service_id: str | None = None
+    task: str | None = None
+    started_at: float | None = None
+
+
+class StandardIngestSummary(WireSafeModel):
+    ingested_files: int = 0
+    quarantined_items: int = 0
+
+
 class CeleryStatusResponse(WireSafeModel):
     """``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
     summed across services, so both keep open string keys."""
 
+    deployment_mode: Literal["standard", "high_scale"] = "standard"
+    scheduler_mode: Literal["inprocess", "external"] = "inprocess"
     broker_reachable: bool | None = None
     workers: CeleryWorkers | None = None
     queues: dict[str, int] | None = None
     schedules: list[CeleryScheduleEntry] | None = None
     ledger: dict[str, int] | None = None
+    inprocess_schedules: list[InProcessScheduleEntry] | None = None
+    inprocess_active_runs: list[InProcessActiveRun] | None = None
+    standard_ingest: StandardIngestSummary | None = None
 
 
 class IngestLedgerEntry(WireSafeModel):

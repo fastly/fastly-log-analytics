@@ -183,6 +183,68 @@ class TestCeleryStatusHighScaleAndStandard:
             assert data["schedules"] == []
             assert data["ledger"] == {}
 
+    def test_standard_mode_inprocess_scheduler_and_ingest_telemetry(self, client):
+        """Standard mode returns deployment_mode='standard', scheduler_mode='inprocess',
+        inprocess_schedules, inprocess_active_runs, and standard_ingest summary."""
+        fake_job = SimpleNamespace(
+            id="log_discovery_svc-a",
+            name="log_discovery_svc-a",
+            trigger="interval[0:00:10]",
+            next_run_time=SimpleNamespace(timestamp=lambda: 1700000010.0),
+        )
+        fake_scheduler = SimpleNamespace(scheduler=SimpleNamespace(get_jobs=lambda: [fake_job]))
+        with (
+            patch(
+                "backend.celery_status._get_redis",
+                side_effect=ConnectionError("Celery broker not configured in standard mode"),
+            ),
+            patch("backend.config.is_high_scale_mode", return_value=False),
+            patch("backend.config.list_configs", return_value=[{"service_id": "svc-a"}]),
+            patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
+            patch(
+                "backend.celery_status.inprocess_active_runs_entries",
+                return_value=[
+                    {
+                        "run_id": 101,
+                        "service_id": "svc-a",
+                        "task": "sync",
+                        "started_at": 1700000000.0,
+                    }
+                ],
+            ),
+            patch(
+                "backend.celery_status.standard_ingest_summary",
+                return_value={"ingested_files": 420, "quarantined_items": 1},
+            ),
+            patch(
+                "backend.celery_status.ingest_ledger_summary",
+                return_value={"committed": 420, "quarantined": 1},
+            ),
+        ):
+            resp = client.get("/api/admin/celery/status")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["broker_reachable"] is False
+            assert data["deployment_mode"] == "standard"
+            assert data["scheduler_mode"] == "inprocess"
+            assert data["inprocess_schedules"] == [
+                {
+                    "name": "log_discovery_svc-a",
+                    "trigger": "interval[0:00:10]",
+                    "next_run_at": 1700000010.0,
+                }
+            ]
+            assert data["inprocess_active_runs"] == [
+                {
+                    "run_id": 101,
+                    "service_id": "svc-a",
+                    "task": "sync",
+                    "started_at": 1700000000.0,
+                }
+            ]
+            assert data["standard_ingest"] == {"ingested_files": 420, "quarantined_items": 1}
+            assert data["ledger"] == {"committed": 420, "quarantined": 1}
+
 
 class TestQueueMetricHistoryBatch:
     def test_metric_history_batch_returns_celery_series(self, client):
