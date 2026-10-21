@@ -295,6 +295,13 @@ async function logPagePerf(page, name, sectionTimings = {}) {
           const key = new URL(r.name).pathname;
           const row = api[key] || (api[key] = { n: 0, maxMs: 0, kb: 0 });
           row.n += 1;
+          if (Math.round(r.duration) >= row.maxMs) {
+            // Where the slowest call spent its time: browser/gateway queue and
+            // connection setup (stall), server + network wait, and download.
+            row.stallMs = Math.round(r.requestStart - r.startTime);
+            row.waitMs = Math.round(r.responseStart - r.requestStart);
+            row.dlMs = Math.round(r.responseEnd - r.responseStart);
+          }
           row.maxMs = Math.max(row.maxMs, Math.round(r.duration));
           row.kb = Math.max(row.kb, Math.round((r.transferSize || r.encodedBodySize || 0) / 102.4) / 10);
         }
