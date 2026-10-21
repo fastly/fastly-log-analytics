@@ -302,6 +302,44 @@ def _build_io_per_request_metrics(
 # ── Overview rollup reader ──────────────────────────────────────────────
 
 
+def _collapse_hourly_to_daily_bundle_paths(
+    src: dict,
+    rollup_paths: list[str],
+    bundle_filename: str,
+) -> list[str]:
+    """Replace any full 24-hour closed day in ``rollup_paths`` with its compacted
+    ``day_bundled/day=YYYY-MM-DD/{bundle_filename}`` file when present on disk."""
+    import os
+
+    from backend.core.rollups._common import _day_bundled_root
+
+    if len(rollup_paths) < 24:
+        return rollup_paths
+    day_root = _day_bundled_root(src)
+    if not os.path.isdir(day_root):
+        return rollup_paths
+
+    by_day: dict[str, list[str]] = {}
+    other_paths: list[str] = []
+    for p in rollup_paths:
+        parent = os.path.basename(os.path.dirname(p))
+        if parent.startswith("hour=") and len(parent) >= 18:
+            day_key = parent[5:15]
+            by_day.setdefault(day_key, []).append(p)
+        else:
+            other_paths.append(p)
+
+    collapsed: list[str] = list(other_paths)
+    for day_key, paths in sorted(by_day.items()):
+        if len(paths) == 24:
+            day_file = os.path.join(day_root, f"day={day_key}", bundle_filename)
+            if os.path.isfile(day_file):
+                collapsed.append(day_file)
+                continue
+        collapsed.extend(paths)
+    return collapsed
+
+
 def _try_overview_from_rollup(
     runner: QueryRunner,
     *,
@@ -350,6 +388,12 @@ def _try_overview_from_rollup(
 
     if not rollup_paths and not crosses_active:
         return None
+
+    rollup_paths = _collapse_hourly_to_daily_bundle_paths(
+        runner.src,
+        rollup_paths,
+        OVERVIEW_BUNDLE_FILENAME,
+    )
 
     interval = safe_interval(chart_interval, "1 day")
     _HIT_STATES = HIT_STATES
@@ -412,7 +456,8 @@ def _try_overview_from_rollup(
             f"  {cnt_miss_elapsed} AS cnt_miss_elapsed "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-            f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}'"
+            f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}' "
+            f"GROUP BY 1"
         )
 
     if not select_clauses:
@@ -520,14 +565,13 @@ def _try_network_from_rollup(
     *,
     start_time: str | None,
     end_time: str | None,
+    chart_interval: str = "1 day",
     actual_cols: set[str],
 ) -> dict[str, Any] | None:
-    """Serve the network section aggregates from pre-rolled hourly parquets.
+    """Serve the network section aggregates and protocol time series from pre-rolled hourly parquets.
 
-    Returns the ``net`` dict with percentage metrics when eligible, or
-    ``None`` to fall through to the raw scan. Does NOT include the
-    protocol time series (that still needs a raw scan per-protocol
-    per-bucket).
+    Returns the ``net`` dict with percentage metrics and ``protocol_time_series``
+    when eligible, or ``None`` to fall through to the raw scan.
     """
     import os
 
@@ -540,6 +584,10 @@ def _try_network_from_rollup(
         return None
     st, et = window
     if (et - st) > timedelta(days=366):
+        return None
+
+    # network_summary.parquet rolls up `is_ssl`, not the legacy `tls` VARCHAR fallback column
+    if "is_ssl" not in actual_cols and "tls" in actual_cols:
         return None
 
     bundled_root = _hour_bundled_root(runner.src)
@@ -560,6 +608,13 @@ def _try_network_from_rollup(
     if not rollup_paths and not crosses_active:
         return None
 
+    rollup_paths = _collapse_hourly_to_daily_bundle_paths(
+        runner.src,
+        rollup_paths,
+        NETWORK_SUMMARY_BUNDLE_FILENAME,
+    )
+
+    interval = safe_interval(chart_interval, "1 day")
     has_protocol = "protocol" in actual_cols
     has_is_ssl = "is_ssl" in actual_cols
     has_ipv6 = "ipv6" in actual_cols
@@ -570,15 +625,25 @@ def _try_network_from_rollup(
         paths_sql = quote_path_list(rollup_paths)
         st_tz = st.astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
+        http3_r = "SUM(http3_requests)" if has_protocol else "CAST(NULL AS BIGINT)"
+        h2_r = "SUM(h2_requests)" if has_protocol else "CAST(NULL AS BIGINT)"
+        h11_r = "SUM(h11_requests)" if has_protocol else "CAST(NULL AS BIGINT)"
+        other_r = "SUM(other_proto_requests)" if has_protocol else "CAST(NULL AS BIGINT)"
+        tls_r = "SUM(tls_requests)" if has_is_ssl else "CAST(NULL AS BIGINT)"
+        ipv6_r = "SUM(ipv6_requests)" if has_ipv6 else "CAST(NULL AS BIGINT)"
         select_clauses.append(
-            f"SELECT SUM(requests) AS total_requests, "
-            f"  SUM(http3_requests) AS http3, "
-            f"  SUM(h2_requests) AS h2, "
-            f"  SUM(tls_requests) AS tls, "
-            f"  SUM(ipv6_requests) AS ipv6 "
+            f"SELECT time_bucket(INTERVAL '{interval}', hour_start) AS bucket, "
+            f"  SUM(requests) AS total_requests, "
+            f"  {http3_r} AS http3, "
+            f"  {h2_r} AS h2, "
+            f"  {h11_r} AS h11, "
+            f"  {other_r} AS other_proto, "
+            f"  {tls_r} AS tls, "
+            f"  {ipv6_r} AS ipv6 "
             f"FROM read_parquet([{paths_sql}]) "
             f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
-            f"  AND hour_start < TIMESTAMPTZ '{et_tz}'"
+            f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
+            f"GROUP BY 1"
         )
 
     if crosses_active:
@@ -587,58 +652,94 @@ def _try_network_from_rollup(
         live_st_tz = live_start.astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
 
-        http3_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/3')" if has_protocol else "NULL"
-        h2_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/2')" if has_protocol else "NULL"
-        tls_clause = (
-            "COUNT(*) FILTER (WHERE is_ssl = true)"
-            if "is_ssl" in actual_cols
-            else ("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '')" if "tls" in actual_cols else "NULL")
+        http3_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/3')" if has_protocol else "CAST(NULL AS BIGINT)"
+        h2_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/2')" if has_protocol else "CAST(NULL AS BIGINT)"
+        h11_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1')" if has_protocol else "CAST(NULL AS BIGINT)"
+        other_proto_clause = (
+            "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1'))"
+            if has_protocol
+            else "CAST(NULL AS BIGINT)"
         )
-        ipv6_clause = "COUNT(*) FILTER (WHERE ipv6 = true)" if has_ipv6 else "NULL"
+        tls_clause = "COUNT(*) FILTER (WHERE is_ssl = true)" if has_is_ssl else "CAST(NULL AS BIGINT)"
+        ipv6_clause = "COUNT(*) FILTER (WHERE ipv6 = true)" if has_ipv6 else "CAST(NULL AS BIGINT)"
 
         table_name = _safe_table(runner.src["name"])
         select_clauses.append(
-            f"SELECT COUNT(*) AS total_requests, "
+            f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS bucket, "
+            f"  COUNT(*) AS total_requests, "
             f"  {http3_clause} AS http3, "
             f"  {h2_clause} AS h2, "
+            f"  {h11_clause} AS h11, "
+            f"  {other_proto_clause} AS other_proto, "
             f"  {tls_clause} AS tls, "
             f"  {ipv6_clause} AS ipv6 "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-            f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}'"
+            f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}' "
+            f"GROUP BY 1"
         )
 
+    unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
     combined_sql = (
-        "SELECT SUM(total_requests) AS total_requests, "
+        "SELECT bucket, "
+        "SUM(total_requests) AS total_requests, "
         "SUM(http3) AS http3, SUM(h2) AS h2, "
+        "SUM(h11) AS h11, SUM(other_proto) AS other_proto, "
         "SUM(tls) AS tls, SUM(ipv6) AS ipv6 "
-        f"FROM ({' UNION ALL '.join(select_clauses)})"
+        f"FROM ({unioned}) "
+        "WHERE bucket IS NOT NULL "
+        "GROUP BY bucket ORDER BY bucket"
     )
     try:
-        row = runner.execute(combined_sql).fetchone()
+        rows = runner.execute(combined_sql).fetchall()
     except duckdb.Error as e:
         logger.debug("[network_rollup] read failed, falling back to raw: %s", e)
         return None
 
-    if not row or not row[0]:
+    col_names = [d[0] for d in runner.con.description]
+    buckets = [dict(zip(col_names, r)) for r in rows]
+    if not buckets:
         return None
 
-    total = int(row[0])
-    if total == 0:
-        return {"total_requests": 0, "http3_pct": None, "h2_pct": None, "tls_pct": None, "ipv6_pct": None}
+    def _sum_opt(key: str) -> int | None:
+        vals = [int(v) for b in buckets if (v := b.get(key)) is not None]
+        if not vals:
+            return None
+        return sum(vals)
 
-    def _pct(val: Any) -> float | None:
+    total = _sum_opt("total_requests") or 0
+    if total == 0:
+        return None
+
+    def _pct(val: int | None) -> float | None:
         if val is None:
             return None
         return round(int(val) * 100.0 / total, 1)
 
-    return {
+    net_out: dict[str, Any] = {
         "total_requests": total,
-        "http3_pct": _pct(row[1]),
-        "h2_pct": _pct(row[2]),
-        "tls_pct": _pct(row[3]),
-        "ipv6_pct": _pct(row[4]),
+        "http3_pct": _pct(_sum_opt("http3")) if has_protocol else None,
+        "h2_pct": _pct(_sum_opt("h2")) if has_protocol else None,
+        "tls_pct": _pct(_sum_opt("tls")) if has_is_ssl else None,
+        "ipv6_pct": _pct(_sum_opt("ipv6")) if has_ipv6 else None,
     }
+
+    if has_protocol:
+        proto_ts: list[dict[str, Any]] = []
+        for b in buckets:
+            t_str = safe_iso(b["bucket"])
+            for col_key, proto_label in (
+                ("h11", "HTTP/1.1"),
+                ("h2", "HTTP/2"),
+                ("http3", "HTTP/3"),
+                ("other_proto", "Other"),
+            ):
+                cnt = int(b.get(col_key) or 0)
+                if cnt > 0:
+                    proto_ts.append({"time": t_str, "value": cnt, "category": proto_label})
+        net_out["protocol_time_series"] = proto_ts
+
+    return net_out
 
 
 def get_summary(
@@ -700,9 +801,10 @@ def get_summary(
         **runner.telemetry(),
     }
 
-    # ── Rollup fast path for overview + caching ────────────────────────
+    # ── Rollup fast path for overview + caching + network ──────────────
     _overview_done = False
     _caching_done = False
+    _network_done = False
     _HIT_STATES = HIT_STATES
 
     if (_want("caching") or _want("overview")) and has_cache and not filters:
@@ -720,6 +822,7 @@ def get_summary(
             timer=timer,
         )
         if rollup_result is not None:
+            result["used_rollups"] = True
             if "caching" in rollup_result:
                 result["caching"] = rollup_result["caching"]
                 _caching_done = True
@@ -728,14 +831,30 @@ def get_summary(
                 _overview_done = True
         timer.mark("overview_rollup_attempt", _t)
 
-    # ── Combined overview + caching (raw scan fallback) ──────────────
-    # When both sections are requested, a single GROUP BY query produces
-    # per-bucket aggregates for all overview AND caching stats + both
-    # time-series. This replaces 4 independent full-table scans with 1.
+    if _want("network") and not filters:
+        _t = time.perf_counter()
+        net_rollup = _try_network_from_rollup(
+            runner,
+            start_time=start_time,
+            end_time=end_time,
+            chart_interval=chart_interval,
+            actual_cols=actual_cols,
+        )
+        if net_rollup is not None:
+            result["used_rollups"] = True
+            result["network"] = net_rollup
+            _network_done = True
+            timer.mark("network_rollup", _t)
+
+    # ── Combined overview + caching (+ network) (raw scan fallback) ─────
+    # When these sections are co-requested (e.g. Executive Summary tab),
+    # a single GROUP BY query produces per-bucket aggregates for all
+    # overview, caching, AND network stats + time-series in 1 scan.
 
     if _want("caching") and has_cache and not _caching_done:
         _t = time.perf_counter()
-        include_overview = _want("overview")
+        include_overview = _want("overview") and not _overview_done
+        include_network = _want("network") and not _network_done
 
         combined_parts: list[str] = [
             bucket_select,
@@ -761,6 +880,20 @@ def get_summary(
                 combined_parts.append(f"COUNT(elapsed) FILTER (WHERE cache IN {_HIT_STATES}) AS cnt_hit_elapsed")
                 combined_parts.append("SUM(elapsed) FILTER (WHERE cache = 'MISS') AS sum_miss_elapsed")
                 combined_parts.append("COUNT(elapsed) FILTER (WHERE cache = 'MISS') AS cnt_miss_elapsed")
+        if include_network:
+            if has_protocol:
+                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3_cnt")
+                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2_cnt")
+                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1') AS h11_cnt")
+                combined_parts.append(
+                    "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1')) AS other_proto_cnt"
+                )
+            if "is_ssl" in actual_cols:
+                combined_parts.append("COUNT(*) FILTER (WHERE is_ssl = true) AS tls_cnt")
+            elif "tls" in actual_cols:
+                combined_parts.append("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') AS tls_cnt")
+            if has_ipv6:
+                combined_parts.append("COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6_cnt")
 
         combined_sql = (
             f"SELECT {', '.join(combined_parts)} FROM {table_name} WHERE {where_clause} GROUP BY bucket ORDER BY bucket"
@@ -838,6 +971,37 @@ def get_summary(
             }
             _overview_done = True
 
+        if include_network:
+
+            def _comb_pct(key: str) -> float | None:
+                if total_requests <= 0:
+                    return None
+                return round(_sum(key) * 100.0 / total_requests, 1)
+
+            net_combined: dict[str, Any] = {
+                "http3_pct": _comb_pct("http3_cnt") if has_protocol else None,
+                "h2_pct": _comb_pct("h2_cnt") if has_protocol else None,
+                "tls_pct": _comb_pct("tls_cnt") if has_is_ssl else None,
+                "ipv6_pct": _comb_pct("ipv6_cnt") if has_ipv6 else None,
+                "total_requests": total_requests,
+            }
+            if has_protocol:
+                proto_ts: list[dict[str, Any]] = []
+                for b in buckets:
+                    t_str = safe_iso(b["bucket"])
+                    for col_key, proto_label in (
+                        ("h11_cnt", "HTTP/1.1"),
+                        ("h2_cnt", "HTTP/2"),
+                        ("http3_cnt", "HTTP/3"),
+                        ("other_proto_cnt", "Other"),
+                    ):
+                        cnt = int(b.get(col_key) or 0)
+                        if cnt > 0:
+                            proto_ts.append({"time": t_str, "value": cnt, "category": proto_label})
+                net_combined["protocol_time_series"] = proto_ts
+            result["network"] = net_combined
+            _network_done = True
+
     # ── Overview (standalone fallback when caching wasn't co-requested) ──
     if _want("overview") and not _overview_done:
         _t = time.perf_counter()
@@ -880,40 +1044,40 @@ def get_summary(
     # ── Security ─────────────────────────────────────────────────────────
     if _want("security") and has_waf:
         _t = time.perf_counter()
-        sec_parts = [
-            "COUNT(*) AS total_requests",
-            "COUNT(*) FILTER (WHERE waf = 1) AS waf_inspected",
-            "COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS waf_blocked",
-            "COUNT(*) FILTER (WHERE waf = 1 AND waf_resp NOT IN (406) AND waf_sig IS NOT NULL AND waf_sig != '') AS waf_logged",
-            "COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 200) AS waf_passed",
-        ]
-        sql = f"SELECT {', '.join(sec_parts)} FROM {table_name} WHERE {where_clause}"
-        row = runner.execute(sql, params).fetchone()
-        timer.mark("security_agg_query", _t)
-
-        security: dict[str, Any] = {}
-        if row:
-            cols = [d[0] for d in runner.con.description]
-            security = dict(zip(cols, row))
-
-        # Threat timeline
-        _t = time.perf_counter()
-        threat_sql = (
+        sec_combined_sql = (
             f"SELECT {bucket_select}, "
-            f"COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS blocked, "
-            f"COUNT(*) FILTER (WHERE waf = 1 AND waf_resp NOT IN (406) AND waf_sig IS NOT NULL AND waf_sig != '') AS logged "
+            f"COUNT(*) AS total_requests, "
+            f"COUNT(*) FILTER (WHERE waf = 1) AS waf_inspected, "
+            f"COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS waf_blocked, "
+            f"COUNT(*) FILTER (WHERE waf = 1 AND waf_resp NOT IN (406) AND waf_sig IS NOT NULL AND waf_sig != '') AS waf_logged, "
+            f"COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 200) AS waf_passed "
             f"FROM {table_name} WHERE {where_clause} "
             f"GROUP BY bucket ORDER BY bucket"
         )
-        threat_rows = runner.execute(threat_sql, params).fetchall()
-        timer.mark("security_threat_ts", _t)
+        sec_rows = runner.execute(sec_combined_sql, params).fetchall()
+        timer.mark("security_agg_query", _t)
+
+        sec_cols = [d[0] for d in runner.con.description]
+        sec_buckets = [dict(zip(sec_cols, r)) for r in sec_rows]
+        _sec_sum = lambda key: sum(int(b.get(key, 0) or 0) for b in sec_buckets)  # noqa: E731
+
+        security: dict[str, Any] = {
+            "total_requests": _sec_sum("total_requests"),
+            "waf_inspected": _sec_sum("waf_inspected"),
+            "waf_blocked": _sec_sum("waf_blocked"),
+            "waf_logged": _sec_sum("waf_logged"),
+            "waf_passed": _sec_sum("waf_passed"),
+        }
+
         threat_ts: list[dict] = []
-        for r in threat_rows:
-            t_str = safe_iso(r[0])
-            if r[1]:
-                threat_ts.append({"time": t_str, "value": int(r[1]), "category": "blocked"})
-            if r[2]:
-                threat_ts.append({"time": t_str, "value": int(r[2]), "category": "logged"})
+        for b in sec_buckets:
+            t_str = safe_iso(b["bucket"])
+            blocked_cnt = int(b.get("waf_blocked") or 0)
+            logged_cnt = int(b.get("waf_logged") or 0)
+            if blocked_cnt:
+                threat_ts.append({"time": t_str, "value": blocked_cnt, "category": "blocked"})
+            if logged_cnt:
+                threat_ts.append({"time": t_str, "value": logged_cnt, "category": "logged"})
         security["threat_time_series"] = threat_ts
 
         # Top WAF signals (from waf_sig CSV column if present)
@@ -1072,81 +1236,63 @@ def get_summary(
 
         result["performance"] = perf
 
-    # ── Network ──────────────────────────────────────────────────────────
-    if _want("network"):
+    # ── Network (standalone fallback when not already satisfied) ─────────
+    if _want("network") and not _network_done:
         _t = time.perf_counter()
-
-        # Try rollup for aggregate stats (unfiltered only)
-        net: dict[str, Any] | None = None
-        if not filters:
-            net = _try_network_from_rollup(
-                runner,
-                start_time=start_time,
-                end_time=end_time,
-                actual_cols=actual_cols,
-            )
-            if net is not None:
-                timer.mark("network_rollup", _t)
-
-        # Raw scan fallback for aggregates
-        if net is None:
-            net_parts = ["COUNT(*) AS total_requests"]
-            if has_protocol:
-                net_parts.append(
-                    "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/3') * 100.0 / NULLIF(COUNT(*), 0), 1) AS http3_pct"
-                )
-                net_parts.append(
-                    "ROUND(COUNT(*) FILTER (WHERE protocol = 'HTTP/2') * 100.0 / NULLIF(COUNT(*), 0), 1) AS h2_pct"
-                )
-            if "is_ssl" in actual_cols:
-                net_parts.append(
-                    "ROUND(COUNT(*) FILTER (WHERE is_ssl = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct"
-                )
-            elif "tls" in actual_cols:
-                net_parts.append(
-                    "ROUND(COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') * 100.0 / NULLIF(COUNT(*), 0), 1) AS tls_pct"
-                )
-            if has_ipv6:
-                net_parts.append(
-                    "ROUND(COUNT(*) FILTER (WHERE ipv6 = true) * 100.0 / NULLIF(COUNT(*), 0), 1) AS ipv6_pct"
-                )
-
-            sql = f"SELECT {', '.join(net_parts)} FROM {table_name} WHERE {where_clause}"
-            row = runner.execute(sql, params).fetchone()
-            timer.mark("network_agg_query", _t)
-
-            net = {"total_requests": 0}
-            if row:
-                cols = [d[0] for d in runner.con.description]
-                d = dict(zip(cols, row))
-                net = {
-                    "http3_pct": d.get("http3_pct"),
-                    "tls_pct": d.get("tls_pct"),
-                    "ipv6_pct": d.get("ipv6_pct"),
-                    "h2_pct": d.get("h2_pct"),
-                    "total_requests": d.get("total_requests", 0),
-                }
-
-        # Protocol adoption time series (always raw — per-protocol per-bucket)
+        net_parts = [
+            bucket_select,
+            "COUNT(*) AS total_requests",
+        ]
         if has_protocol:
-            _t = time.perf_counter()
-            proto_sql = (
-                f"SELECT {bucket_select}, "
-                f"CASE "
-                f"  WHEN protocol = 'HTTP/3' THEN 'HTTP/3' "
-                f"  WHEN protocol = 'HTTP/2' THEN 'HTTP/2' "
-                f"  WHEN protocol = 'HTTP/1.1' THEN 'HTTP/1.1' "
-                f"  ELSE 'Other' "
-                f"END AS proto, "
-                f"COUNT(*) AS cnt "
-                f"FROM {table_name} WHERE {where_clause} "
-                f"GROUP BY bucket, proto ORDER BY bucket, proto"
+            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3_cnt")
+            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2_cnt")
+            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1') AS h11_cnt")
+            net_parts.append(
+                "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1')) AS other_proto_cnt"
             )
-            proto_rows = runner.execute(proto_sql, params).fetchall()
-            timer.mark("network_protocol_ts", _t)
-            net["protocol_time_series"] = [
-                {"time": safe_iso(r[0]), "value": int(r[2]), "category": r[1]} for r in proto_rows
-            ]
+        if "is_ssl" in actual_cols:
+            net_parts.append("COUNT(*) FILTER (WHERE is_ssl = true) AS tls_cnt")
+        elif "tls" in actual_cols:
+            net_parts.append("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') AS tls_cnt")
+        if has_ipv6:
+            net_parts.append("COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6_cnt")
+
+        sql = f"SELECT {', '.join(net_parts)} FROM {table_name} WHERE {where_clause} GROUP BY bucket ORDER BY bucket"
+        net_rows = runner.execute(sql, params).fetchall()
+        timer.mark("network_agg_query", _t)
+
+        net_cols = [d[0] for d in runner.con.description]
+        net_buckets = [dict(zip(net_cols, r)) for r in net_rows]
+        _net_sum = lambda key: sum(int(b.get(key, 0) or 0) for b in net_buckets)  # noqa: E731
+        net_total = _net_sum("total_requests")
+
+        def _net_pct(key: str) -> float | None:
+            if net_total <= 0:
+                return None
+            return round(_net_sum(key) * 100.0 / net_total, 1)
+
+        net: dict[str, Any] = {
+            "http3_pct": _net_pct("http3_cnt") if has_protocol else None,
+            "tls_pct": _net_pct("tls_cnt") if has_is_ssl else None,
+            "ipv6_pct": _net_pct("ipv6_cnt") if has_ipv6 else None,
+            "h2_pct": _net_pct("h2_cnt") if has_protocol else None,
+            "total_requests": net_total,
+        }
+
+        if has_protocol:
+            proto_ts_standalone: list[dict[str, Any]] = []
+            for b in net_buckets:
+                t_str = safe_iso(b["bucket"])
+                for col_key, proto_label in (
+                    ("h11_cnt", "HTTP/1.1"),
+                    ("h2_cnt", "HTTP/2"),
+                    ("http3_cnt", "HTTP/3"),
+                    ("other_proto_cnt", "Other"),
+                ):
+                    cnt = int(b.get(col_key) or 0)
+                    if cnt > 0:
+                        proto_ts_standalone.append({"time": t_str, "value": cnt, "category": proto_label})
+            net["protocol_time_series"] = proto_ts_standalone
 
         result["network"] = net
 
@@ -1174,4 +1320,5 @@ def get_summary(
         if io_result:
             result["io"] = io_result
 
+    result.update(runner.telemetry())
     return result

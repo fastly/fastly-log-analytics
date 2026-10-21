@@ -27,7 +27,7 @@ def value_summary(
 
     sections = _expand_sections(req.sections)
 
-    return repo.get_summary(
+    res = repo.get_summary(
         con=ctx.con,
         src=ctx.source,
         start_time=start_time,
@@ -37,3 +37,4 @@ def value_summary(
         sections=sections,
         service_id=ctx.source.get("service_id"),
     )
+    return ValueSummaryResponse.with_telemetry(**res)

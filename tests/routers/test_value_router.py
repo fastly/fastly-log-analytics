@@ -228,3 +228,110 @@ def test_value_summary_analyst_session_clamps_window(client, in_memory_duckdb, t
         assert captured["end_time"] == end.isoformat()
     finally:
         app.dependency_overrides.pop(build_request_context, None)
+
+
+def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test_service_source):
+    """Verify _try_overview_from_rollup and _try_network_from_rollup succeed when crosses_active=True
+    (including GROUP BY 1 on the active-hour raw branch and protocol_time_series generation)."""
+    import os
+    import shutil
+    from datetime import UTC, datetime, timedelta
+
+    from backend.core.rollups import (
+        NETWORK_SUMMARY_BUNDLE_FILENAME,
+        OVERVIEW_BUNDLE_FILENAME,
+        _hour_bundled_root,
+    )
+    from backend.utils.date_utils import iso_z
+
+    table_name = _safe_table(test_service_source["name"])
+    now = datetime.now(UTC).replace(minute=10, second=0, microsecond=0)
+    prev_hour = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+    in_memory_duckdb.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            timestamp TIMESTAMPTZ,
+            cache VARCHAR,
+            resp_bytes BIGINT,
+            is_shield BOOLEAN,
+            waf INT,
+            waf_resp INT,
+            elapsed DOUBLE,
+            protocol VARCHAR,
+            is_ssl BOOLEAN,
+            ipv6 BOOLEAN
+        )
+    """)
+    in_memory_duckdb.execute(
+        f"""
+        INSERT INTO {table_name} VALUES
+        (TIMESTAMPTZ '{iso_z(now)}', 'HIT', 1000, true, 0, 200, 1200.0, 'HTTP/3', true, true),
+        (TIMESTAMPTZ '{iso_z(now)}', 'MISS', 2000, false, 1, 406, 4800.0, 'HTTP/2', true, false)
+        """
+    )
+
+    bundled_root = _hour_bundled_root(test_service_source)
+    hour_dir = os.path.join(bundled_root, f"hour={prev_hour.strftime('%Y-%m-%d-%H')}")
+    os.makedirs(hour_dir, exist_ok=True)
+    ov_path = os.path.join(hour_dir, OVERVIEW_BUNDLE_FILENAME)
+    net_path = os.path.join(hour_dir, NETWORK_SUMMARY_BUNDLE_FILENAME)
+
+    try:
+        in_memory_duckdb.execute(
+            f"""
+            COPY (
+                SELECT
+                    TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start,
+                    CAST(10 AS BIGINT) AS requests,
+                    CAST(8 AS BIGINT) AS hit_requests,
+                    CAST(2 AS BIGINT) AS miss_requests,
+                    CAST(0 AS BIGINT) AS pass_requests,
+                    CAST(0 AS BIGINT) AS synth_requests,
+                    CAST(2 AS BIGINT) AS origin_requests,
+                    CAST(8000 AS BIGINT) AS bandwidth_saved_bytes,
+                    CAST(10000 AS BIGINT) AS total_bandwidth_bytes,
+                    CAST(4 AS BIGINT) AS shield_hit_requests,
+                    CAST(5 AS BIGINT) AS shield_total_requests,
+                    CAST(1 AS BIGINT) AS threats_blocked,
+                    CAST(8000.0 AS DOUBLE) AS hit_elapsed_sum,
+                    CAST(8 AS BIGINT) AS hit_elapsed_count,
+                    CAST(8000.0 AS DOUBLE) AS miss_elapsed_sum,
+                    CAST(2 AS BIGINT) AS miss_elapsed_count
+            ) TO '{ov_path}' (FORMAT PARQUET)
+            """
+        )
+        in_memory_duckdb.execute(
+            f"""
+            COPY (
+                SELECT
+                    TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start,
+                    CAST(10 AS BIGINT) AS requests,
+                    CAST(6 AS BIGINT) AS http3_requests,
+                    CAST(3 AS BIGINT) AS h2_requests,
+                    CAST(1 AS BIGINT) AS h11_requests,
+                    CAST(0 AS BIGINT) AS other_proto_requests,
+                    CAST(10 AS BIGINT) AS tls_requests,
+                    CAST(5 AS BIGINT) AS ipv6_requests
+            ) TO '{net_path}' (FORMAT PARQUET)
+            """
+        )
+
+        resp = client.post(
+            "/api/value/summary",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "sections": ["overview", "caching", "network"],
+                "start_time": iso_z(prev_hour),
+                "end_time": iso_z(now + timedelta(minutes=5)),
+                "chart_interval": "1 hour",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["overview"]["total_requests"] == 12
+        assert body["caching"]["hit_requests"] == 9
+        assert body["network"]["total_requests"] == 12
+        assert len(body["network"]["protocol_time_series"]) > 0
+    finally:
+        shutil.rmtree(os.path.dirname(bundled_root), ignore_errors=True)

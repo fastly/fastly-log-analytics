@@ -94,7 +94,24 @@ export default function FastlyValueBody({
   })
 
   const data = valueQuery.data
-  const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && valueQuery.isPlaceholderData))
+  const hasActiveSectionData =
+    activeTab === 'summary'
+      ? Boolean(data?.overview || data?.caching || data?.network)
+      : activeTab === 'caching'
+        ? Boolean(data?.caching)
+        : activeTab === 'security'
+          ? Boolean(data?.security)
+          : activeTab === 'bots'
+            ? Boolean(data?.bots)
+            : activeTab === 'performance'
+              ? Boolean(data?.performance)
+              : activeTab === 'network'
+                ? Boolean(data?.network)
+                : activeTab === 'io'
+                  ? Boolean(data?.io)
+                  : true
+  const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && !hasActiveSectionData))
+  const refreshing = activeTab !== 'assets' && valueQuery.isFetching && hasActiveSectionData
 
   return (
     <div className="space-y-6">
@@ -125,7 +142,7 @@ export default function FastlyValueBody({
             </div>
           </div>
         ) : (
-          <>
+          <div className={refreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>
             <TabsContent value="summary">
               <SummaryValueTab data={data} loading={loading} />
             </TabsContent>
@@ -158,7 +175,7 @@ export default function FastlyValueBody({
             <TabsContent value="io">
               <IOValueTab data={data?.io} loading={loading} />
             </TabsContent>
-          </>
+          </div>
         )}
       </Tabs>
     </div>
