@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import UTC, datetime, timedelta
@@ -1054,7 +1055,9 @@ def get_session_detail(
                     conditions.append('"timestamp_hour" <= ?')
                     p.append(e_utc.strftime("%Y-%m-%d-%H"))
         except Exception:
-            pass
+            logging.getLogger(__name__).debug(
+                "sessions.get_session_detail: partition bound parse failed", exc_info=True
+            )
 
     if ua is not None:
         conditions.append('"ua" IS NOT DISTINCT FROM ?')

@@ -89,7 +89,7 @@ function hasPopulatedRumChart() {
       Array.isArray(values) && values.some(value => typeof value === 'number' && Number.isFinite(value));
     return rect.width > 100 && rect.height > 100
       && chart.data?.some(trace =>
-        hasFiniteMeasurement(trace.y) || hasFiniteMeasurement(trace.values)
+        hasFiniteMeasurement(trace.x) || hasFiniteMeasurement(trace.y) || hasFiniteMeasurement(trace.values)
       );
   });
 }
@@ -225,12 +225,13 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
       } catch (chartErr) {
         console.log(`[${name} 24h] Attempt ${attempt}/4: no populated Plotly chart yet.`);
       }
-      bodyText = await page.evaluate(() => document.body.innerText);
+      bodyText = await page.evaluate(() => `${document.body.innerText}\n${document.body.textContent || ''}`);
       const lower = bodyText.toLowerCase();
       hasMarker = markers.some(marker => lower.includes(marker.toLowerCase()));
       hasChart = await page.evaluate(hasPopulatedRumChart);
-      emptyPanels = EMPTY_STATE_MARKERS.reduce((sum, marker) => sum + bodyText.split(marker).length - 1, 0);
-      if (hasMarker && hasChart && !bodyText.includes("Failed to load") && (!strictEmpty || emptyPanels === 0)) {
+      const visibleText = await page.evaluate(() => document.body.innerText);
+      emptyPanels = EMPTY_STATE_MARKERS.reduce((sum, marker) => sum + visibleText.split(marker).length - 1, 0);
+      if (hasMarker && hasChart && !visibleText.includes("Failed to load") && (!strictEmpty || emptyPanels === 0)) {
         break;
       }
     } catch (err) {
@@ -878,7 +879,13 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     await verifyDataPage(browser, adminTlsOptions, {
       name: 'Security',
       path: '/security',
-      markers: ['Traffic Quality Breakdown', 'Suspicious ISPs', 'Proxy/Anonymizer Breakdown'],
+      markers: [
+        'Traffic Quality Breakdown',
+        'Suspicious ISPs',
+        'Proxy/Anonymizer Breakdown',
+        'Well-Known Bots',
+        'Request Header Size Distribution',
+      ],
     });
     await verifyDataPage(browser, adminTlsOptions, {
       name: 'Origin',

@@ -7,7 +7,7 @@ import time as _time
 
 import duckdb
 
-from backend.core.metric_expressions import column_or_default
+from backend.core.metric_expressions import column_or_default, sum_or_zero
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -132,8 +132,8 @@ def get_assets_aggregates(
                 {encoding_expr} as content_encoding,
                 {status_expr} as status,
                 COUNT(*) as req_cnt,
-                COALESCE(SUM({bytes_expr}), 0) as sum_bytes,
-                COALESCE(SUM({ttl_expr}), 0.0) as sum_ttl,
+                {sum_or_zero(bytes_expr)} as sum_bytes,
+                {sum_or_zero(ttl_expr, zero="0.0")} as sum_ttl,
                 COUNT({ttl_expr}) as cnt_ttl,
                 LOWER({url_expr}) as url_lower
             FROM {table_name}
@@ -187,8 +187,8 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 asset_type,
-                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
-                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as egress_bytes,
+                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
+                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as egress_bytes,
                 COALESCE(
                     SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC') THEN req_cnt ELSE 0 END) * 1.0 /
                     NULLIF(SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC', 'MISS', 'PASS', 'BYPASS') THEN req_cnt ELSE 0 END), 0),
@@ -221,8 +221,8 @@ def get_assets_aggregates(
             SELECT
                 asset_type,
                 cache as cache_status,
-                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
-                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as bytes
+                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
+                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as bytes
             FROM assets_enriched
             GROUP BY asset_type, cache
             ORDER BY asset_type, requests DESC
@@ -249,8 +249,8 @@ def get_assets_aggregates(
                     WHEN content_encoding != '' THEN content_encoding
                     ELSE 'uncompressed'
                 END as content_encoding,
-                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
-                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as bytes
+                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
+                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as bytes
             FROM assets_enriched
             GROUP BY asset_type, 2
             ORDER BY asset_type, requests DESC
@@ -271,9 +271,9 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 url,
-                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
                 SUM(sum_bytes) * 1.0 / NULLIF(SUM(req_cnt), 0) as avg_bytes,
-                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as total_bytes,
+                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as total_bytes,
                 status
             FROM assets_enriched
             WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
@@ -298,7 +298,7 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 url,
-                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
                 SUM(sum_ttl) * 1.0 / NULLIF(SUM(cnt_ttl), 0) as avg_ttl,
                 asset_type
             FROM assets_enriched

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 
 import duckdb
@@ -14,6 +15,8 @@ from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.telemetry import get_queries, record_telemetry_query
 
+logger = logging.getLogger(__name__)
+
 _LOG_ACTIVITY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
 _CacheRegistry.register("repositories.usage._LOG_ACTIVITY_CACHE", _LOG_ACTIVITY_CACHE)
 
@@ -24,7 +27,7 @@ def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None
         q_list.append({"sql": sql_str, "time_ms": elapsed_ms, "engine": "DuckDB"})
         record_telemetry_query("duckdb", sql_str, elapsed_ms, service_id=service_id)
     except Exception:
-        pass
+        logger.debug("usage._record_duckdb_query failed", exc_info=True)
 
 
 def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | None, list]:

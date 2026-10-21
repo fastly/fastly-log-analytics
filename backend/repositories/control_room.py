@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime
 from typing import Any
 
 from backend.repositories._sql import control_room as sql
+
+logger = logging.getLogger(__name__)
 
 
 def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
@@ -19,7 +22,7 @@ def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None
             q_list.append({"sql": compact, "time_ms": elapsed_ms, "engine": "DuckDB"})
         record_telemetry_query("duckdb", compact, elapsed_ms, service_id=service_id)
     except Exception:
-        pass
+        logger.debug("control_room._record_duckdb_query failed", exc_info=True)
 
 
 def recent_standard_error_events(con, view_name: str, *, service_id: str | None = None) -> list[dict]:

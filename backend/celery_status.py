@@ -141,7 +141,7 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     scheduled: dict[str, Any] = {}
 
     if not broker_reachable:
-        workers_error = "Broker unreachable"
+        workers_error = "Broker unreachable (Broker connection timeout)"
     else:
         try:
             i = app.control.inspect(timeout=timeout)

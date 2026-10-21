@@ -393,7 +393,7 @@ def preview_alert_series(
             if anchor_dt:
                 existing_cols = set(QueryRunner(con, src).get_schema_cols())
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("alerts.preview_alert: anchor_dt lookup failed", exc_info=True)
 
     def _prune_clause(mins: int) -> str:
         if not anchor_dt or not existing_cols:

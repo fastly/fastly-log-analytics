@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,6 +25,8 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.telemetry import get_queries, record_telemetry_query
 
+logger = logging.getLogger(__name__)
+
 _SCHEMA_TYPES_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _CacheRegistry.register("repositories.logs._SCHEMA_TYPES_CACHE", _SCHEMA_TYPES_CACHE)
 
@@ -38,7 +41,7 @@ def _record_log_query(runner: QueryRunner, sql_str: str, elapsed_ms: float, serv
         get_queries().append(entry)
         record_telemetry_query("duckdb", sql_str, elapsed_ms, service_id=service_id)
     except Exception:
-        pass
+        logger.debug("logs._record_log_query failed", exc_info=True)
 
 
 def query_logs(

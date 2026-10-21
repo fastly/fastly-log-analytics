@@ -806,7 +806,7 @@ class QueryRunner:
                 service_id=self.src.get("name") or self.src.get("service_id"),
             )
         except Exception:
-            pass
+            _logger.debug("QueryRunner.execute: record_telemetry_query failed", exc_info=True)
         return res
 
     def get_schema_cols(self) -> list[str]:
@@ -1014,7 +1014,7 @@ class QueryRunner:
                         self._last_active_direct_n_files = 0
                         return sub_name
                     except Exception:
-                        pass
+                        _logger.debug("QueryRunner: shared active temp slice failed", exc_info=True)
 
         # Enumerate candidate parquets EXPLICITLY (not a glob) so buffer
         # files that cannot contain live-window rows are pruned by mtime:
