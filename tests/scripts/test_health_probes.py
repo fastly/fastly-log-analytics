@@ -357,3 +357,72 @@ def test_audit_post_json_does_not_retry_http_errors(stub: Stub, monkeypatch: pyt
     monkeypatch.setattr(audit, "time", _SleepStub(lambda _s: pytest.fail("must not retry HTTP errors")))
     assert audit.http_post_json(f"{stub.origin}/p", {}, timeout=5) == (500, {"e": 1})
     assert [line for line, _, _ in stub.seen].count("POST /p") == 1
+
+
+def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from scripts.lib import environments
+
+    for key in (
+        "FLA_ADMIN_DEPLOY_ENV",
+        "LOCAL_STANDARD_ADMIN_MTLS",
+        "GCE_ADMIN_MTLS",
+        "ELEVATION_ADMIN_MTLS",
+        "ADMIN_GATEWAY_ENDPOINTS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    endpoint_files: dict[str, str] = {}
+    for name in ("cert", "key", "ca"):
+        p = tmp_path / name
+        p.write_text("pem")
+        p.chmod(0o600)
+        endpoint_files[name] = str(p)
+
+    endpoints = {
+        "local-standard": {"origin": "https://127.0.0.1:9443", **endpoint_files},
+        "remote-standard": {"origin": "https://203.0.113.10:9443", **endpoint_files},
+        "remote-high-scale": {"origin": "https://10.0.0.10:8443", **endpoint_files},
+    }
+    deploy_env = tmp_path / "deploy.env"
+    deploy_env.write_text(
+        f"LOCAL_STANDARD_ADMIN_MTLS=1\n"
+        f"GCE_ADMIN_MTLS=1\n"
+        f"ELEVATION_ADMIN_MTLS=1\n"
+        f"ADMIN_GATEWAY_ENDPOINTS='{json.dumps(endpoints)}'\n"
+    )
+    deploy_env.chmod(0o600)
+    monkeypatch.setenv("FLA_ADMIN_DEPLOY_ENV", str(deploy_env))
+    monkeypatch.setenv("GCE_ADMIN_MTLS", "0")
+
+    loaded = environments.load_persisted_deploy_env()
+    assert loaded["LOCAL_STANDARD_ADMIN_MTLS"] == "1"
+    assert loaded["ELEVATION_ADMIN_MTLS"] == "1"
+    # Existing process env wins over persisted deploy.env
+    assert environments.os.environ["GCE_ADMIN_MTLS"] == "0"
+
+    audit.refresh_environment_origins()
+    assert audit.ENVIRONMENTS["local-standard"].backend_url == "https://127.0.0.1:9443"
+    assert audit.ENVIRONMENTS["remote-standard"].backend_url == "https://203.0.113.10:9443"
+    assert audit.ENVIRONMENTS["remote-high-scale"].backend_url == "https://10.0.0.10:8443"
+
+
+def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(audit, "is_admin_url", lambda url: url.startswith("https://10.0.0.10:8443"))
+    monkeypatch.setattr(
+        audit,
+        "http_get_json",
+        lambda url, headers=None, timeout=5.0: (0, {"error": "<urlopen error timed out>"}),
+    )
+    env = audit.EnvironmentConfig(
+        name="remote-high-scale",
+        architecture="High-Scale (Remote/K8s)",
+        backend_url="https://10.0.0.10:8443",
+        frontend_url="https://10.0.0.10:8443/dashboard",
+        service_id="svc-hs",
+        is_high_scale=True,
+    )
+    res = audit.audit_target(env, timeout=1.0)
+    assert not res.reachable
+    assert any("VPN/tunnel" in err and "10.0.0.10:8443" in err for err in res.errors)

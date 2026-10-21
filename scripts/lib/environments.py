@@ -14,10 +14,33 @@ with safe placeholders so the tracked tree stays clean for the public repo.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+PERSISTED_DEPLOY_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "LOCAL_STANDARD_ADMIN_MTLS",
+        "GCE_ADMIN_MTLS",
+        "ELEVATION_ADMIN_MTLS",
+        "ADMIN_GATEWAY_REQUIRED",
+        "ADMIN_GATEWAY_CALLERS_READY",
+        "ADMIN_GATEWAY_ENDPOINTS",
+        "ADMIN_GATEWAY_HOST",
+        "ADMIN_GATEWAY_CERT_DIR",
+        "ADMIN_GATEWAY_SECRET",
+        "LOCAL_HOSTS",
+        "ELEVATION_ADMIN_GATEWAY_HOST",
+        "ELEVATION_ADMIN_GATEWAY_CERT_DIR",
+        "ELEVATION_ADMIN_GATEWAY_IMAGE",
+        "GCE_ADMIN_BUNDLE_DIR",
+        "ADMIN_GATEWAY_UID",
+        "ADMIN_GATEWAY_GID",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
 
 
 def load_dotenv(path: str | Path | None = None) -> None:
@@ -31,6 +54,50 @@ def load_dotenv(path: str | Path | None = None) -> None:
 
     dotenv_path = Path(path) if path is not None else ROOT / ".env"
     _load_dotenv(dotenv_path=str(dotenv_path), override=False)
+
+
+def load_persisted_deploy_env(path: str | Path | None = None) -> dict[str, str]:
+    """Load persisted admin-mTLS settings from ``FLA_ADMIN_DEPLOY_ENV`` without overwriting ``os.environ``.
+
+    Matches the validation rules in ``scripts/dev/deploy_test_all.sh``:
+    regular owner-only file (mode 0600), no interpolation, allow-listed keys only.
+    """
+    from dotenv import dotenv_values
+
+    raw_path = (
+        Path(path)
+        if path is not None
+        else Path(
+            os.getenv(
+                "FLA_ADMIN_DEPLOY_ENV",
+                str(Path.home() / ".config/fastly-log-analytics/admin/deploy.env"),
+            )
+        )
+    )
+    if not raw_path.exists() and not raw_path.is_symlink():
+        return {}
+    st = os.lstat(raw_path)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or (st.st_mode & 0o077):
+        raise ValueError(f"{raw_path}: must be a regular file owned by you with mode 600")
+    values = dotenv_values(raw_path, interpolate=False)
+    oneshot = {"GCE_ADMIN_BOOTSTRAP", "GCE_ADMIN_FIREWALL_APPLY"} & values.keys()
+    if oneshot:
+        raise ValueError(f"{raw_path}: one-shot keys must not be persisted: {', '.join(sorted(oneshot))}")
+    unknown = sorted(set(values) - PERSISTED_DEPLOY_ENV_KEYS)
+    if unknown:
+        raise ValueError(f"{raw_path}: unsupported keys: {', '.join(unknown)}")
+    loaded: dict[str, str] = {}
+    for key, value in values.items():
+        if value is None or "\0" in value:
+            raise ValueError(f"{raw_path}: {key} needs a value")
+        if key in ("ADMIN_GATEWAY_UID", "ADMIN_GATEWAY_GID") and not value.isdigit():
+            raise ValueError(f"{raw_path}: {key} must be a numeric id")
+        if key == "NODE_EXTRA_CA_CERTS" and not (os.path.isabs(value) and ":" not in value and os.path.isfile(value)):
+            raise ValueError(f"{raw_path}: {key} must be one absolute existing PEM file")
+        loaded[key] = value
+        if key not in os.environ:
+            os.environ[key] = value
+    return loaded
 
 
 @dataclass(frozen=True)

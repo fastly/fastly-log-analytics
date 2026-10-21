@@ -24,6 +24,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import shutil
@@ -36,13 +37,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 # Direct path invocation and python -m both resolve the shared project helper.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, is_admin_url, validate_admin_tls_config  # noqa: E402
 from scripts.lib.cli import add_common_args  # noqa: E402
-from scripts.lib.environments import ENVIRONMENT_SPECS, load_dotenv  # noqa: E402
+from scripts.lib.environments import (  # noqa: E402
+    ENVIRONMENT_SPECS,
+    load_dotenv,
+    load_persisted_deploy_env,
+)
 from scripts.lib.environments import service_id as _registry_service_id  # noqa: E402
 from scripts.lib.readiness import ProbeResult, probe  # noqa: E402
 
@@ -93,10 +99,20 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
     for name, spec in ENVIRONMENT_SPECS.items()
 }
 
-for _environment_name, _environment_config in ENVIRONMENTS.items():
-    if _configured_origin := admin_origin(_environment_name):
-        _environment_config.backend_url = _configured_origin
-        _environment_config.frontend_url = f"{_configured_origin}/dashboard"
+
+def refresh_environment_origins() -> None:
+    """Update ENVIRONMENTS URLs from any configured admin mTLS origins."""
+    for env_name, env_config in ENVIRONMENTS.items():
+        spec = ENVIRONMENT_SPECS[env_name]
+        if configured_origin := admin_origin(env_name):
+            env_config.backend_url = configured_origin
+            env_config.frontend_url = f"{configured_origin}/dashboard"
+        else:
+            env_config.backend_url = spec.backend_url
+            env_config.frontend_url = spec.frontend_url
+
+
+refresh_environment_origins()
 
 
 def auto_resolve_remote_admin_token() -> str | None:
@@ -282,6 +298,21 @@ def format_bytes(b: int | float | None) -> str:
     return f"{b:.1f} PB"
 
 
+def _private_network_mtls_hint(url: str) -> str:
+    if not is_admin_url(url):
+        return ""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    if addr.is_private and not addr.is_loopback:
+        target = f"{host}:{parts.port}" if parts.port else host
+        return f" — mTLS gateway unreachable on private network ({target}); check VPN/tunnel connectivity"
+    return ""
+
+
 def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     res = AuditResult(
         target=env.name,
@@ -304,7 +335,8 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 
     if status != 200 or health_data.get("status") != "ok":
         res.reachable = False
-        res.errors.append(f"Backend unhealthy: HTTP {status} (data: {health_data})")
+        hint = _private_network_mtls_hint(env.backend_url) if status == 0 else ""
+        res.errors.append(f"Backend unhealthy: HTTP {status} (data: {health_data}){hint}")
         return res
 
     res.reachable = True
@@ -709,6 +741,8 @@ def run_audit(
 
 
 def main() -> int:
+    load_persisted_deploy_env()
+    refresh_environment_origins()
     validate_admin_tls_config()
     parser = argparse.ArgumentParser(
         description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit",
