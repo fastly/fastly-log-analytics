@@ -265,8 +265,26 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   }
   console.log(`[${name} Verification] Verified: panels present and charts populated with real data. 🟢`);
   await logPagePerf(page, name, sectionTimings);
+  if (name === 'Streaming') await logPoolStats(context, name);
   await page.close();
   await context.close();
+}
+
+// DuckDB connection-pool state right after the page load (admin health snapshot):
+// size, in-use/idle, and checkout vs iceberg-view-rebind wait percentiles. Explains
+// a large `connection_acquire` entry in the aggregate endpoints' section timings.
+async function logPoolStats(context, name) {
+  try {
+    const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 20000 });
+    if (!res.ok()) throw new Error(`status ${res.status()}`);
+    const pools = ((await res.json()).pool_wait || []).map(p => ({
+      max: p.max_size, inUse: p.in_use, idle: p.idle, created: p.created_total, reused: p.reused_total,
+      discarded: p.discarded_total, saturated: p.saturated_rejects_total, wait: p.wait, rebindWait: p.rebind_wait,
+    }));
+    console.log(`[POOL ${name}] ${JSON.stringify(pools)}`);
+  } catch (err) {
+    console.log(`[POOL ${name}] unavailable: ${err.message}`);
+  }
 }
 
 // One-line, non-fatal page-performance record for the Phase 4 audit workbooks:
