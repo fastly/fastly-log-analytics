@@ -2571,6 +2571,7 @@ def _redispatch_pending(
     stuck: list[str],
     dispatch_fn: Callable[[str, list[str]], object],
     label: str,
+    queue_depths_fn: Callable[[], tuple[dict[str, int], bool]] | None = None,
 ) -> tuple[int, bool]:
     """Re-dispatch reclaimed + stuck ledger keys in batches. Returns ``(redispatched, broker_ok)``.
 
@@ -2596,9 +2597,10 @@ def _redispatch_pending(
     pending_batches = math.ceil(pending / LEDGER_CONVERT_BATCH_SIZE)
     broker_ok = False
     try:
-        from backend.celery_status import celery_queue_depths
+        from backend.celery_queue import celery_queue_depths
 
-        queues, broker_ok = celery_queue_depths()
+        depth_fn = queue_depths_fn if queue_depths_fn is not None else celery_queue_depths
+        queues, broker_ok = depth_fn()
         queue_depth = queues.get("q.ingest", 0) if broker_ok else 0
     except Exception:
         queue_depth = 0

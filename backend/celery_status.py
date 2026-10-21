@@ -17,63 +17,50 @@ Design notes:
 from __future__ import annotations
 
 import logging
-import os
-import threading
+import sys
+from types import ModuleType
 from typing import Any
+
+from backend import celery_queue as _celery_queue
+from backend.celery_queue import (
+    KNOWN_QUEUES as KNOWN_QUEUES,
+)
+from backend.celery_queue import (
+    _get_redis as _get_redis,
+)
+from backend.celery_queue import (
+    _redis_client as _redis_client,
+)
+from backend.celery_queue import (
+    _redis_lock as _redis_lock,
+)
+from backend.celery_queue import (
+    celery_queue_depths as celery_queue_depths,
+)
 
 logger = logging.getLogger(__name__)
 
-_redis_lock = threading.Lock()
-_redis_client: Any = None
 
-# Queues the app actually uses: Celery's default queue plus the explicit
-# routed queues from backend/celery_app.py. Keep in sync with task_routes.
-KNOWN_QUEUES = ("celery", "q.ingest", "q.control")
+class _ShimModule(ModuleType):
+    """Mirror monkeypatches of queue/Redis helpers onto ``backend.celery_queue``."""
 
+    _MIRRORED_TO_QUEUE = frozenset(
+        {
+            "KNOWN_QUEUES",
+            "_get_redis",
+            "_redis_client",
+            "_redis_lock",
+            "celery_queue_depths",
+        }
+    )
 
-def _get_redis():
-    """Lazily create (and cache) one sync Redis client for status reads."""
-    global _redis_client
-    from backend import config as svcconfig
-
-    if not svcconfig.is_high_scale_mode() and not os.environ.get("CELERY_BROKER_URL"):
-        raise ConnectionError("Celery broker not configured in standard mode")
-    with _redis_lock:
-        if _redis_client is None:
-            import redis
-
-            broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-            _redis_client = redis.Redis.from_url(
-                broker_url,
-                socket_connect_timeout=0.25,
-                socket_timeout=0.5,
-                decode_responses=True,
-            )
-        return _redis_client
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._MIRRORED_TO_QUEUE:
+            setattr(_celery_queue, name, value)
+        super().__setattr__(name, value)
 
 
-def celery_queue_depths() -> tuple[dict[str, int], bool]:
-    """Return ({queue: depth}, broker_reachable).
-
-    Checks the known queue names directly (LLEN on a missing key is 0) and
-    SCANs for any additional ``q.*`` queues a future route might add.
-    """
-    queues: dict[str, int] = {}
-    try:
-        r = _get_redis()
-        names = set(KNOWN_QUEUES)
-        for key in r.scan_iter(match="q.*", count=200):
-            names.add(key)
-        for q in sorted(names):
-            try:
-                if r.type(q) in ("list", "none"):
-                    queues[q] = int(r.llen(q))
-            except Exception:
-                continue
-        return queues, True
-    except Exception as e:
-        logger.debug("[celery_status] broker unreachable for queue depths: %s", e)
-        return {}, False
+sys.modules[__name__].__class__ = _ShimModule
 
 
 def ingest_ledger_summary() -> dict[str, int]:
