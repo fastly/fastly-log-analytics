@@ -221,7 +221,8 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     if (!url.includes('/aggregates') || response.status() !== 200) return;
     try {
       const body = await response.json();
-      if (body && body.section_timings) sectionTimings[new URL(url).pathname] = body.section_timings;
+      const timings = body && (body._section_timings || body.section_timings);
+      if (timings && timings.length) sectionTimings[new URL(url).pathname] = timings;
     } catch (e) { /* non-JSON or already disposed */ }
   });
 
