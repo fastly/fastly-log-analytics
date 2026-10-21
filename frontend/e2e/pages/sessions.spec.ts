@@ -251,5 +251,11 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
     const queries = (json as SessionsDebugResponse)._debug_queries ?? []
     console.log(`[TELEMETRY /sessions] Captured ${queries.length} queries`)
     expect(queries.length).toBeGreaterThan(0)
+    const sessionQueries = queries.filter((q) => !q.sql?.includes('CREATE OR REPLACE VIEW'))
+    for (const q of sessionQueries) {
+      if (typeof q.time_ms === 'number') {
+        expect(q.time_ms).toBeLessThan(2000)
+      }
+    }
   })
 })

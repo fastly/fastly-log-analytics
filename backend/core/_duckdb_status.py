@@ -1203,6 +1203,12 @@ def get_asn_names(service_id: str, asns: list) -> dict:
                     else:
                         name = raw_owner
                     resolved[asn_int] = name
+            # Negatively cache any ASN in `need` that cymruwhois did not resolve
+            # so unallocated/synthetic ASNs do not trigger a live WHOIS socket on
+            # every request when the lookup itself succeeded.
+            for asn in need:
+                if asn not in resolved:
+                    resolved[asn] = f"AS{asn}"
         except Exception:
             logger.warning("ASN resolution failed", exc_info=True)
 

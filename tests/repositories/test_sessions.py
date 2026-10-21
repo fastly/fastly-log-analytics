@@ -1132,3 +1132,111 @@ def test_rollup_sessions_correctly_identifies_streaming(in_memory_duckdb, rollup
     session = out["sessions"][0]
     assert session["ip"] == "123.45.67.89"
     assert session["is_streaming"] is True
+
+
+def test_rollup_sessions_suffix_pruning_and_direct_buffer_active_hour(in_memory_duckdb, rollup_source):
+    """Suffix pruning on session_start DESC reads only the latest 3 hourly rollup
+    bundles when they satisfy `limit`, and `_build_direct_active_hour_session_sql`
+    reads active-hour buffer parquets directly without requiring the view."""
+    from backend.repositories._base import QueryRunner, SectionTimer
+    from backend.repositories.sessions import _get_sessions_from_rollup
+
+    cache_root = rollup_source["_cache_dir_override"]
+    active_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    hours = [active_hour - timedelta(hours=h) for h in (5, 4, 3, 2, 1)]
+
+    for idx, h in enumerate(hours):
+        token = h.strftime("%Y-%m-%d-%H")
+        _seed_per_field_hour(cache_root, token)
+        bundle_path = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={token}", "sessions.parquet")
+        _write_rollup_parquet(
+            bundle_path,
+            [
+                {
+                    "bucket": h,
+                    "ip": f"10.99.0.{idx + 1}",
+                    "ja4": f"ja4-{idx + 1}",
+                    "first_ts": h + timedelta(minutes=10),
+                    "last_ts": h + timedelta(minutes=20),
+                    "req_count": 10 + idx,
+                    "country": "US",
+                    "asn": 7922,
+                    "reqs_4xx": 0,
+                    "reqs_5xx": 0,
+                    "total_bytes": 1000,
+                    "rtt_sum": 100.0,
+                    "rtt_count": 10,
+                    "edge_count": 10,
+                    "shield_count": 0,
+                    "ua_min": "Mozilla/5.0",
+                    "edge_sid_max": f"sid-{idx + 1}",
+                    "cmcd_count": 0,
+                }
+            ],
+        )
+
+    buf_dir = os.path.join(cache_root, "buffer")
+    os.makedirs(buf_dir, exist_ok=True)
+    buf_file = os.path.join(buf_dir, "live_batch.parquet")
+    live_ts = (active_hour + timedelta(minutes=1)).isoformat()
+    in_memory_duckdb.execute(
+        f"""
+        COPY (
+            SELECT
+                TIMESTAMPTZ '{live_ts}' AS timestamp,
+                '10.99.0.99'::VARCHAR AS ip,
+                'ja4-live'::VARCHAR AS ja4,
+                'US'::VARCHAR AS country,
+                7922::INTEGER AS asn,
+                200::INTEGER AS status,
+                5000::BIGINT AS resp_bytes,
+                1200.0::DOUBLE AS tcp_rtt,
+                1::INTEGER AS edge,
+                'LiveAgent/1.0'::VARCHAR AS ua,
+                'sid-live'::VARCHAR AS edge_sid,
+                NULL::VARCHAR AS cmcd_sid
+        ) TO '{buf_file}' (FORMAT PARQUET)
+        """
+    )
+
+    runner = QueryRunner(in_memory_duckdb, rollup_source)
+    timer = SectionTimer()
+    out = _get_sessions_from_rollup(
+        runner=runner,
+        con=in_memory_duckdb,
+        src=rollup_source,
+        table_name="nonexistent_view_table",
+        actual_cols={
+            "timestamp",
+            "ip",
+            "ja4",
+            "country",
+            "asn",
+            "status",
+            "resp_bytes",
+            "tcp_rtt",
+            "edge",
+            "ua",
+            "edge_sid",
+            "cmcd_sid",
+        },
+        start_dt=hours[0],
+        end_dt=active_hour + timedelta(minutes=30),
+        page=1,
+        limit=2,
+        sort_by="session_start",
+        sort_dir="DESC",
+        flagged_only=False,
+        min_reqs_flag=1000,
+        min_4xx_pct_flag=20.0,
+        has_ja4=True,
+        has_rtt=True,
+        has_edge=True,
+        has_edge_sid=True,
+        has_cmcd=True,
+        section_timings=timer.entries,
+    )
+    assert out is not None
+    assert [s["ip"] for s in out["sessions"]] == ["10.99.0.99", "10.99.0.5"]
+    assert len(out["debug_queries"]) == 1
+    assert hours[0].strftime("%Y-%m-%d-%H") not in out["debug_queries"][0]["sql"]

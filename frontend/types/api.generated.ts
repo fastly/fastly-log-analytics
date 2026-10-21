@@ -1441,7 +1441,7 @@ export interface paths {
         };
         /**
          * Rum Analytics
-         * @description Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
+         * @description Retrieve parsed RUM analytics from DuckDB views.
          *     Wraps execution with execute_with_stale_view_retry.
          *
          *     A recognized ``range_token`` (+ optional ``anchor``) is resolved server-side by the shared
