@@ -1057,13 +1057,7 @@ async def rum_live_events(
         def _get_live_events(con):
             from backend.utils.date_utils import iso_z
 
-            actual_cols: list[str] | None = None
-            try:
-                desc = con.execute("SELECT * FROM client_vitals LIMIT 0").description
-                if desc:
-                    actual_cols = [d[0] for d in desc]
-            except Exception:
-                actual_cols = None
+            actual_cols = rum_repo.get_client_vitals_columns(con)
 
             # Try a narrow 2-hour recent window first with partition pruning when window > 2h
             s_dt = parse_iso_utc(start_time) if start_time else None

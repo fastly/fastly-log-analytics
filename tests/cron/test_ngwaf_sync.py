@@ -215,13 +215,17 @@ def test_ngwaf_sync_adaptive_rescheduling_on_budget_exceeded(fake_cfg):
     mock_job = MagicMock()
     mock_sched.get_job.return_value = mock_job
 
-    # Mock time.time so initial call is 1000.0, and loop check sees 1245.0 (>= 240s elapsed)
-    time_calls = [1000.0, 1000.0, 1245.0, 1245.0, 1245.0, 1245.0, 1245.0, 1245.0]
+    # Advance the simulated clock when the paged fetch yields so background
+    # threads (e.g. psycopg_pool maintenance) or logging calls cannot consume
+    # the start timestamp before cron_run.__enter__ records _start_time.
+    clock = [1000.0]
 
     def mock_time():
-        if time_calls:
-            return time_calls.pop(0)
-        return 1245.0
+        return clock[0]
+
+    def fake_fetch_paged(*_args, **_kwargs):
+        clock[0] = 1245.0
+        yield (fake_records, "2026-09-01T01:00:00Z", 5)
 
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
@@ -234,7 +238,7 @@ def test_ngwaf_sync_adaptive_rescheduling_on_budget_exceeded(fake_cfg):
         patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
-            return_value=[(fake_records, "2026-09-01T01:00:00Z", 5)],
+            side_effect=fake_fetch_paged,
         ),
         patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
         patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),

@@ -591,3 +591,14 @@ def count_aggregate_buckets(con, service_id: str) -> int | None:
     """Distinct ``bucket_start`` values in ``rum_vitals_aggregates`` for the service."""
     row = con.execute(sql_rum.AGGREGATE_BUCKET_COUNT, [service_id]).fetchone()
     return row[0] if row is not None else None
+
+
+def get_client_vitals_columns(con) -> list[str] | None:
+    """Return column names of ``client_vitals`` (or ``None`` if unavailable)."""
+    try:
+        desc = con.execute(sql_rum.CLIENT_VITALS_SCHEMA_PROBE).description
+        if desc:
+            return [d[0] for d in desc]
+    except Exception:
+        logger.debug("client_vitals schema probe failed", exc_info=True)
+    return None

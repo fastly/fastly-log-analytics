@@ -740,3 +740,5 @@ HEADER_STATS = (
 )
 
 AGGREGATE_BUCKET_COUNT = "SELECT COUNT(DISTINCT bucket_start) FROM rum_vitals_aggregates WHERE service_id = ?"
+
+CLIENT_VITALS_SCHEMA_PROBE = "SELECT * FROM client_vitals LIMIT 0"
