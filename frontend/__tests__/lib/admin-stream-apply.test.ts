@@ -11,7 +11,7 @@
  *
  * @vitest-environment jsdom
  */
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { applyShare, applySyncStatus, applySystemMetrics, makeCronRunsApplier } from '@/lib/admin-stream-apply'
@@ -230,5 +230,67 @@ describe('makeCronRunsApplier', () => {
     applier.cleanup()
     vi.advanceTimersByTime(100)
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('coalesces a staggered sub-100ms burst via true trailing-edge debounce into a single flush', () => {
+    const qc = makeQueryClient()
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    const applier = makeCronRunsApplier(qc, 'svc-1')
+
+    // Simulate 9 rapid cron_runs SSE events arriving 30ms apart (240ms total span).
+    for (let i = 0; i < 9; i++) {
+      applier.apply({ task: 'log_discovery', status: 'success' })
+      if (i < 8) {
+        vi.advanceTimersByTime(30)
+      }
+    }
+    // Still inside the trailing-edge coalesce window — must not have flushed mid-burst.
+    expect(spy).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(100)
+    const lastSyncCalls = invalidatedKeys(spy).filter((k) => k === JSON.stringify(['last-sync', 'svc-1']))
+    expect(lastSyncCalls).toHaveLength(1)
+  })
+
+  it('passes { cancelRefetch: false } so in-flight /api/cron-runs requests are never aborted', async () => {
+    const qc = makeQueryClient()
+    // Seed initial data (matching useBootstrap seeding lastSync on mount).
+    qc.setQueryData(['last-sync', 'svc-1'], { started_at: '2026-10-21T00:00:00Z', status: 'success' })
+
+    const abortedSignals: boolean[] = []
+    let fetchCount = 0
+    const obs = new QueryObserver(qc, {
+      queryKey: ['last-sync', 'svc-1'],
+      staleTime: 30_000,
+      queryFn: ({ signal }) =>
+        new Promise((resolve) => {
+          fetchCount += 1
+          signal.addEventListener('abort', () => abortedSignals.push(true))
+          setTimeout(() => resolve({ started_at: '2026-10-21T00:01:00Z', status: 'success' }), 250)
+        }),
+    })
+    // Attach an active observer so invalidateQueries triggers refetching.
+    const unsub = obs.subscribe(() => {})
+
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    const applier = makeCronRunsApplier(qc, 'svc-1')
+
+    // First flush starts a 250ms in-flight fetch.
+    applier.apply({ task: 'log_discovery', status: 'running' })
+    vi.advanceTimersByTime(100)
+    expect(fetchCount).toBe(1)
+
+    // Second flush 120ms later arrives while the 250ms fetch is STILL in flight.
+    vi.advanceTimersByTime(20)
+    applier.apply({ task: 'log_discovery', status: 'success' })
+    vi.advanceTimersByTime(100)
+
+    // Must never abort the in-flight request (which causes net::ERR_ABORTED in the browser).
+    expect(abortedSignals).toHaveLength(0)
+    for (const call of spy.mock.calls) {
+      expect(call[1]).toEqual({ cancelRefetch: false })
+    }
+
+    unsub()
   })
 })

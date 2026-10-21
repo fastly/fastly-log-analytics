@@ -388,3 +388,48 @@ def test_convert_batch_task_routes_to_ingest_queue():
     name = "backend.core.ingest.convert_batch_files"
     assert name in app.tasks
     assert app.amqp.router.route({}, name)["queue"].name == "q.ingest"
+
+
+def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_run(tmp_path):
+    """Regression test for the High-Scale /api/cron-runs refetch + ERR_ABORTED storm:
+    when a batch of N files shares an originating ``log_discovery`` run_id,
+    ``convert_batch_objects`` must aggregate all N object outcomes into
+    ``cron_runs`` and publish ``cron_run_changed`` at most ONCE per originating
+    run — never once per file (which emitted up to 50 SSE events in ~1.3s)."""
+    from backend.core import metadata as metadata_db
+
+    service_id = "test-batch-sse-coalesce-svc"
+    con, cur = _clear_ledger(service_id)
+    con.execute("DELETE FROM cron_runs WHERE service_id=?", (service_id,))
+    con.commit()
+
+    run_id = metadata_db.start_cron_run(service_id, "log_discovery")
+    metadata_db.log_cron_run(service_id, "log_discovery", duration_s=0.2, status="success", run_id=run_id)
+
+    keys, s3_map = _write_files(tmp_path, [f"s{i}" for i in range(8)], lines_per_file=2)
+    for object_key in keys:
+        cur.execute(
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, status, discovered_at, originating_task, originating_run_id) "
+            "VALUES (?, ?, 'discovered', ?, 'log_discovery', ?)",
+            (service_id, object_key, time.time(), run_id),
+        )
+    con.commit()
+
+    with (
+        _batch_env(service_id, tmp_path, _download_stub(s3_map)),
+        patch("backend.core.metadata.cron_log._publish_cron_run_change") as mock_publish,
+    ):
+        summary = convert_batch_objects(service_id, keys, "w-sse")
+
+    assert summary["committed"] == 8, summary
+    row = con.execute(
+        "SELECT status, rows_ingested FROM cron_runs WHERE id=? AND service_id=?",
+        (run_id, service_id),
+    ).fetchone()
+    assert row[0] == "success"
+    assert row[1] == 16
+    assert mock_publish.call_count == 1, (
+        f"Expected 1 coalesced cron_run_changed SSE publish for an 8-file batch, got {mock_publish.call_count}"
+    )
+    mock_publish.assert_called_once_with(service_id, run_id, "log_discovery", "success")

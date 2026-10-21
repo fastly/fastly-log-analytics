@@ -154,20 +154,24 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     flushTimer = null
     const due = new Set(pending)
     pending.clear()
+    // Pass { cancelRefetch: false } so an SSE invalidation never aborts an
+    // already in-flight request (which shows up as net::ERR_ABORTED in the
+    // browser and wastes backend work when /api/cron-runs takes >100ms).
+    const opts = { cancelRefetch: false } as const
     if (due.has('table')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) }, opts)
     }
     if (due.has('recent')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) }, opts)
     }
     if (due.has('last-sync')) {
-      qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) }, opts)
     }
     if (due.has('iceberg')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() }, opts)
     }
     if (due.has('schedule')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) }, opts)
     }
     // The /logs Service History, Ingestion and Schema tabs have no
     // dedicated stream — they piggyback on these cron-complete events.
@@ -177,21 +181,22 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     // refetch when that tab is actually open; otherwise it just freshens
     // the cache for the next visit.
     if (due.has('audit')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(serviceId) }, opts)
     }
     if (due.has('ingested')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.ingestedFiles(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.ingestedFiles(serviceId) }, opts)
     }
     if (due.has('schema')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.schema(serviceId) })
+      qc.invalidateQueries({ queryKey: queryKeys.admin.schema(serviceId) }, opts)
     }
   }
 
   const schedule = (key: InvalidationKey) => {
     pending.add(key)
-    if (flushTimer === null) {
-      flushTimer = setTimeout(flush, INVALIDATION_COALESCE_MS)
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer)
     }
+    flushTimer = setTimeout(flush, INVALIDATION_COALESCE_MS)
   }
 
   const apply = (data: unknown) => {

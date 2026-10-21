@@ -59,6 +59,14 @@ def _record_ledger_object_outcome(service_id: str, object_key: str, counters: di
     record_ingest_object_outcome(service_id, object_key, counters)
 
 
+def _record_ledger_batch_outcomes(service_id: str, outcomes_by_key: dict[str, dict[str, int]]) -> None:
+    if not outcomes_by_key:
+        return
+    from backend.core.metadata.cron_log import record_ingest_batch_outcomes
+
+    record_ingest_batch_outcomes(service_id, outcomes_by_key)
+
+
 def _mark_object_failed(counters: dict[str, int]) -> None:
     counters["objects_failed"] = 1
     counters["objects_successful"] = 0
@@ -2171,6 +2179,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     # not touch it again.
     active: list[str] = list(claimed_keys)
     outcomes: dict[str, dict[str, int]] = {}
+    batch_outcomes: dict[str, dict[str, int]] = {}
     duckdb_con = None
     admission_cm = ducklake_write_admission(service_id)
     admission_entered = False
@@ -2219,7 +2228,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                         summary["dead_letter"] += 1
                         outcome = _new_object_outcome()
                         _mark_object_failed(outcome)
-                        _record_ledger_object_outcome(service_id, object_key, outcome)
+                        batch_outcomes[object_key] = outcome
                     logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
                 else:
                     _ledger_record_failure(
@@ -2232,9 +2241,10 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                     summary["failed"] += 1
                     outcome = _new_object_outcome()
                     _mark_object_failed(outcome)
-                    _record_ledger_object_outcome(service_id, object_key, outcome)
+                    batch_outcomes[object_key] = outcome
 
             if not files:
+                _record_ledger_batch_outcomes(service_id, batch_outcomes)
                 return summary
 
             # Acquire the per-service write lock only now — for the DuckLake
@@ -2397,7 +2407,8 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
             outcome = _new_object_outcome()
             _mark_object_failed(outcome)
-            _record_ledger_object_outcome(service_id, object_key, outcome)
+            batch_outcomes[object_key] = outcome
+        _record_ledger_batch_outcomes(service_id, batch_outcomes)
         summary["failed"] += len(active)
         return summary
     finally:
@@ -2414,11 +2425,12 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
         if outcome_status == "committed":
             summary["committed"] += 1
-            _record_ledger_object_outcome(service_id, object_key, outcomes[object_key])
+            batch_outcomes[object_key] = outcomes[object_key]
         else:
             outcome = outcomes[object_key]
             _mark_object_failed(outcome)
-            _record_ledger_object_outcome(service_id, object_key, outcome)
+            batch_outcomes[object_key] = outcome
+    _record_ledger_batch_outcomes(service_id, batch_outcomes)
     return summary
 
 
@@ -3395,6 +3407,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     bucket = src.get("bucket", "")
     active: list[str] = list(claimed_keys)
     outcomes: dict[str, dict[str, int]] = {}
+    batch_outcomes: dict[str, dict[str, int]] = {}
     duckdb_con = None
     admission_cm = ducklake_write_admission(service_id)
     admission_entered = False
@@ -3568,7 +3581,8 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
             outcome = _new_object_outcome()
             _mark_object_failed(outcome)
-            _record_ledger_object_outcome(service_id, object_key, outcome)
+            batch_outcomes[object_key] = outcome
+        _record_ledger_batch_outcomes(service_id, batch_outcomes)
         summary["failed"] += len(active)
         return summary
     finally:
@@ -3585,11 +3599,12 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
         outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
         if outcome_status == "committed":
             summary["committed"] += 1
-            _record_ledger_object_outcome(service_id, object_key, outcomes[object_key])
+            batch_outcomes[object_key] = outcomes[object_key]
         else:
             outcome = outcomes[object_key]
             _mark_object_failed(outcome)
-            _record_ledger_object_outcome(service_id, object_key, outcome)
+            batch_outcomes[object_key] = outcome
+    _record_ledger_batch_outcomes(service_id, batch_outcomes)
     return summary
 
 

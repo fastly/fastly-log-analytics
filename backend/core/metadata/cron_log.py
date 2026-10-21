@@ -348,12 +348,12 @@ def log_cron_run(
         _publish_cron_run_change(service_id, run_id, task, final_status)
 
 
-def record_ingest_object_outcome(service_id: str, object_key: str, outcome_counters: dict[str, int]) -> bool:
-    """Replace one ledger object's contribution in its originating cron run.
-
-    The ledger snapshot and aggregated cron counters commit together, so task
-    retries and later source-deletion outcomes cannot double-count an object.
-    """
+def _record_ingest_object_outcome_inner(
+    service_id: str,
+    object_key: str,
+    outcome_counters: dict[str, int],
+) -> tuple[bool, tuple[int, str, str] | None]:
+    """Commit one ledger object's outcome and return ``(updated, publish_info)``."""
 
     new_counters = _normalize_outcome_counters(outcome_counters)
     con = get_con(service_id)
@@ -367,7 +367,7 @@ def record_ingest_object_outcome(service_id: str, object_key: str, outcome_count
         ).fetchone()
         if ledger_row is None:
             con.execute("ROLLBACK")
-            return False
+            return False, None
 
         task = ledger_row["originating_task"]
         run_id = ledger_row["originating_run_id"]
@@ -429,8 +429,55 @@ def record_ingest_object_outcome(service_id: str, object_key: str, outcome_count
         raise
 
     if run_id is not None and task is not None and new_run_status is not None:
+        return True, (run_id, task, new_run_status)
+    return True, None
+
+
+def record_ingest_object_outcome(
+    service_id: str,
+    object_key: str,
+    outcome_counters: dict[str, int],
+    *,
+    publish: bool = True,
+) -> bool:
+    """Replace one ledger object's contribution in its originating cron run.
+
+    The ledger snapshot and aggregated cron counters commit together, so task
+    retries and later source-deletion outcomes cannot double-count an object.
+    """
+    updated, pub_info = _record_ingest_object_outcome_inner(service_id, object_key, outcome_counters)
+    if publish and pub_info is not None:
+        run_id, task, new_run_status = pub_info
         _publish_cron_run_change(service_id, run_id, task, new_run_status)
-    return True
+    return updated
+
+
+def record_ingest_batch_outcomes(
+    service_id: str,
+    outcomes_by_key: dict[str, dict[str, int]],
+) -> int:
+    """Record ledger object outcomes for a batch of objects, coalescing SSE
+    ``cron_run_changed`` publications to at most one per originating cron run.
+
+    Without batch-level coalescing, a 50-file ``convert_batch_objects`` call
+    emits 50 back-to-back ``cron_run_changed`` events ~25ms apart for the same
+    ``log_discovery`` run, driving a refetch + ``net::ERR_ABORTED`` storm on
+    connected browsers.
+    """
+    if not outcomes_by_key:
+        return 0
+    updated_count = 0
+    pending_publishes: dict[tuple[int, str], str] = {}
+    for object_key, counters in outcomes_by_key.items():
+        updated, pub_info = _record_ingest_object_outcome_inner(service_id, object_key, counters)
+        if updated:
+            updated_count += 1
+        if pub_info is not None:
+            run_id, task, new_run_status = pub_info
+            pending_publishes[(run_id, task)] = new_run_status
+    for (run_id, task), new_run_status in pending_publishes.items():
+        _publish_cron_run_change(service_id, run_id, task, new_run_status)
+    return updated_count
 
 
 def finalize_cron_run_if_running(
