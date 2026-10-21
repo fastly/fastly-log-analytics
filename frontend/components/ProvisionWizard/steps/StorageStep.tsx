@@ -157,6 +157,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                     </p>
                   </div>
                   <Switch
+                    aria-label="Edge Only"
                     checked={config.edge_only}
                     onCheckedChange={(v) => setConfig({ ...config, edge_only: v })}
                   />
@@ -406,6 +407,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                 </p>{" "}
               </div>
               <Switch
+                aria-label="Background Sync"
                 checked={config.enable_cron_sync}
                 onCheckedChange={(v) =>
                   setConfig({ ...config, enable_cron_sync: v })
@@ -434,6 +436,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                 </p>
               </div>
               <Switch
+                aria-label="Auto-Delete Raw Logs"
                 checked={config.delete_after}
                 onCheckedChange={(v) =>
                   setConfig({ ...config, delete_after: v })
@@ -734,6 +737,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                 </p>
             </div>
             <Switch
+              aria-label="Daily Iceberg Optimization"
               checked={config.enable_cron_compact}
               onCheckedChange={(v) =>
                 setConfig({ ...config, enable_cron_compact: v })

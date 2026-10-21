@@ -316,7 +316,7 @@ export function StandardFieldsStep({
               info="When enabled, only edge nodes write logs, skipping shield nodes and cache restarts. This prevents duplicate log entries."
             />
           </div>
-          <Switch id="edgeOnly" checked={edgeOnly} onCheckedChange={setEdgeOnly} />
+          <Switch id="edgeOnly" aria-label="Edge Only" checked={edgeOnly} onCheckedChange={setEdgeOnly} />
         </div>
 
         {/* Optional Log Condition */}
