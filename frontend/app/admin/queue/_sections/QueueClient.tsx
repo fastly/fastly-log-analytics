@@ -3,6 +3,7 @@
 import React from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { formatLocalDateTime } from '@/lib/date'
+import { formatCount } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import type { ColumnDef } from '@tanstack/react-table'
@@ -457,7 +458,7 @@ export function QueueClient() {
                 <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Ingested Files</div>
                   <div className="text-2xl font-semibold tabular-nums mt-0.5">
-                    {standardIngestedFiles.toLocaleString()}
+                    {formatCount(standardIngestedFiles)}
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Tracked in PostgreSQL ingested_files
@@ -470,7 +471,7 @@ export function QueueClient() {
                       standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''
                     }`}
                   >
-                    {standardQuarantinedItems.toLocaleString()}
+                    {formatCount(standardQuarantinedItems)}
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Corrupt files &amp; lines preserved on disk

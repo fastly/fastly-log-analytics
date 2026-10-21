@@ -375,7 +375,7 @@ function CeleryStatusCard() {
       ? 'default'
       : 'warning'
   let secondaryText = isStandardMode
-    ? `${activeRuns} active · ${ingestedFiles.toLocaleString()} ingested · in-process`
+    ? `${activeRuns} active · ${formatCount(ingestedFiles)} ingested · in-process`
     : `ingest: ${ingestQ} · control: ${controlQ}`
 
   if (deadLetters > 0) {
