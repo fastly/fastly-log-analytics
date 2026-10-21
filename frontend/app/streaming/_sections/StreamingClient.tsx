@@ -49,6 +49,42 @@ const STARTUP_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Startup Ratio (%)' } },
 }
 
+const DURATION_DIST_LAYOUT: PlotlyLayout = {
+  yaxis: { title: { text: 'Sessions' } },
+  barcornerradius: 3,
+}
+
+const EMPTY_PLOT_LAYOUT: PlotlyLayout = {}
+const EMPTY_ROWS: never[] = []
+
+const CONTENT_COLUMNS = [
+  { accessorKey: 'content_id', header: 'Content ID' },
+  { accessorKey: 'session_count', header: 'Sessions' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
+  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
+  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
+]
+
+const REBUFFER_COUNTRY_COLUMNS = [
+  { accessorKey: 'country', header: 'Country' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
+  { accessorKey: 'session_count', header: 'Sessions' },
+  { accessorKey: 'median_throughput', header: 'Median Throughput (kbps)' },
+]
+
+const REBUFFER_ASN_COLUMNS = [
+  { accessorKey: 'label', header: 'ASN' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
+  { accessorKey: 'session_count', header: 'Sessions' },
+  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
+  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
+]
+
+const STREAMING_FORMAT_COLUMNS = [
+  { accessorKey: 'streaming_format', header: 'Format' },
+  { accessorKey: 'session_count', header: 'Sessions' },
+]
+
 interface StreamingBodyProps {
   activeServiceId: string | null
   filterPayload: FiltersPayload
@@ -299,34 +335,6 @@ function StreamingBody({
 
   // ── Content ─────────────────────────────────────────────────────────────
 
-  const contentColumns = [
-    { accessorKey: 'content_id', header: 'Content ID' },
-    { accessorKey: 'session_count', header: 'Sessions' },
-    { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
-    { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
-    { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
-  ]
-
-  const rebufferCountryColumns = [
-    { accessorKey: 'country', header: 'Country' },
-    { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
-    { accessorKey: 'session_count', header: 'Sessions' },
-    { accessorKey: 'median_throughput', header: 'Median Throughput (kbps)' },
-  ]
-
-  const rebufferAsnColumns = [
-    { accessorKey: 'label', header: 'ASN' },
-    { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
-    { accessorKey: 'session_count', header: 'Sessions' },
-    { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
-    { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
-  ]
-
-  const streamingFormatColumns = [
-    { accessorKey: 'streaming_format', header: 'Format' },
-    { accessorKey: 'session_count', header: 'Sessions' },
-  ]
-
   return (
     <>
       {/* Overview Cards */}
@@ -551,7 +559,7 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.top_content.title}
           helpContent={STREAMING_INFO.top_content.body}
         >
-          <DataTable columns={contentColumns} data={data?.top_content ?? []} />
+          <DataTable columns={CONTENT_COLUMNS} data={data?.top_content ?? EMPTY_ROWS} />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -566,7 +574,7 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.session_duration.title}
           helpContent={STREAMING_INFO.session_duration.body}
         >
-          <PlotlyChart data={durationDistData} layout={{ yaxis: { title: { text: 'Sessions' } }, barcornerradius: 3 }} height="100%" />
+          <PlotlyChart data={durationDistData} layout={DURATION_DIST_LAYOUT} height="100%" />
         </AnalyticsCard>
       </div>
 
@@ -583,7 +591,7 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.object_type_dist.title}
           helpContent={STREAMING_INFO.object_type_dist.body}
         >
-          <PlotlyChart data={objectTypeData} layout={{}} height="100%" />
+          <PlotlyChart data={objectTypeData} layout={EMPTY_PLOT_LAYOUT} height="100%" />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -594,7 +602,7 @@ function StreamingBody({
           error={cmcdQuery.error as AnalyticsCardError | null}
           isEmpty={!streamingFormatRows.length}
         >
-          <DataTable columns={streamingFormatColumns} data={streamingFormatRows} />
+          <DataTable columns={STREAMING_FORMAT_COLUMNS} data={streamingFormatRows} />
         </AnalyticsCard>
       </div>
 
@@ -610,7 +618,7 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.rebuffer_by_country.title}
           helpContent={STREAMING_INFO.rebuffer_by_country.body}
         >
-          <DataTable columns={rebufferCountryColumns} data={data?.rebuffer_by_country ?? []} />
+          <DataTable columns={REBUFFER_COUNTRY_COLUMNS} data={data?.rebuffer_by_country ?? EMPTY_ROWS} />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -623,7 +631,7 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.rebuffer_by_asn.title}
           helpContent={STREAMING_INFO.rebuffer_by_asn.body}
         >
-          <DataTable columns={rebufferAsnColumns} data={data?.rebuffer_by_asn ?? []} />
+          <DataTable columns={REBUFFER_ASN_COLUMNS} data={data?.rebuffer_by_asn ?? EMPTY_ROWS} />
         </AnalyticsCard>
       </div>
     </>

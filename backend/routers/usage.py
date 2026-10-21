@@ -40,8 +40,12 @@ router = APIRouter(prefix="/api/usage", tags=["usage"], responses=DEFAULT_ERROR_
 # 60 s staleness window is invisible to the operator and absorbs every
 # burst without changing chart numbers.
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 
 _FASTLY_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
+_STORAGE_INSPECTION_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
+_CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
+_CacheRegistry.register("routers.usage._STORAGE_INSPECTION_CACHE", _STORAGE_INSPECTION_CACHE)
 
 
 def _fastly_api(path: str, api_key: str) -> dict:
@@ -441,68 +445,80 @@ def usage_current_storage(
         # per the standing "be a little behind the data rather than read
         # extra from the cloud" rule. The FOS-LIST fallback below still
         # covers the cold-start case where get_table_info errors out.
-        iceberg_bytes = 0
-        iceberg_files = 0
-        iceberg_info_success = False
-        # First try the cron-written cached values in svcconfig.status —
-        # the heavy refresh_config_status tick already populated these,
-        # so this endpoint stays sub-50 ms even on a cold-cache process.
-        cached_status = svcconfig.get_status(src["name"]) or {}
-        cached_ib = cached_status.get("iceberg_bytes")
-        cached_if = cached_status.get("iceberg_files")
-        if cached_ib is not None and cached_if is not None:
-            iceberg_bytes = int(cached_ib)
-            iceberg_files = int(cached_if)
-            iceberg_info_success = True
+        cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
+        cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
+        if cached_insp is not None:
+            iceberg_bytes, iceberg_files, quarantine_bytes, rum_bytes = cached_insp
         else:
+            iceberg_bytes = 0
+            iceberg_files = 0
+            iceberg_info_success = False
+            # First try the cron-written cached values in svcconfig.status —
+            # the heavy refresh_config_status tick already populated these,
+            # so this endpoint stays sub-50 ms even on a cold-cache process.
+            cached_status = svcconfig.get_status(src["name"]) or {}
+            cached_ib = cached_status.get("iceberg_bytes")
+            cached_if = cached_status.get("iceberg_files")
+            if cached_ib is not None and cached_if is not None:
+                iceberg_bytes = int(cached_ib)
+                iceberg_files = int(cached_if)
+                iceberg_info_success = True
+            else:
+                try:
+                    from backend.core import iceberg as db_iceberg
+
+                    iceberg_info = db_iceberg.get_table_info(src)
+                    if not iceberg_info.get("error"):
+                        iceberg_bytes = iceberg_info.get("size_bytes", 0)
+                        iceberg_files = iceberg_info.get("data_files", 0)
+                        iceberg_info_success = True
+                except Exception:
+                    logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
+
+            if not iceberg_info_success:
+                try:
+                    s3 = _get_fos_client(src)
+                    bucket = src["bucket"]
+                    prefix = f"{src.get('prefix', '').strip().rstrip('/')}/" if src.get("prefix") else ""
+                    iceberg_prefix = f"{prefix}iceberg/"
+                    paginator = s3.get_paginator("list_objects_v2")
+                    for page in paginator.paginate(Bucket=bucket, Prefix=iceberg_prefix.rstrip("/")):
+                        for obj in page.get("Contents", []):
+                            iceberg_bytes += obj.get("Size", 0)
+                            iceberg_files += 1
+                except Exception as e:
+                    import logging
+
+                    logging.error(f"FOS Scan failed: {e}")
+
+            quarantine_bytes = 0
             try:
-                from backend.core import iceberg as db_iceberg
+                from backend.core.metadata.quarantine import get_quarantine_storage_total
 
-                iceberg_info = db_iceberg.get_table_info(src)
-                if not iceberg_info.get("error"):
-                    iceberg_bytes = iceberg_info.get("size_bytes", 0)
-                    iceberg_files = iceberg_info.get("data_files", 0)
-                    iceberg_info_success = True
+                quarantine_bytes = get_quarantine_storage_total(src["name"])
             except Exception:
-                logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
+                logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
 
-        if not iceberg_info_success:
+            # Calculate RUM storage separately from regular logs
+            rum_bytes = 0
             try:
                 s3 = _get_fos_client(src)
                 bucket = src["bucket"]
-                prefix = f"{src.get('prefix', '').strip().rstrip('/')}/" if src.get("prefix") else ""
-                iceberg_prefix = f"{prefix}iceberg/"
+                prefix = src.get("prefix", "").strip("/")
+                rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
                 paginator = s3.get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=bucket, Prefix=iceberg_prefix.rstrip("/")):
+                for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
                     for obj in page.get("Contents", []):
-                        iceberg_bytes += obj.get("Size", 0)
-                        iceberg_files += 1
-            except Exception as e:
-                import logging
+                        rum_bytes += obj.get("Size", 0)
+            except Exception:
+                logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
-                logging.error(f"FOS Scan failed: {e}")
-
-        quarantine_bytes = 0
-        try:
-            from backend.core.metadata.quarantine import get_quarantine_storage_total
-
-            quarantine_bytes = get_quarantine_storage_total(src["name"])
-        except Exception:
-            logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
-
-        # Calculate RUM storage separately from regular logs
-        rum_bytes = 0
-        try:
-            s3 = _get_fos_client(src)
-            bucket = src["bucket"]
-            prefix = src.get("prefix", "").strip("/")
-            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
-            paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
-                for obj in page.get("Contents", []):
-                    rum_bytes += obj.get("Size", 0)
-        except Exception:
-            logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
+            _STORAGE_INSPECTION_CACHE[cache_key] = (
+                iceberg_bytes,
+                iceberg_files,
+                quarantine_bytes,
+                rum_bytes,
+            )
 
         regular_log_bytes = total_bytes - rum_bytes
 

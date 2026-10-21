@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -48,6 +50,7 @@ def logs_query_endpoint(
     start_time: str | None,
     end_time: str | None,
     mask_ips: bool,
+    include_count: bool = True,
 ) -> dict[str, Any]:
     """Execute high-scale logs query against ClickHouse request_facts."""
     end_dt = _parse_ts(end_time) or datetime.now(UTC)
@@ -71,26 +74,45 @@ def logs_query_endpoint(
         clauses.append(f"({' OR '.join(_SEARCH_FIELDS)})")
     where_sql = " AND ".join(clauses)
 
-    count_rows = service.client.execute(
-        f"/* logs:count */ SELECT count() AS cnt FROM request_facts WHERE {where_sql}", params
-    )
-    total_count = int(count_rows[0]["cnt"]) if count_rows else 0
-
     sort_dir = "ASC" if str(req.sort_dir).upper() == "ASC" else "DESC"
     limit = req.limit or 100
     offset = req.offset or 0
-    page = service.client.execute(
-        "/* logs:page */ SELECT event_timestamp AS timestamp, client_ip, url, country, custom_fields "
-        f"FROM request_facts WHERE {where_sql} ORDER BY event_timestamp {sort_dir} "
-        "LIMIT {limit:UInt32} OFFSET {offset:UInt32}",
-        {**params, "limit": limit, "offset": offset},
-    )
-    sampled = service.client.execute(
-        "/* logs:columns */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS keys FROM ("
-        f"SELECT custom_fields FROM request_facts WHERE {where_sql} "
-        f"ORDER BY event_timestamp DESC LIMIT {_COLUMN_SAMPLE_ROWS})",
-        params,
-    )
+
+    def _q_page():
+        return service.client.execute(
+            "/* logs:page */ SELECT event_timestamp AS timestamp, client_ip, url, country, custom_fields "
+            f"FROM request_facts WHERE {where_sql} ORDER BY event_timestamp {sort_dir} "
+            "LIMIT {limit:UInt32} OFFSET {offset:UInt32}",
+            {**params, "limit": limit, "offset": offset},
+        )
+
+    if not include_count:
+        page = _q_page()
+        total_count = len(page)
+        sampled: list[dict[str, Any]] = []
+    else:
+
+        def _q_count():
+            return service.client.execute(
+                f"/* logs:count */ SELECT count() AS cnt FROM request_facts WHERE {where_sql}", params
+            )
+
+        def _q_cols():
+            return service.client.execute(
+                "/* logs:columns */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS keys FROM ("
+                f"SELECT custom_fields FROM request_facts WHERE {where_sql} "
+                f"ORDER BY event_timestamp DESC LIMIT {_COLUMN_SAMPLE_ROWS})",
+                params,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_count = pool.submit(contextvars.copy_context().run, _q_count)
+            f_page = pool.submit(contextvars.copy_context().run, _q_page)
+            f_cols = pool.submit(contextvars.copy_context().run, _q_cols)
+            count_rows = f_count.result()
+            page = f_page.result()
+            sampled = f_cols.result()
+        total_count = int(count_rows[0]["cnt"]) if count_rows else 0
 
     known: set[str] = set(_BASE_COLUMNS)
     known.update(sampled[0]["keys"] if sampled and sampled[0].get("keys") else [])

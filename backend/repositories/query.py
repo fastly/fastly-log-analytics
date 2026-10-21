@@ -370,7 +370,15 @@ def _run_validated_query(
     arrow_table = result.to_arrow_table()
     timer.mark("fetch_arrow", _t_fetch)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms, "engine": "DuckDB"})
+    compact_exec_sql = _compact_sql_for_debug(exec_sql.strip())
+    _debug_queries.append({"sql": compact_exec_sql, "time_ms": elapsed_ms, "engine": "DuckDB"})
+    from backend.utils.telemetry import get_queries, record_telemetry_query
+
+    svc_id = (src.get("name") or src.get("service_id")) if src else None
+    q_list = get_queries()
+    for dq in _debug_queries:
+        q_list.append(dq)
+        record_telemetry_query("duckdb", dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
 
     fetched_rows = arrow_table.num_rows
     if is_simple_select:

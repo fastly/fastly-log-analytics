@@ -270,7 +270,11 @@ def query_endpoint(
     # meaningful) but never the global ceiling.
     row_cap = (MAX_QUERY_ROWS if has_explicit_limit else max_rows) + 1
     sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
-    settings = {"max_result_rows": str(row_cap), "result_overflow_mode": "break"}
+    settings = {
+        "max_result_rows": str(row_cap),
+        "result_overflow_mode": "break",
+        "date_time_input_format": "best_effort",
+    }
     if fact_tables:
         _assert_table_filters_enforced(client)
         scope = _table_filters(service.service_id, start_time, end_time, fact_tables, scoped_by_view=tables is not None)
@@ -284,10 +288,11 @@ def query_endpoint(
         raise RuntimeError(str(e)) from e
     timer.mark("execute", t0)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+    compact_sql = _compact_sql_for_debug(sql.strip())
 
     _debug_queries = [
         {
-            "sql": _compact_sql_for_debug(sql.strip()),
+            "sql": compact_sql,
             "time_ms": elapsed_ms,
             "engine": "ClickHouse",
         }

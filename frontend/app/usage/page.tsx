@@ -262,26 +262,29 @@ function UsagePageContent({
   const bwLayout = useMemo(() => ({ ...baseLayout, showlegend: true, yaxis: { title: bwUnit, gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }), [baseLayout, bwUnit, gridColor])
 
   // ── Log generation chart ───────────────────────────────────────────────────
-  const genTimes = logActivity?.data.map(p => p.time) ?? []
-  const ingestCounts = logActivity?.data.map(p => p.row_count) ?? []
-  const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
-  const hasApiCounts = apiCounts.some(v => v != null && v > 0)
+  const logProcData = useMemo<PlotlyTrace[]>(() => {
+    const genTimes = logActivity?.data.map(p => p.time) ?? []
+    const ingestCounts = logActivity?.data.map(p => p.row_count) ?? []
+    const apiCounts = logActivity?.data.map(p => p.api_requests) ?? []
+    const hasApiCounts = apiCounts.some(v => v != null && v > 0)
 
-  const logProcData: PlotlyTrace[] = [
-    { type: 'bar', name: 'Log Lines Ingested', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: 'Ingested: %{y:,}<extra></extra>' }
-  ]
-  if (hasApiCounts) {
-    logProcData.push({
-      type: 'scatter',
-      mode: 'lines+markers',
-      name: 'Fastly Requests',
-      x: genTimes,
-      y: apiCounts,
-      line: { color: CHART_COLORS.warning, width: 2 },
-      marker: { color: CHART_COLORS.warning, size: 6 },
-      hovertemplate: 'Requests: %{y:,}<extra></extra>',
-    })
-  }
+    const traces: PlotlyTrace[] = [
+      { type: 'bar', name: 'Log Lines Ingested', x: genTimes, y: ingestCounts, marker: { color: accent }, hovertemplate: 'Ingested: %{y:,}<extra></extra>' }
+    ]
+    if (hasApiCounts) {
+      traces.push({
+        type: 'scatter',
+        mode: 'lines+markers',
+        name: 'Fastly Requests',
+        x: genTimes,
+        y: apiCounts,
+        line: { color: CHART_COLORS.warning, width: 2 },
+        marker: { color: CHART_COLORS.warning, size: 6 },
+        hovertemplate: 'Requests: %{y:,}<extra></extra>',
+      })
+    }
+    return traces
+  }, [logActivity?.data, accent])
 
   // ── Totals for stat cards ──────────────────────────────────────────────────
   const totalClassA = ops?.total_class_a ?? 0
@@ -514,7 +517,7 @@ function UsagePageContent({
           isLoading={loadingActivity}
           isFetching={fetchingActivity}
           error={errorActivity as AnalyticsCardError | null}
-          isEmpty={genTimes.length === 0}
+          isEmpty={!logActivity?.data || logActivity.data.length === 0}
           className="h-[360px]"
           contentClassName="p-2"
         >

@@ -552,6 +552,7 @@ def get_cmcd_aggregates(
             results["session_duration_dist"] = [{"duration_bucket": r[0], "session_count": r[2]} for r in rows]
             timer.mark("session_duration_dist", _t)
 
+    results.update(runner.telemetry())
     results["section_timings"] = section_timings
     _memo.put(cache_key, results, strip=("section_timings",))
     return results

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextvars
 import json
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -160,8 +162,11 @@ def rum_analytics(
         )
         no_data = not any_data[0]["has_data"]
 
-    rows = service.client.execute(
-        f"""
+    hourly = end - start <= timedelta(hours=48)
+    # Fixed internal expression only; user values remain typed parameters.
+    bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
+
+    vitals_sql = f"""
         /* rum_analytics_vitals */
         SELECT lower(metric_name) AS metric_name,
                quantileExactInclusiveOrNull(0.75)(metric_value) as p75,
@@ -172,11 +177,8 @@ def rum_analytics(
         FROM rum_vitals_facts
         WHERE {where_vitals}
         GROUP BY metric_name
-        """,
-        params,
-    )
-    environment_rows = service.client.execute(
-        f"""
+        """
+    environments_sql = f"""
         /* rum_analytics_environments */
         SELECT if(browser = '', 'Unknown', browser) AS env_browser,
                if(os = '', 'Unknown', os) AS env_os,
@@ -186,9 +188,57 @@ def rum_analytics(
         FROM rum_vitals_facts
         WHERE {where_vitals}
         GROUP BY GROUPING SETS ((browser), (os), (device))
-        """,
-        params,
+        """
+    trends_sql = (
+        events
+        + f"""
+        /* rum_analytics_trends */
+        SELECT {bucket_sql} AS bucket,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
+               uniqExactIf(beacon_id, src = 'vitals') AS views,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
+               uniqExactIf(beacon_id, src = 'errors') AS errors
+        FROM events GROUP BY bucket ORDER BY bucket
+        """
     )
+    pages_sql = (
+        events
+        + """
+        /* rum_analytics_pages */
+        SELECT pathname AS path,
+               uniqExactIf(beacon_id, src = 'vitals') AS views,
+               avgOrNullIf(metric_value, metric_name IN
+                   ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
+               uniqExactIf(beacon_id, src = 'errors') * 100.0
+                   / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate
+        FROM events GROUP BY pathname HAVING views > 0
+        ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5
+        """
+    )
+    exceptions_sql = f"""
+        /* rum_analytics_exceptions */
+        SELECT error_message, error_file, error_line, error_col, count() AS count
+        FROM rum_error_facts WHERE {where_errors}
+        GROUP BY error_message, error_file, error_line, error_col
+        ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3
+        """
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        f_vitals = pool.submit(contextvars.copy_context().run, service.client.execute, vitals_sql, params)
+        f_env = pool.submit(contextvars.copy_context().run, service.client.execute, environments_sql, params)
+        f_trends = pool.submit(contextvars.copy_context().run, service.client.execute, trends_sql, params)
+        f_pages = pool.submit(contextvars.copy_context().run, service.client.execute, pages_sql, params)
+        f_errors = pool.submit(contextvars.copy_context().run, service.client.execute, exceptions_sql, params)
+        rows = f_vitals.result()
+        environment_rows = f_env.result()
+        trend_rows = f_trends.result()
+        page_rows = f_pages.result()
+        error_rows = f_errors.result()
+
     browsers: dict[str, int] = {}
     operating_systems: dict[str, int] = {}
     devices: dict[str, int] = {}
@@ -229,24 +279,6 @@ def rum_analytics(
         elif m in ("fcp", "ttfb"):
             vitals["fid"][m] = seconds(p75)
 
-    hourly = end - start <= timedelta(hours=48)
-    # Fixed internal expression only; user values remain typed parameters.
-    bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
-    trend_rows = service.client.execute(
-        events
-        + f"""
-        /* rum_analytics_trends */
-        SELECT {bucket_sql} AS bucket,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
-               uniqExactIf(beacon_id, src = 'vitals') AS views,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
-               uniqExactIf(beacon_id, src = 'errors') AS errors
-        FROM events GROUP BY bucket ORDER BY bucket
-        """,
-        params,
-    )
     trend_by_bucket = {}
     for row in trend_rows:
         ts = row["bucket"]
@@ -282,23 +314,6 @@ def rum_analytics(
             trends[field].append(int(bucket_row[field]) if bucket_row else 0)
         curr += step
 
-    page_rows = service.client.execute(
-        events
-        + """
-        /* rum_analytics_pages */
-        SELECT pathname AS path,
-               uniqExactIf(beacon_id, src = 'vitals') AS views,
-               avgOrNullIf(metric_value, metric_name IN
-                   ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
-               uniqExactIf(beacon_id, src = 'errors') * 100.0
-                   / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate
-        FROM events GROUP BY pathname HAVING views > 0
-        ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5
-        """,
-        params,
-    )
     worst_pages = [
         {
             "path": row["path"],
@@ -310,16 +325,6 @@ def rum_analytics(
         }
         for row in page_rows
     ]
-    error_rows = service.client.execute(
-        f"""
-        /* rum_analytics_exceptions */
-        SELECT error_message, error_file, error_line, error_col, count() AS count
-        FROM rum_error_facts WHERE {where_errors}
-        GROUP BY error_message, error_file, error_line, error_col
-        ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3
-        """,
-        params,
-    )
     result = {
         "is_mock": False,
         "no_data": no_data,

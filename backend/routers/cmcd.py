@@ -35,7 +35,8 @@ def cmcd_aggregates(
     if high_scale_service is not None:
         from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
 
-        return hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
+        res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
+        return CmcdAggregatesResponse.with_telemetry(**res)
 
     res = repo.get_cmcd_aggregates(
         con=ctx.con,

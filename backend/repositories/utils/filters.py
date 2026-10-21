@@ -206,8 +206,8 @@ def build_where_clause(
         sql_col = real_col
         sql_clean_col = clean_col
 
-        mode = spec.mode
-        values = spec.values
+        mode = filter_spec_attr(spec, "mode") or "include"
+        values = filter_spec_attr(spec, "values") or []
         if (
             actual_cols is not None
             and sql_col not in actual_cols

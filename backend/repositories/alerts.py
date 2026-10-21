@@ -381,6 +381,24 @@ def preview_alert_series(
     elif eval_scope == "origin":
         scope_filter = " AND edge = false"
 
+    if src:
+        try:
+            from backend import config as svcconfig
+            from backend.utils.date_utils import parse_iso_utc
+
+            svc_status = svcconfig.get_status(src.get("name") or src.get("service_id") or "") or {}
+            latest_iso = svc_status.get("latest_log_at")
+            anchor_dt = parse_iso_utc(latest_iso) if latest_iso else None
+            if anchor_dt:
+                existing_cols = {row[0] for row in con.execute(f"DESCRIBE {table_name}").fetchall()}
+                prune_st = (anchor_dt - datetime.timedelta(minutes=lookback_mins + 60)).astimezone(datetime.UTC)
+                if "dt" in existing_cols:
+                    scope_filter += f" AND dt >= '{prune_st.strftime('%Y-%m-%d')}'"
+                if "timestamp_hour" in existing_cols:
+                    scope_filter += f" AND timestamp_hour >= '{prune_st.strftime('%Y-%m-%d-%H')}'"
+        except Exception:
+            pass
+
     q = SQL.PREVIEW_SERIES.format(
         group_sql=group_sql,
         agg_sql=agg_sql,

@@ -84,15 +84,18 @@ def _fetch_standard_stream_logs(
     filters: dict[str, Any] | None = None,
     mask_ips: bool = False,
 ) -> list[dict[str, Any]]:
+    from datetime import UTC, datetime, timedelta
+
     from backend.core import duckdb as _db
     from backend.repositories import logs as logs_repo
 
+    start_iso = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
     con = _db.get_connection(source=source, read_only=True)
     try:
         res = logs_repo.query_logs(
             con=con,
             src=source,
-            start_time=None,
+            start_time=start_iso,
             end_time=None,
             filters=filters or {},
             limit=limit,
@@ -100,8 +103,26 @@ def _fetch_standard_stream_logs(
             sort_dir="DESC",
             search=search,
             mask_ips=mask_ips,
+            include_count=False,
         )
-        return res.get("rows", [])
+        rows = res.get("rows", [])
+        if not rows:
+            # Fallback to unbounded window if the service had no logs in the last 15 minutes
+            res = logs_repo.query_logs(
+                con=con,
+                src=source,
+                start_time=None,
+                end_time=None,
+                filters=filters or {},
+                limit=limit,
+                offset=0,
+                sort_dir="DESC",
+                search=search,
+                mask_ips=mask_ips,
+                include_count=False,
+            )
+            rows = res.get("rows", [])
+        return rows
     finally:
         con.close()
 
@@ -113,9 +134,12 @@ def _fetch_high_scale_stream_logs(
     filters: dict[str, Any] | None = None,
     mask_ips: bool = False,
 ) -> list[dict[str, Any]]:
+    from datetime import UTC, datetime, timedelta
+
     from backend.high_scale.logs import logs_query_endpoint
     from backend.models.logs import LogsQueryRequest
 
+    start_iso = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
     req = LogsQueryRequest(
         limit=limit,
         offset=0,
@@ -126,11 +150,23 @@ def _fetch_high_scale_stream_logs(
     res = logs_query_endpoint(
         service=service,
         req=req,
-        start_time=None,
+        start_time=start_iso,
         end_time=None,
         mask_ips=mask_ips,
+        include_count=False,
     )
-    return res.get("rows", [])
+    rows = res.get("rows", [])
+    if not rows:
+        res = logs_query_endpoint(
+            service=service,
+            req=req,
+            start_time=None,
+            end_time=None,
+            mask_ips=mask_ips,
+            include_count=False,
+        )
+        rows = res.get("rows", [])
+    return rows
 
 
 @router.get("/api/stream/{service_id}")

@@ -85,7 +85,7 @@ def sessions_endpoint(
                 row.get("session_end", ""),
                 service_id=ctx.service_id,
             )
-        return result
+        return SessionsResponse.with_telemetry(**result)
 
 
 @router.post("/detail", response_model=SessionDetailResponse)
@@ -144,7 +144,8 @@ def sessions_detail(
         if high_scale_service is not None:
             from backend.high_scale.sessions import sessions_detail as hs_detail
 
-            return hs_detail(high_scale_service, req, start_time, end_time, ip, ja4)
+            res = hs_detail(high_scale_service, req, start_time, end_time, ip, ja4)
+            return SessionDetailResponse.with_telemetry(**res)
 
         def _run_detail(con):
             return repo.get_session_detail(
@@ -156,4 +157,5 @@ def sessions_detail(
                 session_end=end_time,
             )
 
-        return execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)
+        res = execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)
+        return SessionDetailResponse.with_telemetry(**res)

@@ -6,8 +6,11 @@ function sqlEscape(v: string): string {
   return v.replace(/'/g, "''")
 }
 
-/** Quote a column identifier for DuckDB (double-quote, escape inner quotes). */
+const SIMPLE_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+
+/** Quote a column identifier only when required (unquoted simple identifiers stay compatible with High-Scale ClickHouse console validation). */
 function quoteIdent(name: string): string {
+  if (SIMPLE_IDENT_RE.test(name)) return name
   return `"${name.replace(/"/g, '""')}"`
 }
 

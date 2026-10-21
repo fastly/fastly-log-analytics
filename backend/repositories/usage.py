@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import time as _time
+
 import duckdb
 
 from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
-from backend.repositories._base import QueryRunner, _safe_table
+from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
 from backend.repositories._sql import usage as SQL
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.telemetry import get_queries, record_telemetry_query
+
+_LOG_ACTIVITY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+_CacheRegistry.register("repositories.usage._LOG_ACTIVITY_CACHE", _LOG_ACTIVITY_CACHE)
+
+
+def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
+    try:
+        q_list = get_queries()
+        q_list.append({"sql": sql_str, "time_ms": elapsed_ms, "engine": "DuckDB"})
+        record_telemetry_query("duckdb", sql_str, elapsed_ms, service_id=service_id)
+    except Exception:
+        pass
 
 
 def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | None, list]:
@@ -87,8 +104,27 @@ def get_log_activity(
     if st is None or et is None or et <= st:
         return _log_activity_fallback(src, start_str, end_str, by)
 
+    svc_id = src.get("name") or src.get("service_id", "")
+    cache_key = (
+        svc_id,
+        st.astimezone(UTC).isoformat(),
+        et.astimezone(UTC).isoformat(),
+        by,
+        bool(durable_serving),
+    )
+    cached_res = _LOG_ACTIVITY_CACHE.get(cache_key)
+    if cached_res is not None:
+        for dq in cached_res.get("_debug_queries", []):
+            _record_duckdb_query(dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
+        return {
+            **cached_res,
+            "data": [dict(p) for p in cached_res.get("data", [])],
+        }
+
     if durable_serving:
-        return _log_activity_durable(src, st, et, by)
+        res = _log_activity_durable(src, st, et, by)
+        _LOG_ACTIVITY_CACHE[cache_key] = res
+        return {**res, "data": [dict(p) for p in res.get("data", [])]}
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
@@ -128,6 +164,7 @@ def get_log_activity(
     )
 
     fmt = "%Y-%m-%dT%H:%M" if by == "hour" else "%Y-%m-%d"
+    t0 = _time.perf_counter()
     try:
         con = _duckdb.connect()
         try:
@@ -136,6 +173,9 @@ def get_log_activity(
             con.close()
     except Exception:
         return _log_activity_fallback(src, start_str, end_str, by)
+    elapsed_ms = round((_time.perf_counter() - t0) * 1000, 2)
+    compact_sql = _compact_sql_for_debug(sql)
+    _record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
 
     points: list[dict] = []
     total_rows = 0
@@ -153,14 +193,16 @@ def get_log_activity(
         total_rows += rc
         total_bytes += bs
 
-    return {
+    res = {
         "data": points,
         "total_rows": total_rows,
         "total_bytes": total_bytes,
         "granularity": by,
-        "_debug_queries": [],
+        "_debug_queries": [{"sql": compact_sql, "time_ms": elapsed_ms, "engine": "DuckDB"}],
         "_debug_calls": [],
     }
+    _LOG_ACTIVITY_CACHE[cache_key] = res
+    return {**res, "data": [dict(p) for p in points]}
 
 
 def _log_activity_durable(
@@ -173,6 +215,7 @@ def _log_activity_durable(
     from backend.core.duckdb import get_connection
 
     interval = {"second": "1 second", "minute": "1 minute", "hour": "1 hour", "day": "1 day"}[by]
+    svc_id = str(src.get("name") or src.get("service_id") or "")
     table = _safe_table(src["name"])
     con = get_connection(source=src, read_only=True)
     try:
@@ -188,10 +231,14 @@ def _log_activity_durable(
         f"WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp < CAST(? AS TIMESTAMPTZ) "
         f"GROUP BY 1 ORDER BY 1"
     )
+    t0 = _time.perf_counter()
     try:
         rows = con.execute(sql, [st.isoformat(), et.isoformat()]).fetchall()
     finally:
         con.close()
+    elapsed_ms = round((_time.perf_counter() - t0) * 1000, 2)
+    compact_sql = _compact_sql_for_debug(sql)
+    _record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
 
     fmt = {
         "second": "%Y-%m-%dT%H:%M:%S",
@@ -212,7 +259,7 @@ def _log_activity_durable(
         "total_rows": sum(point["row_count"] for point in points),
         "total_bytes": sum(point["bytes"] for point in points),
         "granularity": by,
-        "_debug_queries": [],
+        "_debug_queries": [{"sql": compact_sql, "time_ms": elapsed_ms, "engine": "DuckDB"}],
         "_debug_calls": [],
     }
 

@@ -247,6 +247,7 @@ def sessions_detail(
         params["ja4"] = ja4
     data = service.client.execute(
         """
+    /* sessions:detail */
     SELECT
         client_ip AS ip,
         custom_fields['ja4'] AS ja4,
@@ -261,7 +262,20 @@ def sessions_detail(
         custom_fields['edge'] AS edge,
         custom_fields['edge_sid'] AS edge_sid,
         custom_fields['ua'] AS ua,
-        toInt32OrNull(custom_fields['asn']) AS asn
+        toInt32OrNull(custom_fields['asn']) AS asn,
+        nullIf(cmcd['ot'], '') AS cmcd_ot,
+        toInt64OrNull(cmcd['br']) AS cmcd_br,
+        toInt64OrNull(cmcd['bl']) AS cmcd_bl,
+        nullIf(cmcd['sf'], '') AS cmcd_sf,
+        nullIf(cmcd['st'], '') AS cmcd_st,
+        toInt64OrNull(cmcd['d']) AS cmcd_d,
+        toInt64OrNull(cmcd['mtp']) AS cmcd_mtp,
+        toInt64OrNull(cmcd['tb']) AS cmcd_tb,
+        if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS cmcd_bs,
+        if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS cmcd_su,
+        nullIf(cmcd['cid'], '') AS cmcd_cid,
+        nullIf(cmcd['sid'], '') AS cmcd_sid,
+        toInt32OrNull(cmcd['v']) AS cmcd_v
     FROM request_facts
     WHERE """
         + " AND ".join(clauses)

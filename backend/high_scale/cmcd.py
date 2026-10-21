@@ -8,7 +8,9 @@ column is missing; ClickHouse failures propagate rather than becoming empty char
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import contextvars
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -199,38 +201,45 @@ def cmcd_aggregates(
     video = _VIDEO if has_video_filter else "1"
 
     result: dict[str, Any] = {"available": True, "has_data": True}
+    tasks: list[Callable[[], dict[str, Any]]] = []
 
     if wanted("overview"):
-        row = execute(
-            "/* cmcd:overview */ SELECT uniqExact(sid) AS active_sessions, "
-            "if(countIf(bs IS NOT NULL) = 0, NULL, "
-            "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_rate, "
-            f"avgIf(br, {video}) AS avg_bitrate, avgIf(bl, {video}) AS avg_buffer_length, "
-            f"quantileTDigestIf(0.5)(mtp, {video}) AS median_throughput FROM ({events})",
-            params,
-        )[0]
-        peak = execute(
-            "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
-            "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
-            f"GROUP BY {_BUCKET.format(column='ts')})",
-            params,
-        )
-        duration = execute(
-            "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
-            "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-            "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
-            params,
-        )
-        avg_duration = duration[0].get("avg_duration") if duration else None
-        result["overview"] = {
-            "active_sessions": int(row["active_sessions"] or 0),
-            "rebuffer_rate": _round(row.get("rebuffer_rate")) if has["bs"] else None,
-            "avg_bitrate": _round(row.get("avg_bitrate")) if has["br"] else None,
-            "avg_buffer_length": _round(row.get("avg_buffer_length")) if has["bl"] else None,
-            "median_throughput": _round(row.get("median_throughput")) if has["mtp"] else None,
-            "peak_viewers": int((peak[0].get("peak_viewers") if peak else 0) or 0),
-            "avg_session_duration": int(round(float(avg_duration))) if avg_duration else None,
-        }
+
+        def _run_overview() -> dict[str, Any]:
+            row = execute(
+                "/* cmcd:overview */ SELECT uniqExact(sid) AS active_sessions, "
+                "if(countIf(bs IS NOT NULL) = 0, NULL, "
+                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_rate, "
+                f"avgIf(br, {video}) AS avg_bitrate, avgIf(bl, {video}) AS avg_buffer_length, "
+                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_throughput FROM ({events})",
+                params,
+            )[0]
+            peak = execute(
+                "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
+                "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
+                f"GROUP BY {_BUCKET.format(column='ts')})",
+                params,
+            )
+            duration = execute(
+                "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
+                "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
+                params,
+            )
+            avg_duration = duration[0].get("avg_duration") if duration else None
+            return {
+                "overview": {
+                    "active_sessions": int(row["active_sessions"] or 0),
+                    "rebuffer_rate": _round(row.get("rebuffer_rate")) if has["bs"] else None,
+                    "avg_bitrate": _round(row.get("avg_bitrate")) if has["br"] else None,
+                    "avg_buffer_length": _round(row.get("avg_buffer_length")) if has["bl"] else None,
+                    "median_throughput": _round(row.get("median_throughput")) if has["mtp"] else None,
+                    "peak_viewers": int((peak[0].get("peak_viewers") if peak else 0) or 0),
+                    "avg_session_duration": int(round(float(avg_duration))) if avg_duration else None,
+                }
+            }
+
+        tasks.append(_run_overview)
 
     want_ts = {
         "sessions_ts": wanted("sessions_ts"),
@@ -240,196 +249,250 @@ def cmcd_aggregates(
         "startup_ts": wanted("startup_ts") and has["su"],
     }
     if any(want_ts.values()):
-        select = [f"{_BUCKET.format(column='ts')} AS bucket"]
-        if want_ts["sessions_ts"]:
-            select += [
-                "uniqExact(sid) AS concurrent_sessions",
-                "if(countIf(bs IS NOT NULL) = 0, NULL, "
-                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_session_pct",
-            ]
-        if want_ts["buffer_health_ts"]:
-            select += [
-                f"quantileTDigestIf(0.5)(bl, {video}) AS p50_buffer",
-                f"quantileTDigestIf(0.95)(bl, {video}) AS p95_buffer",
-                "if(countIf(bs IS NOT NULL) = 0, NULL, countIf(bs = 1) * 100.0 / nullIf(count(), 0)) "
-                "AS starvation_rate",
-            ]
-        if want_ts["bitrate_ts"]:
-            select += [
-                f"avgIf(br, {video}) AS avg_bitrate",
-                f"avgIf(br / tb, {video} AND tb > 0) AS utilization_ratio",
-            ]
-        if want_ts["throughput_ts"]:
-            select += [
-                f"quantileTDigestIf(0.5)(mtp, {video}) AS p50_throughput",
-                f"quantileTDigestIf(0.95)(mtp, {video}) AS p95_throughput",
-                f"quantileTDigestIf(0.99)(mtp, {video}) AS p99_throughput",
-            ]
-        if want_ts["startup_ts"]:
-            select.append(
-                "if(countIf(su IS NOT NULL) = 0, NULL, countIf(su = 1) * 100.0 / nullIf(count(), 0)) AS startup_ratio"
-            )
-        rows = execute(
-            f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
-            params,
-        )
-        by_bucket = {str(row["bucket"]): row for row in rows}
 
-        def padded(field_map: dict[str, tuple[str, Any]], default: dict[str, Any]) -> list[dict[str, Any]]:
-            return _pad(
-                start,
-                end,
-                int(req.bucket_seconds),
-                {
-                    bucket: {out: convert(row.get(src)) for out, (src, convert) in field_map.items()}
-                    for bucket, row in by_bucket.items()
-                },
-                default,
-            )
-
-        if want_ts["sessions_ts"]:
-            first_seen = execute(
-                "/* cmcd:new_sessions */ SELECT "
-                f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
-                f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
+        def _run_timeseries() -> dict[str, Any]:
+            ts_out: dict[str, Any] = {}
+            select = [f"{_BUCKET.format(column='ts')} AS bucket"]
+            if want_ts["sessions_ts"]:
+                select += [
+                    "uniqExact(sid) AS concurrent_sessions",
+                    "if(countIf(bs IS NOT NULL) = 0, NULL, "
+                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_session_pct",
+                ]
+            if want_ts["buffer_health_ts"]:
+                select += [
+                    f"quantileTDigestIf(0.5)(bl, {video}) AS p50_buffer",
+                    f"quantileTDigestIf(0.95)(bl, {video}) AS p95_buffer",
+                    "if(countIf(bs IS NOT NULL) = 0, NULL, countIf(bs = 1) * 100.0 / nullIf(count(), 0)) "
+                    "AS starvation_rate",
+                ]
+            if want_ts["bitrate_ts"]:
+                select += [
+                    f"avgIf(br, {video}) AS avg_bitrate",
+                    f"avgIf(br / tb, {video} AND tb > 0) AS utilization_ratio",
+                ]
+            if want_ts["throughput_ts"]:
+                select += [
+                    f"quantileTDigestIf(0.5)(mtp, {video}) AS p50_throughput",
+                    f"quantileTDigestIf(0.95)(mtp, {video}) AS p95_throughput",
+                    f"quantileTDigestIf(0.99)(mtp, {video}) AS p99_throughput",
+                ]
+            if want_ts["startup_ts"]:
+                select.append(
+                    "if(countIf(su IS NOT NULL) = 0, NULL, countIf(su = 1) * 100.0 / nullIf(count(), 0)) AS startup_ratio"
+                )
+            rows = execute(
+                f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
                 params,
             )
-            new_sessions = {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}
-            result["sessions_ts"] = _pad(
-                start,
-                end,
-                int(req.bucket_seconds),
-                _sessions_ts(rows, new_sessions),
-                {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
-            )
-        if want_ts["buffer_health_ts"]:
-            result["buffer_health_ts"] = padded(
-                {
-                    "p50_buffer": ("p50_buffer", _round),
-                    "p95_buffer": ("p95_buffer", _round),
-                    "starvation_rate": ("starvation_rate", _round),
-                },
-                {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
-            )
-        if want_ts["bitrate_ts"]:
-            result["bitrate_ts"] = padded(
-                {"avg_bitrate": ("avg_bitrate", _round), "utilization_ratio": ("utilization_ratio", _round)},
-                {"avg_bitrate": None, "utilization_ratio": None},
-            )
-        if want_ts["throughput_ts"]:
-            result["throughput_ts"] = padded(
-                {
-                    "p50": ("p50_throughput", _round),
-                    "p95": ("p95_throughput", _round),
-                    "p99": ("p99_throughput", _round),
-                },
-                {"p50": None, "p95": None, "p99": None},
-            )
-        if want_ts["startup_ts"]:
-            result["startup_ts"] = padded(
-                {"startup_ratio": ("startup_ratio", _round)},
-                {"startup_ratio": None},
-            )
+            by_bucket = {str(row["bucket"]): row for row in rows}
+
+            def padded(field_map: dict[str, tuple[str, Any]], default: dict[str, Any]) -> list[dict[str, Any]]:
+                return _pad(
+                    start,
+                    end,
+                    int(req.bucket_seconds),
+                    {
+                        bucket: {out: convert(row.get(src)) for out, (src, convert) in field_map.items()}
+                        for bucket, row in by_bucket.items()
+                    },
+                    default,
+                )
+
+            if want_ts["sessions_ts"]:
+                first_seen = execute(
+                    "/* cmcd:new_sessions */ SELECT "
+                    f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
+                    f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
+                    params,
+                )
+                new_sessions = {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}
+                ts_out["sessions_ts"] = _pad(
+                    start,
+                    end,
+                    int(req.bucket_seconds),
+                    _sessions_ts(rows, new_sessions),
+                    {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
+                )
+            if want_ts["buffer_health_ts"]:
+                ts_out["buffer_health_ts"] = padded(
+                    {
+                        "p50_buffer": ("p50_buffer", _round),
+                        "p95_buffer": ("p95_buffer", _round),
+                        "starvation_rate": ("starvation_rate", _round),
+                    },
+                    {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
+                )
+            if want_ts["bitrate_ts"]:
+                ts_out["bitrate_ts"] = padded(
+                    {"avg_bitrate": ("avg_bitrate", _round), "utilization_ratio": ("utilization_ratio", _round)},
+                    {"avg_bitrate": None, "utilization_ratio": None},
+                )
+            if want_ts["throughput_ts"]:
+                ts_out["throughput_ts"] = padded(
+                    {
+                        "p50": ("p50_throughput", _round),
+                        "p95": ("p95_throughput", _round),
+                        "p99": ("p99_throughput", _round),
+                    },
+                    {"p50": None, "p95": None, "p99": None},
+                )
+            if want_ts["startup_ts"]:
+                ts_out["startup_ts"] = padded(
+                    {"startup_ratio": ("startup_ratio", _round)},
+                    {"startup_ratio": None},
+                )
+            return ts_out
+
+        tasks.append(_run_timeseries)
 
     if wanted("top_content") and has["cid"]:
-        rows = execute(
-            "/* cmcd:top_content */ SELECT cid AS content_id, count() AS session_count, "
-            "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, avg(avg_br) AS avg_br, "
-            "avg(avg_bl) AS avg_bl FROM ("
-            "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
-            f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
-            "GROUP BY cid ORDER BY session_count DESC, content_id LIMIT {top_n:UInt32}",
-            params,
-        )
-        result["top_content"] = [
-            {
-                "content_id": row["content_id"],
-                "session_count": int(row["session_count"]),
-                "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                "avg_bitrate": _round(row.get("avg_br")),
-                "avg_buffer_length": _round(row.get("avg_bl")),
+
+        def _run_top_content() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:top_content */ SELECT cid AS content_id, count() AS session_count, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, avg(avg_br) AS avg_br, "
+                "avg(avg_bl) AS avg_bl FROM ("
+                "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+                f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
+                "GROUP BY cid ORDER BY session_count DESC, content_id LIMIT {top_n:UInt32}",
+                params,
+            )
+            return {
+                "top_content": [
+                    {
+                        "content_id": row["content_id"],
+                        "session_count": int(row["session_count"]),
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in rows
+                ]
             }
-            for row in rows
-        ]
+
+        tasks.append(_run_top_content)
 
     if wanted("rebuffer_by_country") and has_country and has["bs"]:
-        rows = execute(
-            "/* cmcd:rebuffer_by_country */ SELECT country, "
-            "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
-            "avg(median_mtp) AS median_mtp FROM ("
-            "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
-            f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
-            "GROUP BY country ORDER BY session_count DESC, country LIMIT {top_n:UInt32}",
-            params,
-        )
-        result["rebuffer_by_country"] = [
-            {
-                "country": row["country"],
-                "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                "session_count": int(row["session_count"]),
-                "median_throughput": _round(row.get("median_mtp")),
+
+        def _run_rebuffer_country() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:rebuffer_by_country */ SELECT country, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
+                "avg(median_mtp) AS median_mtp FROM ("
+                "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
+                f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
+                "GROUP BY country ORDER BY session_count DESC, country LIMIT {top_n:UInt32}",
+                params,
+            )
+            return {
+                "rebuffer_by_country": [
+                    {
+                        "country": row["country"],
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "median_throughput": _round(row.get("median_mtp")),
+                    }
+                    for row in rows
+                ]
             }
-            for row in rows
-        ]
+
+        tasks.append(_run_rebuffer_country)
 
     if wanted("rebuffer_by_asn") and has_asn and has["bs"]:
-        rows = execute(
-            "/* cmcd:rebuffer_by_asn */ SELECT asn, "
-            "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
-            "avg(avg_br) AS avg_br, avg(avg_bl) AS avg_bl FROM ("
-            "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
-            f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
-            "GROUP BY asn ORDER BY session_count DESC, asn LIMIT {top_n:UInt32}",
-            params,
-        )
-        names = _asn_names(service.service_id, [int(row["asn"]) for row in rows])
-        result["rebuffer_by_asn"] = [
-            {
-                "asn": int(row["asn"]),
-                "label": _asn_label(int(row["asn"]), names),
-                "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                "session_count": int(row["session_count"]),
-                "avg_bitrate": _round(row.get("avg_br")),
-                "avg_buffer_length": _round(row.get("avg_bl")),
+
+        def _run_rebuffer_asn() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:rebuffer_by_asn */ SELECT asn, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
+                "avg(avg_br) AS avg_br, avg(avg_bl) AS avg_bl FROM ("
+                "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+                f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
+                "GROUP BY asn ORDER BY session_count DESC, asn LIMIT {top_n:UInt32}",
+                params,
+            )
+            names = _asn_names(service.service_id, [int(row["asn"]) for row in rows])
+            return {
+                "rebuffer_by_asn": [
+                    {
+                        "asn": int(row["asn"]),
+                        "label": _asn_label(int(row["asn"]), names),
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in rows
+                ]
             }
-            for row in rows
-        ]
+
+        tasks.append(_run_rebuffer_asn)
 
     if wanted("object_type_dist") and has["ot"]:
-        rows = execute(
-            "/* cmcd:object_type_dist */ SELECT ot AS object_type, count() AS request_count "
-            f"FROM ({events}) WHERE ot != '' GROUP BY ot ORDER BY request_count DESC, ot",
-            params,
-        )
-        result["object_type_dist"] = [
-            {"object_type": row["object_type"], "request_count": int(row["request_count"])} for row in rows
-        ]
+
+        def _run_object_type() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:object_type_dist */ SELECT ot AS object_type, count() AS request_count "
+                f"FROM ({events}) WHERE ot != '' GROUP BY ot ORDER BY request_count DESC, ot",
+                params,
+            )
+            return {
+                "object_type_dist": [
+                    {"object_type": row["object_type"], "request_count": int(row["request_count"])} for row in rows
+                ]
+            }
+
+        tasks.append(_run_object_type)
 
     if wanted("streaming_format_dist") and has["sf"]:
-        rows = execute(
-            "/* cmcd:streaming_format_dist */ SELECT sf AS streaming_format, uniqExact(sid) AS session_count "
-            f"FROM ({events}) WHERE sf != '' GROUP BY sf ORDER BY session_count DESC, sf",
-            params,
-        )
-        result["streaming_format_dist"] = [
-            {"streaming_format": row["streaming_format"], "session_count": int(row["session_count"])} for row in rows
-        ]
+
+        def _run_streaming_format() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:streaming_format_dist */ SELECT sf AS streaming_format, uniqExact(sid) AS session_count "
+                f"FROM ({events}) WHERE sf != '' GROUP BY sf ORDER BY session_count DESC, sf",
+                params,
+            )
+            return {
+                "streaming_format_dist": [
+                    {"streaming_format": row["streaming_format"], "session_count": int(row["session_count"])}
+                    for row in rows
+                ]
+            }
+
+        tasks.append(_run_streaming_format)
 
     if wanted("session_duration_dist"):
-        rows = execute(
-            "/* cmcd:session_duration_dist */ SELECT sort_order, count() AS session_count FROM ("
-            "SELECT multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
-            "duration < 1800, 5, duration < 3600, 6, 7) AS sort_order FROM ("
-            "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-            f"FROM ({events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
-            params,
-        )
-        result["session_duration_dist"] = [
-            {"duration_bucket": _DURATION_BUCKETS[int(row["sort_order"])], "session_count": int(row["session_count"])}
-            for row in rows
-        ]
+
+        def _run_session_duration() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:session_duration_dist */ SELECT sort_order, count() AS session_count FROM ("
+                "SELECT multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
+                "duration < 1800, 5, duration < 3600, 6, 7) AS sort_order FROM ("
+                "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                f"FROM ({events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
+                params,
+            )
+            return {
+                "session_duration_dist": [
+                    {
+                        "duration_bucket": _DURATION_BUCKETS[int(row["sort_order"])],
+                        "session_count": int(row["session_count"]),
+                    }
+                    for row in rows
+                ]
+            }
+
+        tasks.append(_run_session_duration)
+
+    if len(tasks) == 1:
+        result.update(tasks[0]())
+    elif tasks:
+        with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, fn) for fn in tasks]
+            for fut in futures:
+                result.update(fut.result())
 
     return result
