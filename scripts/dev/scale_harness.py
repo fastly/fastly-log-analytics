@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request
 
 import aiohttp
@@ -26,8 +27,13 @@ if __package__ in (None, ""):
 from scripts.lib import prom  # noqa: E402
 from scripts.lib.admin_tls import admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.log_factory import (  # noqa: E402
+    URL_PATHS,
+    CmcdSession,
+    build_cmcd_request,
+    build_cmcd_sessions,
     build_rum_beacon_body,
     build_rum_beacon_url,
+    pick_user_agent,
     random_source_ip,
     rum_hex_id,
 )
@@ -97,6 +103,35 @@ def build_request_url(base_url: str, rum_ratio: float, rng: Any = random) -> str
     return base_url
 
 
+@dataclass
+class TrafficProfile:
+    """Non-RUM request mix: CMCD playback requests and varied paths/user agents."""
+
+    cmcd_ratio: float = 0.0
+    diversify: bool = False
+    sessions: list[CmcdSession] | None = None
+
+
+def build_request(
+    base_url: str,
+    rum_ratio: float,
+    rng: Any = random,
+    profile: TrafficProfile | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(url, extra_headers)`` for one request."""
+    url = build_request_url(base_url, rum_ratio, rng)
+    if profile is None or "/rum-beacon" in url:
+        return url, {}
+    base = base_url.rstrip("/")
+    if profile.cmcd_ratio > 0 and profile.sessions and rng.random() < profile.cmcd_ratio:
+        path, headers, query_value = build_cmcd_request(rng.choice(profile.sessions), rng)
+        headers["User-Agent"] = pick_user_agent(rng)
+        return f"{base}{path}?{urlencode({'CMCD': query_value})}", headers
+    if profile.diversify:
+        return f"{base}{rng.choice(URL_PATHS)}", {"User-Agent": pick_user_agent(rng)}
+    return url, {}
+
+
 async def run_stage(
     config: StageConfig,
     session: aiohttp.ClientSession,
@@ -104,6 +139,7 @@ async def run_stage(
     headers: dict[str, str],
     rum_ratio: float = 0.0,
     rng: Any = random,
+    profile: TrafficProfile | None = None,
 ) -> dict[str, Any]:
     started_at = datetime.now(UTC)
     started = time.perf_counter()
@@ -123,8 +159,8 @@ async def run_stage(
                 status, latency = task.result()
                 statuses[str(status)] += 1
                 latencies.append(latency)
-        request_url_final = build_request_url(request_url, rum_ratio, rng)
-        pending.add(asyncio.create_task(_request(session, request_url_final, headers, rng)))
+        request_url_final, extra_headers = build_request(request_url, rum_ratio, rng, profile)
+        pending.add(asyncio.create_task(_request(session, request_url_final, {**headers, **extra_headers}, rng)))
         launched += 1
 
     if pending:
@@ -256,6 +292,7 @@ def probe_analytics_endpoints(backend: str, service_id: str, start_time: str, en
             },
         ),
         ("/api/performance/aggregates", {"start_time": start_time, "end_time": end_time, "filters": {}}),
+        ("/api/cmcd/aggregates", {"start_time": start_time, "end_time": end_time, "filters": {}}),
     ]
     results = []
     for path, body in probes:
@@ -321,11 +358,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "stages": [],
     }
     rng = random.Random(args.seed) if args.seed is not None else random
+    profile = TrafficProfile(
+        cmcd_ratio=args.cmcd_ratio,
+        diversify=args.diversify,
+        sessions=build_cmcd_sessions(rng) if args.cmcd_ratio > 0 else None,
+    )
     timeout = aiohttp.ClientTimeout(total=10)
     connector = aiohttp.TCPConnector(limit=max(args.max_in_flight, 1), ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         for index, stage in enumerate(stages, 1):
-            result = await run_stage(stage, session, args.url, headers, args.rum_ratio, rng)
+            result = await run_stage(stage, session, args.url, headers, args.rum_ratio, rng, profile)
             checkpoint = sample_checkpoint(
                 args.backend,
                 args.service_id,
@@ -373,6 +415,17 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Ratio of requests to send to /rum-beacon with randomized vitals payloads (0.0 to 1.0)",
+    )
+    run_parser.add_argument(
+        "--cmcd-ratio",
+        type=float,
+        default=0.0,
+        help="Ratio of non-RUM requests sent as CMCD video playback (headers and ?CMCD= query) (0.0 to 1.0)",
+    )
+    run_parser.add_argument(
+        "--diversify",
+        action="store_true",
+        help="Vary URL paths and user agents (incl. bots) instead of hitting one URL with one UA",
     )
     run_parser.add_argument(
         "--seed", type=int, default=None, help="Seed request/beacon generation for reproducible runs"

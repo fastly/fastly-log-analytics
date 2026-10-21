@@ -117,13 +117,13 @@ const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
-  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true },
+  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
   { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Raw Logs', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: true },
+  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
 ]
 
 const SYSTEM_NAVIGATION = [
@@ -162,7 +162,7 @@ const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/query': 'Query',
   '/charts': 'Charts',
   '/alerts': 'Alerts',
-  '/logs': 'Raw Logs',
+  '/logs': 'Data Management',
   '/usage': 'Usage and Cost',
   '/admin': 'Admin',
   '/share-login': 'Sign in',
@@ -440,7 +440,8 @@ export function AppLayout({
   // alongside the RouteFocus "Loaded: …" announcement that fires after
   // the navigation completes.
   const analystBlocked =
-    isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
+    (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))) ||
+    ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
   const needsWizard = !isAnalyst && !hasServices && !pathname.startsWith('/admin')
   // Derived from the same conditions the redirect effect below acts on (precedence included),

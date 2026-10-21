@@ -25,14 +25,12 @@ docs/pages/
 ├── security.md                    # /security (WAF, bots, TLS fingerprints, attacks)
 ├── insights.md                    # /insights (Automated anomaly detection & baselines)
 ├── network.md                     # /network (RTT, packet loss, congestion, ASNs)
-├── logs-live-tail.md              # /logs?tab=live (Live log tail & inspect modal)
 ├── rum.md                         # /rum (Real User Monitoring & Core Web Vitals)
 ├── sessions.md                    # /sessions (Client session scoring & clustering)
 ├── sessions-stream.md             # /sessions/stream (Real-time session stream)
 ├── usage-and-cost.md              # /usage (FOS storage, Class A/B ops, cost estimator)
 ├── query.md                       # /query (DuckDB SQL query editor & saved queries)
 ├── alerts.md                      # /alerts (Threshold rules, webhook destinations)
-├── logs.md                        # /logs (Paginated raw log viewer & filter drill-down)
 ├── assets-shield.md               # /assets-shield (Asset caching & origin shielding)
 ├── high-scale-request-facts.md    # /high-scale/request-facts (ClickHouse/High-Scale facts)
 ├── share-login.md                 # /share-login (Remote analyst portal & TOS gate)
@@ -62,14 +60,12 @@ docs/pages/
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 51 automated anomaly detectors across 5 category tabs | **Live-certified** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
-| `/logs?tab=live` | [Live Tail](logs-live-tail.md) | Live SSE log tailing, regex search, inspect modal | **Live-certified** |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |
 | `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Live-certified** |
 | `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Live-certified** |
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Live-certified** |
-| `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Live-certified** |
 | `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Live-certified** |
 | `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer & Standard-mode DuckDB emulation | **Live-certified** |
 | `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Live-certified** |
@@ -88,7 +84,7 @@ docs/pages/
 
 ## 3. Global Time-Range & History Default Contract (App-Wide Standard)
 
-Across almost all analytics pages in this application (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/logs`, `/query`), the default display window must adhere to this unified time-window contract:
+Across almost all analytics pages in this application (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/query`), the default display window must adhere to this unified time-window contract:
 
 1. **Default Window (Mature Services with >= 24h Data):**
    - Loads the **last 24 hours of data** (`[now - 24h, now]`) by default.
@@ -104,7 +100,7 @@ Across almost all analytics pages in this application (`/dashboard`, `/origin`, 
    - As new log batches arrive and continuous ingest pushes the history span past 24 hours, the default rolling window smoothly transitions to capping at 24 hours.
 
 4. **Page Exemptions:**
-   - **Real-Time Stream Tailing:** `/control-room`, `/logs?tab=live`, and `/sessions/stream` operate on live sliding event buffers (e.g. last 100–1,000 events or 1m–5m live window) rather than the 24h historical window.
+   - **Real-Time Stream Tailing:** `/control-room` and `/sessions/stream` operate on live sliding event buffers (e.g. last 100–1,000 events or 1m–5m live window) rather than the 24h historical window.
    - **Admin Operational Trend Vitals:** `/admin/trends` and `/admin/usage-log` use administrative monitoring windows (e.g. 7d or 30d host vitals / FOS ledger).
 
 ---
@@ -144,7 +140,7 @@ To prevent fragmentation and duplicate logic as we implement and test individual
 
 ### 1. Universal Frontend Shared Primitives
 - **Shared Page Shell (`ReportLayout`):**
-  - All analytics pages (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/logs`, `/query`) must be wrapped in `ReportLayout`.
+  - All analytics pages (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/query`) must be wrapped in `ReportLayout`.
   - It centralizes the service selector, time-range presets, quick filters, custom filter bar, timezone switcher, saved views dropdown, compare mode switch, sync health badge, and role footer.
   - **No bespoke headers:** Individual pages must never reimplement their own filter bars, time pickers, or service dropdowns.
 - **Global Zustand Stores:**

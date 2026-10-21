@@ -101,7 +101,7 @@ export function useLogsPageState(initialTab?: string) {
   const activeService = services.find(s => s.id === activeServiceId)
   const isAnalyst = activeService?.accessLevel === 'read_only'
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState(initialTab || 'explorer')
+  const [activeTab, setActiveTab] = useState(initialTab || 'cron')
   const [isPurgeOpen, setIsPurgeOpen] = useState(false)
   const [taskFilter, setTaskFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')

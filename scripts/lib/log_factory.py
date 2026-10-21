@@ -834,3 +834,101 @@ def build_rum_beacon_body(url: str, rng: Any = random, now: datetime | None = No
         metric=metric,
         value=value,
     )
+
+
+# ---------------------------------------------------------------------------
+# CMCD (Common Media Client Data) edge-request generator
+# ---------------------------------------------------------------------------
+
+_CMCD_BITRATES_KBPS = [800, 1500, 3000, 6000]
+_CMCD_TOP_BITRATE_KBPS = _CMCD_BITRATES_KBPS[-1]
+_CMCD_TITLES = ["news-live", "sports-live", "movie-001", "movie-002", "series-s1e1", "series-s1e2", "kids-001"]
+_CMCD_OBJECT_TYPES = ["v", "v", "v", "v", "a", "m", "i"]
+_CMCD_REBUFFER_RATE = 0.04
+_CMCD_V2_RATE = 0.5
+_CMCD_SESSION_POOL_SIZE = 300
+_BOT_UA_RATE = 0.15
+
+
+@dataclass
+class CmcdSession:
+    """One synthetic player session; ``started`` flips after the first (startup) request."""
+
+    sid: str
+    cid: str
+    stream_format: str
+    version: int
+    started: bool = False
+
+
+def build_cmcd_sessions(rng: Any, size: int = _CMCD_SESSION_POOL_SIZE) -> list[CmcdSession]:
+    sessions = []
+    for _ in range(size):
+        sid = f"{rum_hex_id(rng, 8)}-{rum_hex_id(rng, 4)}-{rum_hex_id(rng, 4)}-{rum_hex_id(rng, 12)}"
+        sessions.append(
+            CmcdSession(
+                sid=sid,
+                cid=rng.choice(_CMCD_TITLES),
+                stream_format=rng.choice(["h", "h", "d"]),
+                version=2 if rng.random() < _CMCD_V2_RATE else 1,
+            )
+        )
+    return sessions
+
+
+def _cmcd_bool(session: CmcdSession, key: str) -> str:
+    # CMCD v1 encodes true as a bare key; v2 uses RFC 8941 ``key=?1``.
+    return f"{key}=?1" if session.version == 2 else key
+
+
+def build_cmcd_request(session: CmcdSession, rng: Any = random) -> tuple[str, dict[str, str], str]:
+    """Return ``(path, headers, query_value)`` carrying the same CMCD data both ways.
+
+    The edge VCL reads either the four ``CMCD-*`` headers or ``?CMCD=...``
+    depending on the transport the service was provisioned with; sending both
+    makes the traffic valid for either mode.
+    """
+    object_type = rng.choice(_CMCD_OBJECT_TYPES)
+    bitrate = rng.choice(_CMCD_BITRATES_KBPS)
+    object_fields = [f"br={bitrate}", f"d={rng.choice([2000, 4000, 6000])}", f"ot={object_type}"]
+    object_fields.append(f"tb={_CMCD_TOP_BITRATE_KBPS}")
+    buffer_length = rng.randrange(0, 30000, 100)
+    request_fields = [
+        f"bl={buffer_length}",
+        f"dl={rng.randrange(0, 30000, 100)}",
+        f"mtp={rng.randrange(2000, 50000, 100)}",
+    ]
+    if not session.started:
+        request_fields.append(_cmcd_bool(session, "su"))
+        session.started = True
+    session_fields = [
+        f'cid="{session.cid}"',
+        f"sf={session.stream_format}",
+        f'sid="{session.sid}"',
+        "st=v",
+    ]
+    status_fields = [f"rtp={rng.randrange(1000, 40000, 100)}"]
+    if rng.random() < _CMCD_REBUFFER_RATE:
+        status_fields.insert(0, _cmcd_bool(session, "bs"))
+    headers = {
+        "CMCD-Object": ",".join(object_fields),
+        "CMCD-Request": ",".join(request_fields),
+        "CMCD-Session": ",".join(session_fields),
+        "CMCD-Status": ",".join(status_fields),
+    }
+    query_value = ",".join(sorted(object_fields + request_fields + session_fields + status_fields))
+    if object_type == "m":
+        path = f"/video/{session.cid}/manifest.{'m3u8' if session.stream_format == 'h' else 'mpd'}"
+    elif object_type == "a":
+        path = f"/video/{session.cid}/audio/seg-{rng.randint(1, 900)}.m4a"
+    elif object_type == "i":
+        path = f"/video/{session.cid}/thumb-{rng.randint(1, 60)}.jpg"
+    else:
+        path = f"/video/{session.cid}/{bitrate}/seg-{rng.randint(1, 900)}.m4s"
+    return path, headers, query_value
+
+
+def pick_user_agent(rng: Any = random) -> str:
+    """Mostly browsers with a bot minority so bot/security panels have data."""
+    pool = BOT_USER_AGENTS if rng.random() < _BOT_UA_RATE else USER_AGENTS
+    return rng.choice(pool)
