@@ -96,6 +96,13 @@ function buildCsp(nonce: string): string {
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
+  // No-op 204 fallback when /rum-beacon reaches the Next.js server directly
+  // (e.g., via K8s nginx ingress on analyst share domains), matching
+  // backend/routers/rum.py receive_rum_beacon_fallback().
+  if (pathname === '/rum-beacon') {
+    return new NextResponse(null, { status: 204 })
+  }
+
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses. Route Handlers under app/api/[...path]/route.ts
   // and app/js/[...path]/route.ts proxy to API_PROXY_URL with agent:false
