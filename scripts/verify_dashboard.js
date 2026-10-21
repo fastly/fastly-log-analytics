@@ -189,6 +189,71 @@ function registerErrorListeners(page, browser, contextName) {
   });
 }
 
+const EMPTY_STATE_MARKERS = ["No data available", "No data in this time range yet", "No data in this range"];
+
+// Generic "is this page reading real data" gate for pages without a bespoke
+// stage. Passes only when an identifying panel title renders AND at least one
+// Plotly chart holds finite measurements (hasPopulatedRumChart is the shared
+// predicate). A single legitimately empty panel (e.g. no suspicious clients in
+// synthetic traffic) is logged, not fatal; `strictEmpty` pages treat ANY
+// empty-state panel as a failure.
+async function verifyDataPage(browser, adminTlsOptions, spec) {
+  const { name, path, markers, strictEmpty = false } = spec;
+  const pageUrl = getUrlWithParam(baseUrl.replace('/dashboard', path), "range", "24h");
+  console.log(`[${name} 24h] Checking ${pageUrl} ...`);
+
+  const context = await browser.newContext(adminTlsOptions);
+  if (!adminTlsOptions.clientCertificates && expectedArch === "standard" && expectedEnv === "gce") {
+    await context.addCookies([
+      { name: 'fla.activeAdminToken', value: 'RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0', domain: '127.0.0.1', path: '/' },
+      { name: 'analyst_session_id', value: 'test-session-playwright-e2e-verification-secret', domain: '127.0.0.1', path: '/' },
+    ]);
+    await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
+  }
+  const page = await context.newPage();
+  registerErrorListeners(page, browser, name);
+
+  let bodyText = "";
+  let hasMarker = false;
+  let hasChart = false;
+  let emptyPanels = 0;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await gotoWithShellReady(page, pageUrl, `${name} 24h`, { attempts: 3, navTimeout: 35000, shellTimeout: 10000 });
+      try {
+        await page.waitForFunction(hasPopulatedRumChart, undefined, { timeout: 45000 });
+      } catch (chartErr) {
+        console.log(`[${name} 24h] Attempt ${attempt}/4: no populated Plotly chart yet.`);
+      }
+      bodyText = await page.evaluate(() => document.body.innerText);
+      const lower = bodyText.toLowerCase();
+      hasMarker = markers.some(marker => lower.includes(marker.toLowerCase()));
+      hasChart = await page.evaluate(hasPopulatedRumChart);
+      emptyPanels = EMPTY_STATE_MARKERS.reduce((sum, marker) => sum + bodyText.split(marker).length - 1, 0);
+      if (hasMarker && hasChart && !bodyText.includes("Failed to load") && (!strictEmpty || emptyPanels === 0)) {
+        break;
+      }
+    } catch (err) {
+      console.log(`[${name} 24h] Navigation warning (attempt ${attempt}): ${err.message}`);
+    }
+    console.log(`[${name} 24h] Attempt ${attempt}/4: data not fully rendered yet (marker=${hasMarker}, chart=${hasChart}, emptyPanels=${emptyPanels}). Waiting 8s...`);
+    await page.waitForTimeout(8000);
+  }
+
+  if (!hasMarker || !hasChart || bodyText.includes("Failed to load") || (strictEmpty && emptyPanels > 0)) {
+    console.error(`❌ [${name}] Verification Failed: expected panels [${markers.join(" | ")}] with populated charts (marker=${hasMarker}, populatedChart=${hasChart}, emptyPanels=${emptyPanels}).`);
+    console.error(`Body text sample:\n${bodyText.slice(0, 1000)}`);
+    await browser.close();
+    process.exit(1);
+  }
+  if (emptyPanels > 0) {
+    console.warn(`⚠️ [${name}] ${emptyPanels} panel(s) show an empty state; page has populated charts so proceeding.`);
+  }
+  console.log(`[${name} Verification] Verified: panels present and charts populated with real data. 🟢`);
+  await page.close();
+  await context.close();
+}
+
 (async () => {
   let browser;
   try {
@@ -800,6 +865,31 @@ function registerErrorListeners(page, browser, contextName) {
 
     await networkPage.close();
     await networkContext.close();
+
+    // ────────────────────────────────────────────────────────────────────────
+    // ── STAGES 4-7: STREAMING (CMCD), SECURITY, ORIGIN, PERFORMANCE
+    // ────────────────────────────────────────────────────────────────────────
+    await verifyDataPage(browser, adminTlsOptions, {
+      name: 'Streaming',
+      path: '/streaming',
+      markers: ['Total Sessions', 'Peak Viewers'],
+      strictEmpty: true,
+    });
+    await verifyDataPage(browser, adminTlsOptions, {
+      name: 'Security',
+      path: '/security',
+      markers: ['Traffic Quality Breakdown', 'Suspicious ISPs', 'Proxy/Anonymizer Breakdown'],
+    });
+    await verifyDataPage(browser, adminTlsOptions, {
+      name: 'Origin',
+      path: '/origin',
+      markers: ['Origin Error Rate', 'Origin TTFB', 'Fetch Volume'],
+    });
+    await verifyDataPage(browser, adminTlsOptions, {
+      name: 'Performance',
+      path: '/performance',
+      markers: ['Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution'],
+    });
 
     await browser.close();
     process.exit(0);
