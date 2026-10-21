@@ -128,17 +128,22 @@ def ingest_ledger_summary() -> dict[str, int]:
     return ledger
 
 
-def get_celery_status(timeout: float = 1.0) -> dict[str, Any]:
+def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
     from backend.celery_app import app
 
     workers_error: str | None = None
     try:
         i = app.control.inspect(timeout=timeout)
-        active = i.active() or {}
         stats = i.stats() or {}
-        registered = i.registered() or {}
-        scheduled = i.scheduled() or {}
+        if stats:
+            active = i.active() or {}
+            registered = i.registered() or {}
+            scheduled = i.scheduled() or {}
+        else:
+            active = {}
+            registered = {}
+            scheduled = {}
     except Exception as e:
         workers_error = str(e)[:200]
         active = {}

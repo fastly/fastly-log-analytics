@@ -201,8 +201,26 @@ def close_all_connections() -> None:
     pass
 
 
+_MAX_BATCH_POINTS_PER_SERIES = 240
+
+
+def _downsample_rows(series_rows: list, max_points: int = _MAX_BATCH_POINTS_PER_SERIES) -> list[dict]:
+    n = len(series_rows)
+    if n <= max_points or max_points < 4:
+        return [{"ts": r["ts"], "value": r["value"]} for r in series_rows]
+    step = (n - 1) / float(max_points - 3)
+    indices = {int(round(i * step)) for i in range(max_points - 2)}
+    indices.add(0)
+    indices.add(n - 1)
+    min_idx = min(range(n), key=lambda idx: series_rows[idx]["value"])
+    max_idx = max(range(n), key=lambda idx: series_rows[idx]["value"])
+    indices.add(min_idx)
+    indices.add(max_idx)
+    return [{"ts": series_rows[idx]["ts"], "value": series_rows[idx]["value"]} for idx in sorted(indices)]
+
+
 def _group_batch_rows(rows) -> dict[str, list[dict]]:
-    out: dict[str, list[dict]] = {}
+    raw_grouped: dict[str, list] = {}
     for r in rows:
         key = r["metric"]
         svc = r["service_id"]
@@ -211,8 +229,8 @@ def _group_batch_rows(rows) -> dict[str, list[dict]]:
             task = r["task"]
             if task:
                 key = f"{key}|{task}"
-        out.setdefault(key, []).append({"ts": r["ts"], "value": r["value"]})
-    return out
+        raw_grouped.setdefault(key, []).append(r)
+    return {key: _downsample_rows(series_rows) for key, series_rows in raw_grouped.items()}
 
 
 def teardown() -> None:

@@ -195,6 +195,7 @@ def _redact_ddl_secrets(sql: str) -> str:
 _QUERY_SETTINGS = frozenset(
     {
         "additional_table_filters",
+        "date_time_input_format",
         "max_result_rows",
         "result_overflow_mode",
         "max_rows_to_read",

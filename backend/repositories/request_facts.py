@@ -7,7 +7,26 @@ from typing import Any
 
 from backend.models.high_scale import HighScaleRequestFactRequest
 from backend.repositories._sql import request_facts as sql
+from backend.repositories.utils.filters import _get_utc_date_str, _get_utc_hour_str
+from backend.utils.date_utils import iso_z
 from backend.utils.telemetry import track_query
+
+
+def build_partition_filter_clauses(start_iso: str, end_iso: str, col_names: set[str]) -> tuple[list[str], list[str]]:
+    """Return Hive partition pruning clauses and bind params for ``dt`` / ``timestamp_hour``."""
+    clauses: list[str] = []
+    params: list[str] = []
+    start_date = _get_utc_date_str(start_iso)
+    end_date = _get_utc_date_str(end_iso)
+    if "dt" in col_names and len(start_date) == 10 and len(end_date) == 10:
+        clauses.extend(["dt >= ?", "dt <= ?"])
+        params.extend([start_date, end_date])
+    start_hour = _get_utc_hour_str(start_iso)
+    end_hour = _get_utc_hour_str(end_iso)
+    if "timestamp_hour" in col_names and len(start_hour) == 13 and len(end_hour) == 13:
+        clauses.extend(["timestamp_hour >= ?", "timestamp_hour <= ?"])
+        params.extend([start_hour, end_hour])
+    return clauses, params
 
 
 def fetch_request_facts_emulation(
@@ -18,6 +37,7 @@ def fetch_request_facts_emulation(
     start: datetime,
     end: datetime,
     cursor_ts: Any,
+    service_id: str | None = None,
 ) -> tuple[list[tuple], Any, Any]:
     """``(page rows + 1 lookahead, coverage_start, coverage_end)`` from the first candidate table with a schema.
 
@@ -57,8 +77,9 @@ def fetch_request_facts_emulation(
         "pop" if "pop" in col_names else "'' AS pop",
         "host" if "host" in col_names else "'' AS host",
     ]
-    where_parts = ["timestamp >= ?", "timestamp <= ?"]
-    params: list[object] = [start, end]
+    part_clauses, part_params = build_partition_filter_clauses(iso_z(start), iso_z(end), col_names)
+    where_parts = [*part_clauses, "timestamp >= ?", "timestamp <= ?"]
+    params: list[object] = [*part_params, start, end]
 
     if cursor_ts is not None:
         where_parts.append("timestamp > ?")
@@ -115,9 +136,23 @@ def fetch_request_facts_emulation(
     with track_query(con, request_sql, params, "high_scale.request_facts_emulation") as cur:
         fetched = cur.fetchall()
 
-    ext_sql = sql.EXTENTS.format(table=table)
-    with track_query(con, ext_sql, [], "high_scale.request_facts_extents") as ext_cur:
-        ext_row = ext_cur.fetchone()
-    cov_start = ext_row[0] if ext_row else None
-    cov_end = ext_row[1] if ext_row else None
+    cov_start = None
+    cov_end = None
+    if service_id:
+        try:
+            from backend import config as svcconfig
+
+            st = svcconfig.get_status(service_id) or {}
+            cov_start = st.get("earliest_log_at")
+            cov_end = st.get("latest_log_at")
+        except Exception:
+            cov_start = None
+            cov_end = None
+
+    if not cov_start or not cov_end:
+        ext_sql = sql.EXTENTS.format(table=table)
+        with track_query(con, ext_sql, [], "high_scale.request_facts_extents") as ext_cur:
+            ext_row = ext_cur.fetchone()
+        cov_start = ext_row[0] if ext_row else None
+        cov_end = ext_row[1] if ext_row else None
     return fetched, cov_start, cov_end

@@ -1775,25 +1775,41 @@ def scoring_dashboard(
         # to accept an open connection + table name, which touches 5
         # endpoints worth of test surface. Punting that to v1.2.0 keeps
         # this change additive + zero-risk.
-        evaluation = scoring_evaluation(service_id=service_id)
-        health = scoring_health(request=request, service_id=service_id, since_hours=since_hours)
-        top_flagged = scoring_top_flagged(request=request, service_id=service_id, since_hours=since_hours, limit=50)
-        score_distribution = scoring_score_distribution(request=request, service_id=service_id, since_hours=since_hours)
-        compliance_breakdown = scoring_compliance_breakdown(
-            request=request, service_id=service_id, since_hours=since_hours
-        )
-        curves = scoring_curves(service_id=service_id)
-        threshold_preview = scoring_threshold_preview(
-            request=request, service_id=service_id, threshold=threshold, since_hours=since_hours
-        )
-        # The four config + per-reason cards the admin session-scoring page
-        # was firing as separate requests. Folding them into the dashboard
-        # composite collapses three round-trips to one (saves the per-call
-        # HTTP + auth-middleware overhead on cold mount) and keeps every
-        # admin-session-scoring card a sibling under one cache key. The
-        # /scoring/analytics + /scoring/config composites stay mounted so
-        # callers that only want a subset can still reach for them.
-        evaluation_per_reason = scoring_evaluation_per_reason(service_id=service_id)
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+
+        tasks = {
+            "evaluation": lambda: scoring_evaluation(service_id=service_id),
+            "evaluation_per_reason": lambda: scoring_evaluation_per_reason(service_id=service_id),
+            "health": lambda: scoring_health(request=request, service_id=service_id, since_hours=since_hours),
+            "top_flagged": lambda: scoring_top_flagged(
+                request=request, service_id=service_id, since_hours=since_hours, limit=50
+            ),
+            "score_distribution": lambda: scoring_score_distribution(
+                request=request, service_id=service_id, since_hours=since_hours
+            ),
+            "compliance_breakdown": lambda: scoring_compliance_breakdown(
+                request=request, service_id=service_id, since_hours=since_hours
+            ),
+            "curves": lambda: scoring_curves(service_id=service_id),
+            "threshold_preview": lambda: scoring_threshold_preview(
+                request=request, service_id=service_id, threshold=threshold, since_hours=since_hours
+            ),
+        }
+        results: dict = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {k: pool.submit(contextvars.copy_context().run, fn) for k, fn in tasks.items()}
+            for k, fut in futs.items():
+                results[k] = fut.result()
+
+        evaluation = results["evaluation"]
+        evaluation_per_reason = results["evaluation_per_reason"]
+        health = results["health"]
+        top_flagged = results["top_flagged"]
+        score_distribution = results["score_distribution"]
+        compliance_breakdown = results["compliance_breakdown"]
+        curves = results["curves"]
+        threshold_preview = results["threshold_preview"]
         config_threshold = scoring_threshold_get(service_id)
         exclude_regex = scoring_exclude_regex_get(service_id)
         enforce_status_code = scoring_enforce_status_code_get(service_id)

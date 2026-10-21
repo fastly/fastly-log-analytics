@@ -53,17 +53,19 @@ def api_clickhouse_status(response: Response, service_id: str | None = Query(def
     try:
         client = get_clickhouse_client()
         if client is None:
-            return ClickHouseStatusResponse(service_id=service_id, enabled=False, health="disabled")
+            return ClickHouseStatusResponse.with_telemetry(service_id=service_id, enabled=False, health="disabled")
         client.health()
         status = PgManifest(bounded=True).admin_status(service_id, target_identity(client))
         if status["schema_version"] != CLICKHOUSE_SCHEMA_VERSION:
             response.status_code = 503
-            return ClickHouseStatusResponse(service_id=service_id, enabled=True, health="unavailable", **status)
-        return ClickHouseStatusResponse(service_id=service_id, enabled=True, health="ok", **status)
+            return ClickHouseStatusResponse.with_telemetry(
+                service_id=service_id, enabled=True, health="unavailable", **status
+            )
+        return ClickHouseStatusResponse.with_telemetry(service_id=service_id, enabled=True, health="ok", **status)
     except Exception as exc:
         logger.warning("clickhouse.admin_status", outcome="unavailable", error_kind=type(exc).__name__)
         response.status_code = 503
-        return ClickHouseStatusResponse(service_id=service_id, enabled=True, health="unavailable")
+        return ClickHouseStatusResponse.with_telemetry(service_id=service_id, enabled=True, health="unavailable")
 
 
 @router.post(

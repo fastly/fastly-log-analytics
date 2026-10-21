@@ -92,19 +92,30 @@ def get_assets_aggregates(
 
     create_sql = f"""
         CREATE TEMP TABLE "{temp_table}" AS
-        WITH raw_base AS (
+        WITH grouped_base AS (
             SELECT
                 {url_expr} as url,
                 {cache_expr} as cache,
                 {encoding_expr} as content_encoding,
-                {bytes_expr} as bytes,
                 {status_expr} as status,
-                {ttl_expr} as ttl,
+                COUNT(*) as req_cnt,
+                COALESCE(SUM({bytes_expr}), 0) as sum_bytes,
+                COALESCE(SUM({ttl_expr}), 0.0) as sum_ttl,
+                COUNT({ttl_expr}) as cnt_ttl,
                 LOWER({url_expr}) as url_lower
             FROM {table_name}
-            WHERE {where_clause}
+            WHERE {where_clause} AND {url_expr} IS NOT NULL
+            GROUP BY 1, 2, 3, 4
         )
-        SELECT *,
+        SELECT
+            url,
+            cache,
+            content_encoding,
+            status,
+            req_cnt,
+            sum_bytes,
+            sum_ttl,
+            cnt_ttl,
             CASE
                 WHEN url_lower LIKE '%.png' OR url_lower LIKE '%.jpg' OR url_lower LIKE '%.jpeg' OR url_lower LIKE '%.gif' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.webp' OR url_lower LIKE '%.ico' THEN 'Images'
                 WHEN url_lower LIKE '%.pdf' OR url_lower LIKE '%.doc' OR url_lower LIKE '%.docx' OR url_lower LIKE '%.xls' OR url_lower LIKE '%.xlsx' OR url_lower LIKE '%.ppt' OR url_lower LIKE '%.pptx' OR url_lower LIKE '%.txt' OR url_lower LIKE '%.csv' OR url_lower LIKE '%.zip' OR url_lower LIKE '%.tar' OR url_lower LIKE '%.gz' OR url_lower LIKE '%.tgz' OR url_lower LIKE '%.rar' OR url_lower LIKE '%.7z' THEN 'Documents'
@@ -121,8 +132,7 @@ def get_assets_aggregates(
                 WHEN url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json' THEN 1
                 ELSE 0
             END as is_compressible
-        FROM raw_base
-        WHERE url IS NOT NULL
+        FROM grouped_base
     """
 
     _t = _time.perf_counter()
@@ -144,16 +154,16 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 asset_type,
-                COUNT(*) as requests,
-                SUM(bytes) as egress_bytes,
+                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as egress_bytes,
                 COALESCE(
-                    SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC') THEN 1 ELSE 0 END) * 1.0 /
-                    NULLIF(SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC', 'MISS', 'PASS', 'BYPASS') THEN 1 ELSE 0 END), 0),
+                    SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC') THEN req_cnt ELSE 0 END) * 1.0 /
+                    NULLIF(SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC', 'MISS', 'PASS', 'BYPASS') THEN req_cnt ELSE 0 END), 0),
                     0.0
                 ) as cache_hit_ratio,
                 COALESCE(
-                    SUM(CASE WHEN is_compressible = 1 AND is_compressed = 1 THEN 1 ELSE 0 END) * 1.0 /
-                    NULLIF(SUM(CASE WHEN is_compressible = 1 THEN 1 ELSE 0 END), 0),
+                    SUM(CASE WHEN is_compressible = 1 AND is_compressed = 1 THEN req_cnt ELSE 0 END) * 1.0 /
+                    NULLIF(SUM(CASE WHEN is_compressible = 1 THEN req_cnt ELSE 0 END), 0),
                     0.0
                 ) as compression_rate
             FROM assets_enriched
@@ -164,8 +174,8 @@ def get_assets_aggregates(
         results["asset_type_breakdown"] = [
             {
                 "asset_type": r[0],
-                "requests": r[1],
-                "egress_bytes": r[2] or 0,
+                "requests": int(r[1] or 0),
+                "egress_bytes": int(r[2] or 0),
                 "cache_hit_ratio": float(r[3] or 0.0),
                 "compression_rate": float(r[4] or 0.0),
             }
@@ -178,8 +188,8 @@ def get_assets_aggregates(
             SELECT
                 asset_type,
                 cache as cache_status,
-                COUNT(*) as requests,
-                SUM(bytes) as bytes
+                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as bytes
             FROM assets_enriched
             GROUP BY asset_type, cache
             ORDER BY asset_type, requests DESC
@@ -189,8 +199,8 @@ def get_assets_aggregates(
             {
                 "asset_type": r[0],
                 "cache_status": r[1],
-                "requests": r[2],
-                "bytes": r[3] or 0,
+                "requests": int(r[2] or 0),
+                "bytes": int(r[3] or 0),
             }
             for r in cache_res
         ]
@@ -206,8 +216,8 @@ def get_assets_aggregates(
                     WHEN content_encoding != '' THEN content_encoding
                     ELSE 'uncompressed'
                 END as content_encoding,
-                COUNT(*) as requests,
-                SUM(bytes) as bytes
+                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as bytes
             FROM assets_enriched
             GROUP BY asset_type, 2
             ORDER BY asset_type, requests DESC
@@ -217,8 +227,8 @@ def get_assets_aggregates(
             {
                 "asset_type": r[0],
                 "content_encoding": r[1],
-                "requests": r[2],
-                "bytes": r[3] or 0,
+                "requests": int(r[2] or 0),
+                "bytes": int(r[3] or 0),
             }
             for r in comp_res
         ]
@@ -228,9 +238,9 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 url,
-                COUNT(*) as requests,
-                AVG(bytes) as avg_bytes,
-                SUM(bytes) as total_bytes,
+                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                SUM(sum_bytes) * 1.0 / NULLIF(SUM(req_cnt), 0) as avg_bytes,
+                CAST(COALESCE(SUM(sum_bytes), 0) AS BIGINT) as total_bytes,
                 status
             FROM assets_enriched
             WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
@@ -242,9 +252,9 @@ def get_assets_aggregates(
         results["large_uncompressed_assets"] = [
             {
                 "url": r[0],
-                "requests": r[1],
+                "requests": int(r[1] or 0),
                 "avg_bytes": float(r[2] or 0.0),
-                "total_bytes": r[3] or 0,
+                "total_bytes": int(r[3] or 0),
                 "status": r[4],
             }
             for r in large_res
@@ -255,8 +265,8 @@ def get_assets_aggregates(
             {cte_base}
             SELECT
                 url,
-                COUNT(*) as requests,
-                AVG(ttl) as avg_ttl,
+                CAST(COALESCE(SUM(req_cnt), 0) AS BIGINT) as requests,
+                SUM(sum_ttl) * 1.0 / NULLIF(SUM(cnt_ttl), 0) as avg_ttl,
                 asset_type
             FROM assets_enriched
             WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
@@ -268,7 +278,7 @@ def get_assets_aggregates(
         results["low_ttl_assets"] = [
             {
                 "url": r[0],
-                "requests": r[1],
+                "requests": int(r[1] or 0),
                 "avg_ttl": float(r[2] or 0.0),
                 "asset_type": r[3],
             }
@@ -285,5 +295,6 @@ def get_assets_aggregates(
                 if log_once_per("get_assets_aggregates: DROP TABLE failed (ignored)", 60):
                     logger.debug("get_assets_aggregates: DROP TABLE failed (ignored)", exc_info=True)
 
+    results.update(runner.telemetry())
     results["section_timings"] = section_timings
     return results

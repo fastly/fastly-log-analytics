@@ -22,4 +22,13 @@ from backend.routers.admin._router import router
 def api_celery_status():
     """Expose Celery queue depths, worker status, RedBeat schedule, and
     ingest-ledger summary."""
-    return get_celery_status()
+    res = dict(get_celery_status())
+    from backend.models.common import _debug_responses_enabled
+
+    if _debug_responses_enabled():
+        from backend.utils.telemetry import get_sqlite_queries
+
+        ds = list(get_sqlite_queries())
+        res["_debug_sqlite"] = ds
+        res["_debug_postgres"] = ds
+    return res

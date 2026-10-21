@@ -286,6 +286,7 @@ def _emulate_standard_request_facts(
             start=start,
             end=end,
             cursor_ts=decoded.timestamp if decoded is not None else None,
+            service_id=ctx.service_id,
         )
 
     raw_rows, cov_start, cov_end = execute_with_stale_view_retry(ctx.con, ctx.source, _run_emulation)

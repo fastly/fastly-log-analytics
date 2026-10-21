@@ -342,14 +342,6 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     from_ts = int(start.timestamp())
     to_ts = int((now + timedelta(hours=1 if by == "hour" else 24)).timestamp())
 
-    try:
-        fastly_counts = timer.call(
-            "fastly_fetch",
-            lambda: _fetch_fastly_request_counts(logging_svc_id, api_key, from_ts, to_ts, by, edge_only=edge_only),
-        )
-    except Exception as e:
-        raise_internal(logger, e, code="fastly_stats_failed", status=502)
-
     width = 13 if by == "hour" else 10
     start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
     # Upper bound spans the END of the current (in-flight) bucket so newly
@@ -373,25 +365,45 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     # ingested_at for legacy/test files without an ISO prefix).
     start_bucket = start_iso[:width]
     end_bucket = end_iso[:width]
-    local_counts = timer.call(
-        "sqlite_counts",
-        lambda: metadata_db.get_log_accounting_counts(
-            service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
-        ),
-    )
 
-    # ``our_rows`` comes from the live DuckDB view rather than
-    # ``ingested_files.row_count``. Reason: the metadata column reflects
-    # rows WRITTEN at ingest time. After ``local_compaction`` deduped by
-    # ``rid`` to clean up the buffer-commit-replay dup pattern (fixed
-    # 2026-06-12 in PR #21), the metadata column over-counts by the dup
-    # factor. Reading from DuckDB matches what the dashboard charts
-    # actually show. ``file_count`` stays from the metadata table — it's
-    # the count of source .log.gz files ingested, unrelated to dedup.
-    duckdb_counts: dict[str, int] = timer.call(
-        "duckdb_counts",
-        lambda: _duckdb_row_counts_per_bucket(source, start, end_clamp, by),
-    )
+    import contextvars
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import Any
+
+    def _run_timed(fn: Any) -> tuple[Any, float]:
+        t0 = _time.perf_counter()
+        res = fn()
+        return res, round((_time.perf_counter() - t0) * 1000, 2)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_fastly = pool.submit(
+            contextvars.copy_context().run,
+            _run_timed,
+            lambda: _fetch_fastly_request_counts(logging_svc_id, api_key, from_ts, to_ts, by, edge_only=edge_only),
+        )
+        fut_sqlite = pool.submit(
+            contextvars.copy_context().run,
+            _run_timed,
+            lambda: metadata_db.get_log_accounting_counts(
+                service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+            ),
+        )
+        fut_duckdb = pool.submit(
+            contextvars.copy_context().run,
+            _run_timed,
+            lambda: _duckdb_row_counts_per_bucket(source, start, end_clamp, by),
+        )
+        try:
+            fastly_counts, ms_fastly = fut_fastly.result()
+        except Exception as e:
+            raise_internal(logger, e, code="fastly_stats_failed", status=502)
+        local_counts, ms_sqlite = fut_sqlite.result()
+        duckdb_counts, ms_duckdb = fut_duckdb.result()
+
+    timer.entries.append({"section": "fastly_fetch", "time_ms": ms_fastly})
+    timer.entries.append({"section": "sqlite_counts", "time_ms": ms_sqlite})
+    timer.entries.append({"section": "duckdb_counts", "time_ms": ms_duckdb})
 
     all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()) | set(duckdb_counts.keys()))
     buckets: list[LogAccountingBucket] = []

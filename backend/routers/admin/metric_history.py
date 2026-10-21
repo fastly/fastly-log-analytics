@@ -48,4 +48,13 @@ def metric_history_batch(
         )
     cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
     raw = metric_snapshots.get_batch(since=cutoff)
-    return JSONResponse(content={"series": raw})
+    payload: dict = {"series": raw}
+    from backend.models.common import _debug_responses_enabled
+
+    if _debug_responses_enabled():
+        from backend.utils.telemetry import get_sqlite_queries
+
+        ds = list(get_sqlite_queries())
+        payload["_debug_sqlite"] = ds
+        payload["_debug_postgres"] = ds
+    return JSONResponse(content=payload)

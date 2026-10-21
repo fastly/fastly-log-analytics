@@ -482,7 +482,7 @@ def _sample_celery_workers() -> int:
         if _safe_record("celery_active_workers", float(len(stats))):
             count += 1
 
-        active = i.active() or {}
+        active = (i.active() or {}) if stats else {}
         active_tasks = sum(len(tasks) for tasks in active.values())
         if _safe_record("celery_active_tasks", float(active_tasks)):
             count += 1
