@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
-import { LiveStreamingClient } from '@/app/streaming/_sections/LiveStreamingClient'
+import { LiveTailTab } from '@/app/logs/_sections/LiveTailTab'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
@@ -9,7 +9,7 @@ import { spyOnConsoleError } from '../helpers/page-smoke'
 // Mocks for streaming page
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
-vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/streaming'))
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/logs'))
 
 vi.mock('@/lib/api', () => ({
   client: { GET: vi.fn(), POST: vi.fn().mockResolvedValue({ data: {} }), use: vi.fn() },
@@ -28,13 +28,6 @@ vi.mock('@/hooks/useEventStream', () => ({
   }),
 }))
 
-vi.mock('@/components/ReportLayout', async () =>
-  (await import('../helpers/page-smoke')).reportLayoutModuleMock({
-    activeServiceId: 'test-svc',
-    timezone: 'UTC',
-  }),
-)
-
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 let errorSpy: ReturnType<typeof spyOnConsoleError>
 
@@ -49,14 +42,13 @@ afterEach(() => {
   errorSpy.mockRestore()
 })
 
-test('streaming page mounts and renders title, toolbar controls, and terminal layout', () => {
+test('live tail mounts and renders toolbar controls and terminal layout', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
-  expect(screen.getByText('Live Log Streaming')).toBeInTheDocument()
   expect(screen.getByTestId('stream-controls-toolbar')).toBeInTheDocument()
   expect(screen.getByTestId('stream-terminal-container')).toBeInTheDocument()
   expect(screen.getByTestId('stream-pause-toggle')).toBeInTheDocument()
@@ -73,7 +65,7 @@ test('renders connecting skeleton state when connection is pending', () => {
   mockConnectionState = 'connecting'
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -84,7 +76,7 @@ test('renders connecting skeleton state when connection is pending', () => {
 test('receives and renders SSE log events in real time', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -129,7 +121,7 @@ test('receives and renders SSE log events in real time', () => {
 test('filters streamed logs by live search regex / string and status code', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -188,7 +180,7 @@ test('filters streamed logs by live search regex / string and status code', () =
 test('clicking a log row opens the Deep JSON Row Inspector modal with attributes', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -226,7 +218,7 @@ test('clicking a log row opens the Deep JSON Row Inspector modal with attributes
 test('pause toggle buffers incoming logs and flushes when resumed', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -268,7 +260,7 @@ test('pause toggle buffers incoming logs and flushes when resumed', () => {
 test('clear logs button empties the terminal display', () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
 
@@ -299,7 +291,7 @@ test('clear logs button empties the terminal display', () => {
 const openInspector = () => {
   render(
     <QueryClientProvider client={queryClient}>
-      <LiveStreamingClient />
+      <LiveTailTab activeServiceId="test-svc" />
     </QueryClientProvider>,
   )
   act(() => {

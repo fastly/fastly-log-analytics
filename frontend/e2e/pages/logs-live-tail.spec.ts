@@ -1,7 +1,7 @@
 /**
- * E2E Page Contract Test: Live Log Streaming (/streaming)
+ * E2E Page Contract Test: Live Tail (/logs?tab=live)
  *
- * Implements the verification checklist specified in docs/pages/streaming.md:
+ * Implements the verification checklist specified in docs/pages/logs-live-tail.md:
  * 1. Route accessibility & footer environment mode verification.
  * 2. Instant shell, pre-allocated layout & zero CLS containers.
  * 3. Data contract & SSE connection validation on GET /api/stream/{service_id}.
@@ -19,11 +19,11 @@ type LayoutShiftEntry = PerformanceEntry & {
   value?: number
 }
 
-test.describe('Live Log Streaming Page Contract (/streaming)', () => {
+test.describe('Live Tail Contract (/logs?tab=live)', () => {
 
   test('1. Route accessibility & environment indicator', async ({ page }) => {
-    await page.goto('/streaming')
-    await expect(page.getByRole('heading', { name: /Live Log Streaming/i })).toBeVisible({ timeout: 30_000 })
+    await page.goto('/logs?tab=live')
+    await expect(page.getByRole('tab', { name: /Live Tail/i })).toBeVisible({ timeout: 30_000 })
 
     // Verify footer exists and contains environment mode
     const footer = page.locator('footer')
@@ -33,8 +33,8 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
   })
 
   test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await page.goto('/streaming')
-    await expect(page.getByRole('heading', { name: /Live Log Streaming/i })).toBeVisible({ timeout: 30_000 })
+    await page.goto('/logs?tab=live')
+    await expect(page.getByRole('tab', { name: /Live Tail/i })).toBeVisible({ timeout: 30_000 })
 
     // Verify pre-allocated streaming explorer and terminal container exist
     await expect(page.locator('[data-testid="live-streaming-explorer"]')).toBeVisible({ timeout: 15_000 })
@@ -47,7 +47,7 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
   })
 
   test('3. Core Live Streaming toolbar controls mounted', async ({ page }) => {
-    await page.goto('/streaming')
+    await page.goto('/logs?tab=live')
     await expect(page.locator('[data-testid="live-streaming-explorer"]')).toBeVisible({ timeout: 30_000 })
 
     // Controls Toolbar
@@ -72,7 +72,7 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
       if (msg.type() === 'error') consoleErrors.push(msg.text())
     })
 
-    await page.goto('/streaming')
+    await page.goto('/logs?tab=live')
     await expect(page.locator('[data-testid="live-streaming-explorer"]')).toBeVisible({ timeout: 30_000 })
 
     // Test pause toggle
@@ -97,7 +97,7 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
   })
 
   test('5. Terminal stream viewport and row inspector interaction', async ({ page }) => {
-    await page.goto('/streaming')
+    await page.goto('/logs?tab=live')
     await expect(page.locator('[data-testid="stream-terminal-container"]')).toBeVisible({ timeout: 30_000 })
 
     // Terminal body should be mounted
@@ -125,7 +125,7 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
 
   test('6. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm reload', async ({ page }) => {
     // Prime cache on first visit
-    await page.goto('/streaming', { waitUntil: 'domcontentloaded' })
+    await page.goto('/logs?tab=live', { waitUntil: 'domcontentloaded' })
 
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
@@ -159,7 +159,7 @@ test.describe('Live Log Streaming Page Contract (/streaming)', () => {
       })
     })
 
-    console.log(`[PERF /streaming] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    console.log(`[PERF /logs?tab=live] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
     expect(totalTime).toBeLessThan(10_000)
     if (metrics.lcp > 0) {
       expect(metrics.lcp).toBeLessThan(1500)

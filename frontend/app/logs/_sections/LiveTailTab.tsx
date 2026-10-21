@@ -17,7 +17,6 @@ import {
   RefreshCw,
   Terminal,
 } from 'lucide-react'
-import { ReportLayout } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -90,25 +89,11 @@ function formatElapsed(elapsed: number): string {
   return `${elapsed.toFixed(3)}s`
 }
 
-export function LiveStreamingClient() {
-  return (
-    <ReportLayout
-      title="Live Log Streaming"
-      description="Real-time CDN edge log tail via Server-Sent Events — interactive pause/resume, regex search, and deep JSON inspection."
-      icon={Radio}
-    >
-      {({ activeServiceId }) => (
-        <LiveStreamingBody activeServiceId={activeServiceId} />
-      )}
-    </ReportLayout>
-  )
-}
-
-interface LiveStreamingBodyProps {
+interface LiveTailTabProps {
   activeServiceId: string | null
 }
 
-function LiveStreamingBody({ activeServiceId }: LiveStreamingBodyProps) {
+export function LiveTailTab({ activeServiceId }: LiveTailTabProps) {
   const [logs, setLogs] = useState<StreamLogEvent[]>([])
   const [isPaused, setIsPaused] = useState(false)
   const [pausedBuffer, setPausedBuffer] = useState<StreamLogEvent[]>([])
@@ -730,4 +715,3 @@ function LiveStreamingBody({ activeServiceId }: LiveStreamingBodyProps) {
     </div>
   )
 }
-export default LiveStreamingClient

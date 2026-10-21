@@ -1,4 +1,4 @@
-# Page Specification: Live Log Streaming (`/streaming`)
+# Page Specification: Live Tail (`/logs?tab=live`)
 
 > [!NOTE] **Live-certified (`release/v3.0.0-beta3`)**
 > Audited and verified across Local Standard, Remote Standard GCE, and Elevation High-Scale.
@@ -8,7 +8,7 @@
 
 ## 1. Overview & Objectives
 
-The **Live Log Streaming** page delivers a high-speed, interactive terminal-style live tail of incoming CDN edge log lines via Server-Sent Events (SSE). It supports pause/resume, client-side regex search, JSON inspect modal, and column formatting.
+The **Live Tail** page delivers a high-speed, interactive terminal-style live tail of incoming CDN edge log lines via Server-Sent Events (SSE). It supports pause/resume, client-side regex search, JSON inspect modal, and column formatting.
 
 ### Key Tenets:
 - **Low-Latency Streaming:** Pushes raw edge request events as they land in ingest buffers.
@@ -19,7 +19,7 @@ The **Live Log Streaming** page delivers a high-speed, interactive terminal-styl
 
 ## 2. Routes & URL Schema
 
-- **Primary Route:** `/streaming`
+- **Primary Route:** `/logs?tab=live`
 - **Supported Query Parameters:**
   - `service`: Fastly Service ID.
   - `filter`: Live regex/string search pattern.

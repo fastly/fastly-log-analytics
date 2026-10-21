@@ -14,6 +14,7 @@ import {
   Archive,
   ClipboardList,
   FileText,
+  Radio,
 } from 'lucide-react'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { useBootstrapResolved } from '@/hooks/useIsDataReady'
@@ -32,6 +33,7 @@ import { ServiceHistoryTab } from './ServiceHistoryTab'
 import { IngestionTab } from './IngestionTab'
 import { SSEModal } from './SSEModal'
 import { RawLogsExplorer } from './RawLogsExplorer'
+import { LiveTailTab } from './LiveTailTab'
 
 // Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
 // are the default landing tabs; the four below only matter when the
@@ -86,11 +88,11 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
   return (
     <div className="space-y-6">
       <PageHeader
-        title={s.activeTab === 'explorer' ? "Raw Logs Explorer" : "Data Management"}
-        description={s.activeTab === 'explorer' ? "High-throughput, paginated, searchable access to individual Fastly CDN edge access log records." : "Monitor and manage log ingestion history and active data syncs."}
+        title={s.activeTab === 'explorer' ? "Raw Logs Explorer" : s.activeTab === 'live' ? "Live Tail" : "Data Management"}
+        description={s.activeTab === 'explorer' ? "High-throughput, paginated, searchable access to individual Fastly CDN edge access log records." : s.activeTab === 'live' ? "Real-time CDN edge log tail via Server-Sent Events — pause/resume, regex search, and deep JSON inspection." : "Monitor and manage log ingestion history and active data syncs."}
       />
 
-      {s.activeTab !== 'explorer' && (
+      {s.activeTab !== 'explorer' && s.activeTab !== 'live' && (
         <QuickActionsBar
           isAnalyst={s.isAnalyst}
           status={s.status}
@@ -114,6 +116,9 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
           <TabsList className="w-full flex">
             <TabsTrigger value="explorer" className="flex-1 flex items-center justify-center gap-2 text-xs">
               <FileText className="h-4 w-4" /> Raw Logs
+            </TabsTrigger>
+            <TabsTrigger value="live" className="flex-1 flex items-center justify-center gap-2 text-xs">
+              <Radio className="h-4 w-4" /> Live Tail
             </TabsTrigger>
             <TabsTrigger value="cron" className="flex-1 flex items-center justify-center gap-2 text-xs">
               <History className="h-4 w-4" /> Cron Runs
@@ -147,6 +152,10 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
 
         <TabsContent value="explorer" className="mt-4">
           <RawLogsExplorer activeServiceId={s.activeServiceId} isAnalyst={s.isAnalyst} />
+        </TabsContent>
+
+        <TabsContent value="live" className="mt-4">
+          {s.activeTab === 'live' && <LiveTailTab activeServiceId={s.activeServiceId} />}
         </TabsContent>
 
         <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card">

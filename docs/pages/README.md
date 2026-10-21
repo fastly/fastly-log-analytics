@@ -25,7 +25,7 @@ docs/pages/
 ├── security.md                    # /security (WAF, bots, TLS fingerprints, attacks)
 ├── insights.md                    # /insights (Automated anomaly detection & baselines)
 ├── network.md                     # /network (RTT, packet loss, congestion, ASNs)
-├── streaming.md                   # /streaming (Live log streaming & inspect modal)
+├── logs-live-tail.md              # /logs?tab=live (Live log tail & inspect modal)
 ├── rum.md                         # /rum (Real User Monitoring & Core Web Vitals)
 ├── sessions.md                    # /sessions (Client session scoring & clustering)
 ├── sessions-stream.md             # /sessions/stream (Real-time session stream)
@@ -62,7 +62,7 @@ docs/pages/
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 51 automated anomaly detectors across 5 category tabs | **Live-certified** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
-| `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Live-certified** |
+| `/logs?tab=live` | [Live Tail](logs-live-tail.md) | Live SSE log tailing, regex search, inspect modal | **Live-certified** |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |
@@ -104,7 +104,7 @@ Across almost all analytics pages in this application (`/dashboard`, `/origin`, 
    - As new log batches arrive and continuous ingest pushes the history span past 24 hours, the default rolling window smoothly transitions to capping at 24 hours.
 
 4. **Page Exemptions:**
-   - **Real-Time Stream Tailing:** `/control-room`, `/streaming`, and `/sessions/stream` operate on live sliding event buffers (e.g. last 100–1,000 events or 1m–5m live window) rather than the 24h historical window.
+   - **Real-Time Stream Tailing:** `/control-room`, `/logs?tab=live`, and `/sessions/stream` operate on live sliding event buffers (e.g. last 100–1,000 events or 1m–5m live window) rather than the 24h historical window.
    - **Admin Operational Trend Vitals:** `/admin/trends` and `/admin/usage-log` use administrative monitoring windows (e.g. 7d or 30d host vitals / FOS ledger).
 
 ---

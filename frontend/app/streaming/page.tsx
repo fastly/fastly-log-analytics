@@ -1,7 +1,7 @@
 'use client'
 
-import { LiveStreamingClient } from './_sections/LiveStreamingClient'
+import StreamingClient from './_sections/StreamingClient'
 
 export default function StreamingPage() {
-  return <LiveStreamingClient />
+  return <StreamingClient />
 }
