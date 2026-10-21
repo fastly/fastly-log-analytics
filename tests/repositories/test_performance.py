@@ -334,10 +334,10 @@ def test_performance_aggregates_temp_skipped_when_all_rolled_no_scatter(in_memor
 
 
 def test_performance_aggregates_temp_narrowed_when_scatter_forces_temp(in_memory_duckdb, test_service_source):
-    """All-sections request: top_urls/top_asns/ttl_dist serve from rollups, but
-    scatter+waterfall keep a temp — narrowed to their latency columns
-    (`perf:temp_narrowed`), and ttl is served from the rollup not the live
-    histogram."""
+    """All-sections request: when top_urls/top_asns/ttl_dist serve from rollups
+    and only scatter+waterfall remain live, the full-window temp table is skipped
+    entirely (`perf:temp_skipped`) and scatter/waterfall query the base relation
+    directly with partition_pruning."""
     table_name = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=20)
     for log in logs:
@@ -362,11 +362,11 @@ def test_performance_aggregates_temp_narrowed_when_scatter_forces_temp(in_memory
         )
 
     names = {t["section"] for t in result["section_timings"]}
-    assert "perf:temp_narrowed" in names
-    assert "temp_table_create" in names, "scatter still needs a (narrowed) temp"
+    assert "perf:temp_skipped" in names
+    assert "temp_table_create" not in names, "scatter+waterfall alone must not materialize a full-window temp table"
     # ttl served from rollup, NOT the live histogram.
     assert "ttl_dist_rollup" in names
     assert "ttl_dist_query" not in names
     assert result["ttl_dist"] == [{"bucket": "<1m", "count": 5}]
-    # scatter/waterfall still produced from the narrowed temp.
+    # scatter/waterfall still produced from the direct query.
     assert "scatter" in result and "waterfall" in result

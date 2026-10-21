@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -11,6 +12,18 @@ from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
 from backend.high_scale.registry import HighScaleService
 from backend.models.performance import PerformanceAggregatesResponse
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
+
+_HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
+_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128)
+CacheRegistry.register("hs_performance_aggregates_memo", _memo.cache)
 
 _ALL_SECTIONS = frozenset({"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"})
 _SORT_COLUMNS = {"avg": "avg_ms", "p50": "p50_ms", "p95": "p95_ms", "p99": "p99_ms"}
@@ -315,8 +328,28 @@ def performance_aggregates(
 
     wanted = _ALL_SECTIONS if sections is None else sections
     filters = _active_filters(req)
-    sort_column = _SORT_COLUMNS.get(getattr(req, "sort_by", "p99"), "p99_ms")
+    sort_by = getattr(req, "sort_by", "p99")
+    sort_column = _SORT_COLUMNS.get(sort_by, "p99_ms")
     result: dict[str, Any] = {}
+
+    cache_key: str | None = None
+    if _HS_PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        cache_key = digest_cache_key(
+            {
+                "ep": "hs_performance_aggregates",
+                "svc": service.service_id,
+                "cid": client_cache_token(service.client),
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(filters),
+                "sb": sort_by,
+                "sec": sorted(wanted),
+            },
+            {"service_id": service.service_id},
+        )
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return PerformanceAggregatesResponse.with_telemetry(**cached)
 
     # Pre-validate filter clauses on the caller thread so unsupported filter
     # fields raise immediately and deterministically.
@@ -400,4 +433,7 @@ def performance_aggregates(
 
     # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
     # are exact ClickHouse quantiles over the matching facts.
-    return PerformanceAggregatesResponse.with_telemetry(**result, _approx=not filters)
+    payload = {**result, "_approx": not filters}
+    if cache_key is not None:
+        _memo.put(cache_key, payload)
+    return PerformanceAggregatesResponse.with_telemetry(**payload)

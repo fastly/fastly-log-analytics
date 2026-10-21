@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time as _time
 
 import duckdb
@@ -16,9 +17,57 @@ from backend.repositories._base import (
     percentile_ms_expr,
 )
 from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
+
+_PERF_CACHE_TTL = float(os.getenv("PERF_CACHE_TTL_SECONDS", "30"))
+_memo = ResponseMemo(ttl=_PERF_CACHE_TTL, maxsize=128)
+CacheRegistry.register("performance_aggregates_memo", _memo.cache)
+
+
+def _perf_memo_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None,
+    sort_by: str = "p99",
+    sections: set[str] | None = None,
+) -> str:
+    payload = {
+        "ep": "performance_aggregates",
+        "s": bucket_time_to_minute(start_time),
+        "e": bucket_time_to_minute(end_time),
+        "f": serialize_filters_for_key(filters),
+        "sb": sort_by,
+        "sec": sorted(sections) if sections is not None else None,
+        "cd": str(src.get("_cache_dir_override", "")),
+    }
+    return digest_cache_key(payload, src)
+
+
+def peek_performance_aggregates(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None,
+    sort_by: str = "p99",
+    sections: set[str] | None = None,
+) -> dict | None:
+    """Return a cached performance aggregates response without acquiring a DuckDB connection."""
+    if _PERF_CACHE_TTL <= 0 or start_time is None or end_time is None:
+        return None
+    key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+    cached = _memo.get(key)
+    return dict(cached) if cached is not None else None
+
 
 # Temp-table projection order for the section-aware narrowed temp. Mirrors the
 # origin/security ``_TEMP_COL_ORDER`` pattern: the temp is built for ONLY the
@@ -37,6 +86,13 @@ def get_performance_aggregates(
     sort_by: str = "p99",
     sections: set[str] | None = None,
 ) -> dict:
+    cache_key: str | None = None
+    if _PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        cache_key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
     # Per-phase wall-clock timings surface in the response under
     # _section_timings so the perf harness can attribute /api/performance/
     # aggregates without ad-hoc instrumentation. Mirrors network.py.
@@ -186,11 +242,15 @@ def get_performance_aggregates(
 
     # 6 + 7. Scatter + waterfall: always live. Scatter is a uniform 300-row
     # SAMPLE (not aggregatable) and waterfall is auto-paired with it
-    # (_WATERFALL_SCATTER_PAIR), so this is the irreducible residual that keeps
-    # the temp — narrowed to its latency columns. No rollup attempt.
+    # (_WATERFALL_SCATTER_PAIR). When top_urls/top_asns/ttl_dist are all
+    # served from rollups (or not requested), skip materializing a full-window
+    # temp table and query the base logs relation directly with partition_pruning.
     _want_scatter_waterfall = _want_scatter or _want_waterfall
     if _want_scatter_waterfall and "ttfb" in actual_cols and "elapsed" in actual_cols:
-        _need("scatter_waterfall", {"ttfb", "elapsed", "cache", "ottfb", "ottlb"})
+        if live_sections:
+            _need("scatter_waterfall", {"ttfb", "elapsed", "cache", "ottfb", "ottlb"})
+        else:
+            live_sections.add("scatter_waterfall")
     elif _want_scatter_waterfall:
         if _want_scatter:
             results["scatter"] = []
@@ -285,14 +345,25 @@ def get_performance_aggregates(
             results["ttl_dist"] = [{"bucket": r[0], "count": r[1]} for r in ttl_res]
             timer.mark("ttl_dist_query", _t)
 
-        if "scatter_waterfall" in live_sections and temp_table:
-            # Scatter sample + waterfall averages from a single MATERIALIZED CTE
-            # Single-pass CTE over the already-materialized in-memory temp table:
-            # avoid `AS MATERIALIZED` here so DuckDB does not spool a second
-            # copy of the rows on top of `{temp_table}`.
+        if "scatter_waterfall" in live_sections:
+            # Scatter sample + waterfall averages from a single CTE pass.
+            # When top_urls/top_asns/ttl_dist were served from rollups, temp_table
+            # is None and we query the base logs relation directly with partition_pruning.
             _t = _time.perf_counter()
             ottfb_expr = coalesce("CAST(ottfb AS DOUBLE) / 1000.0", "0") if "ottfb" in actual_cols else "0"
             ottlb_expr = coalesce("CAST(ottlb AS DOUBLE) / 1000.0", "0") if "ottlb" in actual_cols else "0"
+            if temp_table:
+                source_rel = temp_table
+                comp_where = "WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL"
+                q_params = None
+            else:
+                source_rel = f'"{table_name}"'
+                comp_where = (
+                    f"WHERE {where_clause} AND ttfb IS NOT NULL AND elapsed IS NOT NULL"
+                    if where_clause.strip()
+                    else "WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL"
+                )
+                q_params = params
 
             combined_q = f"""
                 WITH components AS (
@@ -304,8 +375,8 @@ def get_performance_aggregates(
                         GREATEST(0.0, {ottlb_expr} - {ottfb_expr}) AS origin_download,
                         GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - {ottfb_expr}) AS edge_processing,
                         GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({ottlb_expr}, CAST(ttfb AS DOUBLE) * 1000.0)) AS client_download
-                    FROM {temp_table}
-                    WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL
+                    FROM {source_rel}
+                    {comp_where}
                 )
                 SELECT
                     's'::VARCHAR AS row_type,
@@ -331,7 +402,7 @@ def get_performance_aggregates(
                     AVG(client_download)
                 FROM components
             """
-            combined_rows = runner.execute(combined_q).fetchall()
+            combined_rows = runner.execute(combined_q, q_params).fetchall()
 
             scatter: list[dict] = []
             waterfall_avg = {
@@ -378,4 +449,6 @@ def get_performance_aggregates(
         results["waterfall"] = {}
 
     results["section_timings"] = section_timings
+    if cache_key is not None:
+        _memo.put(cache_key, dict(results))
     return results

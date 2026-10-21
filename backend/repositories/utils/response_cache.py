@@ -12,6 +12,7 @@ requests" rule both live here so callers can't skip them.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,23 @@ from backend.utils.bounded_cache import BoundedTTLCache
 if TYPE_CHECKING:
     from backend.models.common import FiltersDict
     from backend.repositories._base import QueryRunner
+
+_CLIENT_TOKEN_COUNTER = itertools.count(1)
+
+
+def client_cache_token(client: Any) -> int:
+    """Return a monotonic instance token for ``client`` immune to GC ``id()`` reuse."""
+    if client is None:
+        return 0
+    tok = getattr(client, "_hs_cache_token", None)
+    if tok is None:
+        tok = next(_CLIENT_TOKEN_COUNTER)
+        try:
+            object.__setattr__(client, "_hs_cache_token", tok)
+        except Exception:
+            tok = id(client)
+    return int(tok)
+
 
 # Keys never persisted in the memo cache: per-request telemetry would leak
 # across requests if kept, and the cache-hit marker is stamped fresh on read.

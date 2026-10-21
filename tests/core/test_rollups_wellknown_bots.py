@@ -118,11 +118,11 @@ def test_read_falls_back_below_48h_window(tmp_path):
     cache_root.mkdir()
     src = {"name": "svc-bot-narrow"}
 
-    # Seed a couple of closed hours, query only a 24 h span.
+    # Seed a couple of closed hours, query only a 12 h span (< 23 h gate).
     h2, _ = _past_hour_iso(2)
     h3, _ = _past_hour_iso(3)
     _, end_iso = _past_hour_iso(2)
-    _, start_iso = _past_hour_iso(26)  # 24 h span
+    _, start_iso = _past_hour_iso(14)  # 12 h span
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),

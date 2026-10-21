@@ -21,21 +21,66 @@ from backend.repositories._base import (
 )
 from backend.repositories._sql import security as SQL
 from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import parse_window
 from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
 _logger = logging.getLogger(__name__)
 
-# Rollup-served paths only beat the live-SQL-on-temp path on windows
-# wide enough that the closed-hour parquet-read cost amortises better
-# than the live column scan. Measured 2026-06-15 on prod: 24 h was a
-# net regression (+110 ms), 7 d and 30 d were wins (−107 ms / −453 ms).
-# Gate at 3 days as a conservative break-even — 24 h and shorter
-# windows skip rollup routing and serve from the live SQL on the
-# already-materialised catalog temp (which keeps is_ipv6 + p_type in
-# its projection on the small-window path).
-_ROLLUP_MIN_WINDOW_SECONDS = 3 * 86400
+_SECURITY_CACHE_TTL = float(os.getenv("SECURITY_CACHE_TTL_SECONDS", "30"))
+_memo = ResponseMemo(ttl=_SECURITY_CACHE_TTL, maxsize=128)
+CacheRegistry.register("security_aggregates_memo", _memo.cache)
+
+
+def _security_memo_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None,
+    bucket_seconds: int = 300,
+    sections: set[str] | None = None,
+    mask_ips: bool = False,
+) -> str:
+    payload = {
+        "ep": "security_aggregates",
+        "s": bucket_time_to_minute(start_time),
+        "e": bucket_time_to_minute(end_time),
+        "f": serialize_filters_for_key(filters),
+        "b": int(bucket_seconds),
+        "sec": sorted(sections) if sections is not None else None,
+        "m": bool(mask_ips),
+        "cd": str(src.get("_cache_dir_override", "")),
+    }
+    return digest_cache_key(payload, src)
+
+
+def peek_security_aggregates(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None,
+    bucket_seconds: int = 300,
+    sections: set[str] | None = None,
+    mask_ips: bool = False,
+) -> dict | None:
+    """Return a cached security aggregates response without acquiring a DuckDB connection."""
+    if _SECURITY_CACHE_TTL <= 0 or start_time is None or end_time is None:
+        return None
+    key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
+    cached = _memo.get(key)
+    return dict(cached) if cached is not None else None
+
+
+# Lowered to 24h (86,400s) so 24h windows use closed-hour rollups
+# (wellknown_bots, ipv6_adoption, proxy_dist) and avoid full-window scans.
+_ROLLUP_MIN_WINDOW_SECONDS = 86400
 
 # The maximum number of top distinct User Agents (UAs) retrieved from the database
 # (via rollups or live temp tables) to pass to the regex-based classifier.
@@ -406,30 +451,67 @@ def classify_ua_counts(rows: list[tuple[str, int]], n: int) -> list[dict]:
     return sorted(bot_counts.values(), key=lambda x: x["request_count"], reverse=True)[:n]
 
 
+_RDNS_LOOKUP_LIMIT = int(os.getenv("SECURITY_RDNS_LOOKUP_LIMIT", "1000"))
+_RDNS_ENQUEUE_LIMIT = int(os.getenv("SECURITY_RDNS_ENQUEUE_LIMIT", "500"))
+
+
 def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     """Aggregate ``(ua, ip, count)`` rows into well-known bot rows with FCrDNS verification counters."""
+    if not rows:
+        return []
+
     from backend.utils.bot_sources import build_matcher
     from backend.utils.rdns_cache import classify, enqueue, get_hostnames
 
     match_ua = build_matcher()
     bot_agg: dict[str, dict] = {}
-    new_ips: list[str] = []
+    new_ips: set[str] = set()
 
-    # Batch-resolve every distinct IP in one SELECT instead of
-    # opening a fresh SQLite connection per (ua, ip) row.
-    hostnames = get_hostnames([ip for _, ip, _ in rows if ip])
-
+    # 1. Deduplicate UA regex matching: evaluate match_ua once per unique UA string.
+    ua_matches: dict[str, list[dict]] = {}
+    matched_rows: list[tuple[list[dict], str, int]] = []
+    ip_totals: dict[str, int] = {}
     for ua_val, ip_val, cnt in rows:
-        matches = match_ua(ua_val)
+        if not ua_val or not ip_val:
+            continue
+        matches = ua_matches.get(ua_val)
+        if matches is None:
+            matches = list(match_ua(ua_val))
+            ua_matches[ua_val] = matches
+        if not matches:
+            continue
+        cnt_int = int(cnt or 0)
+        matched_rows.append((matches, ip_val, cnt_int))
+        ip_totals[ip_val] = ip_totals.get(ip_val, 0) + cnt_int
+
+    if not matched_rows:
+        return []
+
+    # 2. Batch and bound rDNS lookups to the top distinct matched bot IPs by request count.
+    if len(ip_totals) > _RDNS_LOOKUP_LIMIT:
+        top_ips = [ip for ip, _ in sorted(ip_totals.items(), key=lambda kv: kv[1], reverse=True)[:_RDNS_LOOKUP_LIMIT]]
+    else:
+        top_ips = list(ip_totals)
+    hostnames = get_hostnames(top_ips)
+
+    # 3. Cache per-(bot_id, ip) verification classification so repeated UAs from the same IP
+    # don't re-parse CIDR ranges.
+    classify_cache: dict[tuple[str, str], str] = {}
+
+    for matches, ip_val, cnt in matched_rows:
+        hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
+        if status == "pending" and len(new_ips) < _RDNS_ENQUEUE_LIMIT:
+            new_ips.add(ip_val)
         for entry in matches:
             bot_id = entry.get("id", "unknown")
-            hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
-            if status == "pending":
-                new_ips.append(ip_val)
-            verification = entry.get("verification", {})
-            verification_domains = verification.get("domains", [])
-            verification_cidrs = verification.get("cidrs", [])
-            state = classify(ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
+            cache_key = (bot_id, ip_val)
+            state = classify_cache.get(cache_key)
+            if state is None:
+                verification = entry.get("verification", {})
+                verification_domains = verification.get("domains", [])
+                verification_cidrs = verification.get("cidrs", [])
+                state = classify(ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
+                classify_cache[cache_key] = state
 
             if bot_id not in bot_agg:
                 cats = entry.get("categories", [])
@@ -456,7 +538,7 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
 
     # Enqueue any pending IPs we encountered for future enrichment
     if new_ips:
-        enqueue(list(set(new_ips)))
+        enqueue(list(new_ips))
 
     # Sort by request count, return top 50, annotate coverage
     sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
@@ -707,6 +789,13 @@ def get_security_aggregates(
 ) -> dict:
     import time as _time
 
+    memo_key: str | None = None
+    if _SECURITY_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        memo_key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
+        cached = _memo.get(memo_key)
+        if cached is not None:
+            return dict(cached)
+
     # Per-phase timings for /api/security/aggregates so the perf
     # harness can attribute wall time across the ~14 sub-queries
     # _build_security_response runs without ad-hoc instrumentation.
@@ -742,7 +831,7 @@ def get_security_aggregates(
     # per-column form of the all-or-nothing materialize the origin/aggregates
     # fix removed — so a 30d unfiltered request collapses the shared
     # ``temp_table_create`` to the tiny NGWAF-flagged subset (or nothing).
-    return _build_security_response(
+    res = _build_security_response(
         runner,
         src,
         con,
@@ -758,6 +847,9 @@ def get_security_aggregates(
         sections=sections,
         mask_ips=mask_ips,
     )
+    if memo_key is not None:
+        _memo.put(memo_key, dict(res))
+    return res
 
 
 def _build_security_response(
@@ -1434,35 +1526,6 @@ def get_security_proxies(
                 "active_clients": [],
             }
 
-        # Fetch stats
-        stats_row = runner.execute(SQL.GET_PROXY_STATS.format(temp_table=temp_table)).fetchone()
-        stats = (
-            {
-                "active_proxies_count": stats_row[0] or 0,
-                "total_requests_count": stats_row[1] or 0,
-                "distance_mismatches_count": stats_row[2] or 0,
-            }
-            if stats_row
-            else {}
-        )
-
-        # Fetch traffic quality segments
-        quality_rows = runner.execute(SQL.GET_TRAFFIC_QUALITY.format(temp_table=temp_table)).fetchall()
-        traffic_quality = []
-        if quality_rows:
-            total_count = sum(int(r[1] or 0) for r in quality_rows)
-            if total_count > 0:
-                for row_type, row_count in quality_rows:
-                    label = str(row_type if row_type is not None else "Unknown")
-                    item_count = float(row_count or 0)
-                    value = round((item_count / total_count) * 100, 1)
-                    traffic_quality.append({"label": label, "value": value})
-
-        # Fetch top suspicious networks
-        isp_rows = runner.execute(SQL.GET_SUSPICIOUS_ISPS.format(temp_table=temp_table)).fetchall()
-        raw_isps = [{"asn": r[0], "count": r[1]} for r in isp_rows]
-
-        # Fetch active clients
         select_country_city_inner = ""
         if "country" in cols_needed:
             select_country_city_inner += ",\n            country"
@@ -1473,19 +1536,62 @@ def get_security_proxies(
         else:
             select_country_city_inner += ",\n            CAST(NULL AS VARCHAR) AS city"
 
-        select_country_city_outer = ""
-        select_country_city_outer += ",\n        country"
-        select_country_city_outer += ",\n        city"
+        select_country_city_outer = ",\n                country,\n                city"
 
-        clients_cur = runner.execute(
-            SQL.GET_ACTIVE_PROXY_CLIENTS.format(
+        combined_rows = runner.execute(
+            SQL.GET_SECURITY_PROXIES_COMBINED.format(
                 temp_table=temp_table,
                 select_country_city_inner=select_country_city_inner,
                 select_country_city_outer=select_country_city_outer,
             )
-        )
-        client_cols = [c[0] for c in (clients_cur.description or ())]
-        raw_clients = [dict(zip(client_cols, r, strict=False)) for r in clients_cur.fetchall()]
+        ).fetchall()
+
+        stats: dict[str, Any] = {}
+        quality_rows: list[tuple[Any, Any]] = []
+        raw_isps: list[dict[str, Any]] = []
+        raw_clients: list[dict[str, Any]] = []
+
+        for r in combined_rows:
+            kind = r[0]
+            if kind == "stats":
+                stats = {
+                    "active_proxies_count": r[2] or 0,
+                    "total_requests_count": r[3] or 0,
+                    "distance_mismatches_count": r[4] or 0,
+                }
+            elif kind == "quality":
+                quality_rows.append((r[1], r[2]))
+            elif kind == "isp":
+                raw_isps.append({"asn": r[2], "count": r[3]})
+            elif kind == "client":
+                raw_clients.append(
+                    {
+                        "ip": r[1],
+                        "asn": r[2],
+                        "rtt_min_ms": r[5],
+                        "tcp_rtt_ms": r[6],
+                        "distance_km": r[7],
+                        "pop": r[8],
+                        "client_lat": r[9],
+                        "client_lon": r[10],
+                        "pop_lat": r[11],
+                        "pop_lon": r[12],
+                        "impossible_distance": r[13],
+                        "risk_level": r[14],
+                        "country": r[15],
+                        "city": r[16],
+                    }
+                )
+
+        traffic_quality = []
+        if quality_rows:
+            total_count = sum(int(r[1] or 0) for r in quality_rows)
+            if total_count > 0:
+                for row_type, row_count in quality_rows:
+                    label = str(row_type if row_type is not None else "Unknown")
+                    item_count = float(row_count or 0)
+                    value = round((item_count / total_count) * 100, 1)
+                    traffic_quality.append({"label": label, "value": value})
 
         # Gather all distinct ASNs to resolve
         asns_to_resolve = set()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextvars
+import os
 from datetime import datetime
 from typing import Any
 
@@ -29,7 +30,19 @@ from backend.models.dashboard import (
     RawRequest,
     TimeSeriesPoint,
 )
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import safe_iso
+
+_HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
+_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128)
+CacheRegistry.register("hs_dashboard_aggregates_memo", _memo.cache)
 
 _FIELD_DIMENSIONS = {
     "url": "url",
@@ -459,10 +472,58 @@ def _aggregates_batch(
     return {f: by_dim[_FIELD_DIMENSIONS[f]] for f in fields}
 
 
+def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> AggregatesResponse:
+    if cache_key is not None:
+        _memo.put(
+            cache_key,
+            {
+                "data": resp.data,
+                "time_series": resp.time_series,
+                "map_data": resp.map_data,
+                "where_clause": resp.where_clause,
+                "interval": resp.interval,
+                "metric": resp.metric,
+                "total_rows": resp.total_rows,
+                "total_rows_total": resp.total_rows_total,
+                "earliest_log_at": resp.earliest_log_at,
+                "latest_log_at": resp.latest_log_at,
+            },
+        )
+    return resp
+
+
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
     norm_interval = _normalize_chart_interval(req.chart_interval)
+    cache_key: str | None = None
+    if _HS_DASHBOARD_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        raw_filters = (
+            req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+        )
+        cache_key = digest_cache_key(
+            {
+                "ep": "hs_dashboard_aggregates",
+                "svc": service.service_id,
+                "cid": client_cache_token(service.client),
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(raw_filters),
+                "ci": norm_interval,
+                "cm": req.chart_metric,
+                "fl": sorted(req.fields) if req.fields else None,
+                "sec": sorted(req.sections) if req.sections else None,
+                "its": req.include_time_series,
+                "icr": req.include_conn_requests,
+                "imd": req.include_map_data,
+            },
+            {"service_id": service.service_id},
+        )
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return AggregatesResponse.with_telemetry(**cached)
+
     if req.filters or norm_interval == "1 second":
-        return _filtered_aggregates(service, req, start_time, end_time)
+        resp = _filtered_aggregates(service, req, start_time, end_time)
+        return _cache_agg_resp(cache_key, resp)
 
     want_time_series, want_map, want_top_n = _panels(req)
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
@@ -517,7 +578,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         )
     else:
         time_series = _time_series(service, start_time, end_time, norm_interval)
-    return AggregatesResponse.with_telemetry(
+    resp = AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
         map_data=map_data,
@@ -529,6 +590,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         earliest_log_at=_watermark_extent(request_watermark.coverage_start),
         latest_log_at=_watermark_extent(request_watermark.coverage_end),
     )
+    return _cache_agg_resp(cache_key, resp)
 
 
 def bundle(

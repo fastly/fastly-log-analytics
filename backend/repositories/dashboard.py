@@ -30,6 +30,7 @@ from backend.repositories._base import (
 )
 from backend.repositories._sql import dashboard as SQL
 from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import bucket_time_to_minute
 
 # ── In-memory caches ──────────────────────────────────────────────────────────
 # Bounded + actively-reaped: dashboard responses can be 30-240MB per entry,
@@ -45,24 +46,11 @@ from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
-# Dashboard response cache disabled.
-#
-# Symptom: a transient empty result (sync mid-commit, iceberg view rebuild in
-# flight, brief view-rebind race) used to land in this cache and then serve
-# "No data available" to every dashboard request with the same key for the
-# next 30 seconds — across all tabs, auto-refreshes, and any analyst hitting
-# the same window. Observed in prod 2026-06-09: dashboard showed empty for
-# every service even though `Latest Log: 7s ago` in the header.
-#
-# Set to 0 to make both the read gate at `if DASHBOARD_CACHE_TTL > 0:` and
-# the write gate inert without removing the surrounding code (easy to revert
-# or replace with a less-aggressive policy later — e.g. only cache when
-# total_rows > 0, or only cache windows ending more than 5 min in the past).
-# Short-TTL response cache (default 15s, configurable via FLA_DASHBOARD_CACHE_TTL).
+# Short-TTL response cache (default 30s, configurable via FLA_DASHBOARD_CACHE_TTL).
 # Invalidated immediately on every ingest tick via invalidate_service(service_name).
 # Only caches non-empty responses (`total_rows > 0`) so transient empty states
 # (sync mid-commit, view rebind race) are never cached.
-DASHBOARD_CACHE_TTL: int = int(os.getenv("FLA_DASHBOARD_CACHE_TTL", "15"))  # seconds; 0 disables read+write
+DASHBOARD_CACHE_TTL: int = int(os.getenv("FLA_DASHBOARD_CACHE_TTL", "30"))  # seconds; 0 disables read+write
 _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max(DASHBOARD_CACHE_TTL, 1))
 
 
@@ -174,6 +162,78 @@ def _add_bot_columns(actual_cols: Collection[str], columns: list[str], select_co
     return wants_bot, wants_ngwaf_bot
 
 
+def _dashboard_cache_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    chart_interval: str,
+    chart_metric: str,
+    fields_filter: list[str] | None = None,
+    *,
+    include_time_series: bool | None = True,
+    include_conn_requests: bool | None = True,
+    include_map_data: bool | None = True,
+    include_top_n: bool | None = True,
+) -> str:
+    source_name = src["name"]
+    _key_payload = json.dumps(
+        {
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted((filters or {}).items())},
+            "ci": chart_interval,
+            "cm": chart_metric,
+            "fields": sorted(fields_filter) if fields_filter is not None else None,
+            "its": True if include_time_series is None else include_time_series,
+            "icr": True if include_conn_requests is None else include_conn_requests,
+            "imd": True if include_map_data is None else include_map_data,
+            "itn": True if include_top_n is None else include_top_n,
+        },
+        separators=(",", ":"),
+    )
+    return f"{hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
+
+
+def peek_aggregates(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    chart_interval: str,
+    chart_metric: str,
+    fields_filter: list[str] | None = None,
+    *,
+    include_time_series: bool | None = True,
+    include_conn_requests: bool | None = True,
+    include_map_data: bool | None = True,
+    include_top_n: bool | None = True,
+) -> dict | None:
+    """Return a cached dashboard aggregates response without acquiring a DuckDB connection."""
+    if DASHBOARD_CACHE_TTL <= 0:
+        return None
+    cache_key = _dashboard_cache_key(
+        src,
+        start_time,
+        end_time,
+        filters,
+        chart_interval,
+        chart_metric,
+        fields_filter,
+        include_time_series=include_time_series,
+        include_conn_requests=include_conn_requests,
+        include_map_data=include_map_data,
+        include_top_n=include_top_n,
+    )
+    cached_entry = _dashboard_cache.get(cache_key)
+    if cached_entry is not None:
+        _, cached_res = cached_entry
+        cached_res = cached_res.copy()
+        cached_res["is_cached"] = True
+        return cached_res
+    return None
+
+
 def get_aggregates(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -213,29 +273,22 @@ def get_aggregates(
     else:
         fields = all_fields
 
-    # Cache is hard-disabled today (DASHBOARD_CACHE_TTL = 0). Gate the
-    # key-build + read together so the SHA-256 over the filter payload
-    # doesn't run on every request just to be discarded — saves a small
-    # per-request cost while keeping the legacy rollback hatch intact.
     cache_key: str | None = None
     now = time.time()
     if DASHBOARD_CACHE_TTL > 0:
-        _key_payload = json.dumps(
-            {
-                "s": start_time,
-                "e": end_time,
-                "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted(filters.items())},
-                "ci": chart_interval,
-                "cm": chart_metric,
-                "fields": sorted(fields_filter) if fields_filter is not None else None,
-                "its": include_time_series,
-                "icr": include_conn_requests,
-                "imd": include_map_data,
-                "itn": include_top_n,
-            },
-            separators=(",", ":"),
+        cache_key = _dashboard_cache_key(
+            src,
+            start_time,
+            end_time,
+            filters,
+            chart_interval,
+            chart_metric,
+            fields_filter,
+            include_time_series=include_time_series,
+            include_conn_requests=include_conn_requests,
+            include_map_data=include_map_data,
+            include_top_n=include_top_n,
         )
-        cache_key = f"{hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
         # BoundedTTLCache's ``__contains__`` / ``[]`` already enforce TTL
         # internally, so an entry that reads as present is by definition
         # still fresh — no need for the legacy ``now - cached_at`` check.

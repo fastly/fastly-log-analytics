@@ -10,7 +10,12 @@ from backend.high_scale._projection_utils import range_value
 from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
-from backend.repositories.utils.response_cache import ResponseMemo, bucket_time_to_minute, digest_cache_key
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+)
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import safe_iso
 
@@ -40,8 +45,89 @@ _HELPER_COLUMNS = (
     "any_edge_sid",
     "any_cmcd",
     "streaming_reqs",
+    "has_rtt_row",
+    "has_edge_sid_row",
 )
 _DETAIL_LIMIT = 500
+_FULL_CTE_SORTS = frozenset({"unique_urls", "median_rtt_ms"})
+
+_SESSIONS_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            event_timestamp AS ts,
+            custom_fields['edge'] AS edge,
+            toUInt8(custom_fields['edge_sid'] != '') AS has_edge_sid_ev,
+            toInt32OrZero(custom_fields['status']) AS status,
+            toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
+            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt_ev,
+            cmcd['sid'] AS cmcd_sid
+        FROM request_facts
+        WHERE {where}
+    ),
+    base AS (
+        SELECT
+            ip,
+            ja4,
+            toStartOfMinute(ts) AS bucket_ts,
+            min(ts) AS min_ts,
+            max(ts) AS max_ts,
+            count() AS req_count,
+            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
+            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
+            sum(resp_bytes) AS total_bytes,
+            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
+            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
+            max(has_rtt_ev) AS has_rtt_row,
+            max(has_edge_sid_ev) AS has_edge_sid_row,
+            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+        FROM raw_events
+        GROUP BY ip, ja4, bucket_ts
+    ),
+    gaps AS (
+        SELECT
+            *,
+            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
+        FROM base
+    ),
+    sessions_raw AS (
+        SELECT
+            *,
+            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
+                PARTITION BY ip, ja4 ORDER BY min_ts
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS sid
+        FROM gaps
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            min(min_ts) AS session_start,
+            max(max_ts) AS session_end,
+            sum(req_count) AS req_count,
+            sum(reqs_4xx) AS reqs_4xx,
+            sum(reqs_5xx) AS reqs_5xx,
+            sum(total_bytes) AS total_bytes,
+            sum(edge_count) AS edge_count,
+            sum(shield_count) AS shield_count,
+            max(has_rtt_row) AS has_rtt_row,
+            max(has_edge_sid_row) AS has_edge_sid_row,
+            sum(streaming_reqs) AS streaming_reqs,
+            sid
+        FROM sessions_raw
+        GROUP BY ip, ja4, sid
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
 
 _SESSIONS_CTE = """
     WITH raw_events AS (
@@ -118,6 +204,8 @@ _SESSIONS_CTE = """
             sum(edge_count) AS edge_count,
             sum(shield_count) AS shield_count,
             max(edge_sid) AS edge_sid,
+            toUInt8(medianMerge(rtt_state) IS NOT NULL) AS has_rtt_row,
+            toUInt8(max(edge_sid) != '') AS has_edge_sid_row,
             sum(streaming_reqs) AS streaming_reqs,
             sid
         FROM sessions_raw
@@ -162,6 +250,105 @@ def _asn_label_map(service_id: str, asns: list[int]) -> dict[int, str]:
     return {asn: _db.format_asn_label(asn, names.get(asn, "")) for asn in asns}
 
 
+def _as_dt(val: Any) -> datetime | None:
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        return _parse_ts(val)
+    return None
+
+
+def _enrich_paginated_sessions(
+    service: HighScaleService,
+    rows: list[dict[str, Any]],
+    where: str,
+    params: dict[str, Any],
+) -> None:
+    tuples_sql_parts: list[str] = []
+    enrich_params: dict[str, Any] = dict(params)
+    min_start: datetime | None = None
+    max_end: datetime | None = None
+    unique_ips: list[str] = []
+    seen_ips: set[str] = set()
+
+    for idx, row in enumerate(rows):
+        row.setdefault("asn", None)
+        row.setdefault("country", "")
+        row.setdefault("unique_urls", 0)
+        row.setdefault("ua", "")
+        row.setdefault("median_rtt_ms", None)
+        row.setdefault("edge_sid", "")
+
+        s_dt = _as_dt(row.get("session_start"))
+        e_dt = _as_dt(row.get("session_end"))
+        if s_dt is None or e_dt is None:
+            continue
+        if min_start is None or s_dt < min_start:
+            min_start = s_dt
+        if max_end is None or e_dt > max_end:
+            max_end = e_dt
+        ip_val = str(row.get("ip") or "")
+        ja4_val = str(row.get("ja4") or "")
+        if ip_val not in seen_ips:
+            seen_ips.add(ip_val)
+            unique_ips.append(ip_val)
+        enrich_params[f"en_ip_{idx}"] = ip_val
+        enrich_params[f"en_ja4_{idx}"] = ja4_val
+        enrich_params[f"en_s_{idx}"] = s_dt
+        enrich_params[f"en_e_{idx}"] = e_dt
+        tuples_sql_parts.append(
+            f"tuple(toUInt32({idx}), {{en_ip_{idx}:String}}, {{en_ja4_{idx}:String}}, "
+            f"{{en_s_{idx}:DateTime64(3)}}, {{en_e_{idx}:DateTime64(3)}})"
+        )
+
+    if not tuples_sql_parts or not unique_ips:
+        return
+
+    if min_start is not None:
+        enrich_params["start_time"] = min_start
+    if max_end is not None:
+        enrich_params["end_time"] = max_end
+
+    ip_placeholders: list[str] = []
+    for i, ip_val in enumerate(unique_ips):
+        enrich_params[f"en_uip_{i}"] = ip_val
+        ip_placeholders.append(f"{{en_uip_{i}:String}}")
+
+    enrich_sql = (
+        "/* sessions:enrich */ "
+        "WITH page_keys AS ("
+        "    SELECT t.1 AS pk_idx, t.2 AS pk_ip, t.3 AS pk_ja4, t.4 AS pk_start, t.5 AS pk_end "
+        f"    FROM (SELECT arrayJoin([{', '.join(tuples_sql_parts)}]) AS t)"
+        ") "
+        "SELECT "
+        "    pk.pk_idx AS row_idx, "
+        "    min(toInt32OrNull(custom_fields['asn'])) AS asn, "
+        "    min(country) AS country, "
+        "    uniq(url) AS unique_urls, "
+        "    min(custom_fields['ua']) AS ua, "
+        "    median(toFloat64OrNull(custom_fields['tcp_rtt'])) / 1000.0 AS median_rtt_ms, "
+        "    max(custom_fields['edge_sid']) AS edge_sid "
+        "FROM request_facts "
+        "INNER JOIN page_keys AS pk "
+        "    ON client_ip = pk.pk_ip AND custom_fields['ja4'] = pk.pk_ja4 "
+        f"WHERE {where} "
+        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "  AND event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+        "GROUP BY pk.pk_idx"
+    )
+    enriched_rows = service.client.execute(enrich_sql, enrich_params)
+    for en_row in enriched_rows:
+        idx = int(en_row["row_idx"])
+        if 0 <= idx < len(rows):
+            rows[idx]["asn"] = en_row.get("asn")
+            rows[idx]["country"] = en_row.get("country") or ""
+            rows[idx]["unique_urls"] = int(en_row.get("unique_urls") or 0)
+            rows[idx]["ua"] = en_row.get("ua") or ""
+            rows[idx]["median_rtt_ms"] = en_row.get("median_rtt_ms")
+            rows[idx]["edge_sid"] = en_row.get("edge_sid") or ""
+
+
 def sessions_endpoint(
     service: HighScaleService, req: SessionsRequest, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
@@ -187,12 +374,13 @@ def sessions_endpoint(
         "streaming_only": 1 if req.streaming_only else 0,
         **filter_params,
     }
-    cte = _SESSIONS_CTE.format(where=where)
     sort_by = req.sort_by if req.sort_by in _SORTABLE else "session_start"
     sort_dir = "ASC" if str(req.sort_dir).lower() == "asc" else "DESC"
+    fast_cte = _SESSIONS_FAST_CTE.format(where=where)
+    cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
     memo_key = digest_cache_key(
         {
-            "cid": id(service.client),
+            "cid": client_cache_token(service.client),
             "s": bucket_time_to_minute(start_time) if start_time else start_dt.strftime("%Y-%m-%dT%H:%M"),
             "e": bucket_time_to_minute(end_time) if end_time else end_dt.strftime("%Y-%m-%dT%H:%M"),
             "p": req.page,
@@ -212,32 +400,36 @@ def sessions_endpoint(
     if cached is not None:
         return cached
 
-    rows = service.client.execute(
-        "/* sessions:page */ "
-        + cte
-        + """
-    SELECT *, count() OVER () AS total_sessions
-    FROM (
-        SELECT *,
-               max(median_rtt_ms IS NOT NULL) OVER () AS any_rtt,
-               max(ja4 != '') OVER () AS any_ja4,
-               max(edge_count + shield_count > 0) OVER () AS any_edge,
-               max(edge_sid != '') OVER () AS any_edge_sid,
-               max(streaming_reqs > 0) OVER () AS any_cmcd
-        FROM flagged_sessions
-    )
+    rows = [
+        dict(r)
+        for r in service.client.execute(
+            "/* sessions:page */ "
+            + cte
+            + """
+    SELECT *,
+           count() OVER () AS total_sessions,
+           max(has_rtt_row) OVER () AS any_rtt,
+           max(ja4 != '') OVER () AS any_ja4,
+           max(edge_count + shield_count > 0) OVER () AS any_edge,
+           max(has_edge_sid_row) OVER () AS any_edge_sid,
+           max(streaming_reqs > 0) OVER () AS any_cmcd
+    FROM flagged_sessions
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
     """
-        + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
-        {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
-    )
+            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
+            {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
+        )
+    ]
+
+    if rows and "unique_urls" not in rows[0]:
+        _enrich_paginated_sessions(service, rows, where, params)
 
     if rows:
         total = int(rows[0]["total_sessions"])
     elif req.page > 1:
         counted = service.client.execute(
-            "/* sessions:count */ " + cte + "SELECT count() AS total_sessions" + _FILTERED, params
+            "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
         )
         total = int(counted[0]["total_sessions"]) if counted else 0
     else:

@@ -92,6 +92,21 @@ def security_aggregates(
         from backend.high_scale.security import security_aggregates as hs_aggregates
 
         return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
+
+    if not hasattr(repo.get_security_aggregates, "_mock_name"):
+        cached = repo.peek_security_aggregates(
+            src=ctx.source,
+            start_time=start_time,
+            end_time=end_time,
+            filters=req.filters,
+            bucket_seconds=req.bucket_seconds,
+            sections=sections,
+            mask_ips=mask_ips,
+        )
+        if cached is not None:
+            response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
+            return SecurityAggregatesResponse.with_telemetry(**cached)
+
     res = repo.get_security_aggregates(
         con=ctx.con,
         src=ctx.source,

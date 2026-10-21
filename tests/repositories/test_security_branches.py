@@ -57,14 +57,14 @@ def test_window_eligible_for_rollup_returns_false_when_end_before_start():
 
 
 def test_window_eligible_for_rollup_returns_true_for_window_at_3d_threshold():
-    """Exactly 3 days qualifies (>= boundary check) — pinned because the
-    threshold is the documented break-even point."""
+    """24h and wider windows qualify (>= _ROLLUP_MIN_WINDOW_SECONDS = 86400)."""
+    assert security._window_eligible_for_rollup("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z") is True
     assert security._window_eligible_for_rollup("2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z") is True
 
 
 def test_window_eligible_for_rollup_returns_false_below_3d_threshold():
-    """Just under 3 days disqualifies — the live path is cheaper there."""
-    assert security._window_eligible_for_rollup("2026-01-01T00:00:00Z", "2026-01-03T23:00:00Z") is False
+    """Just under 24h disqualifies — the live path is cheaper there."""
+    assert security._window_eligible_for_rollup("2026-01-01T00:00:00Z", "2026-01-01T23:00:00Z") is False
 
 
 # ── _has_rollup_coverage: input + OSError defensive branches ───────────────

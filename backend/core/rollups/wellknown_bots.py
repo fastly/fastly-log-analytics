@@ -430,12 +430,12 @@ def read_wellknown_bots_rollup(
         return None
     if end_dt - start_dt > timedelta(days=366):
         return None
-    # Only serve wide (>= 48 h) windows from the rollup. Narrow windows
-    # (e.g. 24 h) stay on the live SQL path: the closed-hour read cost
-    # doesn't amortise there, and the live path also covers the in-progress
-    # active hour the rollup drops. Matches the >= 48 h gate the slow_urls /
-    # security_dims rollups use (_SLOW_URLS_ROLLUP_MIN_HOURS).
-    if end_dt - start_dt < timedelta(hours=48):
+    # Only serve >= 24 h windows from the rollup (23 h floor after hour-truncation
+    # and minute-quantization). Narrow windows (< 24 h) stay on the live SQL path:
+    # the closed-hour read cost doesn't amortise there, and the live path also
+    # covers the in-progress active hour the rollup drops. Matches the >= 24 h
+    # gate the slow_urls / security_dims rollups use (_SLOW_URLS_ROLLUP_MIN_HOURS).
+    if end_dt - start_dt < timedelta(hours=23):
         return None
 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")

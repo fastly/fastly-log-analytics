@@ -35,7 +35,18 @@ from backend.repositories.security import (
     classify_ua_counts,
     summarize_wellknown_bot_rows,
 )
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import safe_iso
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+CacheRegistry.register("hs_security_aggregates_memo", _memo.cache)
 
 _WHERE = "__WHERE__"
 
@@ -386,8 +397,25 @@ def security_aggregates(
     sections: set[str] | None = None,
     mask_ips: bool = False,
 ) -> SecurityAggregatesResponse:
-    scope = _scope(service, req, start_time, end_time)
     bucket_seconds = _bucket_seconds(req)
+    memo_key = digest_cache_key(
+        {
+            "ep": "hs_security_aggregates",
+            "cid": client_cache_token(service.client),
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+            "b": int(bucket_seconds),
+            "sec": sorted(sections) if sections is not None else None,
+            "m": bool(mask_ips),
+        },
+        {"name": service.service_id, "service_id": service.service_id},
+    )
+    cached = _memo.get(memo_key)
+    if cached is not None:
+        return SecurityAggregatesResponse.with_telemetry(**cached)
+
+    scope = _scope(service, req, start_time, end_time)
 
     def want(name: str) -> bool:
         return sections is None or name in sections
@@ -443,6 +471,7 @@ def security_aggregates(
                     res.update(val)
                 else:
                     res[k] = val
+    _memo.put(memo_key, dict(res))
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 

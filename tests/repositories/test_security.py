@@ -1052,9 +1052,9 @@ def test_security_aggregates_ipv6_proxy_skip_rollup_on_small_window(
 
     from datetime import UTC, datetime, timedelta
 
-    # 24h window — below the 3-day gate threshold.
+    # 12h window — below the 24h gate threshold.
     end = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = (datetime.now(UTC) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.now(UTC) - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     live_ipv6_fired = {"n": 0}
     live_proxy_fired = {"n": 0}
@@ -1120,7 +1120,7 @@ def test_security_aggregates_window_gate_keeps_ipv6_ptype_in_temp_on_small_windo
     from datetime import UTC, datetime, timedelta
 
     end = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = (datetime.now(UTC) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.now(UTC) - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     create_sqls: list[str] = []
     orig_execute = QueryRunner.execute

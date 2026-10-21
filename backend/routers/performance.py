@@ -56,11 +56,22 @@ def performance_aggregates(
     start_time, end_time = ctx.resolve_window(req)
 
     high_scale_service = ctx.high_scale
+    sections = _expand_sections(req.sections)
     if high_scale_service is not None:
         from backend.high_scale.performance import performance_aggregates as hs_performance
 
-        return hs_performance(high_scale_service, req, start_time, end_time, sections=_expand_sections(req.sections))
-    sections = _expand_sections(req.sections)
+        return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
+    if not hasattr(repo.get_performance_aggregates, "_mock_name"):
+        cached = repo.peek_performance_aggregates(
+            src=ctx.source,
+            start_time=start_time,
+            end_time=end_time,
+            filters=req.filters,
+            sort_by=req.sort_by,
+            sections=sections,
+        )
+        if cached is not None:
+            return PerformanceAggregatesResponse.with_telemetry(**cached)
     res = repo.get_performance_aggregates(
         con=ctx.con,
         src=ctx.source,

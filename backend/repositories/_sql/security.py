@@ -499,6 +499,205 @@ GET_ACTIVE_PROXY_CLIENTS = """
     LIMIT 100
 """
 
+GET_SECURITY_PROXIES_COMBINED = """
+    WITH geo_dist AS (
+        SELECT
+            pop AS g_pop,
+            lat AS g_lat,
+            lon AS g_lon,
+            CASE
+                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
+                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
+                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
+                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
+            END AS distance_km
+        FROM (
+            SELECT DISTINCT pop, lat, lon
+            FROM {temp_table}
+            WHERE lat IS NOT NULL AND lon IS NOT NULL
+        )
+    ),
+    metrics AS (
+        SELECT
+            ip,
+            pop,
+            rtt_min,
+            tcp_rtt,
+            rtt_min / 1000.0 AS rtt_min_ms,
+            tcp_rtt / 1000.0 AS tcp_rtt_ms,
+            lat AS client_lat,
+            lon AS client_lon,
+            asn,
+            CASE
+                WHEN pop = 'SJC' THEN 37.3382
+                WHEN pop = 'IAD' THEN 38.9531
+                WHEN pop = 'NRT' THEN 35.7720
+                ELSE 38.0
+            END AS pop_lat,
+            CASE
+                WHEN pop = 'SJC' THEN -121.8863
+                WHEN pop = 'IAD' THEN -77.4565
+                WHEN pop = 'NRT' THEN 140.3929
+                ELSE -97.0
+            END AS pop_lon,
+            geo_dist.distance_km AS distance_km
+            {select_country_city_inner}
+        FROM {temp_table}
+        LEFT JOIN geo_dist
+            ON pop IS NOT DISTINCT FROM geo_dist.g_pop
+           AND lat IS NOT DISTINCT FROM geo_dist.g_lat
+           AND lon IS NOT DISTINCT FROM geo_dist.g_lon
+    ),
+    stats_q AS (
+        SELECT
+            'stats' AS _kind,
+            CAST(NULL AS VARCHAR) AS _s1,
+            CAST(COUNT(DISTINCT CASE
+                WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip
+                WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN ip
+                ELSE NULL
+            END) AS BIGINT) AS _i1,
+            CAST(COUNT(CASE
+                WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 1
+                WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN 1
+                ELSE NULL
+            END) AS BIGINT) AS _i2,
+            CAST(COUNT(DISTINCT CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip ELSE NULL END) AS BIGINT) AS _i3,
+            CAST(NULL AS DOUBLE) AS _d1,
+            CAST(NULL AS DOUBLE) AS _d2,
+            CAST(NULL AS DOUBLE) AS _d3,
+            CAST(NULL AS VARCHAR) AS _s2,
+            CAST(NULL AS DOUBLE) AS _d4,
+            CAST(NULL AS DOUBLE) AS _d5,
+            CAST(NULL AS DOUBLE) AS _d6,
+            CAST(NULL AS DOUBLE) AS _d7,
+            CAST(NULL AS BOOLEAN) AS _b1,
+            CAST(NULL AS VARCHAR) AS _s3,
+            CAST(NULL AS VARCHAR) AS _s4,
+            CAST(NULL AS VARCHAR) AS _s5
+        FROM metrics
+    ),
+    quality_q AS (
+        SELECT
+            'quality' AS _kind,
+            CAST(type AS VARCHAR) AS _s1,
+            CAST(count AS BIGINT) AS _i1,
+            CAST(NULL AS BIGINT) AS _i2,
+            CAST(NULL AS BIGINT) AS _i3,
+            CAST(NULL AS DOUBLE) AS _d1,
+            CAST(NULL AS DOUBLE) AS _d2,
+            CAST(NULL AS DOUBLE) AS _d3,
+            CAST(NULL AS VARCHAR) AS _s2,
+            CAST(NULL AS DOUBLE) AS _d4,
+            CAST(NULL AS DOUBLE) AS _d5,
+            CAST(NULL AS DOUBLE) AS _d6,
+            CAST(NULL AS DOUBLE) AS _d7,
+            CAST(NULL AS BOOLEAN) AS _b1,
+            CAST(NULL AS VARCHAR) AS _s3,
+            CAST(NULL AS VARCHAR) AS _s4,
+            CAST(NULL AS VARCHAR) AS _s5
+        FROM (
+            SELECT
+                CASE
+                    WHEN rtt_min IS NULL OR tcp_rtt IS NULL THEN 'Direct Connection'
+                    WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 THEN 'Active Tunnel / Proxy'
+                    WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.7 THEN 'WiFi / Mobile'
+                    ELSE 'Direct Connection'
+                END AS type,
+                COUNT(*) AS count
+            FROM {temp_table}
+            GROUP BY 1
+            ORDER BY count DESC
+        )
+    ),
+    isps_q AS (
+        SELECT
+            'isp' AS _kind,
+            CAST(NULL AS VARCHAR) AS _s1,
+            CAST(asn AS BIGINT) AS _i1,
+            CAST(count AS BIGINT) AS _i2,
+            CAST(NULL AS BIGINT) AS _i3,
+            CAST(NULL AS DOUBLE) AS _d1,
+            CAST(NULL AS DOUBLE) AS _d2,
+            CAST(NULL AS DOUBLE) AS _d3,
+            CAST(NULL AS VARCHAR) AS _s2,
+            CAST(NULL AS DOUBLE) AS _d4,
+            CAST(NULL AS DOUBLE) AS _d5,
+            CAST(NULL AS DOUBLE) AS _d6,
+            CAST(NULL AS DOUBLE) AS _d7,
+            CAST(NULL AS BOOLEAN) AS _b1,
+            CAST(NULL AS VARCHAR) AS _s3,
+            CAST(NULL AS VARCHAR) AS _s4,
+            CAST(NULL AS VARCHAR) AS _s5
+        FROM (
+            SELECT
+                asn,
+                COUNT(*) AS count
+            FROM {temp_table}
+            WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1
+            GROUP BY 1
+            ORDER BY count DESC
+            LIMIT 10
+        )
+    ),
+    clients_q AS (
+        SELECT
+            'client' AS _kind,
+            CAST(ip AS VARCHAR) AS _s1,
+            CAST(asn AS BIGINT) AS _i1,
+            CAST(NULL AS BIGINT) AS _i2,
+            CAST(NULL AS BIGINT) AS _i3,
+            CAST(ROUND(rtt_min_ms, 2) AS DOUBLE) AS _d1,
+            CAST(ROUND(tcp_rtt_ms, 2) AS DOUBLE) AS _d2,
+            CAST(ROUND(distance_km, 1) AS DOUBLE) AS _d3,
+            CAST(pop AS VARCHAR) AS _s2,
+            CAST(ROUND(client_lat, 4) AS DOUBLE) AS _d4,
+            CAST(ROUND(client_lon, 4) AS DOUBLE) AS _d5,
+            CAST(pop_lat AS DOUBLE) AS _d6,
+            CAST(pop_lon AS DOUBLE) AS _d7,
+            CAST(impossible_distance AS BOOLEAN) AS _b1,
+            CAST(risk_level AS VARCHAR) AS _s3,
+            CAST(country AS VARCHAR) AS _s4,
+            CAST(city AS VARCHAR) AS _s5
+        FROM (
+            SELECT
+                ip,
+                asn,
+                rtt_min_ms,
+                tcp_rtt_ms,
+                distance_km,
+                pop,
+                client_lat,
+                client_lon,
+                pop_lat,
+                pop_lon,
+                CASE
+                    WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN true
+                    ELSE false
+                END AS impossible_distance,
+                CASE
+                    WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 'High'
+                    WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High'
+                    WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium'
+                    ELSE 'Low'
+                END AS risk_level
+                {select_country_city_outer}
+            FROM metrics
+            WHERE
+                rtt_min_ms IS NOT NULL AND (
+                    (distance_km > (rtt_min_ms * 100.0 + 150.0)) OR
+                    (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)
+                )
+            ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC
+            LIMIT 100
+        )
+    )
+    SELECT * FROM stats_q
+    UNION ALL SELECT * FROM quality_q
+    UNION ALL SELECT * FROM isps_q
+    UNION ALL SELECT * FROM clients_q
+"""
+
 __all__ = [
     "threat_intel_sql",
     "TOP_UAS_BY_COUNT",
@@ -519,6 +718,7 @@ __all__ = [
     "GET_TRAFFIC_QUALITY",
     "GET_SUSPICIOUS_ISPS",
     "GET_ACTIVE_PROXY_CLIENTS",
+    "GET_SECURITY_PROXIES_COMBINED",
 ]
 
 

@@ -272,3 +272,49 @@ def test_detail_is_fenced_to_visible_batches_and_parameterised() -> None:
     assert "publication_state='visible'" in sql and "high_scale_batch_publications FINAL" in sql
     assert "client_ip = {ip:String}" in sql and "custom_fields['ja4'] = {ja4:String}" in sql
     assert params["ip"] == "203.0.113.7" and params["ja4"] == "ja4-x"
+
+
+def test_two_phase_session_enrichment_defers_heavy_states_to_phase_2() -> None:
+    fast_row = _session_row()
+    for k in ("asn", "country", "unique_urls", "ua", "median_rtt_ms", "edge_sid"):
+        fast_row.pop(k, None)
+
+    calls: list[tuple[str, dict]] = []
+
+    class _TwoPhaseClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            calls.append((sql, params or {}))
+            if "sessions:page" in sql:
+                return [fast_row]
+            if "sessions:enrich" in sql:
+                return [
+                    {
+                        "row_idx": 0,
+                        "asn": 15169,
+                        "country": "DE",
+                        "unique_urls": 77,
+                        "ua": "Mozilla/5.0",
+                        "median_rtt_ms": 8.25,
+                        "edge_sid": "es-fast",
+                    }
+                ]
+            raise AssertionError(sql)
+
+    res = sessions_endpoint(
+        SimpleNamespace(service_id="svc", client=_TwoPhaseClient()),  # type: ignore[arg-type]
+        SessionsRequest(sort_by="req_count", sort_dir="desc"),
+        START,
+        END,
+    )
+    assert len(calls) == 2
+    page_sql, _ = calls[0]
+    enrich_sql, enrich_params = calls[1]
+    assert "uniqState" not in page_sql and "medianState" not in page_sql
+    assert "sessions:enrich" in enrich_sql
+    assert enrich_params["en_ip_0"] == "203.0.113.7"
+    assert res["sessions"][0]["asn"] == 15169
+    assert res["sessions"][0]["country"] == "DE"
+    assert res["sessions"][0]["unique_urls"] == 77
+    assert res["sessions"][0]["ua"] == "Mozilla/5.0"
+    assert res["sessions"][0]["median_rtt_ms"] == 8.25
+    assert res["sessions"][0]["edge_sid"] == "es-fast"

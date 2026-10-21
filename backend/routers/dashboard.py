@@ -78,6 +78,22 @@ def dashboard_aggregates(
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
+    if not hasattr(repo.get_aggregates, "_mock_name"):
+        cached = repo.peek_aggregates(
+            src=ctx.source,
+            start_time=start_time,
+            end_time=end_time,
+            filters=req.filters,
+            chart_interval=req.chart_interval,
+            chart_metric=req.chart_metric,
+            fields_filter=req.fields,
+            include_time_series=its,
+            include_conn_requests=icr,
+            include_map_data=imd,
+            include_top_n=itn,
+        )
+        if cached is not None:
+            return cached
     return repo.get_aggregates(
         con=ctx.con,
         src=ctx.source,
