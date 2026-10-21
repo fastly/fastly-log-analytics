@@ -152,6 +152,67 @@ def test_error_stream_route_is_registered():
     assert path in app.openapi()["paths"]
 
 
+def test_error_stream_not_shadowed_by_tab_route(monkeypatch):
+    """GET /control-room/error-stream must hit the SSE handler, not 404 unknown_tab from /{tab}."""
+    import backend.routers.control_room as cr_mod
+
+    route_paths = [getattr(r, "path", "") for r in cr_mod.router.routes]
+    err_idx = route_paths.index("/api/services/{service_id}/control-room/error-stream")
+    tab_idx = route_paths.index("/api/services/{service_id}/control-room/{tab}")
+    assert err_idx < tab_idx, "error-stream route must be registered before /{tab} catch-all"
+
+
+def test_correlate_top_values_windowed_freshness_and_telemetry(monkeypatch):
+    """correlate_top_values uses LATEST_TIMESTAMP_WINDOWED and records DuckDB telemetry."""
+    from datetime import UTC, datetime
+
+    from backend.core.metadata import usage_log
+    from backend.repositories import control_room as cr_repo
+    from backend.utils.telemetry import set_page_load_id
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(usage_log, "log_telemetry_query", lambda **kwargs: recorded.append(kwargs))
+
+    executed_sql: list[str] = []
+
+    class _MockResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _MockCon:
+        def execute(self, sql, params=None):
+            executed_sql.append(sql)
+            if "GROUP BY" in sql:
+                return _MockResult([("/home", 42)])
+            return _MockResult([(datetime(2026, 10, 20, 12, 0, tzinfo=UTC),)])
+
+    set_page_load_id("cr-telemetry-test")
+    try:
+        rows, latest_ts = cr_repo.correlate_top_values(
+            _MockCon(),
+            "logs_test",
+            "url",
+            datetime(2026, 10, 20, 11, 0, tzinfo=UTC),
+            10,
+            service_id="svc_cr",
+        )
+    finally:
+        set_page_load_id(None)
+
+    assert rows == [("/home", 42)]
+    assert latest_ts is not None
+    assert len(executed_sql) == 2
+    assert "WHERE timestamp >= ?" in executed_sql[1]
+    assert len(recorded) == 2
+    assert all(r["engine"] == "duckdb" and r["page_load_id"] == "cr-telemetry-test" for r in recorded)
+
+
 def test_recent_standard_errors_maps_rows(monkeypatch):
     import backend.routers.control_room as control_room
 

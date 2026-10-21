@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { rotatePageLoadId } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   Tooltip,
@@ -335,6 +336,7 @@ export function AppLayout({
   if (pathname !== navPathname) {
     setNavPathname(pathname)
     setMobileNavOpen(false)
+    rotatePageLoadId()
   }
   // Cmd/Ctrl+B toggles the sidebar. Skip when an editable surface is
   // focused so the Query page's SQL editor (and any future text inputs

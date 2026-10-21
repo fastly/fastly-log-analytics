@@ -20,6 +20,14 @@ export function getPageLoadId(): string | null {
   return pageLoadId
 }
 
+export function rotatePageLoadId(): string | null {
+  if (typeof window === "undefined") return null
+  pageLoadId = typeof crypto?.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return pageLoadId
+}
+
 export function extractApiError(error: unknown): string {
   if (!error) return 'Unknown error'
   if (typeof error === 'string') return error

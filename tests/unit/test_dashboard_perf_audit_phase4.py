@@ -293,3 +293,116 @@ def test_invalidate_service_clears_aggregates_and_top_bots_cache() -> None:
     assert "top_bots:def456:svc_test" not in dashboard_repo._dashboard_cache
     assert "other:svc_keep" in dashboard_repo._dashboard_cache
     dashboard_repo.invalidate_service("svc_keep")
+
+
+def test_enrich_bot_metadata_binary_search_and_pair_dedup_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """enrich_bot_metadata uses binary-searched CIDR intervals and deduplicates (ua, ip) pairs."""
+    import ipaddress
+    import time
+
+    import pandas as pd
+
+    from backend.utils import bot_sources, rdns_cache
+
+    fake_feeds = {
+        "openai-gptbot": [ipaddress.ip_network(f"198.51.{i}.0/24") for i in range(100)],
+        "anthropic-ai": [ipaddress.ip_network("203.0.113.0/24"), ipaddress.ip_network("2001:db8::/32")],
+    }
+    monkeypatch.setattr(bot_sources, "_get_compiled_ip_feeds", lambda: fake_feeds)
+    monkeypatch.setattr(bot_sources, "_compiled_ip_feeds", {})
+    monkeypatch.setattr(rdns_cache, "get_hostnames", lambda ips: {})
+
+    rows = [
+        {"ua": "Mozilla/5.0 (compatible; GPTBot/1.0)", "ip": "198.51.42.10", "waf_req_id": ""},
+        {"ua": "Mozilla/5.0", "ip": "203.0.113.99", "waf_req_id": ""},
+        {"ua": "Mozilla/5.0", "ip": "192.0.2.1", "waf_req_id": ""},
+    ] * 2000  # 6,000 rows
+    df = pd.DataFrame(rows)
+
+    t0 = time.perf_counter()
+    bot_sources.enrich_bot_metadata(df)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 0.5, f"Expected < 0.5s for 6,000 rows, took {elapsed:.3f}s"
+    assert "openai-gptbot" in str(df.loc[0, "_bot_name"])
+    assert "IP-Match" in str(df.loc[1, "_bot_name"])
+    assert df.loc[2, "_bot_name"] == "null"
+
+
+def test_high_scale_field_values_and_raw_df(monkeypatch: pytest.MonkeyPatch) -> None:
+    """High-scale field_values supports fast aggregate and search paths; raw_df unpacks custom_fields."""
+    from backend.models.dashboard import FieldValuesRequest, RawRequest
+    from backend.utils import bot_sources
+
+    monkeypatch.setattr(bot_sources, "enrich_bot_metadata", lambda df: None)
+
+    class FakeClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "request_aggregates" in sql and "AS total_count" in sql:
+                return [{"total_count": 2}]
+            if "request_aggregates" in sql:
+                return [
+                    {"value": "/api/v1", "aggregate_count": 50},
+                    {"value": "/health", "aggregate_count": 10},
+                ]
+            if "GROUP BY v" in sql:
+                return [{"v": "/api/v1", "c": 50}]
+            if "FROM request_facts" in sql:
+                return [
+                    {
+                        "timestamp": datetime(2026, 10, 20, 12, 0, tzinfo=UTC),
+                        "ip": "198.51.100.1",
+                        "url": "/api/v1",
+                        "country": "US",
+                        "custom_fields": {"custom_header": "abc", "status": "200"},
+                    }
+                ]
+            return []
+
+    service = HighScaleService(
+        service_id="svc1",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc1",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 10, 19, tzinfo=UTC),
+            coverage_end=datetime(2026, 10, 20, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    unfiltered_fv = high_scale_dashboard.field_values(
+        service,
+        FieldValuesRequest(field="url", limit=10),
+        "2026-10-19T00:00:00Z",
+        "2026-10-20T00:00:00Z",
+    )
+    assert len(unfiltered_fv.values) == 2
+    assert unfiltered_fv.values[0].value == "/api/v1"
+    assert unfiltered_fv.values[0].count == 50
+
+    search_fv = high_scale_dashboard.field_values(
+        service,
+        FieldValuesRequest(field="url", search="api", limit=10),
+        "2026-10-19T00:00:00Z",
+        "2026-10-20T00:00:00Z",
+    )
+    assert len(search_fv.values) == 1
+    assert search_fv.values[0].value == "/api/v1"
+
+    df = high_scale_dashboard.raw_df(
+        service,
+        RawRequest(limit=10),
+        "2026-10-19T00:00:00Z",
+        "2026-10-20T00:00:00Z",
+        limit=10,
+    )
+    assert len(df) == 1
+    assert df.loc[0, "url"] == "/api/v1"
+    assert df.loc[0, "custom_header"] == "abc"
+    assert "custom_fields" not in df.columns

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 from datetime import datetime
 from typing import Any
 
@@ -22,7 +23,10 @@ from backend.models.dashboard import (
     AggregatesResponse,
     FieldAggregate,
     FieldTopEntry,
+    FieldValuesRequest,
+    FieldValuesResponse,
     MapPoint,
+    RawRequest,
     TimeSeriesPoint,
 )
 from backend.utils.date_utils import safe_iso
@@ -387,7 +391,8 @@ def _filtered_aggregates(
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        field_results = dict(ex.map(fetch_field, fields_to_query))
+        futs = [ex.submit(contextvars.copy_context().run, fetch_field, f) for f in fields_to_query]
+        field_results = dict(f.result() for f in futs)
 
     total_rows_result = service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params)
     total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
@@ -555,3 +560,167 @@ def bundle(
         "debug_calls": get_tracked_calls(),
         "debug_sqlite": list(get_sqlite_queries()),
     }
+
+
+def field_values(
+    service: HighScaleService,
+    req: FieldValuesRequest,
+    start_time: str | None,
+    end_time: str | None,
+) -> FieldValuesResponse:
+    """Return top values for a single field in high-scale ClickHouse mode."""
+    from backend.high_scale._filters import _column
+    from backend.repositories.utils.filters import normalize_filter_key
+
+    clean_field = "".join(ch for ch in req.field if ch.isalnum() or ch == "_")
+    if not clean_field:
+        raise ValueError("Invalid field name")
+
+    key = normalize_filter_key(clean_field)
+    if not key:
+        raise ValueError("Invalid field name")
+
+    raw_filters = (
+        req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+    )
+    filters_excl = {k: v for k, v in raw_filters.items() if k != req.field and normalize_filter_key(k) != key}
+    filter_clauses, filter_params = request_filter_clauses(filters_excl)
+
+    limit = max(1, min(int(req.limit or 100), 1000))
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+
+    # Fast path: unfiltered + no search + pre-aggregated dimension
+    if not req.search and not filter_clauses and key in _FIELD_DIMENSIONS:
+        agg = _aggregate(
+            service,
+            start_time=start_time,
+            end_time=end_time,
+            dimension=_FIELD_DIMENSIONS[key],
+            watermark=service.watermark_for("request"),
+        )
+        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
+        if key == "asn" and vals:
+            try:
+                from backend.core.duckdb import enrich_asn_labels
+
+                enrich_asn_labels(vals, service.service_id)
+            except Exception:
+                pass
+        return FieldValuesResponse.with_telemetry(
+            values=[FieldTopEntry(**v) for v in vals],
+            field=req.field,
+        )
+
+    if key in {"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"}:
+        return FieldValuesResponse.with_telemetry(values=[], field=req.field)
+
+    params: dict[str, Any] = {"service_id": service.service_id, "limit": limit, **filter_params}
+    sql_col = _column(key, params, "target_field")
+    clauses = [*visible_fact_clauses("request"), *filter_clauses, f"{sql_col} != ''"]
+
+    if start is not None and end is not None:
+        from datetime import timedelta
+
+        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
+
+    if req.search:
+        params["search_pat"] = f"%{req.search}%"
+        clauses.append(f"{sql_col} ILIKE {{search_pat:String}}")
+
+    where_clause = " AND ".join(clauses)
+    rows = service.client.execute(
+        f"SELECT {sql_col} AS v, count() AS c FROM request_facts "
+        f"WHERE {where_clause} GROUP BY v ORDER BY c DESC LIMIT {{limit:UInt32}}",
+        params,
+    )
+    vals_facts: list[dict[str, Any]] = [{"value": str(r["v"]), "count": int(r["c"])} for r in rows]
+    if key == "asn" and vals_facts:
+        try:
+            from backend.core.duckdb import enrich_asn_labels
+
+            enrich_asn_labels(vals_facts, service.service_id)
+        except Exception:
+            pass
+    return FieldValuesResponse.with_telemetry(
+        values=[FieldTopEntry(**v) for v in vals_facts],
+        field=req.field,
+    )
+
+
+def raw_df(
+    service: HighScaleService,
+    req: RawRequest,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    limit: int = 50000,
+):
+    """Fetch raw rows from ClickHouse ``request_facts`` as a pandas DataFrame for CSV export."""
+    from datetime import timedelta
+
+    import pandas as pd
+
+    from backend.utils.bot_sources import enrich_bot_metadata
+
+    raw_filters = (
+        req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+    )
+    filter_clauses, filter_params = request_filter_clauses(raw_filters)
+    clauses = [*visible_fact_clauses("request"), *filter_clauses]
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "limit": max(1, min(int(limit), 50000)),
+        **filter_params,
+    }
+
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None and end is not None:
+        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
+
+    where_clause = " AND ".join(clauses)
+    rows = service.client.execute(
+        "SELECT event_timestamp AS timestamp, client_ip AS ip, url, country, custom_fields "
+        f"FROM request_facts WHERE {where_clause} "
+        "ORDER BY event_timestamp DESC LIMIT {limit:UInt32}",
+        params,
+    )
+    if not rows:
+        return pd.DataFrame()
+
+    records: list[dict[str, Any]] = []
+    for r in rows:
+        cf = r.get("custom_fields")
+        custom = dict(cf) if isinstance(cf, dict) else {}
+        ts = r.get("timestamp")
+        records.append(
+            {
+                **custom,
+                "timestamp": safe_iso(ts) if isinstance(ts, datetime) else str(ts or ""),
+                "ip": str(r.get("ip") or ""),
+                "url": str(r.get("url") or ""),
+                "country": str(r.get("country") or ""),
+            }
+        )
+
+    df = pd.DataFrame(records)
+    enrich_bot_metadata(df)
+
+    if req.columns:
+        existing_cols = [c for c in req.columns if c in df.columns]
+        if "_bot_name" in req.columns and "_bot_name" not in existing_cols:
+            df["_bot_name"] = "null"
+            existing_cols.append("_bot_name")
+        if "_ngwaf_bot_name" in req.columns and "_ngwaf_bot_name" not in existing_cols:
+            df["_ngwaf_bot_name"] = None
+            existing_cols.append("_ngwaf_bot_name")
+        df = df[existing_cols]
+
+    return df

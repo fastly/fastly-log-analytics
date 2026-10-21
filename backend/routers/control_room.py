@@ -105,27 +105,6 @@ TAB_STUBS: dict[str, dict] = {
 }
 
 
-# ── Tab data endpoints (read) ────────────────────────────────────────────────
-
-
-@router.get(
-    "/services/{service_id}/control-room/{tab}",
-    response_model=ControlRoomTabResponse,
-    response_model_exclude_unset=True,
-)
-@query_errors()
-def control_room_tab(
-    tab: str,
-    service_id: ServiceId,
-):
-    """Return data for a control-room tab."""
-    if tab not in TAB_STUBS:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail={"error": "unknown_tab", "tab": tab})
-    return TAB_STUBS[tab]
-
-
 # ── Mutation endpoints (admin-only, 501 stubs) ───────────────────────────────
 
 
@@ -311,12 +290,19 @@ async def realtime_stream(
 
 def _recent_standard_errors(source: dict, service_id: str) -> list[dict]:
     from backend.core import duckdb as _db
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.repositories._base import _safe_table
 
     con = _db.get_connection(source=source, read_only=True)
     try:
         view_name = _safe_table(service_id.replace("-", "_"))
-        return control_room_repo.recent_standard_error_events(con, view_name)
+        return execute_with_stale_view_retry(
+            con,
+            source,
+            control_room_repo.recent_standard_error_events,
+            view_name,
+            service_id=service_id,
+        )
     finally:
         con.close()
 
@@ -497,11 +483,20 @@ async def control_room_correlate(
         )
 
     def _query():
+        from backend.core.iceberg import execute_with_stale_view_retry
+
         con = _db.get_connection(source=source, read_only=True)
         try:
             view_name = _safe_table(service_id.replace("-", "_"))
-            return control_room_repo.correlate_top_values(
-                con, view_name, col, datetime.now(UTC) - timedelta(minutes=window_minutes), limit
+            return execute_with_stale_view_retry(
+                con,
+                source,
+                control_room_repo.correlate_top_values,
+                view_name,
+                col,
+                datetime.now(UTC) - timedelta(minutes=window_minutes),
+                limit,
+                service_id=service_id,
             )
         finally:
             con.close()
@@ -581,3 +576,24 @@ def wizard_step(
         actor="control_room_wizard",
     )
     return {"recorded": True, "step": body.step}
+
+
+# ── Tab data endpoints (read) — registered AFTER static /control-room/* paths ─
+
+
+@router.get(
+    "/services/{service_id}/control-room/{tab}",
+    response_model=ControlRoomTabResponse,
+    response_model_exclude_unset=True,
+)
+@query_errors()
+def control_room_tab(
+    tab: str,
+    service_id: ServiceId,
+):
+    """Return data for a control-room tab."""
+    if tab not in TAB_STUBS:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail={"error": "unknown_tab", "tab": tab})
+    return TAB_STUBS[tab]

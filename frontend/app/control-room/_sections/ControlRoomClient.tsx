@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useTimezone } from '@/hooks/useTimezone'
@@ -159,6 +159,14 @@ function useRealtimeStream(): RealtimeStreamState {
   useEffect(() => {
     if (!activeServiceId) return
     const ac = new AbortController()
+    const pageLoadId = getPageLoadId()
+    // Start SSE stream immediately in parallel with realtime-seed so the
+    // first live metrics_tick is not blocked by the 150ms–1,200ms seed fetch.
+    start(
+      `/api/services/${activeServiceId}/realtime-stream`,
+      undefined,
+      pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
+    )
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
@@ -176,12 +184,6 @@ function useRealtimeStream(): RealtimeStreamState {
       }
       if (!ac.signal.aborted) {
         setSeed({ ticks: seedTicks, timestamps: new Set(seedTicks.map((t) => t.timestamp)) })
-        const pageLoadId = getPageLoadId()
-        start(
-          `/api/services/${activeServiceId}/realtime-stream`,
-          undefined,
-          pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
-        )
       }
     })()
     return () => {
@@ -316,6 +318,7 @@ export function CorrelatorLeaderboard({
       )
     },
     enabled: !!serviceId,
+    placeholderData: keepPreviousData,
     refetchInterval: refreshInterval,
     refetchIntervalInBackground: false,
     retry: false,
@@ -332,7 +335,7 @@ export function CorrelatorLeaderboard({
           </Badge>
         </div>
       )}
-      <div className="space-y-1.5">
+      <div className={`space-y-1.5 transition-opacity ${loading && data ? 'opacity-40 pointer-events-none' : ''}`}>
         {loading && !data && (
           <div className="text-sm text-muted-foreground py-8 text-center animate-pulse">Loading leaderboard...</div>
         )}

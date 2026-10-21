@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { buildServiceHref } from '@/lib/navigation'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
@@ -33,6 +34,9 @@ export function useShareStatusBanner({ enabled }: Options) {
   const router = useRouter()
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
+  const isBootstrapAnalyst =
+    queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst === true
   // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
   const hidden = React.useSyncExternalStore(
     subscribeVisibility,
@@ -53,6 +57,9 @@ export function useShareStatusBanner({ enabled }: Options) {
   const { data: status } = useQuery<ShareBanner | null>({
     queryKey: queryKeys.shareBanner(),
     queryFn: async ({ signal }) => {
+      if (queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst) {
+        return null
+      }
       // Bootstrap can resolve between first render and the mount-time fetch;
       // re-read it once so that window doesn't cost a round trip either.
       if (!seededAtRenderRef.current) {
@@ -71,7 +78,7 @@ export function useShareStatusBanner({ enabled }: Options) {
     refetchInterval: POLL_MS,
     refetchIntervalInBackground: false,
     retry: false,
-    enabled: enabled && !hidden,
+    enabled: enabled && !hidden && !isRemoteAnalyst && !isBootstrapAnalyst,
   })
 
   const node = enabled && status?.sharing_active ? (

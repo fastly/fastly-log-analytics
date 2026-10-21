@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import functools
 import hashlib
 import ipaddress
@@ -550,6 +551,25 @@ def get_bot_regex_pattern(limit: int = 500) -> str | None:
     return "(?i)" + "|".join(re.escape(lit) for lit in literals)
 
 
+def _compile_feed_intervals(
+    feeds: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]],
+) -> dict[str, tuple[list[int], list[int], list[int], list[int]]]:
+    """Collapse each feed's networks into sorted disjoint integer interval arrays for O(log M) bisect matching."""
+    intervals: dict[str, tuple[list[int], list[int], list[int], list[int]]] = {}
+    for feed_id, net_objs in feeds.items():
+        v4_nets = [n for n in net_objs if isinstance(n, ipaddress.IPv4Network)]
+        v6_nets = [n for n in net_objs if isinstance(n, ipaddress.IPv6Network)]
+        v4_collapsed = list(ipaddress.collapse_addresses(v4_nets)) if v4_nets else []
+        v6_collapsed = list(ipaddress.collapse_addresses(v6_nets)) if v6_nets else []
+        intervals[feed_id] = (
+            [int(n.network_address) for n in v4_collapsed],
+            [int(n.broadcast_address) for n in v4_collapsed],
+            [int(n.network_address) for n in v6_collapsed],
+            [int(n.broadcast_address) for n in v6_collapsed],
+        )
+    return intervals
+
+
 def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
     """Compile enabled IP source CIDR ranges into Network objects once for high-performance match."""
     current_mtime = _cache_mtime()
@@ -574,8 +594,22 @@ def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress
                     feeds[src["id"]] = net_objs
 
         _compiled_ip_feeds["feeds"] = feeds
+        _compiled_ip_feeds["intervals"] = _compile_feed_intervals(feeds)
+        _compiled_ip_feeds["intervals_feeds_id"] = id(feeds)
         _compiled_ip_feeds["mtime"] = current_mtime
         return feeds
+
+
+def _get_feed_intervals(
+    ip_feeds: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]],
+) -> dict[str, tuple[list[int], list[int], list[int], list[int]]]:
+    with _compiled_ip_feeds_lock:
+        if _compiled_ip_feeds.get("intervals_feeds_id") == id(ip_feeds) and "intervals" in _compiled_ip_feeds:
+            return _compiled_ip_feeds["intervals"]
+        intervals = _compile_feed_intervals(ip_feeds)
+        _compiled_ip_feeds["intervals"] = intervals
+        _compiled_ip_feeds["intervals_feeds_id"] = id(ip_feeds)
+        return intervals
 
 
 def enrich_bot_metadata(df: Any) -> None:
@@ -592,44 +626,74 @@ def enrich_bot_metadata(df: Any) -> None:
         from backend.utils.rdns_cache import classify, get_hostnames
 
         match_ua = build_matcher()
-        # Match UAs first so we know exactly which IPs need hostname resolution
-        # — then batch-resolve them in one SQLite read instead of opening a
-        # fresh connection per row.
-        row_matches: list[tuple[str, tuple[dict, ...]]] = []
-        candidate_ips: list[str] = []
+        # Deduplicate (ua, ip) pairs across the DataFrame so 50k rows with a few hundred
+        # unique pairs only execute UA matching, IP interval bisect, and rDNS classification
+        # once per unique pair instead of O(N * M).
+        ua_matches_cache: dict[str, tuple[dict, ...]] = {}
+        row_keys: list[tuple[str, str]] = []
+        candidate_ips_set: set[str] = set()
         for ua_val, ip_val in zip(df["ua"], df["ip"]):
-            matches = match_ua(str(ua_val) if ua_val else "")
+            ua_str = str(ua_val) if ua_val else ""
             ip_str = str(ip_val) if ip_val else ""
-            row_matches.append((ip_str, matches))
+            row_keys.append((ua_str, ip_str))
+            matches = ua_matches_cache.get(ua_str)
+            if matches is None:
+                matches = match_ua(ua_str)
+                ua_matches_cache[ua_str] = matches
             if matches and ip_str:
-                candidate_ips.append(ip_str)
-        hostnames = get_hostnames(candidate_ips)
+                candidate_ips_set.add(ip_str)
+        hostnames = get_hostnames(list(candidate_ips_set))
 
-        # Get pre-compiled IP ranges
+        # Pre-compiled IP ranges + sorted disjoint interval arrays for O(log M) bisect lookup
         ip_feeds = _get_compiled_ip_feeds()
+        feed_intervals = _get_feed_intervals(ip_feeds)
+        feed_name_by_id = {s["id"]: s["name"] for s in BOT_SOURCES}
+        ip_feed_cache: dict[str, str | None] = {}
+        pair_label_cache: dict[tuple[str, str], str] = {}
 
-        bot_names = []
-        for ip_str, matches in row_matches:
-            matched_feed = None
-            if ip_str:
-                try:
-                    ip_obj = ipaddress.ip_address(ip_str)
-                    for feed_id, net_objs in ip_feeds.items():
-                        for net in net_objs:
-                            if ip_obj in net:
-                                matched_feed = feed_id
-                                break
-                        if matched_feed:
-                            break
-                except Exception:
-                    logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
+        def _match_ip_feed(ip_str: str) -> str | None:
+            if not ip_str:
+                return None
+            if ip_str in ip_feed_cache:
+                return ip_feed_cache[ip_str]
+            matched_feed: str | None = None
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                ip_int = int(ip_obj)
+                is_v4 = ip_obj.version == 4
+                for feed_id, (v4_starts, v4_ends, v6_starts, v6_ends) in feed_intervals.items():
+                    starts = v4_starts if is_v4 else v6_starts
+                    ends = v4_ends if is_v4 else v6_ends
+                    if not starts:
+                        continue
+                    idx = bisect.bisect_right(starts, ip_int) - 1
+                    if idx >= 0 and ip_int <= ends[idx]:
+                        matched_feed = feed_id
+                        break
+            except Exception:
+                logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
+            ip_feed_cache[ip_str] = matched_feed
+            return matched_feed
+
+        bot_names: list[str] = []
+        for key in row_keys:
+            cached_label = pair_label_cache.get(key)
+            if cached_label is not None:
+                bot_names.append(cached_label)
+                continue
+
+            ua_str, ip_str = key
+            matches = ua_matches_cache[ua_str]
+            matched_feed = _match_ip_feed(ip_str)
 
             if not matches:
                 if matched_feed:
-                    feed_name = next((s["name"] for s in BOT_SOURCES if s["id"] == matched_feed), matched_feed)
-                    bot_names.append(f"{feed_name} (IP-Match)")
+                    feed_name = feed_name_by_id.get(matched_feed, matched_feed)
+                    label = f"{feed_name} (IP-Match)"
                 else:
-                    bot_names.append("null")
+                    label = "null"
+                pair_label_cache[key] = label
+                bot_names.append(label)
                 continue
 
             entry = matches[0]
@@ -642,10 +706,12 @@ def enrich_bot_metadata(df: Any) -> None:
             state = classify(ip_str, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
 
             if matched_feed:
-                feed_name = next((s["name"] for s in BOT_SOURCES if s["id"] == matched_feed), matched_feed)
-                bot_names.append(f"{bot_name} ({state}, {feed_name})")
+                feed_name = feed_name_by_id.get(matched_feed, matched_feed)
+                label = f"{bot_name} ({state}, {feed_name})"
             else:
-                bot_names.append(f"{bot_name} ({state})")
+                label = f"{bot_name} ({state})"
+            pair_label_cache[key] = label
+            bot_names.append(label)
         df["_bot_name"] = bot_names
 
     # 2. NG-WAF Verified Bot Enrichment
@@ -653,10 +719,9 @@ def enrich_bot_metadata(df: Any) -> None:
         from backend.core.metadata import pg_connection
 
         # Normalize each waf_req_id once: None for missing/sentinel
-        # values, str(x) otherwise. Both the IN-list and the per-row
-        # output then read from this single pass.
+        # values, str(x) otherwise. Deduplicate the IN-list while keeping per-row output aligned.
         norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
-        waf_ids = [n for n in norm if n]
+        waf_ids = list(dict.fromkeys(n for n in norm if n))
         if not waf_ids:
             df["_ngwaf_bot_name"] = None
         else:

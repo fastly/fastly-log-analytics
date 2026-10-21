@@ -52,4 +52,6 @@ ORDER BY 2 DESC
 LIMIT ?
 """
 
+LATEST_TIMESTAMP_WINDOWED = "SELECT MAX(timestamp) AS latest FROM {view} WHERE timestamp >= ?"
+
 LATEST_TIMESTAMP = "SELECT MAX(timestamp) AS latest FROM {view}"

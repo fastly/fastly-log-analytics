@@ -50,7 +50,8 @@ export function RealtimeChart({
   y2AxisSuffix,
 }: RealtimeChartProps) {
   const [helpOpen, setHelpOpen] = useState(false)
-  const labels = makeTimeLabels(traces[0]?.y.length ?? WINDOW)
+  const pointCount = traces[0]?.y.length ?? WINDOW
+  const labels = useMemo(() => makeTimeLabels(pointCount), [traces, pointCount])
 
   const data = useMemo(() => traces.map((trace) => ({
     type: 'bar' as const,

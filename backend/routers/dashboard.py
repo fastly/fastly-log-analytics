@@ -432,15 +432,21 @@ def dashboard_raw_csv(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    df = repo.get_raw_df(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-        limit=50000,  # Cap at 50k rows for performance
-        columns=req.columns,
-    )
+    csv_limit = min(max(1, int(req.limit)), 50000) if "limit" in req.model_fields_set and req.limit else 50000
+    if ctx.high_scale is not None:
+        from backend.high_scale import dashboard as hs_dashboard
+
+        df = hs_dashboard.raw_df(ctx.high_scale, req, start_time, end_time, limit=csv_limit)
+    else:
+        df = repo.get_raw_df(
+            con=ctx.con,
+            src=ctx.source,
+            start_time=start_time,
+            end_time=end_time,
+            filters=req.filters,
+            limit=csv_limit,
+            columns=req.columns,
+        )
 
     if df.empty:
         return StreamingResponse(iter([b""]), media_type="text/csv")
@@ -481,7 +487,8 @@ def dashboard_raw_csv(
             yield slice_df.to_csv(header=first, index=False).encode("utf-8")
             first = False
 
-    filename = f"logs_{ctx.source['name']}_{int(time.time())}.csv"
+    source_name = ctx.high_scale.service_id if ctx.high_scale is not None else ctx.source["name"]
+    filename = f"logs_{source_name}_{int(time.time())}.csv"
     return StreamingResponse(
         csv_chunks(),
         media_type="text/csv",
@@ -496,6 +503,10 @@ def dashboard_field_values(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    if ctx.high_scale is not None:
+        from backend.high_scale import dashboard as hs_dashboard
+
+        return hs_dashboard.field_values(ctx.high_scale, req, start_time, end_time)
     return repo.get_field_values(
         con=ctx.con,
         src=ctx.source,
