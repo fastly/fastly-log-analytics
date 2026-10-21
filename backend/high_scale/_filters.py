@@ -17,6 +17,8 @@ from backend.repositories.utils.filters import filter_spec_attr, normalize_filte
 _COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
 # Stored as floats in the map; the standard path filters on the rounded integer.
 _ROUNDED = frozenset({"age", "ttl"})
+# Stored as 'True'/'False' or '1'/'0' strings in custom_fields; normalise both sides to 'true'/'false'.
+_BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
 # Resolved by the standard path through lookups the fact table has no column for.
 _UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"})
 
@@ -28,6 +30,8 @@ def _column(key: str, params: dict[str, Any], param: str) -> str:
     lookup = f"custom_fields[{{{param}:String}}]"
     if key in _ROUNDED:
         return f"toString(toInt32(round(toFloat64OrZero({lookup}))))"
+    if key in _BOOLEAN:
+        return f"if(lower({lookup}) IN ('true', '1'), 'true', if(lower({lookup}) IN ('false', '0'), 'false', {lookup}))"
     return lookup
 
 
@@ -54,7 +58,14 @@ def request_filter_clauses(
         names: list[str] = []
         for j, value in enumerate(concrete):
             name = f"{prefix}_{i}_{j}"
-            params[name] = str(value)
+            str_val = str(value)
+            if key in _BOOLEAN:
+                lowered = str_val.strip().lower()
+                if lowered in ("true", "1"):
+                    str_val = "true"
+                elif lowered in ("false", "0"):
+                    str_val = "false"
+            params[name] = str_val
             names.append(f"{{{name}:String}}")
         include = mode != "exclude"
         parts: list[str] = []

@@ -27,6 +27,9 @@ from backend.utils.telemetry import get_queries, record_telemetry_query
 _SCHEMA_TYPES_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _CacheRegistry.register("repositories.logs._SCHEMA_TYPES_CACHE", _SCHEMA_TYPES_CACHE)
 
+_LOGS_QUERY_MEMO: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=10.0)
+_CacheRegistry.register("repositories.logs._LOGS_QUERY_MEMO", _LOGS_QUERY_MEMO)
+
 
 def _record_log_query(runner: QueryRunner, sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
     entry = {"sql": sql_str, "time_ms": elapsed_ms, "engine": "DuckDB"}
@@ -123,18 +126,81 @@ def query_logs(
     eff_where_clause = " AND ".join(conditions)
     timer.mark("build_where_clause", _t)
 
+    has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
+    memo_key: tuple[Any, ...] | None = None
+    if has_partition_cols:
+        memo_key = (
+            source_name,
+            table_name,
+            start_time,
+            end_time,
+            repr(sorted((filters or {}).items())),
+            limit,
+            offset,
+            str(sort_dir).upper(),
+            search or "",
+            tuple(columns or ()),
+            bool(mask_ips),
+            bool(include_count),
+        )
+        cached_resp = _LOGS_QUERY_MEMO.get(memo_key)
+        if cached_resp is not None:
+            return {
+                **cached_resp,
+                "section_timings": section_timings,
+                **runner.telemetry(),
+            }
+
     # Total count query (skipped when include_count=False, e.g. SSE live stream ticks)
     total_count = 0
     if include_count:
         _t = _time.perf_counter()
-        count_sql = f"SELECT COUNT(*) FROM {table_name} WHERE {eff_where_clause}"
-        try:
-            count_res = con.execute(count_sql, query_params).fetchone()
-            total_count = int(count_res[0]) if count_res else 0
-            count_ms = round((_time.perf_counter() - _t) * 1000, 2)
-            _record_log_query(runner, _compact_sql_for_debug(count_sql), count_ms, service_id=source_name)
-        except Exception:
-            total_count = 0
+        counted = False
+        if not filters and not has_search and has_partition_cols:
+            try:
+                rollup_cnt = runner.try_count_from_rollup(
+                    start_time,
+                    end_time,
+                    table_name,
+                    where_clause,
+                    params,
+                    unfiltered_window=True,
+                    actual_cols=actual_cols,
+                )
+                if rollup_cnt is not None and rollup_cnt > 0:
+                    total_count = int(rollup_cnt)
+                    counted = True
+            except Exception:
+                counted = False
+            if not counted:
+                try:
+                    fast_cnt_params, fast_cnt_where = build_where_clause(
+                        start_time,
+                        end_time,
+                        {},
+                        actual_cols,
+                        inline_params=False,
+                        exclude_invalid_ips=False,
+                        partition_pruning=True,
+                    )
+                    fast_cnt_sql = f"SELECT COUNT(*) FROM {table_name} WHERE {fast_cnt_where}"
+                    count_res = con.execute(fast_cnt_sql, fast_cnt_params).fetchone()
+                    total_count = int(count_res[0]) if count_res else 0
+                    count_ms = round((_time.perf_counter() - _t) * 1000, 2)
+                    _record_log_query(runner, _compact_sql_for_debug(fast_cnt_sql), count_ms, service_id=source_name)
+                    counted = True
+                except Exception:
+                    counted = False
+
+        if not counted:
+            count_sql = f"SELECT COUNT(*) FROM {table_name} WHERE {eff_where_clause}"
+            try:
+                count_res = con.execute(count_sql, query_params).fetchone()
+                total_count = int(count_res[0]) if count_res else 0
+                count_ms = round((_time.perf_counter() - _t) * 1000, 2)
+                _record_log_query(runner, _compact_sql_for_debug(count_sql), count_ms, service_id=source_name)
+            except Exception:
+                total_count = 0
         timer.mark("count_query", _t)
 
     # Columns selection
@@ -160,13 +226,7 @@ def query_logs(
     records: list[dict[str, Any]] | None = None
     # Fast-path partition pruning for first-page DESC queries over wide windows:
     # try the most recent 6 hours of partitions first so DuckDB doesn't sort 30 days of Parquet files.
-    if (
-        safe_sort_dir == "DESC"
-        and offset == 0
-        and not filters
-        and not has_search
-        and ("dt" in actual_cols or "timestamp_hour" in actual_cols)
-    ):
+    if safe_sort_dir == "DESC" and offset == 0 and has_partition_cols:
         try:
             st_dt = parse_iso_utc(start_time) if start_time else None
             et_dt = parse_iso_utc(end_time) if end_time else None
@@ -230,7 +290,7 @@ def query_logs(
 
     has_more = (offset + len(records)) < total_count
 
-    return {
+    core_payload = {
         "rows": records,
         "total_count": total_count,
         "has_more": has_more,
@@ -239,6 +299,12 @@ def query_logs(
         "columns": selected_cols,
         "schema_columns": schema_columns,
         "missing_fields": [],
+    }
+    if memo_key is not None and total_count > 0:
+        _LOGS_QUERY_MEMO[memo_key] = core_payload
+
+    return {
+        **core_payload,
         "section_timings": section_timings,
         **runner.telemetry(),
     }

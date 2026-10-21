@@ -16,9 +16,20 @@ from backend.repositories._base import (
     empty_schema_response,
 )
 from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_response_cache = _memo.cache
+_CacheRegistry.register("assets._response_cache", _response_cache)
 
 
 def get_assets_aggregates(
@@ -55,8 +66,30 @@ def get_assets_aggregates(
         )
 
     _t = _time.perf_counter()
-    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    params, where_clause = build_where_clause(
+        start_time,
+        end_time,
+        filters,
+        actual_cols,
+        inline_params=True,
+        partition_pruning=True,
+    )
     timer.mark("build_where_clause", _t)
+
+    has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
+    cache_key: str | None = None
+    if has_partition_cols and src.get("cache_dir"):
+        cache_key = digest_cache_key(
+            {
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(filters),
+            },
+            src,
+        )
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return {**cached, "section_timings": section_timings, **runner.telemetry()}
 
     results = {
         "missing_fields": missing_fields,
@@ -297,4 +330,6 @@ def get_assets_aggregates(
 
     results.update(runner.telemetry())
     results["section_timings"] = section_timings
+    if cache_key is not None:
+        _memo.put(cache_key, results, strip=("section_timings",))
     return results

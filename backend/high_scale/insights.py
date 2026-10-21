@@ -37,6 +37,7 @@ from backend.models.dashboard import CacheCollapseDetailResponse, InsightsRespon
 from backend.repositories.insights import definitions as _definitions  # noqa: F401  (registers the detections)
 from backend.repositories.insights.registry import InsightDefinition, registry
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc, safe_iso
 
 _MAX_WORKERS = 4
@@ -45,6 +46,7 @@ _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
 
 _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 
 
 def _window(
@@ -190,7 +192,8 @@ def insights_endpoint(
         filter_clause,
         tuple(sorted((k, str(v)) for k, v in filter_params.items())),
     )
-    if not force_refresh:
+    use_cache = isinstance(service, HighScaleService)
+    if use_cache and not force_refresh:
         cached = _INSIGHTS_CACHE.get(cache_key)
         if cached is not None:
             return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
@@ -298,7 +301,7 @@ def insights_endpoint(
         "baseline_hours": baseline_hours,
         "window_total_requests": window_total,
     }
-    if not any(c.get("severity") == "error" for c in cards):
+    if use_cache and not any(c.get("severity") == "error" for c in cards):
         _INSIGHTS_CACHE[cache_key] = payload
     return InsightsResponse.with_telemetry(**payload)
 

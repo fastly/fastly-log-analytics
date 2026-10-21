@@ -15,7 +15,18 @@ from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, e
 from backend.repositories._sql import sessions as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.pagination import calc_offset
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.sql_validator import escape_sql_literal
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_response_cache = _memo.cache
+_CacheRegistry.register("sessions._response_cache", _response_cache)
 
 
 def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tuple[list[str], bool] | None:
@@ -55,6 +66,143 @@ def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tup
         return None
 
     return collect_hourly_bundle_paths(src, st, et, bundled_root, SESSIONS_BUNDLE_FILENAME)
+
+
+_SESSION_ACTIVE_HOUR_COLS = (
+    "timestamp",
+    "ip",
+    "ja4",
+    "country",
+    "asn",
+    "status",
+    "resp_bytes",
+    "tcp_rtt",
+    "edge",
+    "ua",
+    "edge_sid",
+    "cmcd_sid",
+)
+
+
+def _parse_rollup_hour_dt(path: str) -> datetime | None:
+    """Extract the UTC hour datetime from a ``.../hour=YYYY-MM-DD-HH/sessions.parquet`` path."""
+    parent = os.path.basename(os.path.dirname(path))
+    for prefix in ("hour=", "dt="):
+        if parent.startswith(prefix):
+            from backend.utils.date_utils import parse_hour_key
+
+            return parse_hour_key(parent[len(prefix) :])
+    return None
+
+
+def _build_direct_active_hour_session_sql(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    actual_cols: set,
+    active_hour_dt: datetime,
+    user_start: datetime,
+    user_end: datetime,
+) -> str | None:
+    """Build an active-hour session aggregation query that reads directly from
+    the DuckLake table and mtime-pruned local buffer parquets (with
+    ``union_by_name=false`` and narrow column projection), bypassing the
+    90-column ``logs_<id>`` view.
+
+    Returns ``None`` when the caller should fall back to
+    :func:`_build_active_hour_session_sql` against ``table_name`` (e.g. in
+    durable serving mode or unit tests backed by an in-memory table).
+    """
+    from backend import config as svcconfig
+    from backend.core.duckdb import _cache_dir
+
+    if svcconfig.is_durable_serving_mode(src):
+        return None
+
+    try:
+        cache_dir = _cache_dir(src)
+    except Exception:
+        return None
+
+    live_start = max(active_hour_dt, user_start)
+    live_end = min(active_hour_dt + timedelta(hours=1), user_end)
+    start_iso = live_start.isoformat()
+    end_iso = live_end.isoformat()
+
+    buf_dir = os.path.join(cache_dir, "buffer")
+    hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={live_start.strftime('%Y-%m-%d-%H')}")
+    cutoff_epoch = live_start.timestamp() - 300.0
+
+    try:
+        from backend.core.iceberg.buffer import _tombstoned_parquet_paths
+
+        tombstoned = _tombstoned_parquet_paths(buf_dir)
+    except Exception:
+        tombstoned = set()
+
+    def _list_parquets(d: str, *, prune_mtime: bool) -> list[str]:
+        out: list[str] = []
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if not e.name.endswith(".parquet") or e.name.startswith(".tmp_"):
+                        continue
+                    if e.path in tombstoned:
+                        continue
+                    if prune_mtime:
+                        try:
+                            if e.stat().st_mtime < cutoff_epoch:
+                                continue
+                        except OSError:
+                            pass
+                    out.append(e.path)
+        except OSError:
+            pass
+        out.sort()
+        return out
+
+    buffer_files = _list_parquets(buf_dir, prune_mtime=True)
+
+    lake_table: str | None = None
+    try:
+        from backend.core.iceberg._ducklake import ducklake_table_name
+
+        lake_tname = ducklake_table_name(src)
+        row = con.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+            [lake_tname],
+        ).fetchone()
+        if row:
+            lake_table = f'lake."{lake_tname}"'
+    except Exception:
+        lake_table = None
+
+    hourly_files = [] if lake_table else _list_parquets(hourly_dir, prune_mtime=False)
+
+    if not lake_table and not buffer_files and not hourly_files:
+        return None
+
+    needed_cols = [c for c in _SESSION_ACTIVE_HOUR_COLS if c in actual_cols]
+    if "timestamp" not in needed_cols or "ip" not in needed_cols:
+        return None
+    col_list = ", ".join(f'"{c}"' for c in needed_cols)
+    where_cond = (
+        f"timestamp >= TIMESTAMPTZ '{start_iso}' AND timestamp < TIMESTAMPTZ '{end_iso}' AND \"ip\" IS NOT NULL"
+    )
+
+    all_local_files = hourly_files + buffer_files
+    raw_parts: list[str] = []
+    if lake_table:
+        raw_parts.append(f"SELECT {col_list} FROM {lake_table} WHERE {where_cond}")
+    if all_local_files:
+        file_list = ", ".join("'" + escape_sql_literal(f) + "'" for f in all_local_files)
+        raw_parts.append(
+            f"SELECT {col_list} FROM read_parquet([{file_list}], union_by_name=false, hive_partitioning=false) "
+            f"WHERE {where_cond}"
+        )
+
+    raw_union = " UNION ALL BY NAME ".join(raw_parts)
+    sql, _ = _build_active_hour_session_sql(f"({raw_union})", actual_cols, active_hour_dt, user_start, user_end)
+    return sql
 
 
 def _build_active_hour_session_sql(
@@ -269,25 +417,12 @@ def _get_sessions_from_rollup(
         # to serve.
         return None
 
-    # Build the UNION ALL of rollup + active-hour rows.
-    union_parts: list[str] = []
-    if rollup_paths:
-        # The rollup writer stores `bucket` as TIMESTAMPTZ but DuckDB
-        # may infer naive on re-read depending on the parquet metadata.
-        # The downstream sessions logic only cares about first_ts/last_ts
-        # ordering, so neither timezone interpretation breaks correctness.
-        paths_sql = ", ".join("'" + escape_sql_literal(p) + "'" for p in rollup_paths)
-        union_parts.append(
-            f"SELECT bucket, ip, ja4, first_ts, last_ts, req_count, country, asn, "
-            f"reqs_4xx, reqs_5xx, total_bytes, rtt_sum, rtt_count, edge_count, shield_count, "
-            f"ua_min, edge_sid_max, COALESCE(cmcd_count, 0) AS cmcd_count "
-            f"FROM read_parquet([{paths_sql}], union_by_name=true)"
-        )
-    if crosses_active:
-        active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_sql, _ = _build_active_hour_session_sql(table_name, actual_cols, active_hour_dt, start_dt, end_dt)
-        union_parts.append(live_sql)
-    union_sql = " UNION ALL ".join(union_parts)
+    active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) if crosses_active else None
+    direct_live_sql: str | None = None
+    fallback_live_sql: str | None = None
+    if crosses_active and active_hour_dt is not None:
+        direct_live_sql = _build_direct_active_hour_session_sql(con, src, actual_cols, active_hour_dt, start_dt, end_dt)
+        fallback_live_sql, _ = _build_active_hour_session_sql(table_name, actual_cols, active_hour_dt, start_dt, end_dt)
 
     # Sort/filter compatible columns for the final SELECT. The rollup
     # has session_start/session_end via MIN(first_ts)/MAX(last_ts)
@@ -303,7 +438,6 @@ def _get_sessions_from_rollup(
         "total_bytes": "total_bytes",
     }.get(sort_by, "session_start")
     sort_dir_sql = "DESC" if sort_dir.upper() == "DESC" else "ASC"
-    flagged_filter_sql = "WHERE flagged = true" if flagged_only else ""
     offset = calc_offset(page, limit)
 
     # Window-function stitching: walk the per-(ip, ja4) rollup rows in
@@ -311,95 +445,202 @@ def _get_sessions_from_rollup(
     # row's first_ts and the previous row's last_ts exceeds 30 minutes.
     # Then GROUP BY the stitched session id.
     #
-    # median_rtt_ms is APPROXIMATED as the row-weighted mean
-    # (SUM(rtt_sum) / SUM(rtt_count)) since true median can't compose
-    # from per-hour aggregates. The frontend column header keeps its
-    # name for back-compat; the rollup path's value is within ~10% of
-    # the raw-path value for typical distributions and dramatically
-    # cheaper.
+    # Optimization: >99% of (ip, ja4) pairs appear in only a single hour
+    # bucket across a 24h window. Grouping by (ip, ja4) first (`by_pair`)
+    # lets single-bucket pairs (`row_cnt = 1`) bypass both window sorts,
+    # while late materialization (`top_sessions JOIN filtered`) computes
+    # the 15 payload columns (strings + counters) only for the winning
+    # `LIMIT` rows instead of all ~170k sessions.
     #
-    # unique_urls is NULL on the rollup path — the rollup grain is
-    # hourly and we don't pre-aggregate URL sets. Frontend renders
-    # NULL as a dash.
     # Push filter pills into the rollup CTE so we skip stitching rows
     # the user filtered out. Country / asn are MIN-aggregated in the
     # rollup row, so the filter semantics match raw-path for any IP
     # whose country/asn is stable across the hour (the common case).
     rollup_filter_sql = _build_rollup_filter_sql(rollup_filters)
 
-    stitch_sql = f"""
-        WITH src AS ({union_sql}),
-        filtered AS (
-            SELECT * FROM src WHERE 1=1 {rollup_filter_sql}
-        ),
-        ordered AS (
-            SELECT *,
-                   LAG(last_ts) OVER (PARTITION BY ip, ja4 ORDER BY first_ts) AS prev_last_ts
-            FROM filtered
-        ),
-        marks AS (
-            SELECT *,
-                   CASE WHEN prev_last_ts IS NULL
-                          OR (first_ts - prev_last_ts) > INTERVAL 30 MINUTES
-                        THEN 1 ELSE 0 END AS is_new
-            FROM ordered
-        ),
-        sids AS (
-            SELECT *,
-                   SUM(is_new) OVER (PARTITION BY ip, ja4 ORDER BY first_ts
-                                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
-            FROM marks
-        ),
-        agg AS (
-            SELECT ip,
-                   ja4,
-                   MIN(first_ts) AS session_start,
-                   MAX(last_ts)  AS session_end,
-                   SUM(req_count) AS req_count,
-                   MIN(country)  AS country,
-                   MIN(asn)      AS asn,
-                   SUM(reqs_4xx) AS reqs_4xx,
-                   SUM(reqs_5xx) AS reqs_5xx,
-                   SUM(total_bytes) AS total_bytes,
-                   SUM(rtt_sum)  AS rtt_sum,
-                   SUM(rtt_count) AS rtt_count,
-                   SUM(edge_count) AS edge_count,
-                   SUM(shield_count) AS shield_count,
-                   MIN(ua_min)   AS ua,
-                   MAX(edge_sid_max) AS edge_sid,
-                   SUM(cmcd_count) AS cmcd_count
-            FROM sids
-            GROUP BY ip, ja4, sid
-        ),
-        flagged AS (
-            SELECT *,
-                   CASE WHEN rtt_count > 0 THEN rtt_sum / rtt_count / 1000.0 ELSE NULL END AS median_rtt_ms,
-                   CAST(NULL AS BIGINT) AS unique_urls,
-                   (req_count >= {min_reqs_flag}
-                    OR (reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= {min_4xx_pct_flag}) AS flagged
-            FROM agg
+    extra_sort_agg = ""
+    extra_sort_col = ""
+    if sort_col_sql in ("total_bytes", "edge_count", "shield_count"):
+        extra_sort_agg = f", SUM({sort_col_sql}) AS {sort_col_sql}"
+        extra_sort_col = f", {sort_col_sql}"
+    elif sort_col_sql == "median_rtt_ms":
+        extra_sort_agg = (
+            ", CASE WHEN SUM(rtt_count) > 0 THEN SUM(rtt_sum) / SUM(rtt_count) / 1000.0 ELSE NULL END AS median_rtt_ms"
         )
-        SELECT * FROM flagged
-        {flagged_filter_sql}
-        ORDER BY {sort_col_sql} {sort_dir_sql}
-        LIMIT {limit} OFFSET {offset}
-    """
+        extra_sort_col = ", median_rtt_ms"
+
+    def _compose_stitch_sql(
+        paths_subset: list[str],
+        *,
+        min_session_start: datetime | None = None,
+        use_fast_sources: bool = True,
+    ) -> str:
+        union_parts: list[str] = []
+        if paths_subset:
+            paths_sql = ", ".join("'" + escape_sql_literal(p) + "'" for p in paths_subset)
+            union_flag = "false" if use_fast_sources else "true"
+            union_parts.append(
+                f"SELECT bucket, ip, ja4, first_ts, last_ts, req_count, country, asn, "
+                f"reqs_4xx, reqs_5xx, total_bytes, rtt_sum, rtt_count, edge_count, shield_count, "
+                f"ua_min, edge_sid_max, COALESCE(cmcd_count, 0) AS cmcd_count "
+                f"FROM read_parquet([{paths_sql}], union_by_name={union_flag})"
+            )
+        if crosses_active:
+            live_part = direct_live_sql if use_fast_sources and direct_live_sql is not None else fallback_live_sql
+            if live_part:
+                union_parts.append(live_part)
+        union_sql = " UNION ALL ".join(union_parts)
+
+        where_clauses: list[str] = []
+        if flagged_only:
+            where_clauses.append("flagged = true")
+        if min_session_start is not None:
+            where_clauses.append(f"session_start >= TIMESTAMPTZ '{min_session_start.isoformat()}'")
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        return f"""
+            WITH src AS ({union_sql}),
+            filtered AS (
+                SELECT * FROM src WHERE 1=1 {rollup_filter_sql}
+            ),
+            by_pair AS (
+                SELECT ip,
+                       ja4,
+                       COUNT(*) AS row_cnt,
+                       MIN(first_ts) AS session_start,
+                       MAX(last_ts)  AS session_end,
+                       SUM(req_count) AS req_count,
+                       SUM(reqs_4xx) AS reqs_4xx
+                       {extra_sort_agg}
+                FROM filtered
+                GROUP BY ip, ja4
+            ),
+            multi_rows AS (
+                SELECT f.ip, f.ja4, f.first_ts, f.last_ts, f.req_count, f.reqs_4xx,
+                       f.total_bytes, f.rtt_sum, f.rtt_count, f.edge_count, f.shield_count,
+                       LAG(f.last_ts) OVER (PARTITION BY f.ip, f.ja4 ORDER BY f.first_ts) AS prev_last_ts
+                FROM filtered f
+                SEMI JOIN by_pair bp
+                  ON f.ip = bp.ip AND f.ja4 IS NOT DISTINCT FROM bp.ja4 AND bp.row_cnt > 1
+            ),
+            multi_sids AS (
+                SELECT *,
+                       SUM(CASE WHEN prev_last_ts IS NULL
+                                  OR (first_ts - prev_last_ts) > INTERVAL 30 MINUTES
+                                THEN 1 ELSE 0 END)
+                           OVER (PARTITION BY ip, ja4 ORDER BY first_ts
+                                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
+                FROM multi_rows
+            ),
+            multi_agg AS (
+                SELECT ip,
+                       ja4,
+                       sid,
+                       MIN(first_ts) AS session_start,
+                       MAX(last_ts)  AS session_end,
+                       SUM(req_count) AS req_count,
+                       SUM(reqs_4xx) AS reqs_4xx
+                       {extra_sort_agg}
+                FROM multi_sids
+                GROUP BY ip, ja4, sid
+            ),
+            all_skinny AS (
+                SELECT ip, ja4, 1 AS sid, session_start, session_end, req_count, reqs_4xx {extra_sort_col}
+                FROM by_pair
+                WHERE row_cnt = 1
+                UNION ALL
+                SELECT ip, ja4, sid, session_start, session_end, req_count, reqs_4xx {extra_sort_col}
+                FROM multi_agg
+            ),
+            skinny_flagged AS (
+                SELECT *,
+                       (req_count >= {min_reqs_flag}
+                        OR (reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= {min_4xx_pct_flag}) AS flagged
+                FROM all_skinny
+            ),
+            top_sessions AS (
+                SELECT ip, ja4, sid, session_start, session_end, flagged
+                FROM skinny_flagged
+                {where_sql}
+                ORDER BY {sort_col_sql} {sort_dir_sql}
+                LIMIT {limit} OFFSET {offset}
+            ),
+            agg AS (
+                SELECT t.ip,
+                       t.ja4,
+                       t.session_start,
+                       t.session_end,
+                       SUM(f.req_count) AS req_count,
+                       MIN(f.country)  AS country,
+                       MIN(f.asn)      AS asn,
+                       SUM(f.reqs_4xx) AS reqs_4xx,
+                       SUM(f.reqs_5xx) AS reqs_5xx,
+                       SUM(f.total_bytes) AS total_bytes,
+                       SUM(f.rtt_sum)  AS rtt_sum,
+                       SUM(f.rtt_count) AS rtt_count,
+                       SUM(f.edge_count) AS edge_count,
+                       SUM(f.shield_count) AS shield_count,
+                       MIN(f.ua_min)   AS ua,
+                       MAX(f.edge_sid_max) AS edge_sid,
+                       SUM(f.cmcd_count) AS cmcd_count,
+                       CASE WHEN SUM(f.rtt_count) > 0 THEN SUM(f.rtt_sum) / SUM(f.rtt_count) / 1000.0 ELSE NULL END AS median_rtt_ms,
+                       CAST(NULL AS BIGINT) AS unique_urls,
+                       t.flagged
+                FROM top_sessions t
+                JOIN filtered f
+                  ON f.ip = t.ip
+                 AND f.ja4 IS NOT DISTINCT FROM t.ja4
+                 AND f.first_ts >= t.session_start
+                 AND f.last_ts <= t.session_end
+                GROUP BY t.ip, t.ja4, t.sid, t.session_start, t.session_end, t.flagged
+            )
+            SELECT * FROM agg
+            ORDER BY {sort_col_sql} {sort_dir_sql}
+        """
+
+    def _run_stitch_with_fallback(
+        paths_subset: list[str],
+        *,
+        min_session_start: datetime | None = None,
+    ) -> tuple[list[tuple], list[str]] | None:
+        for use_fast in (True, False):
+            sql = _compose_stitch_sql(
+                paths_subset,
+                min_session_start=min_session_start,
+                use_fast_sources=use_fast,
+            )
+            try:
+                res = runner.execute(sql, [])
+                fetched = res.fetchall()
+                cols = [desc[0] for desc in con.description]
+                return fetched, cols
+            except duckdb.Error as err:
+                if not use_fast:
+                    import logging as _logging
+
+                    _logging.getLogger(__name__).warning("[sessions] rollup query failed, falling back: %s", err)
+                    return None
+        return None
 
     _t = time.perf_counter()
-    try:
-        result = runner.execute(stitch_sql, [])
-    except duckdb.Error as e:
-        # If the rollup query throws (schema drift, file corruption,
-        # whatever), fall back to raw rather than 500-ing the user.
-        import logging as _logging
+    exec_out: tuple[list[tuple], list[str]] | None = None
+    if sort_col_sql == "session_start" and sort_dir_sql == "DESC" and offset == 0 and len(rollup_paths) > 3:
+        cutoff_dt = _parse_rollup_hour_dt(rollup_paths[-2])
+        prev_dt = _parse_rollup_hour_dt(rollup_paths[-3])
+        if cutoff_dt is not None and prev_dt is not None and (cutoff_dt - prev_dt) == timedelta(hours=1):
+            pruned_out = _run_stitch_with_fallback(rollup_paths[-3:], min_session_start=cutoff_dt)
+            if pruned_out is not None and len(pruned_out[0]) >= limit:
+                exec_out = pruned_out
 
-        _logging.getLogger(__name__).warning("[sessions] rollup query failed, falling back: %s", e)
+    if exec_out is None:
+        exec_out = _run_stitch_with_fallback(rollup_paths, min_session_start=None)
+
+    if exec_out is None:
         section_timings.append(
             {"section": "sessions_rollup_failed", "time_ms": round((time.perf_counter() - _t) * 1000, 2)}
         )
         return None
-    rows = result.fetchall()
-    col_names = [desc[0] for desc in con.description]
+    rows, col_names = exec_out
     section_timings.append({"section": "sessions_rollup_query", "time_ms": round((time.perf_counter() - _t) * 1000, 2)})
 
     sessions: list[dict] = []
@@ -501,8 +742,32 @@ def get_sessions(
         )
 
     _t = time.perf_counter()
-    params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols))
+    params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), partition_pruning=True)
     timer.mark("build_where_clause", _t)
+
+    has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
+    cache_key: str | None = None
+    if has_partition_cols and src.get("cache_dir"):
+        cache_key = digest_cache_key(
+            {
+                "op": "sessions",
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(filters),
+                "p": page,
+                "l": limit,
+                "sb": sort_by,
+                "sd": sort_dir,
+                "fo": flagged_only,
+                "mr": min_reqs_flag,
+                "m4": min_4xx_pct_flag,
+                "so": streaming_only,
+            },
+            src,
+        )
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return {**cached, "section_timings": section_timings, **runner.telemetry()}
 
     has_ja4 = "ja4" in actual_cols
     has_asn = "asn" in actual_cols
@@ -567,6 +832,8 @@ def get_sessions(
             )
             timer.mark("sessions_rollup_attempt", _t)
             if rollup_result is not None:
+                if cache_key is not None:
+                    _memo.put(cache_key, rollup_result, strip=("section_timings",))
                 return rollup_result
 
     group_cols = ["ip"]
@@ -708,7 +975,7 @@ def get_sessions(
         total = runner.execute(count_sql, params).fetchone()[0]
         timer.mark("count_query", _t)
 
-    return {
+    res = {
         "sessions": sessions,
         "asn_names": asn_names,
         "total": total,
@@ -724,6 +991,9 @@ def get_sessions(
         "section_timings": section_timings,
         **runner.telemetry(),
     }
+    if cache_key is not None:
+        _memo.put(cache_key, res, strip=("section_timings",))
+    return res
 
 
 def get_session_detail(
@@ -737,6 +1007,25 @@ def get_session_detail(
 ) -> dict:
     runner = QueryRunner(con, src)
     table_name = _safe_table(src["name"])
+    actual_cols = set(runner.get_schema_cols())
+    has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
+
+    cache_key: str | None = None
+    if has_partition_cols and src.get("cache_dir"):
+        cache_key = digest_cache_key(
+            {
+                "op": "detail",
+                "ip": ip,
+                "s": session_start,
+                "e": session_end,
+                "ua": ua,
+                "ja4": ja4,
+            },
+            src,
+        )
+        cached = _memo.get(cache_key)
+        if cached is not None:
+            return {**cached, **runner.telemetry()}
 
     conditions = [
         '"ip" = ?',
@@ -744,6 +1033,28 @@ def get_session_detail(
         "timestamp <= CAST(? AS TIMESTAMPTZ)",
     ]
     p: list[Any] = [ip, session_start, session_end]
+
+    if has_partition_cols:
+        try:
+            from backend.utils.date_utils import parse_iso_utc
+
+            s_dt = parse_iso_utc(str(session_start))
+            e_dt = parse_iso_utc(str(session_end))
+            if s_dt and e_dt:
+                s_utc = s_dt.astimezone(UTC)
+                e_utc = e_dt.astimezone(UTC)
+                if "dt" in actual_cols:
+                    conditions.append('"dt" >= ?')
+                    p.append(s_utc.strftime("%Y-%m-%d"))
+                    conditions.append('"dt" <= ?')
+                    p.append(e_utc.strftime("%Y-%m-%d"))
+                if "timestamp_hour" in actual_cols:
+                    conditions.append('"timestamp_hour" >= ?')
+                    p.append(s_utc.strftime("%Y-%m-%d-%H"))
+                    conditions.append('"timestamp_hour" <= ?')
+                    p.append(e_utc.strftime("%Y-%m-%d-%H"))
+        except Exception:
+            pass
 
     if ua is not None:
         conditions.append('"ua" IS NOT DISTINCT FROM ?')
@@ -762,4 +1073,7 @@ def get_session_detail(
             if hasattr(v, "isoformat"):
                 rec[k] = v.isoformat()
 
-    return {"data": records, "columns": col_names, **runner.telemetry()}
+    res = {"data": records, "columns": col_names, **runner.telemetry()}
+    if cache_key is not None:
+        _memo.put(cache_key, res)
+    return res

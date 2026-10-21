@@ -375,29 +375,39 @@ def preview_alert_series(
 
     agg_sql = get_metric_sql(metric, status_codes)
 
-    scope_filter = ""
+    base_scope_filter = ""
     if eval_scope == "edge":
-        scope_filter = " AND edge = true"
+        base_scope_filter = " AND edge = true"
     elif eval_scope == "origin":
-        scope_filter = " AND edge = false"
+        base_scope_filter = " AND edge = false"
 
+    anchor_dt = None
+    existing_cols: set[str] = set()
     if src:
         try:
-            from backend import config as svcconfig
             from backend.utils.date_utils import parse_iso_utc
 
             svc_status = svcconfig.get_status(src.get("name") or src.get("service_id") or "") or {}
             latest_iso = svc_status.get("latest_log_at")
             anchor_dt = parse_iso_utc(latest_iso) if latest_iso else None
             if anchor_dt:
-                existing_cols = {row[0] for row in con.execute(f"DESCRIBE {table_name}").fetchall()}
-                prune_st = (anchor_dt - datetime.timedelta(minutes=lookback_mins + 60)).astimezone(datetime.UTC)
-                if "dt" in existing_cols:
-                    scope_filter += f" AND dt >= '{prune_st.strftime('%Y-%m-%d')}'"
-                if "timestamp_hour" in existing_cols:
-                    scope_filter += f" AND timestamp_hour >= '{prune_st.strftime('%Y-%m-%d-%H')}'"
+                existing_cols = set(QueryRunner(con, src).get_schema_cols())
         except Exception:
             pass
+
+    def _prune_clause(mins: int) -> str:
+        if not anchor_dt or not existing_cols:
+            return ""
+        clause = ""
+        prune_st = (anchor_dt - datetime.timedelta(minutes=mins + 60)).astimezone(datetime.UTC)
+        if "dt" in existing_cols:
+            clause += f" AND dt >= '{prune_st.strftime('%Y-%m-%d')}'"
+        if "timestamp_hour" in existing_cols:
+            clause += f" AND timestamp_hour >= '{prune_st.strftime('%Y-%m-%d-%H')}'"
+        return clause
+
+    max_ts_prune = _prune_clause(lookback_mins)
+    scope_filter = base_scope_filter + max_ts_prune
 
     q = SQL.PREVIEW_SERIES.format(
         group_sql=group_sql,
@@ -406,6 +416,11 @@ def preview_alert_series(
         lookback_mins=lookback_mins,
         scope_filter=scope_filter,
     )
+    if max_ts_prune:
+        q = q.replace(
+            f"(SELECT max(timestamp) FROM {table_name})",
+            f"(SELECT max(timestamp) FROM {table_name} WHERE 1=1{max_ts_prune})",
+        )
 
     with track_query(con, q, [], "alerts_preview") as cursor:
         rows = cursor.fetchall()
@@ -440,28 +455,40 @@ def preview_alert_series(
         days = getattr(alert, "baseline_period_days", 7) or 7
         zscore_thresh = getattr(alert, "zscore_threshold", 3.0) or 3.0
 
-        try:
-            existing_cols = set(QueryRunner(con, src).get_schema_cols())
-        except Exception:
-            existing_cols = set()
+        if not existing_cols:
+            try:
+                existing_cols = set(QueryRunner(con, src).get_schema_cols())
+            except Exception:
+                existing_cols = set()
 
-        baseline_start_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{days} days'"
-        baseline_end_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '1 hours'"
+        max_ts_subq = (
+            f"(SELECT max(timestamp) FROM {table_name} WHERE 1=1{max_ts_prune})"
+            if max_ts_prune
+            else f"(SELECT max(timestamp) FROM {table_name})"
+        )
+        baseline_start_expr = f"{max_ts_subq} - INTERVAL '{days} days'"
+        baseline_end_expr = f"{max_ts_subq} - INTERVAL '1 hours'"
 
-        baseline_where = f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} {scope_filter}"
+        baseline_where = f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} {base_scope_filter}"
 
-        try:
-            with track_query(con, SQL.PREVIEW_MAX_TS.format(table=table_name), [], "alerts_preview_max_ts") as cursor:
-                max_ts_row = cursor.fetchone()
-                max_ts_dt = max_ts_row[0] if max_ts_row else None
-        except Exception:
-            max_ts_dt = None
+        max_ts_dt = anchor_dt
+        if not max_ts_dt:
+            try:
+                with track_query(
+                    con, SQL.PREVIEW_MAX_TS.format(table=table_name), [], "alerts_preview_max_ts"
+                ) as cursor:
+                    max_ts_row = cursor.fetchone()
+                    max_ts_dt = max_ts_row[0] if max_ts_row else None
+            except Exception:
+                max_ts_dt = None
 
         if max_ts_dt:
             st_dt = max_ts_dt - datetime.timedelta(days=days)
             st_utc = st_dt.astimezone(datetime.UTC)
             if "dt" in existing_cols:
                 baseline_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+            if "timestamp_hour" in existing_cols:
+                baseline_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
 
         q_baseline = SQL.PREVIEW_BASELINE.format(agg_sql=agg_sql, table=table_name, baseline_where=baseline_where)
 
@@ -490,14 +517,20 @@ def preview_alert_series(
 
     if eval_type in ("relative_increase", "relative_decrease") and comp_period:
         res["type"] = "relative"
+        hist_scope_filter = base_scope_filter + _prune_clause(lookback_mins + comp_period)
         q_hist = SQL.PREVIEW_HISTORY.format(
             group_sql=group_sql,
             agg_sql=agg_sql,
             table=table_name,
             start_minutes=lookback_mins + comp_period,
             comp_period=comp_period,
-            scope_filter=scope_filter,
+            scope_filter=hist_scope_filter,
         )
+        if max_ts_prune:
+            q_hist = q_hist.replace(
+                f"(SELECT max(timestamp) FROM {table_name})",
+                f"(SELECT max(timestamp) FROM {table_name} WHERE 1=1{max_ts_prune})",
+            )
         with track_query(con, q_hist, [], "alerts_preview") as cursor:
             hist_rows = cursor.fetchall()
 

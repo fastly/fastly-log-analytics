@@ -105,7 +105,14 @@ def get_cmcd_aggregates(
     table_name = _safe_table(src["name"])
 
     _t = _time.perf_counter()
-    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+    params, where_clause = build_where_clause(
+        start_time,
+        end_time,
+        filters,
+        actual_cols,
+        inline_params=True,
+        partition_pruning=True,
+    )
     timer.mark("build_where_clause", _t)
 
     cmcd_where = f"{where_clause} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''"
@@ -165,32 +172,43 @@ def get_cmcd_aggregates(
         if _want("overview"):
             _t = _time.perf_counter()
             sql = f"""
+                WITH base_metrics AS (
+                    SELECT
+                        COUNT(DISTINCT cmcd_sid) AS active_sessions,
+                        {_rebuffer_rate_expr(has_bs)},
+                        {"AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL"} AS avg_bitrate,
+                        {"AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL"} AS avg_buffer_length,
+                        {"APPROX_QUANTILE(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"} AS median_throughput
+                    FROM {t} WHERE {w}
+                ),
+                peak_metrics AS (
+                    SELECT MAX(cnt) AS peak_viewers FROM (
+                        SELECT COUNT(DISTINCT cmcd_sid) AS cnt
+                        FROM {t} WHERE {w}
+                        GROUP BY {_bucket_expr(bucket_ms)}
+                    )
+                ),
+                dur_metrics AS (
+                    SELECT ROUND(AVG(dur), 0) AS avg_dur FROM (
+                        SELECT EPOCH(MAX(timestamp)) - EPOCH(MIN(timestamp)) AS dur
+                        FROM {t} WHERE {w}
+                        GROUP BY cmcd_sid
+                        HAVING dur > 0
+                    )
+                )
                 SELECT
-                    COUNT(DISTINCT cmcd_sid) AS active_sessions,
-                    {_rebuffer_rate_expr(has_bs)},
-                    {"AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL"} AS avg_bitrate,
-                    {"AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL"} AS avg_buffer_length,
-                    {"APPROX_QUANTILE(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"} AS median_throughput
-                FROM {t} WHERE {w}
+                    b.active_sessions,
+                    b.rebuffer_rate,
+                    b.avg_bitrate,
+                    b.avg_buffer_length,
+                    b.median_throughput,
+                    p.peak_viewers,
+                    d.avg_dur
+                FROM base_metrics b
+                CROSS JOIN peak_metrics p
+                CROSS JOIN dur_metrics d
             """
             row = runner.execute(sql).fetchone()
-            peak_sql = f"""
-                SELECT MAX(cnt) FROM (
-                    SELECT COUNT(DISTINCT cmcd_sid) AS cnt
-                    FROM {t} WHERE {w}
-                    GROUP BY {_bucket_expr(bucket_ms)}
-                )
-            """
-            peak_row = runner.execute(peak_sql).fetchone()
-            dur_sql = f"""
-                SELECT ROUND(AVG(dur), 0) FROM (
-                    SELECT EPOCH(MAX(timestamp)) - EPOCH(MIN(timestamp)) AS dur
-                    FROM {t} WHERE {w}
-                    GROUP BY cmcd_sid
-                    HAVING dur > 0
-                )
-            """
-            dur_row = runner.execute(dur_sql).fetchone()
             if row:
                 results["overview"] = {
                     "active_sessions": row[0] or 0,
@@ -198,8 +216,8 @@ def get_cmcd_aggregates(
                     "avg_bitrate": _round_val(row[2]),
                     "avg_buffer_length": _round_val(row[3]),
                     "median_throughput": _round_val(row[4]),
-                    "peak_viewers": (peak_row[0] or 0) if peak_row else 0,
-                    "avg_session_duration": int(dur_row[0]) if dur_row and dur_row[0] else None,
+                    "peak_viewers": row[5] or 0,
+                    "avg_session_duration": int(row[6]) if row[6] else None,
                 }
             timer.mark("overview", _t)
 
@@ -495,7 +513,25 @@ def get_cmcd_aggregates(
         want_sf = _want("streaming_format_dist") and has_sf
         if want_ot or want_sf:
             _t = _time.perf_counter()
-            if want_ot:
+            if want_ot and want_sf:
+                sql = f"""
+                    SELECT 'ot' AS kind, cmcd_ot AS val, COUNT(*) AS cnt
+                    FROM {t} WHERE {w} AND cmcd_ot IS NOT NULL AND cmcd_ot != ''
+                    GROUP BY 2
+                    UNION ALL
+                    SELECT 'sf' AS kind, cmcd_sf AS val, COUNT(DISTINCT cmcd_sid) AS cnt
+                    FROM {t} WHERE {w} AND cmcd_sf IS NOT NULL AND cmcd_sf != ''
+                    GROUP BY 2
+                    ORDER BY kind ASC, cnt DESC
+                """
+                rows = runner.execute(sql).fetchall()
+                results["object_type_dist"] = [
+                    {"object_type": r[1], "request_count": r[2]} for r in rows if r[0] == "ot"
+                ]
+                results["streaming_format_dist"] = [
+                    {"streaming_format": r[1], "session_count": r[2]} for r in rows if r[0] == "sf"
+                ]
+            elif want_ot:
                 sql = f"""
                     SELECT cmcd_ot, COUNT(*) AS request_count
                     FROM {t} WHERE {w} AND cmcd_ot IS NOT NULL AND cmcd_ot != ''
@@ -503,8 +539,7 @@ def get_cmcd_aggregates(
                 """
                 rows = runner.execute(sql).fetchall()
                 results["object_type_dist"] = [{"object_type": r[0], "request_count": r[1]} for r in rows]
-
-            if want_sf:
+            elif want_sf:
                 sql = f"""
                     SELECT cmcd_sf, COUNT(DISTINCT cmcd_sid) AS session_count
                     FROM {t} WHERE {w} AND cmcd_sf IS NOT NULL AND cmcd_sf != ''

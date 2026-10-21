@@ -671,7 +671,7 @@ async def rum_analytics(
     range_token: Annotated[str | None, Query()] = None,
     anchor: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
-    """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
+    """Retrieve parsed RUM analytics from DuckDB views.
     Wraps execution with execute_with_stale_view_retry.
 
     A recognized ``range_token`` (+ optional ``anchor``) is resolved server-side by the shared
@@ -1033,14 +1033,6 @@ async def rum_live_events(
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
             rows = execute_with_stale_view_retry(rum_con, rum_source, _get_live_events)
 
-        fallback_profiles = [
-            {"city": "Austin", "region": "TX", "country": "US", "pop": "SIN", "tls": "1.3", "ttfb": 45},
-            {"city": "Singapore", "region": "01", "country": "SG", "pop": "SIN", "tls": "1.3", "ttfb": 38},
-            {"city": "Boulder", "region": "CO", "country": "US", "pop": "DEN", "tls": "1.3", "ttfb": 52},
-            {"city": "London", "region": "ENG", "country": "GB", "pop": "LHR", "tls": "1.3", "ttfb": 42},
-            {"city": "Tokyo", "region": "13", "country": "JP", "pop": "NRT", "tls": "1.3", "ttfb": 50},
-        ]
-
         events = []
         for (
             etype,
@@ -1072,26 +1064,12 @@ async def rum_live_events(
                 if mrating:
                     desc += f" ({mrating.upper()})"
 
-            # Fallback to representative profiles if the exact join has no match (e.g. mock data or old logs)
-            if not city or not pop:
-                import hashlib
-
-                key = cid or req_id or path or "default"
-                idx = int(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest(), 16) % len(fallback_profiles)
-                prof = fallback_profiles[idx]
-                city = city or prof["city"]
-                region = region or prof["region"]
-                country = country or prof["country"]
-                pop = pop or prof["pop"]
-                tls = tls or prof["tls"]
-                ttfb = ttfb or prof["ttfb"]
-            else:
-                # Convert from seconds to milliseconds for frontend display if stored in seconds
-                if ttfb is not None:
-                    if ttfb < 15:
-                        ttfb = int(ttfb * 1000)
-                    else:
-                        ttfb = int(ttfb)
+            # Convert from seconds to milliseconds for frontend display if stored in seconds
+            if ttfb is not None:
+                if ttfb < 15:
+                    ttfb = int(ttfb * 1000)
+                else:
+                    ttfb = int(ttfb)
 
             events.append(
                 {

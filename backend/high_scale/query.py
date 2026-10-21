@@ -249,12 +249,72 @@ def query_endpoint(
     sql = re.sub(r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp", sql, flags=re.IGNORECASE)
     sql = re.sub(r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip", sql, flags=re.IGNORECASE)
 
+    # Normalise ISO-8601 timestamp string literals ('YYYY-MM-DDTHH:MM:SS(.sss)?(Z|±HH:MM)?')
+    # into ClickHouse DateTime64-compatible UTC strings ('YYYY-MM-DD HH:MM:SS.fff').
+    def _normalize_iso_literal(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
+            return f"'{dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}'"
+        except ValueError:
+            return match.group(0)
+
+    sql = re.sub(
+        r"'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'",
+        _normalize_iso_literal,
+        sql,
+    )
+
     from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 
     for field in _FIELD_DIMENSIONS.values():
         if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             continue
         sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
+
+    # Normalise boolean custom_fields predicates ('True'/'1' vs 'true') and numeric comparisons on String map values.
+    for b_field in ("edge", "is_ipv6", "waf"):
+        sql = re.sub(
+            rf"custom_fields\['{b_field}'\]\s+IN\s*\(\s*'true'\s*\)",
+            f"lower(custom_fields['{b_field}']) IN ('true', '1')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(
+            rf"custom_fields\['{b_field}'\]\s+NOT\s+IN\s*\(\s*'true'\s*\)",
+            f"lower(custom_fields['{b_field}']) NOT IN ('true', '1')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(
+            rf"custom_fields\['{b_field}'\]\s+IN\s*\(\s*'false'\s*\)",
+            f"lower(custom_fields['{b_field}']) IN ('false', '0', '')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(
+            rf"custom_fields\['{b_field}'\]\s*=\s*'true'",
+            f"lower(custom_fields['{b_field}']) IN ('true', '1')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(
+            rf"custom_fields\['{b_field}'\]\s*=\s*'false'",
+            f"lower(custom_fields['{b_field}']) IN ('false', '0', '')",
+            sql,
+            flags=re.IGNORECASE,
+        )
+
+    sql = re.sub(
+        r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
+        r"\1 \2 '\3'",
+        sql,
+    )
+    sql = re.sub(
+        r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
+        r"toFloat64OrZero(\1) \2 \3",
+        sql,
+    )
 
     fact_tables = {
         names[canonical]: domain
