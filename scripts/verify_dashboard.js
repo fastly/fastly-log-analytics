@@ -251,8 +251,56 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     console.warn(`⚠️ [${name}] ${emptyPanels} panel(s) show an empty state; page has populated charts so proceeding.`);
   }
   console.log(`[${name} Verification] Verified: panels present and charts populated with real data. 🟢`);
+  await logPagePerf(page, name);
   await page.close();
   await context.close();
+}
+
+// One-line, non-fatal page-performance record for the Phase 4 audit workbooks:
+// navigation timings, paint/LCP/CLS, and per-endpoint API timings with duplicate
+// counts, as the page was loaded for the data check above (cold first load).
+async function logPagePerf(page, name) {
+  try {
+    const perf = await page.evaluate(() => new Promise(resolve => {
+      const nav = performance.getEntriesByType('navigation')[0];
+      const fcp = performance.getEntriesByName('first-contentful-paint')[0];
+      let lcp = null;
+      let cls = 0;
+      try {
+        new PerformanceObserver(list => {
+          const entries = list.getEntries();
+          if (entries.length) lcp = entries[entries.length - 1].startTime;
+        }).observe({ type: 'largest-contentful-paint', buffered: true });
+        new PerformanceObserver(list => {
+          for (const e of list.getEntries()) if (!e.hadRecentInput) cls += e.value;
+        }).observe({ type: 'layout-shift', buffered: true });
+      } catch (e) { /* unsupported entry type (e.g. webkit) */ }
+      setTimeout(() => {
+        const api = {};
+        for (const r of performance.getEntriesByType('resource')) {
+          if (!r.name.includes('/api/')) continue;
+          const key = new URL(r.name).pathname;
+          const row = api[key] || (api[key] = { n: 0, maxMs: 0, kb: 0 });
+          row.n += 1;
+          row.maxMs = Math.max(row.maxMs, Math.round(r.duration));
+          row.kb = Math.max(row.kb, Math.round((r.transferSize || r.encodedBodySize || 0) / 102.4) / 10);
+        }
+        resolve({
+          ttfbMs: nav ? Math.round(nav.responseStart) : null,
+          dclMs: nav ? Math.round(nav.domContentLoadedEventEnd) : null,
+          loadMs: nav ? Math.round(nav.loadEventEnd) : null,
+          fcpMs: fcp ? Math.round(fcp.startTime) : null,
+          lcpMs: lcp === null ? null : Math.round(lcp),
+          cls: Math.round(cls * 1000) / 1000,
+          api,
+          duplicateApi: Object.entries(api).filter(([, v]) => v.n > 1).map(([k, v]) => `${k} x${v.n}`),
+        });
+      }, 500);
+    }));
+    console.log(`[PERF ${name}] ${JSON.stringify(perf)}`);
+  } catch (err) {
+    console.log(`[PERF ${name}] unavailable: ${err.message}`);
+  }
 }
 
 (async () => {
