@@ -41,7 +41,7 @@ const ALL_PAGES = [
   { name: 'Usage & Cost', path: '/usage', adminOnly: true },
   { name: 'SQL Query Pad', path: '/query', adminOnly: false },
   { name: 'Alerts', path: '/alerts', adminOnly: true },
-  { name: 'Raw Logs', path: '/logs', adminOnly: true },
+  { name: 'Data Management', path: '/logs', adminOnly: true },
   { name: 'Assets & Shield', path: '/assets-shield', adminOnly: false },
   { name: 'High-Scale Facts', path: '/high-scale/request-facts', adminOnly: true },
   { name: 'Analyst Share Login', path: '/share-login', adminOnly: false },

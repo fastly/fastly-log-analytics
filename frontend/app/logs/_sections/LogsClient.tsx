@@ -22,6 +22,7 @@ import { ingestedFilesColumns } from '@/lib/table-columns'
 import { PageHeader } from '@/components/ui/page-header'
 
 import { useLogsPageState } from '../_state'
+import Loading from '../loading'
 import { useCronColumns } from './CronColumns'
 import { useAuditColumns } from './AuditColumns'
 import { FloatingOperationsDock } from './FloatingOperationsDock'
@@ -75,10 +76,9 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
     return <NoServiceSelected icon={Database} message="Please select a service from the header to access admin controls." />
   }
   if (!s.activeServiceId) {
-    // Bootstrap in flight — render nothing rather than flash the
-    // fallback. The page will re-render with real content as soon as
-    // bootstrap commits.
-    return null
+    // Bootstrap in flight — render the height-matched route skeleton rather
+    // than collapsing the main container to 0px and flashing the footer up.
+    return <Loading />
   }
 
   return (
@@ -145,6 +145,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
             isLoadingCron={s.isLoadingCron}
             isFetchingCron={s.isFetchingCron}
             orderedSchedules={s.orderedSchedules}
+            isLoadingSchedule={s.isLoadingSchedule}
             taskFilter={s.taskFilter}
             setTaskFilter={s.setTaskFilter}
             statusFilter={s.statusFilter}

@@ -38,6 +38,7 @@ vi.mock('@/app/logs/_state', () => ({
     auditLogs: [],
     ingestedFiles: [],
     orderedSchedules: [],
+    isLoadingSchedule: false,
     schemaData: { tables: [] },
     backgroundCronToast: null,
     setBackgroundCronToast: vi.fn(),

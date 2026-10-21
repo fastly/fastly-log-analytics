@@ -62,7 +62,7 @@ The system supports three distinct operational personas across the Dashboard:
 | **Saved Views** | Create, Update, Delete, Apply | Apply only (read-only view) | Apply only (read-only view) |
 | **Customize Cards Dialog** | Persistent to browser `localStorage` per service | Independent browser `localStorage` (does not modify Admin layout) | Independent browser `localStorage` (does not modify Admin layout) |
 | **CSV Export (`/api/dashboard/raw/csv`)** | Raw unmasked export | Export with raw IPs permitted | Export permitted with client IPs masked and session cookies redacted |
-| **Deep Link: Raw Logs (`/logs`)** | Full unmasked logs | Read-only logs with raw IPs | Read-only logs with client IPs masked and sessions redacted |
+| **Deep Link: See Raw Logs (`/query`)** | Full unmasked logs | Read-only logs with raw IPs | Read-only logs with client IPs masked and sessions redacted |
 | **Deep Link: SQL Runner (`/query`)** | Arbitrary SQL execution | Read-only arbitrary SQL execution | Permitted, with **server-side AST & regex query rewrites** strictly enforcing column-level IP/PII masking in query outputs |
 | **Service Settings & FOS Sync** | Full access to mutate configs & trigger syncs | Read-only / CTAs hidden | Read-only / CTAs hidden |
 

@@ -333,7 +333,7 @@ export function useLogsPageState(initialTab?: string) {
     setConsoleOpen(false)
   }
 
-  const { data: cronSchedule } = useQuery({
+  const { data: cronSchedule, isLoading: isLoadingSchedule } = useQuery({
     queryKey: queryKeys.admin.cronSchedule(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/cron-schedule", { signal })
@@ -544,6 +544,7 @@ export function useLogsPageState(initialTab?: string) {
     isFetchingCron,
     recentCrons,
     orderedSchedules,
+    isLoadingSchedule,
     catalogMaps,
     auditLogs,
     isLoadingAudit,

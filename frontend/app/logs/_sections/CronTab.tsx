@@ -42,6 +42,7 @@ export function CronTab({
   isLoadingCron,
   isFetchingCron,
   orderedSchedules,
+  isLoadingSchedule = false,
   taskFilter,
   setTaskFilter,
   statusFilter,
@@ -61,6 +62,7 @@ export function CronTab({
   isLoadingCron: boolean
   isFetchingCron: boolean
   orderedSchedules: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>
+  isLoadingSchedule?: boolean
   taskFilter: string
   setTaskFilter: (v: string) => void
   statusFilter: string
@@ -109,7 +111,7 @@ export function CronTab({
         }}
         renderToolbar={(table) => (
           <>
-            {orderedSchedules.length > 0 && (
+            {(orderedSchedules.length > 0 || isLoadingSchedule) && (
               <div className="p-4 border-b bg-muted/10 space-y-5">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium">Cron Jobs</h3>
@@ -149,54 +151,72 @@ export function CronTab({
                 </HelpDialog>
 
                 <div className="space-y-5">
-                  {CRON_GROUPS.map(group => {
-                    const groupTasks = orderedSchedules.filter(s => group.tasks.includes(s.task))
-                    if (groupTasks.length === 0) return null
-
-                    return (
+                  {orderedSchedules.length === 0 ? (
+                    (isAnalyst ? [CRON_GROUPS[3]] : CRON_GROUPS).map(group => (
                       <div key={group.title} className="space-y-3">
                         <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">{group.title}</div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
-                          {groupTasks.map((item) => (
-                            <CronScheduleBox
-                              key={item.task}
-                              schedule={item.schedule || { task: item.task }}
-                              activeJob={item.activeJob}
-                              compact={item.task === 'expire_snapshots'}
-                              onOpenConsole={(jobId) => {
-                                setConsoleOpen(true)
-                                setSelectedConsoleJobId(jobId)
-                              }}
+                          {group.tasks.slice(0, isAnalyst ? 2 : 3).map((task) => (
+                            <div
+                              key={task}
+                              className="h-8 rounded-md border border-muted bg-muted/20 animate-pulse min-w-[130px] flex-1"
                             />
                           ))}
                         </div>
                       </div>
-                    )
-                  })}
-                  {(() => {
-                    const groupedTaskNames = CRON_GROUPS.flatMap(g => g.tasks)
-                    const otherTasks = orderedSchedules.filter(s => !groupedTaskNames.includes(s.task))
-                    if (otherTasks.length === 0) return null
-                    return (
-                      <div className="space-y-3">
-                        <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Other Tasks</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
-                          {otherTasks.map((item) => (
-                            <CronScheduleBox
-                              key={item.task}
-                              schedule={item.schedule || { task: item.task }}
-                              activeJob={item.activeJob}
-                              compact={item.task === 'expire_snapshots'}
-                              onOpenConsole={(jobId) => {
-                                setConsoleOpen(true)
-                                setSelectedConsoleJobId(jobId)
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    )
-                  })()}
+                    ))
+                  ) : (
+                    <>
+                      {CRON_GROUPS.map(group => {
+                        const groupTasks = orderedSchedules.filter(s => group.tasks.includes(s.task))
+                        if (groupTasks.length === 0) return null
+
+                        return (
+                          <div key={group.title} className="space-y-3">
+                            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">{group.title}</div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
+                              {groupTasks.map((item) => (
+                                <CronScheduleBox
+                                  key={item.task}
+                                  schedule={item.schedule || { task: item.task }}
+                                  activeJob={item.activeJob}
+                                  compact={item.task === 'expire_snapshots'}
+                                  onOpenConsole={(jobId) => {
+                                    setConsoleOpen(true)
+                                    setSelectedConsoleJobId(jobId)
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {(() => {
+                        const groupedTaskNames = CRON_GROUPS.flatMap(g => g.tasks)
+                        const otherTasks = orderedSchedules.filter(s => !groupedTaskNames.includes(s.task))
+                        if (otherTasks.length === 0) return null
+                        return (
+                          <div className="space-y-3">
+                            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Other Tasks</div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
+                              {otherTasks.map((item) => (
+                                <CronScheduleBox
+                                  key={item.task}
+                                  schedule={item.schedule || { task: item.task }}
+                                  activeJob={item.activeJob}
+                                  compact={item.task === 'expire_snapshots'}
+                                  onOpenConsole={(jobId) => {
+                                    setConsoleOpen(true)
+                                    setSelectedConsoleJobId(jobId)
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })()}
+                    </>
+                  )}
                 </div>
               </div>
             )}

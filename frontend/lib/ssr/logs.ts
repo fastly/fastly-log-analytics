@@ -41,3 +41,19 @@ export async function fetchCronRunsServerSide(
     'ssr/logs',
   )
 }
+
+export async function fetchCronScheduleServerSide(
+  serviceId: string | undefined,
+): Promise<unknown | null> {
+  if (!serviceId) return null
+
+  return parseSsrJson(
+    await ssrUpstreamGet({
+      path: '/api/cron-schedule',
+      logPrefix: 'ssr/logs-schedule',
+      injectAdminToken: true,
+      extraHeaders: { 'X-Fastly-Service-Id': serviceId },
+    }),
+    'ssr/logs-schedule',
+  )
+}
