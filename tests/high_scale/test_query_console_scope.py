@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -206,3 +207,92 @@ def test_syntax_the_two_parsers_could_read_differently_is_rejected_before_valida
 )
 def test_ordinary_sql_still_runs(sql: str) -> None:
     _run(sql)
+
+
+# ── analyst identities read through views ──────────────────────────────────────────────────────────────
+
+
+VIEWS = {
+    "request_facts": "fla_cv_abc_m_request_facts",
+    "rum_vitals_facts": "fla_cv_abc_m_rum_vitals_facts",
+    "rum_error_facts": "fla_cv_abc_m_rum_error_facts",
+}
+
+
+def _run_as_analyst(sql: str, client: _Recorder | None = None) -> tuple[str, dict[str, str]]:
+    client = client or _Recorder()
+    query_endpoint(
+        SimpleNamespace(service_id="svc", client=None),  # type: ignore[arg-type]
+        QueryRequest(sql=sql, max_rows=10),
+        START,
+        END,
+        True,
+        client=client,
+        tables=VIEWS,
+    )
+    return client.calls[-1]
+
+
+def test_analyst_sql_is_renamed_onto_the_identitys_views_never_the_base_tables() -> None:
+    sql, _ = _run_as_analyst("SELECT count(*) AS n FROM logs")
+
+    assert "fla_cv_abc_m_request_facts" in sql
+    assert not re.search(r"(?<![\w])request_facts", sql.replace("fla_cv_abc_m_request_facts", ""))
+
+
+@pytest.mark.parametrize(
+    ("user_table", "view"),
+    [("client_vitals", "rum_vitals_facts"), ("client_errors", "rum_error_facts")],
+)
+def test_rum_tables_map_to_their_own_views(user_table: str, view: str) -> None:
+    sql, settings = _run_as_analyst(f"SELECT count(*) AS n FROM {user_table}")
+
+    assert VIEWS[view] in sql
+    assert f"'{VIEWS[view]}'" in settings["additional_table_filters"]
+
+
+def test_with_a_view_only_the_analyst_window_is_sent_as_a_setting() -> None:
+    _, settings = _run_as_analyst("SELECT count(*) AS n FROM logs")
+
+    scope = settings["additional_table_filters"]
+    assert scope.startswith("{'fla_cv_abc_m_request_facts': ")
+    assert "event_timestamp >=" in scope and "event_timestamp <=" in scope
+    for fixed_by_the_view in ("service_id", "publication_state", "high_scale_batch_publications"):
+        assert fixed_by_the_view not in scope, "the identity cannot read the publication table a fence subquery needs"
+
+
+def test_table_filters_with_a_view_and_no_window_sends_no_setting_at_all() -> None:
+    assert _table_filters("svc", None, None, {"v": "request"}, scoped_by_view=True) is None
+
+
+def test_table_filters_default_still_pins_service_fence_and_window_for_the_privileged_client() -> None:
+    filters = _table_filters("svc", START, END, {"request_facts": "request"})
+
+    assert filters is not None
+    assert "service_id = \\'svc\\'" in filters and "high_scale_batch_publications" in filters
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM fla_cv_abc_m_request_facts",
+        "SELECT * FROM fla_cv_abc_r_request_facts",
+        "SELECT * FROM default.fla_cv_abc_m_request_facts",
+        "SELECT * FROM request_facts",
+        "SELECT * FROM high_scale_batch_publications",
+    ],
+)
+def test_an_analyst_cannot_name_a_view_or_base_table_directly(sql: str) -> None:
+    client = _Recorder()
+
+    with pytest.raises(PermissionError):
+        _run_as_analyst(sql, client)
+
+    assert not client.calls
+
+
+def test_the_privileged_path_without_views_is_unchanged() -> None:
+    sql, settings = _run("SELECT count(*) AS n FROM logs")
+
+    assert "request_facts" in sql and "fla_cv_" not in sql
+    assert "service_id" in settings["additional_table_filters"]

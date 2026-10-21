@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,30 +29,42 @@ def _instant(value: datetime) -> str:
     return f"toDateTime64({_literal(value.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S.%f'))}, 6, 'UTC')"
 
 
-def _table_filters(service_id: str, start_time: str | None, end_time: str | None, tables: list[str]) -> str:
-    """``additional_table_filters`` value pinning every fact table to this service, its visible batches and the window.
+def _table_filters(
+    service_id: str,
+    start_time: str | None,
+    end_time: str | None,
+    tables: Iterable[str] | Mapping[str, str],
+    *,
+    scoped_by_view: bool = False,
+) -> str | None:
+    """``additional_table_filters`` value for the fact tables the query reads, or None when nothing applies.
 
-    ClickHouse applies the predicate to the storage read itself, so no shape of user SQL (an ``OR`` in its own
-    ``WHERE``, a subquery, CTE, join or alias) can read another service's rows or widen the granted window.
-    It is sent as an HTTP setting, never as SQL text, so a user comment cannot swallow it.
+    ``tables`` maps each table name as it appears in the SQL to its publication domain (a bare iterable of
+    canonical fact-table names is accepted). By default the filter pins service, visible batches and the analyst
+    window. With ``scoped_by_view`` the table is a console view that already fixes service and fence in the
+    database (and the identity cannot read the publication table a fence subquery would need), so only the window
+    is applied. It is sent as an HTTP setting, never as SQL text, so a user comment cannot swallow it.
     """
+    domains = tables if isinstance(tables, Mapping) else {table: _FACT_DOMAINS[table] for table in tables}
     start = _range_value(start_time)
     end = _range_value(end_time)
     entries = []
-    for table in tables:
-        domain = _FACT_DOMAINS[table]
-        clauses = [
-            f"service_id = {_literal(service_id)}",
-            "publication_state = 'visible'",
-            "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
-            f"WHERE service_id = {_literal(service_id)} AND domain = '{domain}' AND publication_state = 'visible')",
-        ]
+    for table, domain in domains.items():
+        clauses: list[str] = []
+        if not scoped_by_view:
+            clauses += [
+                f"service_id = {_literal(service_id)}",
+                "publication_state = 'visible'",
+                "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+                f"WHERE service_id = {_literal(service_id)} AND domain = '{domain}' AND publication_state = 'visible')",
+            ]
         if start is not None:
             clauses.append(f"event_timestamp >= {_instant(start)}")
         if end is not None:
             clauses.append(f"event_timestamp <= {_instant(end)}")
-        entries.append(f"{_literal(table)}: {_literal(' AND '.join(clauses))}")
-    return "{" + ", ".join(entries) + "}"
+        if clauses:
+            entries.append(f"{_literal(table)}: {_literal(' AND '.join(clauses))}")
+    return "{" + ", ".join(entries) + "}" if entries else None
 
 
 def _assert_table_filters_enforced(client: Any) -> None:
@@ -191,9 +204,15 @@ def query_endpoint(
     *,
     session_id: str | None = None,
     client: Any | None = None,
+    tables: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run a console query. ``client`` overrides the service's own ClickHouse client (analysts pass theirs)."""
+    """Run a console query.
+
+    ``client`` overrides the service's own ClickHouse client and ``tables`` maps each canonical fact table to the
+    view to read it through; analysts pass both (their identity has grants on those views only).
+    """
     client = client if client is not None else service.client
+    names = {canonical: (tables or {}).get(canonical, canonical) for canonical in _FACT_DOMAINS}
     timer = SectionTimer()
     section_timings = timer.entries
 
@@ -203,7 +222,7 @@ def query_endpoint(
     allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
 
     _t_val = time.perf_counter()
-    _reject_ambiguous_syntax(raw_sql, allowed_tables)
+    _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
     with duckdb.connect(":memory:") as parser_con:
         try:
             validate_user_sql(
@@ -221,10 +240,10 @@ def query_endpoint(
 
     # Translate DuckDB table names to ClickHouse fact tables
     if svc_table != "logs":
-        sql = re.sub(rf"\b{re.escape(svc_table)}\b", "request_facts", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\blogs\b", "request_facts", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_vitals\b", "rum_vitals_facts", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_errors\b", "rum_error_facts", sql, flags=re.IGNORECASE)
+        sql = re.sub(rf"\b{re.escape(svc_table)}\b", names["request_facts"], sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\blogs\b", names["request_facts"], sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bclient_vitals\b", names["rum_vitals_facts"], sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bclient_errors\b", names["rum_error_facts"], sql, flags=re.IGNORECASE)
 
     # Translate canonical column names for ClickHouse fact tables
     sql = re.sub(r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp", sql, flags=re.IGNORECASE)
@@ -237,7 +256,11 @@ def query_endpoint(
             continue
         sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
 
-    fact_tables = [table for table in _FACT_DOMAINS if re.search(rf"\b{table}\b", sql, flags=re.IGNORECASE)]
+    fact_tables = {
+        names[canonical]: domain
+        for canonical, domain in _FACT_DOMAINS.items()
+        if re.search(rf"\b{re.escape(names[canonical])}\b", sql, flags=re.IGNORECASE)
+    }
 
     has_explicit_limit = bool(re.search(r"\bLIMIT\b", _code_only(sql), flags=re.IGNORECASE))
     _reject_unsafe_functions(sql)
@@ -250,7 +273,9 @@ def query_endpoint(
     settings = {"max_result_rows": str(row_cap), "result_overflow_mode": "break"}
     if fact_tables:
         _assert_table_filters_enforced(client)
-        settings["additional_table_filters"] = _table_filters(service.service_id, start_time, end_time, fact_tables)
+        scope = _table_filters(service.service_id, start_time, end_time, fact_tables, scoped_by_view=tables is not None)
+        if scope is not None:
+            settings["additional_table_filters"] = scope
 
     t0 = time.perf_counter()
     try:

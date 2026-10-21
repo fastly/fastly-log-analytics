@@ -586,7 +586,7 @@ def test_query_high_scale_is_closed_to_analysts_until_clickhouse_enforces_the_bo
     assert calls == [], "nothing may reach ClickHouse for an analyst"
 
 
-def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console):
+def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console, mask_ips=True):
     """Post a console query as an analyst against a fake high-scale service; ``console`` is the stand-in manager."""
     from datetime import UTC, datetime
     from types import SimpleNamespace
@@ -598,7 +598,7 @@ def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_c
     main_client = SimpleNamespace(execute=lambda sql, params=None, settings=None: main_calls.append(sql) or [])
     fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=main_client)
     session = SimpleNamespace(
-        session_id="sess-hs2", pii_policy={"mask_ips": True}, service_ids=[test_service_source["service_id"]]
+        session_id="sess-hs2", pii_policy={"mask_ips": mask_ips}, service_ids=[test_service_source["service_id"]]
     )
     app.dependency_overrides[build_request_context] = override_request_context(
         source=test_service_source,
@@ -624,26 +624,58 @@ def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_c
 
 
 @pytest.mark.security_regression
-def test_analyst_console_runs_on_the_services_own_least_privilege_identity(
+def test_analyst_console_runs_on_the_services_own_least_privilege_identity_through_its_views(
     client, in_memory_duckdb, test_service_source
 ):
     from types import SimpleNamespace
 
-    console_calls: list[str] = []
+    seen: list[tuple[str, dict]] = []
     console_client = SimpleNamespace(
         execute=lambda sql, params=None, settings=None: (
-            [{"n": 0}] if "system.one" in sql else console_calls.append(sql) or [{"n": 7}]
+            [{"n": 0}] if "system.one" in sql else seen.append((sql, dict(settings or {}))) or [{"n": 7}]
         )
     )
-    console = SimpleNamespace(client_for=lambda sid: console_client)
+    asked: list[bool] = []
+
+    def client_for(sid, masked=True):
+        asked.append(masked)
+        return SimpleNamespace(client=console_client, tables={"request_facts": "fla_cv_view_req"})
+
     main_calls: list[str] = []
 
-    resp = _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_calls, console)
+    resp = _analyst_on_high_scale(
+        client, in_memory_duckdb, test_service_source, main_calls, SimpleNamespace(client_for=client_for)
+    )
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"] == [{"n": 7}]
-    assert console_calls, "the analyst's query must run on the console identity"
+    sql, settings = seen[0]
+    assert "fla_cv_view_req" in sql and "request_facts" not in sql, "analysts read through their view only"
+    scope = settings["additional_table_filters"]
+    assert "event_timestamp >=" in scope and "service_id" not in scope, "the view fixes the service; only the window"
     assert main_calls == [], "and never on the application's privileged ClickHouse user"
+    assert asked == [True], "a mask_ips invite must get the masked identity"
+
+
+@pytest.mark.security_regression
+def test_an_invite_without_mask_ips_gets_the_raw_identity(client, in_memory_duckdb, test_service_source):
+    from types import SimpleNamespace
+
+    asked: list[bool] = []
+    console_client = SimpleNamespace(
+        execute=lambda sql, params=None, settings=None: [{"n": 0}] if "system.one" in sql else [{"n": 1}]
+    )
+
+    def client_for(sid, masked=True):
+        asked.append(masked)
+        return SimpleNamespace(client=console_client, tables={"request_facts": "fla_cv_view_req"})
+
+    resp = _analyst_on_high_scale(
+        client, in_memory_duckdb, test_service_source, [], SimpleNamespace(client_for=client_for), mask_ips=False
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert asked == [False]
 
 
 @pytest.mark.security_regression

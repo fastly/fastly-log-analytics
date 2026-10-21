@@ -1,18 +1,21 @@
-"""Per-service least-privilege ClickHouse identities for analyst SQL.
+"""Per-service, per-mask-mode least-privilege ClickHouse identities for analyst SQL.
 
 Analysts are an adversary, and the console validates SQL with DuckDB's parser while ClickHouse runs it, so
-name-based checks can only ever be a second line of defence. The first is the database itself: each service gets
-its own ClickHouse user whose
+name-based checks can only ever be a second line of defence. The first is the database itself. Each service gets
+two ClickHouse users, ``masked`` (for ``mask_ips`` invites) and ``raw``, and each user
 
-* grants are ``SELECT`` on the fact tables and the publication table only (no other table, no ``system.*``
-  beyond what every user can read, no table-function sources, no DDL or inserts),
-* settings profile is ``readonly = 1`` with every resource limit the client sends capped by ``MAX``, so a query
-  cannot raise its own memory, threads or timeout, and
-* restrictive row policies pin every readable table to that service's ``service_id``, which no query text or
-  ``SETTINGS`` clause can remove.
+* can ``SELECT`` only from its own three **views** (``request_facts``, ``rum_vitals_facts``, ``rum_error_facts``)
+  and nothing else: no base table, no ``system.*`` beyond what every user can read, no table-function sources, no
+  DDL or inserts,
+* sees only that service's visible batches, because the view fixes ``service_id`` and the publication fence,
+* in the masked view reads ``'[redacted]'`` wherever the data holds a client IP or session identifier (the same
+  columns and map keys the standard console redacts), so no string function can recover them: the data never
+  leaves the database unmasked, and the masked user has no grant on the raw view or the base table, and
+* runs under ``readonly = 1`` with every resource limit the client sends capped by ``MAX``.
 
-Credentials are derived from one deployment secret (``CLICKHOUSE_CONSOLE_SECRET``), so nothing per service has
-to be stored. With no secret configured analysts get no console (fail closed).
+The views execute with the definer's rights, so the identity never needs access to the base tables or to the
+publication table. Credentials are derived from one deployment secret (``CLICKHOUSE_CONSOLE_SECRET``), so nothing
+per service has to be stored. With no secret configured analysts get no console (fail closed).
 """
 
 from __future__ import annotations
@@ -24,18 +27,24 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from backend import config
 from backend.core.clickhouse_client import ClickHouseClient
+from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
 
 logger = logging.getLogger(__name__)
 
-SCOPED_TABLES = ("request_facts", "rum_vitals_facts", "rum_error_facts", "high_scale_batch_publications")
+# canonical fact table -> publication domain fenced by its view
+FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "rum_error_facts": "rum_errors"}
+PUBLICATIONS_TABLE = "high_scale_batch_publications"
 PROFILE = "fla_console_ro"
 MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
+REDACTED = "[redacted]"
+# Per-client identifiers redacted for a mask_ips analyst: the standard console's families plus the RUM client id.
+MASKED_KEYS = tuple(sorted(IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_id"}))
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 # Mirrors the per-query settings ClickHouseClient._request always sends, plus the three the console adds. Any
@@ -67,57 +76,108 @@ def _literal(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def console_identity(service_id: str, secret: bytes) -> tuple[str, str]:
-    """``(user, password)`` for ``service_id``; the password is an HMAC of the service under the deployment secret."""
+def _service_hash(service_id: str) -> str:
+    return hashlib.sha256(service_id.encode()).hexdigest()[:16]
+
+
+def _mode(masked: bool) -> str:
+    return "m" if masked else "r"
+
+
+def console_identity(service_id: str, secret: bytes, masked: bool = True) -> tuple[str, str]:
+    """``(user, password)`` for ``service_id`` in the given mask mode; the password is an HMAC under the secret."""
     if len(secret) < MIN_SECRET_BYTES:
         raise ValueError(f"CLICKHOUSE_CONSOLE_SECRET must be at least {MIN_SECRET_BYTES} bytes")
     if len(set(secret)) < MIN_DISTINCT_SECRET_BYTES:
         raise ValueError(f"CLICKHOUSE_CONSOLE_SECRET needs at least {MIN_DISTINCT_SECRET_BYTES} distinct bytes")
-    user = "fla_console_" + hashlib.sha256(service_id.encode()).hexdigest()[:16]
-    password = hmac.new(secret, f"console:{service_id}".encode(), hashlib.sha256).hexdigest()
+    user = f"fla_console_{_service_hash(service_id)}_{_mode(masked)}"
+    password = hmac.new(secret, f"console:{service_id}:{_mode(masked)}".encode(), hashlib.sha256).hexdigest()
     return user, password
 
 
-def provision_console_access(admin: Any, database: str, service_id: str, secret: bytes) -> str:
-    """Idempotently create ``service_id``'s console identity and return its user name.
+def console_tables(service_id: str, masked: bool) -> dict[str, str]:
+    """Canonical fact table name -> the view this identity reads it through."""
+    return {table: f"fla_cv_{_service_hash(service_id)}_{_mode(masked)}_{table}" for table in FACT_DOMAINS}
 
-    Order matters: the row policy exists before any ``SELECT`` is granted, because a user with grants but no
-    policy would see every service's rows. If any statement fails nothing broader than a grantless user remains.
+
+def _view_select(database: str, table: str, columns: list[tuple[str, str]], service_id: str, masked: bool) -> str:
+    sid = _literal(service_id)
+    fence = (
+        f"batch_id IN (SELECT batch_id FROM `{database}`.`{PUBLICATIONS_TABLE}` FINAL "
+        f"WHERE service_id = {sid} AND domain = '{FACT_DOMAINS[table]}' AND publication_state = 'visible')"
+    )
+    source = f"FROM `{database}`.`{table}` WHERE service_id = {sid} AND publication_state = 'visible' AND {fence}"
+    replacements: list[str] = []
+    keys = ", ".join(_literal(key) for key in MASKED_KEYS)
+    for name, type_ in columns if masked else []:
+        if type_.startswith("Map(String, String"):
+            replacements.append(
+                f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND v != '', {_literal(REDACTED)}, v)), "
+                f"`{name}`) AS `{name}`"
+            )
+        elif name.lower() in MASKED_KEYS and "String" in type_:
+            replacements.append(f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {_literal(REDACTED)}) AS `{name}`")
+    projection = f"SELECT * REPLACE ({', '.join(replacements)})" if replacements else "SELECT *"
+    return f"{projection} {source}"
+
+
+def provision_console_access(admin: Any, database: str, service_id: str, secret: bytes) -> dict[str, str]:
+    """Idempotently create ``service_id``'s masked and raw console identities; returns ``{mode: user}``.
+
+    Order matters: a user is created with no grants, its views are created and verified, and only then is
+    ``SELECT`` on those views (and nothing else) granted. If any statement fails nothing broader than a grantless
+    user remains. Pre-view identities (base-table grants plus a row policy) are removed.
     """
     if not _DATABASE.fullmatch(database):
         raise ValueError("ClickHouse database must be a simple identifier")
-    user, password = console_identity(service_id, secret)
     db = f"`{database}`"
-    tables = ", ".join(f"{db}.`{table}`" for table in SCOPED_TABLES)
-    policy = f"`{user}_scope`"
-    scope = f"FOR SELECT USING service_id = {_literal(service_id)} AS RESTRICTIVE TO `{user}`"
-    before_grants = [
-        f"CREATE SETTINGS PROFILE IF NOT EXISTS {PROFILE} SETTINGS {_PROFILE_SETTINGS}",
-        f"ALTER SETTINGS PROFILE {PROFILE} SETTINGS {_PROFILE_SETTINGS}",
-        f"CREATE USER IF NOT EXISTS `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} "
-        f"DEFAULT DATABASE {db} SETTINGS PROFILE '{PROFILE}'",
-        # Always re-applied: rotates the password and re-attaches the profile on a pre-existing user.
-        f"ALTER USER `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} SETTINGS PROFILE '{PROFILE}'",
-        f"CREATE ROW POLICY IF NOT EXISTS {policy} ON {tables} {scope}",
-        f"ALTER ROW POLICY {policy} ON {tables} {scope}",
-    ]
-    for statement in before_grants:
-        admin.execute(statement)
-    # CREATE ROW POLICY is one multi-table statement, and a user holding SELECT on a table without a policy reads
-    # every service: prove all of them exist before granting anything.
-    present = {
-        row.get("table")
-        for row in admin.execute(
-            "SELECT table FROM system.row_policies "
-            f"WHERE database = {_literal(database)} AND short_name = {_literal(user + '_scope')}"
-        )
+    schemas = {
+        table: [(str(row["name"]), str(row["type"])) for row in admin.execute(f"DESCRIBE TABLE {db}.`{table}`")]
+        for table in FACT_DOMAINS
     }
-    missing = set(SCOPED_TABLES) - present
-    if missing:
-        raise RuntimeError(f"row policies missing on {sorted(missing)} for {service_id}; nothing was granted")
-    for table in SCOPED_TABLES:
-        admin.execute(f"GRANT SELECT ON {db}.`{table}` TO `{user}`")
-    return user
+    for table, columns in schemas.items():
+        if not columns:
+            raise RuntimeError(f"{table} has no columns; refusing to provision console access")
+
+    legacy_user = f"fla_console_{_service_hash(service_id)}"
+    legacy_tables = ", ".join(f"{db}.`{t}`" for t in (*FACT_DOMAINS, PUBLICATIONS_TABLE))
+    admin.execute(f"DROP ROW POLICY IF EXISTS `{legacy_user}_scope` ON {legacy_tables}")
+    admin.execute(f"DROP USER IF EXISTS `{legacy_user}`")
+
+    admin.execute(f"CREATE SETTINGS PROFILE IF NOT EXISTS {PROFILE} SETTINGS {_PROFILE_SETTINGS}")
+    admin.execute(f"ALTER SETTINGS PROFILE {PROFILE} SETTINGS {_PROFILE_SETTINGS}")
+
+    users: dict[str, str] = {}
+    for masked in (True, False):
+        user, password = console_identity(service_id, secret, masked)
+        views = console_tables(service_id, masked)
+        admin.execute(
+            f"CREATE USER IF NOT EXISTS `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} "
+            f"DEFAULT DATABASE {db} SETTINGS PROFILE '{PROFILE}'"
+        )
+        # Always re-applied: rotates the password and re-attaches the profile on a pre-existing user.
+        admin.execute(
+            f"ALTER USER `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} SETTINGS PROFILE '{PROFILE}'"
+        )
+        for table, view in views.items():
+            admin.execute(
+                f"CREATE OR REPLACE VIEW {db}.`{view}` DEFINER = CURRENT_USER SQL SECURITY DEFINER AS "
+                + _view_select(database, table, schemas[table], service_id, masked)
+            )
+        present = {
+            row.get("name")
+            for row in admin.execute(
+                f"SELECT name FROM system.tables WHERE database = {_literal(database)} AND engine = 'View' "
+                f"AND name IN ({', '.join(_literal(v) for v in views.values())})"
+            )
+        }
+        missing = set(views.values()) - present
+        if missing:
+            raise RuntimeError(f"console views missing for {service_id}: {sorted(missing)}; nothing was granted")
+        for view in views.values():
+            admin.execute(f"GRANT SELECT ON {db}.`{view}` TO `{user}`")
+        users["masked" if masked else "raw"] = user
+    return users
 
 
 def provision_configured_services(admin: Any, service_ids: Iterable[str]) -> tuple[str, ...]:
@@ -143,8 +203,16 @@ def _env_secret() -> bytes | None:
     return value.encode() if value else None
 
 
+@dataclasses.dataclass(frozen=True)
+class ConsoleAccess:
+    """A console identity's client plus the views it must read each fact table through."""
+
+    client: Any
+    tables: Mapping[str, str]
+
+
 class ConsoleClients:
-    """Lazy per-service ClickHouse clients that log in as each service's own console identity."""
+    """Lazy per-(service, mask mode) ClickHouse clients that log in as that identity."""
 
     def __init__(
         self,
@@ -156,45 +224,55 @@ class ConsoleClients:
         self._settings = settings
         self._secret = secret
         self._factory = client_factory
-        self._clients: dict[str, Any] = {}
+        self._access: dict[tuple[str, bool], ConsoleAccess] = {}
         self._lock = threading.Lock()
 
-    def client_for(self, service_id: str) -> Any | None:
-        """The service's console client, or None when no secret/ClickHouse is configured (analysts get no console)."""
+    def client_for(self, service_id: str, masked: bool = True) -> ConsoleAccess | None:
+        """The identity for ``service_id``, or None when no secret/ClickHouse is configured (no analyst console)."""
         if self._secret is None or self._settings is None:
             return None
+        key = (service_id, masked)
         with self._lock:
-            existing = self._clients.get(service_id)
+            existing = self._access.get(key)
         if existing is not None:
             return existing
         # The isolation check is a ClickHouse round trip: never hold the shared lock across it, or one slow
         # service would stall the console for every other service.
-        user, password = console_identity(service_id, self._secret)
+        user, password = console_identity(service_id, self._secret, masked)
         client = self._factory(dataclasses.replace(self._settings, user=user, password=password))
+        access = ConsoleAccess(client, console_tables(service_id, masked))
         try:
-            self._assert_isolated(client, service_id)
+            self._assert_isolated(access, service_id, masked)
         except BaseException:
             client.close()
             raise
         with self._lock:
-            winner = self._clients.setdefault(service_id, client)
-        if winner is not client:
+            winner = self._access.setdefault(key, access)
+        if winner is not access:
             client.close()
         return winner
 
     @staticmethod
-    def _assert_isolated(client: Any, service_id: str) -> None:
-        """Fail closed unless the identity cannot read another service's rows (a missing policy would fail open)."""
-        for table in SCOPED_TABLES:
-            rows = client.execute(f"SELECT count() AS n FROM {table} WHERE service_id != {_literal(service_id)}")
+    def _assert_isolated(access: ConsoleAccess, service_id: str, masked: bool) -> None:
+        """Fail closed unless the identity reads only its own service and, when masked, only redacted identifiers."""
+        sid = _literal(service_id)
+        for view in access.tables.values():
+            rows = access.client.execute(f"SELECT count() AS n FROM {view} WHERE service_id != {sid}")
             if not rows or int(rows[0].get("n", 1)) != 0:
-                raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {table}")
+                raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {view}")
+        if masked:
+            view = access.tables["request_facts"]
+            rows = access.client.execute(
+                f"SELECT count() AS n FROM {view} WHERE client_ip != '' AND client_ip != {_literal(REDACTED)}"
+            )
+            if not rows or int(rows[0].get("n", 1)) != 0:
+                raise RuntimeError(f"console identity for {service_id} failed the masking check on {view}")
 
     def close(self) -> None:
         with self._lock:
-            clients, self._clients = list(self._clients.values()), {}
-        for client in clients:
-            client.close()
+            held, self._access = list(self._access.values()), {}
+        for access in held:
+            access.client.close()
 
 
 _manager: ConsoleClients | None = None
