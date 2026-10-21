@@ -265,6 +265,10 @@ async def dashboard_bundle(
                 await task
                 raise
             timer.mark("bundle:top_bots", t1)
+        if isinstance(aggregates, dict):
+            aggregates = dict(aggregates)
+        if isinstance(top_bots, dict):
+            top_bots = dict(top_bots)
         single_debug_queries: list = []
         single_debug_calls: list = []
         for sub in (aggregates, top_bots):
@@ -420,6 +424,10 @@ async def dashboard_bundle(
     # debug lists — Pydantic's BundleResponse will validate them and
     # then BaseResponse._strip_debug_when_disabled redacts any
     # remaining debug keys when DEBUG_RESPONSES is unset.
+    if isinstance(aggregates, dict):
+        aggregates = dict(aggregates)
+    if isinstance(top_bots, dict):
+        top_bots = dict(top_bots)
     all_debug_queries: list = []
     all_debug_calls: list = []
     for sub in (aggregates, top_bots):

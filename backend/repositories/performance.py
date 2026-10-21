@@ -65,7 +65,7 @@ def peek_performance_aggregates(
     if _PERF_CACHE_TTL <= 0 or start_time is None or end_time is None:
         return None
     key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
-    cached = _memo.get(key)
+    cached = _memo.get_with_telemetry(key)
     return dict(cached) if cached is not None else None
 
 
@@ -89,7 +89,7 @@ def get_performance_aggregates(
     cache_key: str | None = None
     if _PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
         cache_key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
-        cached = _memo.get(cache_key)
+        cached = _memo.get_with_telemetry(cache_key)
         if cached is not None:
             return dict(cached)
 
@@ -448,6 +448,7 @@ def get_performance_aggregates(
     if _want_waterfall and "waterfall" not in results:
         results["waterfall"] = {}
 
+    results.update(runner.telemetry())
     results["section_timings"] = section_timings
     if cache_key is not None:
         _memo.put(cache_key, dict(results))

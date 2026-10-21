@@ -57,7 +57,7 @@ def check_assets_cache(
     """Fast pre-connection cache check for production file-backed services."""
     if not src.get("duckdb_path") and not src.get("cache_dir"):
         return None
-    cached = _memo.get(_build_cache_key(src, start_time, end_time, filters))
+    cached = _memo.get_with_telemetry(_build_cache_key(src, start_time, end_time, filters))
     if cached is not None:
         return {**cached, "section_timings": []}
     return None
@@ -111,9 +111,9 @@ def get_assets_aggregates(
     cache_key: str | None = None
     if has_partition_cols or src.get("duckdb_path") or src.get("cache_dir"):
         cache_key = _build_cache_key(src, start_time, end_time, filters)
-        cached = _memo.get(cache_key)
+        cached = _memo.get_with_telemetry(cache_key)
         if cached is not None and not missing_fields:
-            return {**cached, "section_timings": section_timings, **runner.telemetry()}
+            return {**runner.telemetry(), **cached, "section_timings": section_timings}
 
     results = {
         "missing_fields": missing_fields,

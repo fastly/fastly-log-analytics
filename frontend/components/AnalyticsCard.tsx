@@ -86,14 +86,14 @@ export function AnalyticsCard({
     <Card className={cn("flex flex-col gap-0 py-0 overflow-hidden", className)}>
       <CardHeader className="px-4 pt-4 pb-3 border-b space-y-0">
         <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             {icon && <div className="text-primary">{icon}</div>}
-            <div>
+            <div className="min-w-0">
               <CardTitle className="text-sm font-medium">{title}</CardTitle>
-              {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
+              {description && <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{description}</p>}
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             {isFetching && !showLoading && <UpdatingBadge />}
             {headerAction}
             {helpContent && (

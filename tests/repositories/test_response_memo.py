@@ -43,6 +43,25 @@ def test_put_strips_extra_keys():
     assert memo.get("k") == {"a": 1, "is_cached": True}
 
 
+def test_get_with_telemetry_restores_cached_query_attribution():
+    memo = ResponseMemo()
+    memo.put(
+        "k",
+        {
+            "a": 1,
+            "debug_queries": [{"sql": "SELECT 1", "time_ms": 1.2, "engine": "DuckDB"}],
+            "debug_calls": [{"service": "fastly", "method": "GET", "path": "/x", "time_ms": 2.0}],
+        },
+    )
+    assert memo.get("k") == {"a": 1, "is_cached": True}
+    hit = memo.get_with_telemetry("k")
+    assert hit is not None
+    assert hit["a"] == 1
+    assert hit["is_cached"] is True
+    assert hit["debug_queries"] == [{"sql": "SELECT 1", "time_ms": 1.2, "engine": "DuckDB", "is_cached": True}]
+    assert hit["debug_calls"] == [{"service": "fastly", "method": "GET", "path": "/x", "time_ms": 2.0}]
+
+
 def test_origin_response_cache_key_is_byte_stable():
     from backend.repositories.origin import _response_cache_key
 

@@ -74,7 +74,7 @@ def peek_security_aggregates(
     if _SECURITY_CACHE_TTL <= 0 or start_time is None or end_time is None:
         return None
     key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
-    cached = _memo.get(key)
+    cached = _memo.get_with_telemetry(key)
     return dict(cached) if cached is not None else None
 
 
@@ -773,7 +773,7 @@ def get_top_bots(
         **runner.telemetry(),
     }
     if cache_key is not None and (arcjet_bots or ngwaf_bots):
-        _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict)
+        _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict.copy())
     return res_dict
 
 
@@ -792,7 +792,7 @@ def get_security_aggregates(
     memo_key: str | None = None
     if _SECURITY_CACHE_TTL > 0 and start_time is not None and end_time is not None:
         memo_key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
-        cached = _memo.get(memo_key)
+        cached = _memo.get_with_telemetry(memo_key)
         if cached is not None:
             return dict(cached)
 

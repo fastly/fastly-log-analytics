@@ -128,7 +128,7 @@ def assets_aggregates(
         },
         {"name": service.service_id},
     )
-    cached = _memo.get(cache_key)
+    cached = _memo.get_with_telemetry(cache_key)
     if cached is not None:
         return AssetsAggregatesResponse.with_telemetry(**cached)
 

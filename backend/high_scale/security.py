@@ -411,7 +411,7 @@ def security_aggregates(
         },
         {"name": service.service_id, "service_id": service.service_id},
     )
-    cached = _memo.get(memo_key)
+    cached = _memo.get_with_telemetry(memo_key)
     if cached is not None:
         return SecurityAggregatesResponse.with_telemetry(**cached)
 

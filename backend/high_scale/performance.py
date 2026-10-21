@@ -347,7 +347,7 @@ def performance_aggregates(
             },
             {"service_id": service.service_id},
         )
-        cached = _memo.get(cache_key)
+        cached = _memo.get_with_telemetry(cache_key)
         if cached is not None:
             return PerformanceAggregatesResponse.with_telemetry(**cached)
 

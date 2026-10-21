@@ -32,9 +32,9 @@ export default function Loading() {
         <Skeleton className="h-8 w-24" />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[204px] [contain-intrinsic-size:auto_204px] [content-visibility:auto]">
         {TREND_KEYS.map((key) => (
-          <Card key={key} className="min-h-[200px]">
+          <Card key={key} className="min-h-[204px]">
             <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
               <Skeleton className="h-5 w-44" />
               <span className="text-xs text-muted-foreground">

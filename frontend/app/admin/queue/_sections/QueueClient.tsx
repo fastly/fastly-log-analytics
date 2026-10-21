@@ -175,6 +175,7 @@ export function QueueClient() {
     data,
     isLoading,
     isFetching,
+    isFetched,
     error,
     refetch,
   } = useQuery({
@@ -223,6 +224,7 @@ export function QueueClient() {
     data: trends,
     isLoading: trendsLoading,
     isFetching: trendsFetching,
+    isFetched: trendsFetched,
     error: trendsError,
     refetch: refetchTrends,
   } = useQuery({
@@ -238,9 +240,12 @@ export function QueueClient() {
     refetchInterval: 60_000,
   })
 
+  const isStatusRefetching = isFetching && isFetched && !isLoading
+  const isTrendsRefetching = trendsFetching && trendsFetched && !trendsLoading
+
   const isRefreshing =
-    (isFetching && !isLoading) ||
-    (trendsFetching && !trendsLoading) ||
+    isStatusRefetching ||
+    isTrendsRefetching ||
     (ledgerFetching && !ledgerLoading)
 
   const handleRefresh = React.useCallback(() => {
@@ -441,20 +446,21 @@ export function QueueClient() {
 
       <div
         data-testid="admin-queue-trends-reservation"
-        className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+        className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[204px] [contain-intrinsic-size:auto_204px] [content-visibility:auto]"
       >
         {isStandardMode ? (
           <>
             <AnalyticsCard
+              key="standard-ingest-summary"
               title="Standard Ingest Summary"
               description="Tracked synchronous file ingestion and quarantine state across all services."
-              className="min-h-[200px]"
+              className="min-h-[204px]"
               isLoading={isLoading}
-              isFetching={isFetching}
+              isFetching={isStatusRefetching}
               loadingMessage="Loading ingest telemetry..."
               error={error as AnalyticsCardError | null}
             >
-              <div className="grid grid-cols-2 gap-4 pt-1" data-testid="admin-queue-standard-ingest-summary">
+              <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-ingest-summary">
                 <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Ingested Files</div>
                   <div className="text-2xl font-semibold tabular-nums mt-0.5">
@@ -481,15 +487,16 @@ export function QueueClient() {
             </AnalyticsCard>
 
             <AnalyticsCard
+              key="standard-scheduler-overview"
               title="In-Process Scheduler Overview"
               description="APScheduler background cron tasks and active PostgreSQL job leases."
-              className="min-h-[200px]"
+              className="min-h-[204px]"
               isLoading={isLoading}
-              isFetching={isFetching}
+              isFetching={isStatusRefetching}
               loadingMessage="Loading scheduler telemetry..."
               error={error as AnalyticsCardError | null}
             >
-              <div className="grid grid-cols-2 gap-4 pt-1" data-testid="admin-queue-standard-scheduler-summary">
+              <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-scheduler-summary">
                 <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Registered Schedules</div>
                   <div className="text-2xl font-semibold tabular-nums mt-0.5">
@@ -514,11 +521,12 @@ export function QueueClient() {
         ) : (
           <>
             <AnalyticsCard
+              key="celery-queue-depth"
               title="Total Queue Depth (1h)"
               description="Aggregate sum of all Celery queue lengths."
-              className="min-h-[200px]"
+              className="min-h-[204px]"
               isLoading={isLoading || trendsLoading}
-              isFetching={trendsFetching}
+              isFetching={isTrendsRefetching}
               loadingMessage="Loading queue telemetry..."
               error={trendsError as AnalyticsCardError | null}
               isEmpty={!isLoading && !trendsLoading && !trendsError && queuePoints.length === 0}
@@ -542,11 +550,12 @@ export function QueueClient() {
             </AnalyticsCard>
 
             <AnalyticsCard
+              key="celery-active-tasks"
               title="Active Tasks (1h)"
               description="Total actively executing Celery tasks across all workers."
-              className="min-h-[200px]"
+              className="min-h-[204px]"
               isLoading={isLoading || trendsLoading}
-              isFetching={trendsFetching}
+              isFetching={isTrendsRefetching}
               loadingMessage="Loading queue telemetry..."
               error={trendsError as AnalyticsCardError | null}
               isEmpty={!isLoading && !trendsLoading && !trendsError && workerPoints.length === 0}
@@ -578,11 +587,12 @@ export function QueueClient() {
       >
         {isStandardMode ? (
           <AnalyticsCard
+            key="standard-quarantined-files"
             title={`Quarantined Files & Corrupt Lines (${standardQuarantinedItems})`}
             helpTitle="Quarantined Files & Corrupt Lines"
             className="min-h-[200px]"
             isLoading={isLoading}
-            isFetching={isFetching}
+            isFetching={isStatusRefetching}
             loadingMessage="Inspecting quarantine directory..."
             error={error as AnalyticsCardError | null}
             helpContent={
@@ -606,11 +616,12 @@ export function QueueClient() {
           </AnalyticsCard>
         ) : (
           <AnalyticsCard
+            key="celery-queue-depths-card"
             title="Queue Depths"
             helpTitle="Queue Depths"
             className="min-h-[200px]"
             isLoading={isLoading}
-            isFetching={isFetching}
+            isFetching={isStatusRefetching}
             loadingMessage="Inspecting Celery task broker..."
             error={error as AnalyticsCardError | null}
             helpContent={
@@ -649,11 +660,12 @@ export function QueueClient() {
       >
         {isStandardMode ? (
           <AnalyticsCard
+            key="standard-active-jobs"
             title={`Active In-Process Jobs (${inprocessActiveRuns.length})`}
             helpTitle="Active In-Process Jobs"
             className="min-h-[200px]"
             isLoading={isLoading}
-            isFetching={isFetching}
+            isFetching={isStatusRefetching}
             loadingMessage="Inspecting active cron leases..."
             error={error as AnalyticsCardError | null}
             helpContent={
@@ -685,11 +697,12 @@ export function QueueClient() {
           </AnalyticsCard>
         ) : (
           <AnalyticsCard
+            key="celery-active-workers"
             title={`Active Workers (${workerCount})`}
             helpTitle="Active Workers"
             className="min-h-[200px]"
             isLoading={isLoading}
-            isFetching={isFetching}
+            isFetching={isStatusRefetching}
             loadingMessage="Inspecting Celery task broker..."
             error={error as AnalyticsCardError | null}
             helpContent={
@@ -743,7 +756,7 @@ export function QueueClient() {
           helpTitle="Ingest Ledger Status"
           className="min-h-[240px]"
           isLoading={isLoading}
-          isFetching={isFetching}
+          isFetching={isStatusRefetching}
           loadingMessage="Loading queue telemetry..."
           error={error as AnalyticsCardError | null}
           helpContent={
@@ -1072,7 +1085,7 @@ export function QueueClient() {
           helpTitle="In-Process Schedules"
           className="min-h-[200px]"
           isLoading={isLoading}
-          isFetching={isFetching}
+          isFetching={isStatusRefetching}
           loadingMessage="Loading scheduler telemetry..."
           error={error as AnalyticsCardError | null}
           helpContent={

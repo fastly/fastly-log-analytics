@@ -123,12 +123,42 @@ class ResponseMemo:
 
     def __init__(self, *, ttl: float = 30.0, maxsize: int = 256) -> None:
         self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+        self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
 
     def get(self, key: str) -> dict | None:
         return cache_get(self.cache, key)
 
+    def get_with_telemetry(self, key: str) -> dict | None:
+        """Return a copy of the cached payload with cached query/call attribution restored."""
+        cached = self.get(key)
+        if cached is None:
+            return None
+        telem = self._telemetry_cache.get(key)
+        if telem:
+            cached["debug_queries"] = [q.copy() if isinstance(q, dict) else q for q in telem.get("debug_queries", [])]
+            cached["debug_calls"] = [c.copy() if isinstance(c, dict) else c for c in telem.get("debug_calls", [])]
+        return cached
+
     def put(self, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
         cache_put(self.cache, key, value, strip=strip)
+        dq = value.get("debug_queries")
+        dc = value.get("debug_calls")
+        if dq is None and dc is None:
+            try:
+                from backend.utils.telemetry import get_queries, get_tracked_calls
+
+                dq = get_queries()
+                dc = get_tracked_calls()
+            except Exception:
+                pass
+        if dq or dc:
+            cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in (dq or [])]
+            self._telemetry_cache[key] = {
+                "debug_queries": cached_queries,
+                "debug_calls": list(dc or []),
+            }
+        else:
+            self._telemetry_cache.pop(key, None)
 
     def check(self, key: str, runner: QueryRunner) -> dict | None:
         """Cached payload with this request's telemetry merged in, or ``None`` on a miss."""

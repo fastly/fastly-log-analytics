@@ -517,7 +517,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
             },
             {"service_id": service.service_id},
         )
-        cached = _memo.get(cache_key)
+        cached = _memo.get_with_telemetry(cache_key)
         if cached is not None:
             return AggregatesResponse.with_telemetry(**cached)
 

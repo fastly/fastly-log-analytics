@@ -1124,7 +1124,7 @@ def get_aggregates(
             **runner.telemetry(),
         }
         if DASHBOARD_CACHE_TTL > 0 and cache_key is not None and int(payload.get("total_rows") or 0) > 0:
-            _dashboard_cache[cache_key] = (now, payload)
+            _dashboard_cache[cache_key] = (now, payload.copy())
         return payload
 
     finally:
