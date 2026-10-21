@@ -289,12 +289,14 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
 
     // High-scale Celery/RedBeat sections and false-alarm broker warning should be hidden
-    expect(screen.queryByTestId('admin-queue-depths-reservation')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Queue Depths$/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/RedBeat Schedules/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
 
     // Standard mode cards and tables should be rendered
+    expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
+    expect(screen.getByText(/Quarantined Files & Corrupt Lines \(2\)/i)).toBeInTheDocument()
     expect(screen.getByTestId('admin-queue-standard-ingest-summary')).toBeInTheDocument()
     expect(screen.getByText('1,250')).toBeInTheDocument()
     expect(screen.getByTestId('admin-queue-standard-scheduler-summary')).toBeInTheDocument()

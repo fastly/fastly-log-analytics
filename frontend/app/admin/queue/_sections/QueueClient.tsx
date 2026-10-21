@@ -590,11 +590,39 @@ export function QueueClient() {
         )}
       </div>
 
-      {!isStandardMode ? (
-        <div
-          data-testid="admin-queue-depths-reservation"
-          className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
-        >
+      <div
+        data-testid="admin-queue-depths-reservation"
+        className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      >
+        {isStandardMode ? (
+          <AnalyticsCard
+            title={`Quarantined Files & Corrupt Lines (${standardQuarantinedItems})`}
+            helpTitle="Quarantined Files & Corrupt Lines"
+            className="min-h-[200px]"
+            isLoading={isLoading}
+            isFetching={isFetching}
+            loadingMessage="Inspecting quarantine directory..."
+            error={error as AnalyticsCardError | null}
+            helpContent={
+              <div className="space-y-4 text-sm">
+                <p>
+                  Displays corrupt raw archive files and malformed JSON log lines isolated on local disk during synchronous ingest.
+                </p>
+                <p>
+                  Operators can inspect or download quarantined artifacts for forensic debugging or purge them once resolved.
+                </p>
+              </div>
+            }
+          >
+            {standardQuarantinedItems === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No corrupt files or malformed log lines are currently quarantined on disk.
+              </p>
+            ) : (
+              <QuarantineSection />
+            )}
+          </AnalyticsCard>
+        ) : (
           <AnalyticsCard
             title="Queue Depths"
             helpTitle="Queue Depths"
@@ -630,8 +658,8 @@ export function QueueClient() {
               </div>
             )}
           </AnalyticsCard>
-        </div>
-      ) : null}
+        )}
+      </div>
 
       <div
         data-testid="admin-queue-workers-reservation"
@@ -1051,7 +1079,6 @@ export function QueueClient() {
             </div>
           )}
         </AnalyticsCard>
-        <QuarantineSection />
       </div>
 
       <div

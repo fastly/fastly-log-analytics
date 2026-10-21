@@ -137,14 +137,9 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     })
 
     // Verify all zero-CLS reservation containers are mounted with contain-intrinsic-size and content-visibility:auto
-    const statusRes = await page.request.get('/api/admin/celery/status')
-    const statusBody = statusRes.ok() ? await statusRes.json() : {}
-    const isStandardMode =
-      statusBody.deployment_mode === 'standard' && !statusBody.broker_reachable
-
     const reservations = [
       'admin-queue-trends-reservation',
-      ...(isStandardMode ? [] : ['admin-queue-depths-reservation']),
+      'admin-queue-depths-reservation',
       'admin-queue-workers-reservation',
       'admin-queue-ledger-reservation',
       'admin-queue-schedules-reservation',
@@ -233,8 +228,12 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
         page.locator('[data-testid="admin-queue-trends-reservation"]:visible'),
       ).toContainText(/In-Process Scheduler Overview/i, { timeout: 15_000 })
 
-      // Celery Queue Depths card is hidden in Standard Mode
-      await expect(page.locator('[data-testid="admin-queue-depths-reservation"]')).toHaveCount(0)
+      // Quarantined Files & Corrupt Lines card replaces Celery Queue Depths in Standard Mode
+      const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
+      await expect(depthsCard).toContainText(/Quarantined Files & Corrupt Lines \(\d+\)/i, {
+        timeout: 15_000,
+      })
+      await expect(depthsCard).not.toContainText(/Queue Depths/i)
 
       // Active In-Process Jobs card
       await expect(
