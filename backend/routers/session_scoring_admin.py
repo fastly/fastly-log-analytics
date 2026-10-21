@@ -93,6 +93,7 @@ _query_logs = _ss._query_logs  # type: ignore[has-type]
 _finalize_cached = _ss._finalize_cached  # type: ignore[has-type]
 _SECRET_KEYS = _ss._SECRET_KEYS  # type: ignore[has-type]
 _MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
+_table_columns = _ss._table_columns  # type: ignore[has-type]
 
 # Composite-endpoint dependencies — the /scoring/dashboard composite at the
 # bottom of this file calls back into the analytics endpoints that live in
@@ -1777,6 +1778,11 @@ def scoring_dashboard(
         # this change additive + zero-risk.
         import contextvars
         from concurrent.futures import ThreadPoolExecutor
+
+        # Pre-warm _table_columns once so the 5 sub-handlers below share the
+        # cached schema + view binding instead of opening 5 concurrent
+        # DESCRIBE connections on cold cache.
+        _table_columns(service_id)
 
         tasks = {
             "evaluation": lambda: scoring_evaluation(service_id=service_id),

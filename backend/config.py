@@ -80,8 +80,8 @@ class ClickHouseConfig:
     connect_timeout_s: float = 5.0
     query_timeout_s: float = 30.0
     insert_timeout_s: float = 30.0
-    pool_timeout_s: float = 5.0
-    pool_max_size: int = 8
+    pool_timeout_s: float = 30.0
+    pool_max_size: int = 24
 
 
 def _clickhouse_bool(name: str, default: str) -> bool:
@@ -151,8 +151,8 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
         connect_timeout_s=_clickhouse_number("CLICKHOUSE_CONNECT_TIMEOUT_S", 5, 60),
         query_timeout_s=query_timeout,
         insert_timeout_s=_clickhouse_number("CLICKHOUSE_INSERT_TIMEOUT_S", query_timeout, 300),
-        pool_timeout_s=_clickhouse_number("CLICKHOUSE_POOL_TIMEOUT_S", 5, 60),
-        pool_max_size=_clickhouse_number("CLICKHOUSE_POOL_MAX_SIZE", 8, 64, integer=True),
+        pool_timeout_s=_clickhouse_number("CLICKHOUSE_POOL_TIMEOUT_S", 30, 60),
+        pool_max_size=_clickhouse_number("CLICKHOUSE_POOL_MAX_SIZE", 24, 64, integer=True),
     )
 
 

@@ -337,6 +337,9 @@ def _isoformat_ts(rows: list[dict], *fields: str) -> list[dict]:
     return rows
 
 
+_table_columns_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+
+
 def _table_columns(service_id: str) -> set[str]:
     """Column-name set for a service's logs table, or empty set on error.
 
@@ -348,14 +351,25 @@ def _table_columns(service_id: str) -> set[str]:
     A missing/not-yet-ready view returns an empty set (→ omit the
     columns) rather than 500-ing the whole card.
     """
+    import os as _os
+
     from backend.core.duckdb import _safe_table_name
+
+    in_test = bool(_os.getenv("PYTEST_CURRENT_TEST"))
+    if not in_test:
+        cached = _table_columns_cache.get(service_id)
+        if cached is not None:
+            return cached
 
     table = _safe_table_name(service_id)
     try:
         rows = _scoring_repo.describe_table(service_id, table)
     except Exception:  # noqa: BLE001 — view not ready / table missing → no columns
         return set()
-    return {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    cols = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    if cols and not in_test:
+        _table_columns_cache[service_id] = cols
+    return cols
 
 
 # Synthesize-missing-scoring-columns helpers live in the repository (the
@@ -1572,3 +1586,4 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 _CacheRegistry.register("session_scoring._analytics_cache", _analytics_cache)
 _CacheRegistry.register("session_scoring._inflight", _inflight)
 _CacheRegistry.register("session_scoring._reconstruct_labeled_sessions_cache", _reconstruct_labeled_sessions_cache)
+_CacheRegistry.register("session_scoring._table_columns_cache", _table_columns_cache)

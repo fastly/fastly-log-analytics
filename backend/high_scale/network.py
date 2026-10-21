@@ -315,7 +315,7 @@ def network_health(
         GROUP BY asn
     """
     sql_batch = [heatmap_sql, map_sql, metro_sql, speed_sql, pct_sql]
-    with ThreadPoolExecutor(max_workers=len(sql_batch), thread_name_prefix="hs-net-health") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-health") as pool:
         futs = [pool.submit(contextvars.copy_context().run, _run, q) for q in sql_batch]
         heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = [f.result() for f in futs]
 
@@ -682,7 +682,7 @@ def network_quality(
         LIMIT {_SCATTER_SAMPLE}
         """
 
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="hs-net-quality") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-quality") as pool:
         f_country = pool.submit(contextvars.copy_context().run, _bar, "country")
         f_asn = pool.submit(contextvars.copy_context().run, _bar, _ASN)
         f_region = pool.submit(
@@ -889,7 +889,7 @@ def network_bundle(
     want_pop = sections is None or "pop_health" in sections
     want_transport = sections is None or "transport" in sections
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-net-bundle") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-bundle") as pool:
         f_health = (
             pool.submit(contextvars.copy_context().run, network_health, service, req, start_time, end_time)
             if want_health

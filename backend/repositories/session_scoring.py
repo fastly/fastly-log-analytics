@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -34,7 +35,9 @@ def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
     parametrized queries (e.g. ``WHERE edge_sid IN (?, ?, ?)``) without
     string-formatting user-controlled values into the SQL.
     """
+    from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.repositories._base import _compact_sql_for_debug
     from backend.utils.telemetry import get_queries
 
@@ -44,8 +47,13 @@ def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
     con = None
     t0 = _time.monotonic()
     try:
-        con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
-        rows = con.execute(sql, params).fetchall() if params else con.execute(sql).fetchall()
+        skip_view = not svcconfig.is_durable_serving_mode(src)
+        con = get_connection(source=src, max_wait=3, skip_view_update=skip_view, read_only=True)
+
+        def _exec(c: Any) -> Any:
+            return c.execute(sql, params).fetchall() if params else c.execute(sql).fetchall()
+
+        rows = execute_with_stale_view_retry(con, src, _exec)
         cols = [d[0] for d in con.description] if con.description else []
         result = [dict(zip(cols, r)) for r in rows]
         get_queries().append(

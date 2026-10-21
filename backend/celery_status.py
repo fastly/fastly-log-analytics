@@ -45,8 +45,8 @@ def _get_redis():
             broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
             _redis_client = redis.Redis.from_url(
                 broker_url,
-                socket_connect_timeout=1.0,
-                socket_timeout=2.0,
+                socket_connect_timeout=0.25,
+                socket_timeout=0.5,
                 decode_responses=True,
             )
         return _redis_client
@@ -132,26 +132,27 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
     from backend.celery_app import app
 
-    workers_error: str | None = None
-    try:
-        i = app.control.inspect(timeout=timeout)
-        stats = i.stats() or {}
-        if stats:
-            active = i.active() or {}
-            registered = i.registered() or {}
-            scheduled = i.scheduled() or {}
-        else:
-            active = {}
-            registered = {}
-            scheduled = {}
-    except Exception as e:
-        workers_error = str(e)[:200]
-        active = {}
-        stats = {}
-        registered = {}
-        scheduled = {}
-
     queues, broker_reachable = celery_queue_depths()
+
+    workers_error: str | None = None
+    active: dict[str, Any] = {}
+    stats: dict[str, Any] = {}
+    registered: dict[str, Any] = {}
+    scheduled: dict[str, Any] = {}
+
+    if not broker_reachable:
+        workers_error = "Broker unreachable"
+    else:
+        try:
+            i = app.control.inspect(timeout=timeout)
+            stats = i.stats() or {}
+            if stats:
+                active = i.active() or {}
+                registered = i.registered() or {}
+                scheduled = i.scheduled() or {}
+        except Exception as e:
+            workers_error = str(e)[:200]
+
     schedules: list[dict[str, Any]] = redbeat_schedule_entries() if broker_reachable else []
     ledger = ingest_ledger_summary()
 
