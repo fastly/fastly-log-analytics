@@ -31,6 +31,7 @@ docs/pages/
 ├── sessions-stream.md             # /sessions/stream (Real-time session stream)
 ├── usage-and-cost.md              # /usage (FOS storage, Class A/B ops, cost estimator)
 ├── query.md                       # /query (DuckDB SQL query editor & saved queries)
+├── logs.md                        # /logs (Data Management: crons, audit history, DuckLake, schema)
 ├── alerts.md                      # /alerts (Threshold rules, webhook destinations)
 ├── assets-shield.md               # /assets-shield (Asset caching & origin shielding)
 ├── high-scale-request-facts.md    # /high-scale/request-facts (ClickHouse/High-Scale facts)
@@ -61,12 +62,13 @@ docs/pages/
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 51 automated anomaly detectors across 5 category tabs | **Live-certified** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
-| `/streaming` | [Streaming](streaming.md) | CMCD viewers, rebuffering, bitrate, throughput, top content | **Partially certified** (aggregates latency and analyst check open) |
+| `/streaming` | [Streaming](streaming.md) | CMCD viewers, rebuffering, bitrate, throughput, top content | **Partially certified** (connection-wait latency and analyst check open) |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |
 | `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Live-certified** |
 | `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Live-certified** |
+| `/logs` | [Data Management](logs.md) | Cron runs & schedules, service audit history, ingested files, DuckLake & metadata storage, raw FOS browser, DuckDB schema | **Live-certified** |
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Live-certified** |
 | `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Live-certified** |
 | `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer & Standard-mode DuckDB emulation | **Live-certified** |

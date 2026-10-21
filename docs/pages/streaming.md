@@ -84,18 +84,23 @@ The **Streaming** page turns Common Media Client Data (CMCD v1/v2) that players 
 
 ## 8. Performance, Cost & Telemetry Budgets
 
-Measured by the deploy verifier (`scripts/verify_dashboard.js`, `[PERF Streaming]` lines) on commit `40ee38b7`, first load of `/streaming?range=24h` under continuous load-test traffic, from the operator machine (high-scale goes through the admin gateway).
+Measured by the deploy verifier (`scripts/verify_dashboard.js`, `[PERF Streaming]` lines) on commit `f9fc9ebe`, first load of `/streaming?range=24h` under continuous load-test traffic, from the operator machine (high-scale goes through the admin gateway). Local numbers swing with host load; the remote ones are steadier.
 
 | Metric | Target | Local Standard | Remote Standard | Remote High-Scale |
 |---|---|---|---|---|
-| **TTFB** | - | 92 ms | 455 ms | 1,953 ms |
-| **FCP / LCP** | LCP < 1500 ms | 224 ms | 696 ms | 2,480 ms |
+| **FCP / LCP** | LCP < 1500 ms | 1,104 ms | 824 ms | 892 ms |
 | **Cumulative Layout Shift (CLS)** | <= 0.05 (aim 0.00) | 0.013 | 0.013 | 0.013 |
-| **`/api/cmcd/aggregates` latency** | < 1000 ms (proposed) | 4,603 ms | 3,340 ms | 2,769 ms |
-| **`/api/cmcd/aggregates` payload** | - | 9.9 KB | 10.9 KB | 9.5 KB |
+| **`/api/cmcd/aggregates` total** | < 1000 ms (proposed) | 14,090 ms | 3,302 ms | 2,776 ms |
+| of which: waiting for a DuckDB connection (`connection_acquire`) | - | 7,925 ms | 2,035 ms | n/a |
+| of which: query sections (`_section_timings`, excl. connection) | - | ~4,500 ms | ~1,030 ms | not reported |
+| **`/api/cmcd/aggregates` payload** | - | 10 KB | 11 KB | 10 KB |
 | **Duplicate data requests** | 0 | 0 | 0 | 0 |
 
-What that says: the shell paints fast, layout is stable (all three under 0.05, none at 0.00), and the data query is the slow part. High-Scale LCP is over budget because TTFB is about 2 s through the gateway; Standard environments are well inside it. The aggregates endpoint takes 2.8 to 4.6 s everywhere. That is the optimization target, and the latency goal above is a proposal until we agree on one. Remote Standard also logs four `/api/web-vitals` beacons per load, which are expected telemetry and not data fetches.
+What the breakdown says:
+- The page itself is fast and stable: FCP under 1.2 s everywhere and CLS 0.013 on all three.
+- **Most of the endpoint's time is waiting for a connection**, not querying. `connection_acquire` is about 60% of the total on both Standard environments. The 12 sections together cost roughly 1 s on Remote Standard.
+- **One section was wasting time and is fixed.** `rebuffer_by_country` used `APPROX_QUANTILE` per (country, session) group; with many countries it took up to 4.4 s locally. It now uses `MEDIAN` (64 ms locally and 25 ms on Remote Standard in the same environments after the change; about 9x faster on a 3M-row benchmark).
+- High-Scale reports no section timings (the ClickHouse reader doesn't emit them), so its 2.8 s is not yet broken down.
 
 ---
 
@@ -106,7 +111,7 @@ What that says: the shell paints fast, layout is stable (all three under 0.05, n
 - [x] **3. Layout stability:** CLS 0.013 on all three environments (budget 0.05); the e2e test also holds CLS <= 0.05 on a warm reload.
 - [x] **4. Accessibility:** `/streaming` is in `e2e/a11y-routes.spec.ts` and the populated page is axe-checked in `e2e/pages/streaming.spec.ts`; both pass on chromium, firefox and webkit.
 - [ ] **5. Role verification:** confirm Analyst Path B can load the page and that no section exposes a client IP.
-- [x] **6. Duplicate-request audit:** one `/api/cmcd/aggregates` call per load on every environment. Latency is recorded in section 8 and is above a sensible target (open).
+- [x] **6. Duplicate-request audit:** one `/api/cmcd/aggregates` call per load on every environment. Latency is recorded in section 8 and is above a sensible target (open: connection wait).
 - [x] **7. Not-enabled state:** covered by a unit test and an e2e test with `available: false`; the nav link hides when the schema has no `cmcd_sid`.
 
 ---
