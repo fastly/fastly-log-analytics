@@ -58,7 +58,10 @@ logger = logging.getLogger(__name__)
 # the write gate inert without removing the surrounding code (easy to revert
 # or replace with a less-aggressive policy later — e.g. only cache when
 # total_rows > 0, or only cache windows ending more than 5 min in the past).
-DASHBOARD_CACHE_TTL = 0  # seconds; 0 disables read+write
+# Short-TTL response cache (default 5s, configurable via FLA_DASHBOARD_CACHE_TTL).
+# Only caches non-empty responses (`total_rows > 0`) so transient empty states
+# (sync mid-commit, view rebind race) are never cached.
+DASHBOARD_CACHE_TTL: int = int(os.getenv("FLA_DASHBOARD_CACHE_TTL", "5"))  # seconds; 0 disables read+write
 _dashboard_cache: BoundedTTLCache = BoundedTTLCache(maxsize=500, ttl_seconds=max(DASHBOARD_CACHE_TTL, 1))
 
 
@@ -1052,7 +1055,7 @@ def get_aggregates(
             "section_timings": section_timings,
             **runner.telemetry(),
         }
-        if DASHBOARD_CACHE_TTL > 0:
+        if DASHBOARD_CACHE_TTL > 0 and cache_key is not None and int(payload.get("total_rows") or 0) > 0:
             _dashboard_cache[cache_key] = (now, payload)
         return payload
 

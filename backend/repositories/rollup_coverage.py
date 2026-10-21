@@ -55,7 +55,7 @@ MISSING_HOUR_HEAL_CAP = 48
 # output more than one tick stale. Bounded by entry count so unbounded
 # service/hour churn cannot blow it up.
 LISTDIR_CACHE_TTL_S = 60.0
-LISTDIR_CACHE_MAX_ENTRIES = 4096
+LISTDIR_CACHE_MAX_ENTRIES = 32768
 _listdir_cache: dict[str, tuple[float, list[str]]] = {}
 
 

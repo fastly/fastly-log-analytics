@@ -141,9 +141,10 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                                 attach_err,
                             )
 
-                        # Find hours that had data in the last 48 hours to do a fast incremental recompute
+                        # Find hours that had data in the last 2 hours to do a fast incremental recompute
+                        # (48h on every 10s RUM commit caused 48 full client_vitals/client_errors scans per tick).
                         recent_hours = []
-                        since = datetime.now(UTC) - timedelta(hours=48)
+                        since = datetime.now(UTC) - timedelta(hours=2)
                         try:
                             res_v = rum_con.execute(
                                 "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp >= ?",

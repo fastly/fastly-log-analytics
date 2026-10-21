@@ -246,6 +246,7 @@ function DashboardBody({
   const transformPending = transformed.params !== trafficParams
 
   React.useEffect(() => {
+    if (transformed.params === trafficParams) return
     let cancelled = false
     buildTrafficDataAsync(trafficParams)
       .then((traces) => {
@@ -263,7 +264,7 @@ function DashboardBody({
     return () => {
       cancelled = true
     }
-  }, [trafficParams])
+  }, [trafficParams, transformed.params])
 
   const chartLayout = React.useMemo(
     () => buildChartLayout({
@@ -462,11 +463,20 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
   const mounted = useMounted()
 
   const allCards = useDashboardCards()
+  const allCardIds = React.useMemo(() => allCards.map((c) => c.id), [allCards])
+  const inFormatCardIds = React.useMemo(
+    () => allCards.filter((c) => c.inActiveFormat).map((c) => c.id),
+    [allCards],
+  )
 
   const { visibleCards, toggleCard, showAll, reset: resetCards } = useCardVisibility(
     'dashboard_cards',
-    allCards.map((c) => c.id),
-    allCards.filter((c) => c.inActiveFormat).map((c) => c.id),
+    allCardIds,
+    inFormatCardIds,
+  )
+  const visibleCardsCount = React.useMemo(
+    () => allCards.reduce((acc, c) => acc + (visibleCards.has(c.id) ? 1 : 0), 0),
+    [allCards, visibleCards],
   )
 
   // Time-range wire inputs (lib/range-wire.ts; resolved inside useDashboardBundle
@@ -504,7 +514,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
       defaultInterval="1 hour"
       headerActions={
         <DashboardHeader
-          visibleCardsCount={allCards.filter(c => visibleCards.has(c.id)).length}
+          visibleCardsCount={visibleCardsCount}
           allCards={allCards}
           visibleCards={visibleCards}
           onToggleCard={toggleCard}

@@ -145,3 +145,4 @@ configs-hs/
 
 # Playwright output when e2e is run from the repo root
 /test-results/
+/artifacts/

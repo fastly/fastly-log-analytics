@@ -104,6 +104,14 @@ export function buildTrafficData({
     ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
     : time_series
 
+  let tsXValues: string[] | null = null
+  const getTsXValues = (): string[] => {
+    if (!tsXValues) {
+      tsXValues = time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    }
+    return tsXValues
+  }
+
   let traces: PlotlyTrace[] = []
 
   if (hasCategories) {
@@ -133,7 +141,9 @@ export function buildTrafficData({
       marker: { color: colorMap[cat] || `hsl(${(i * 50) % 360}, 70%, 50%)` }
     }))
   } else {
-    const xValues = barSeries.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    const xValues = barSeries === time_series
+      ? getTsXValues()
+      : barSeries.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
     const yValues = barSeries.map((d) => d.value)
 
     traces = [{
@@ -172,7 +182,7 @@ export function buildTrafficData({
 
   if (!hasCategories && time_series.some((d) => d.baseline != null)) {
     traces.push({
-      x: time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss")),
+      x: getTsXValues(),
       y: time_series.map((d) => d.baseline),
       type: 'scatter', mode: 'lines',
       name: 'Baseline (7d prior)',
@@ -182,7 +192,7 @@ export function buildTrafficData({
   }
 
   if (!hasCategories && trend !== 'off') {
-    const xValues = time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    const xValues = getTsXValues()
     const yValues = time_series.map((d) => d.value)
     const n = yValues.length
     let windowSize = 0
@@ -197,14 +207,27 @@ export function buildTrafficData({
       windowSize = Math.floor((trendMap[trend] ?? 0) / sec)
     }
     if (windowSize > 1) {
-      const trendY = new Array(n).fill(null)
-      for (let i = windowSize - 1; i < n; i++) {
-        let sum = 0, count = 0
-        for (let j = 0; j < windowSize; j++) {
-          const v = yValues[i - j]
-          if (v != null) { sum += v; count++ }
+      const trendY: (number | null)[] = new Array(n).fill(null)
+      if (n >= windowSize) {
+        let runningSum = 0
+        let runningCount = 0
+        for (let i = 0; i < n; i++) {
+          const enterVal = yValues[i]
+          if (enterVal != null) {
+            runningSum += enterVal
+            runningCount++
+          }
+          if (i >= windowSize) {
+            const exitVal = yValues[i - windowSize]
+            if (exitVal != null) {
+              runningSum -= exitVal
+              runningCount--
+            }
+          }
+          if (i >= windowSize - 1) {
+            trendY[i] = runningCount > 0 ? runningSum / runningCount : null
+          }
         }
-        trendY[i] = count > 0 ? sum / count : null
       }
       traces.push({
         x: xValues, y: trendY,

@@ -95,6 +95,16 @@ _UA_RE = re.compile(r"(Chrome|Firefox|Safari|Edge|OPR)")
 _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)")
 
 
+@asset_router.api_route(
+    "/rum-beacon",
+    methods=["GET", "POST", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def receive_rum_beacon_fallback() -> Response:
+    """No-op 204 endpoint when `/rum-beacon` reaches the origin directly (local dev / direct tunnel)."""
+    return Response(status_code=204)
+
+
 @asset_router.get("/js/rum.js")
 async def get_rum_tracker(request: Request, service_id: str | None = None):
     # Resolve active service ID

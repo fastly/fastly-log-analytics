@@ -787,6 +787,11 @@ def _bootstrap_sync(
     response_services = services
     if analyst_session is not None:
         response_services = [{k: v for k, v in svc.items() if k != "ngwaf_workspace_id"} for svc in services]
+        if mask_ips_for(analyst_session):
+            from backend.core.share_db.validation import apply_pii_policy
+
+            schema = apply_pii_policy(schema, {"mask_ips": True})
+            response_services = apply_pii_policy(response_services, {"mask_ips": True})
 
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
@@ -847,10 +852,13 @@ def schema_endpoint(
 
     # Try cache first
     cached_status = svcconfig.get_status(source["name"])
-    if cached_status and "schema" in cached_status:
-        return {"schema": cached_status["schema"], "table_name": _safe_table_name(source["name"])}
+    raw_schema = cached_status["schema"] if (cached_status and "schema" in cached_status) else get_schema(con, source)
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        from backend.core.share_db.validation import apply_pii_policy
 
-    return {"schema": get_schema(con, source), "table_name": _safe_table_name(source["name"])}
+        raw_schema = apply_pii_policy(raw_schema, {"mask_ips": True})
+    return {"schema": raw_schema, "table_name": _safe_table_name(source["name"])}
 
 
 def _compute_log_fields_catalog(service_id: str | None) -> dict:

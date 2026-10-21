@@ -11,7 +11,10 @@ from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
 from backend.high_scale._scope import visible_fact_clauses
-from backend.high_scale.aggregate_query import query_clickhouse_aggregate
+from backend.high_scale.aggregate_query import (
+    query_clickhouse_aggregate,
+    query_clickhouse_aggregates_batch,
+)
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import (
@@ -407,6 +410,29 @@ def _filtered_aggregates(
     )
 
 
+def _aggregates_batch(
+    service: HighScaleService,
+    *,
+    start_time: str | None,
+    end_time: str | None,
+    fields: list[str],
+    watermark,
+):
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    dims = [_FIELD_DIMENSIONS[f] for f in fields]
+    by_dim = query_clickhouse_aggregates_batch(
+        service.client,
+        service_id=service.service_id,
+        domain="request",
+        dimensions=dims,
+        start=start,
+        end=end,
+        watermark=watermark,
+    )
+    return {f: by_dim[_FIELD_DIMENSIONS[f]] for f in fields}
+
+
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
     norm_interval = _normalize_chart_interval(req.chart_interval)
     if req.filters or norm_interval == "1 second" or (req.chart_metric and req.chart_metric != "requests"):
@@ -415,25 +441,17 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
     want_time_series, want_map, want_top_n = _panels(req)
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
     request_watermark = service.watermark_for("request")
-    responses = {
-        field: _aggregate(
-            service,
-            start_time=start_time,
-            end_time=end_time,
-            dimension=_FIELD_DIMENSIONS[field],
-            watermark=request_watermark,
-        )
-        for field in fields_to_query
-    }
-    total = responses.get("url")
-    if total is None:
-        total = _aggregate(
-            service,
-            start_time=start_time,
-            end_time=end_time,
-            dimension="url",
-            watermark=request_watermark,
-        )
+    all_fields_to_query = list(fields_to_query)
+    if "url" not in all_fields_to_query:
+        all_fields_to_query.append("url")
+    responses = _aggregates_batch(
+        service,
+        start_time=start_time,
+        end_time=end_time,
+        fields=all_fields_to_query,
+        watermark=request_watermark,
+    )
+    total = responses["url"]
 
     data = {
         field: FieldAggregate(
@@ -477,6 +495,13 @@ def bundle(
     want_bots = sections is None or "bots" in sections
     res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
     res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
+
+    if res_aggregates is not None:
+        res_aggregates.debug_queries = []
+        res_aggregates.debug_calls = []
+    if res_top_bots is not None:
+        res_top_bots.debug_queries = []
+        res_top_bots.debug_calls = []
 
     return {
         "aggregates": res_aggregates,

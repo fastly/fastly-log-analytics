@@ -107,6 +107,7 @@ from .day_bundles import (
     compact_perf_latency_closed_days_to_daily,
     compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
+    compact_time_series_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
     retire_compacted_hour_bundles,
 )
@@ -199,6 +200,7 @@ __all__ = [
     "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
+    "compact_time_series_closed_days_to_daily",
     "retire_compacted_hour_bundles",
     "recompute_touched_hours",
     "backfill_rollups",

@@ -535,15 +535,20 @@ class ClickHouseClient:
                 stats["duration_ms"] = (time.perf_counter() - started) * 1000
                 if operation == "execute" and data and "query" in data:
                     try:
+                        redacted_sql = _redact_ddl_secrets(data["query"].strip())
+                        dur_ms = round(stats["duration_ms"], 2)
                         queries = get_queries()
                         queries.append(
                             {
-                                "sql": _redact_ddl_secrets(data["query"].strip()),
-                                "time_ms": round(stats["duration_ms"], 2),
+                                "sql": redacted_sql,
+                                "time_ms": dur_ms,
                                 "engine": "ClickHouse",
                             }
                         )
                         _QUERIES.set(queries)
+                        from backend.utils.telemetry import record_telemetry_query
+
+                        record_telemetry_query("clickhouse", redacted_sql, dur_ms)
                     except Exception:
                         logger.debug("_request: _QUERIES.set failed (ignored)", exc_info=True)
                 try:

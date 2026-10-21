@@ -275,10 +275,7 @@ class TopNPlan:
 
 
 def _has_real_parquet(directory: str) -> bool:
-    try:
-        return any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in os.listdir(directory))
-    except OSError:
-        return False
+    return any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in cached_listdir(directory))
 
 
 def _day_covered_by_any_field(
@@ -293,10 +290,14 @@ def _day_covered_by_any_field(
     """
     covered: set[str] = set()
     active_day = win.active_str[:10]
+    existing_day_fields = set(cached_listdir(day_root))
+    if not existing_day_fields:
+        return covered
     for field in safe_fields:
-        field_day_dir = os.path.join(day_root, f"field={field}")
-        if not os.path.isdir(field_day_dir):
+        field_key = f"field={field}"
+        if field_key not in existing_day_fields:
             continue
+        field_day_dir = os.path.join(day_root, field_key)
         for day_entry in cached_listdir(field_day_dir):
             if not day_entry.startswith("day="):
                 continue
@@ -402,15 +403,20 @@ def _per_field_files(
     active_day = win.active_str[:10]
     active_str, st_floor, et_floor = win.active_str, win.st_floor, win.et_floor
     hours_seen: set[str] = set()
+    existing_hour_fields = set(cached_listdir(hour_root))
+    if not existing_hour_fields:
+        return hours_seen
+    existing_day_fields = set(cached_listdir(day_root))
     for field in safe_fields:
-        field_hour_dir = os.path.join(hour_root, f"field={field}")
-        field_day_dir = os.path.join(day_root, f"field={field}")
-        if not os.path.isdir(field_hour_dir):
+        field_key = f"field={field}"
+        if field_key not in existing_hour_fields:
             continue
+        field_hour_dir = os.path.join(hour_root, field_key)
+        field_day_dir = os.path.join(day_root, field_key)
         # A day bundle suppresses this field's day file AND its per-hour
         # fallback for that day (the bundle already aggregates the whole day).
         covered_days: set[str] = set(bundled_days)
-        if os.path.isdir(field_day_dir):
+        if field_key in existing_day_fields:
             for day_entry in cached_listdir(field_day_dir):
                 if not day_entry.startswith("day="):
                     continue

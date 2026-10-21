@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import quote_path_list
+from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
 )
@@ -227,7 +229,6 @@ def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str)
     extension unavailable, etc.). DETACHes on exit. Callers should treat a False
     yield as "the bridge isn't available — fall back to a Python-side query".
     """
-    import os
 
     attached = False
     if sqlite_path and os.path.exists(sqlite_path):
@@ -282,8 +283,6 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     existing = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = ?", [alias]).fetchone()
     if existing:
         return True
-
-    import os
 
     from backend import config as svcconfig
 
@@ -788,13 +787,26 @@ class QueryRunner:
                 # callers see the real symptom, not the rebind side-effect.
                 raise e
             res = self.con.execute(q, p if p is not None else [])
+        elapsed_ms = round((time.time() - t0) * 1000, 2)
+        compact_sql = _compact_sql_for_debug(q.strip())
         self.debug_queries.append(
             {
-                "sql": _compact_sql_for_debug(q.strip()),
-                "time_ms": round((time.time() - t0) * 1000, 2),
+                "sql": compact_sql,
+                "time_ms": elapsed_ms,
                 "engine": "DuckDB",
             }
         )
+        try:
+            from backend.utils.telemetry import record_telemetry_query
+
+            record_telemetry_query(
+                "duckdb",
+                compact_sql,
+                elapsed_ms,
+                service_id=self.src.get("name") or self.src.get("service_id"),
+            )
+        except Exception:
+            pass
         return res
 
     def get_schema_cols(self) -> list[str]:
@@ -958,7 +970,6 @@ class QueryRunner:
         direct read fails (caller should fall back to the view-based
         ``create_filtered_temp_table`` path for correctness).
         """
-        import os
         import uuid as _uuid
         from datetime import timedelta as _timedelta
 
@@ -1764,22 +1775,73 @@ class QueryRunner:
         if (et - st) > timedelta(days=366):
             return None
 
-        # st is UTC (parse_iso_utc guarantees it). The plan is None when a
-        # closed hour has per-field rollup data but no bundle on disk (the
-        # writer-behind case where serving the rollup would undercount), when
-        # a gap is older than the heal cap, or when there is nothing to read.
-        plan = plan_hourly_read(
-            self.src,
-            st,
-            et,
-            TIME_SERIES_BUNDLE_FILENAME,
-            allow_all_fields_coverage=True,
-            heal=True,
-        )
-        if plan is None:
-            return None
-        rollup_paths, crosses_active = plan.paths, plan.crosses_active
-        active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
+        # st is UTC (parse_iso_utc guarantees it). For multi-week windows
+        # (7d–90d), prefer closed-day bundles (`day_bundled/day=D/time_series.parquet`,
+        # or `day_bundled/day=D/overview.parquet` when `chart_metric == "requests"`
+        # and `interval in ("1 hour", "1 day")`) for the contiguous closed-day prefix
+        # before falling back to hourly bundles for recent days. This prevents
+        # 30d windows from disqualifying when >7d hourly `time_series.parquet` files
+        # are retired, and cuts 30d parquet file reads from ~720 hourly files to ~30.
+        day_ts_paths: list[str] = []
+        day_ov_paths: list[str] = []
+        trailing_st = st
+        cov = rollup_coverage.CoverageIndex.build(st, et)
+        if timedelta(days=6) < (et - st) <= timedelta(days=90) and not rollup_coverage.durable_serving_blocked(
+            self.src
+        ):
+            from backend.core.rollups._common import (
+                OVERVIEW_BUNDLE_FILENAME,
+                _day_bundled_root,
+            )
+            from backend.utils.date_utils import parse_hour_key_strict
+
+            day_root = _day_bundled_root(self.src)
+            can_use_overview = chart_metric == "requests" and interval in ("1 hour", "1 day")
+            covered_until_hour: str | None = None
+            for day, day_hours in sorted(cov.by_day().items()):
+                if day >= cov.active_hour_str[:10]:
+                    break
+                if len(day_hours) < 24:
+                    break
+                day_ts_file = rollup_coverage._day_bundle_file(day_root, day, TIME_SERIES_BUNDLE_FILENAME)
+                day_ov_file = (
+                    rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
+                    if can_use_overview
+                    else None
+                )
+                if day_ts_file:
+                    day_ts_paths.append(day_ts_file)
+                    covered_until_hour = day_hours[-1]
+                elif day_ov_file:
+                    day_ov_paths.append(day_ov_file)
+                    covered_until_hour = day_hours[-1]
+                else:
+                    break
+            if covered_until_hour is not None:
+                trailing_st = parse_hour_key_strict(covered_until_hour) + timedelta(hours=1)
+
+        if trailing_st < et:
+            plan = plan_hourly_read(
+                self.src,
+                trailing_st,
+                et,
+                TIME_SERIES_BUNDLE_FILENAME,
+                allow_all_fields_coverage=True,
+                heal=True,
+            )
+            if plan is None:
+                return None
+            rollup_paths = day_ts_paths + list(plan.paths)
+            crosses_active = plan.crosses_active
+            active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
+            missing_hours = plan.missing_hours
+            heal_where_sql = plan.heal_where() if plan.missing_hours else ""
+        else:
+            rollup_paths = day_ts_paths
+            crosses_active = False
+            active_hour_str, active_hour_dt = cov.active_hour_str, cov.active_dt
+            missing_hours = []
+            heal_where_sql = ""
 
         parts = self._TS_ROLLUP_METRIC_PARTS[chart_metric]
         # Bucket is TIMESTAMPTZ in the bundle parquets (older notes about
@@ -1789,6 +1851,7 @@ class QueryRunner:
         # session tz like CDT silently shifts the filter by 5 hours and
         # drops bundles at the window's edges.
         st_tz = st.astimezone(UTC).isoformat()
+        st_hour_tz = st.replace(minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
 
         # Each branch emits raw (num, den) per bucket; the outer query below
@@ -1805,13 +1868,28 @@ class QueryRunner:
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}' "
                 f"GROUP BY 1"
             )
+        if day_ov_paths:
+            ov_paths_sql = quote_path_list(day_ov_paths)
+            hour_ts_expr = (
+                "TRY_CAST(CASE WHEN LENGTH(CAST(hour_start AS VARCHAR)) = 13 "
+                "THEN CAST(hour_start AS VARCHAR) || ':00:00Z' "
+                "ELSE CAST(hour_start AS VARCHAR) END AS TIMESTAMPTZ)"
+            )
+            select_clauses.append(
+                f"SELECT time_bucket(INTERVAL '{interval}', {hour_ts_expr}) AS out_bucket, "
+                f"       {parts['num_rollup']} AS num, {parts['den_rollup']} AS den "
+                f"FROM read_parquet([{ov_paths_sql}]) "
+                f"WHERE {hour_ts_expr} >= TIMESTAMPTZ '{st_hour_tz}' "
+                f"  AND {hour_ts_expr} < TIMESTAMPTZ '{et_tz}' "
+                f"GROUP BY 1"
+            )
 
         # Missing-hour live heal: a CLOSED hour in [st, et) with no
         # time_series bundle at all is a writer-coverage gap, not proof of
         # zero traffic, so the plan lists it for a live scan of the raw base
         # table. Uses a literal, unparameterized where-clause — sidesteps
         # bound-parameter bookkeeping across UNION ALL branches.
-        if plan.missing_hours:
+        if missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
@@ -1820,7 +1898,7 @@ class QueryRunner:
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
                     f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
                     f"FROM {heal_base_table} "
-                    f"WHERE {plan.heal_where()} "
+                    f"WHERE {heal_where_sql} "
                     f"GROUP BY 1"
                 )
 
@@ -1993,20 +2071,64 @@ class QueryRunner:
         if (et - st) > timedelta(days=366):
             return None
 
-        plan = plan_hourly_read(
-            self.src,
-            st,
-            et,
-            TIME_SERIES_BUNDLE_FILENAME,
-            allow_all_fields_coverage=True,
-            heal=True,
-        )
-        if plan is None:
-            return None
-        rollup_paths, crosses_active = plan.paths, plan.crosses_active
-        active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
+        day_ts_paths: list[str] = []
+        day_ov_paths: list[str] = []
+        trailing_st = st
+        cov = rollup_coverage.CoverageIndex.build(st, et)
+        if timedelta(days=6) < (et - st) <= timedelta(days=90) and not rollup_coverage.durable_serving_blocked(
+            self.src
+        ):
+            from backend.core.rollups._common import (
+                OVERVIEW_BUNDLE_FILENAME,
+                _day_bundled_root,
+            )
+            from backend.utils.date_utils import parse_hour_key_strict
+
+            day_root = _day_bundled_root(self.src)
+            covered_until_hour: str | None = None
+            for day, day_hours in sorted(cov.by_day().items()):
+                if day >= cov.active_hour_str[:10]:
+                    break
+                if len(day_hours) < 24:
+                    break
+                day_ts_file = rollup_coverage._day_bundle_file(day_root, day, TIME_SERIES_BUNDLE_FILENAME)
+                day_ov_file = rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
+                if day_ts_file:
+                    day_ts_paths.append(day_ts_file)
+                    covered_until_hour = day_hours[-1]
+                elif day_ov_file:
+                    day_ov_paths.append(day_ov_file)
+                    covered_until_hour = day_hours[-1]
+                else:
+                    break
+            if covered_until_hour is not None:
+                trailing_st = parse_hour_key_strict(covered_until_hour) + timedelta(hours=1)
+
+        if trailing_st < et:
+            plan = plan_hourly_read(
+                self.src,
+                trailing_st,
+                et,
+                TIME_SERIES_BUNDLE_FILENAME,
+                allow_all_fields_coverage=True,
+                heal=True,
+            )
+            if plan is None:
+                return None
+            rollup_paths = day_ts_paths + list(plan.paths)
+            crosses_active = plan.crosses_active
+            active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
+            missing_hours = plan.missing_hours
+            heal_where_sql = plan.heal_where() if plan.missing_hours else ""
+        else:
+            rollup_paths = day_ts_paths
+            crosses_active = False
+            active_hour_str, active_hour_dt = cov.active_hour_str, cov.active_dt
+            missing_hours = []
+            heal_where_sql = ""
 
         st_tz = st.astimezone(UTC).isoformat()
+        st_hour_tz = st.replace(minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
 
         select_clauses: list[str] = []
@@ -2018,16 +2140,29 @@ class QueryRunner:
                 f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
             )
+        if day_ov_paths:
+            ov_paths_sql = quote_path_list(day_ov_paths)
+            hour_ts_expr = (
+                "TRY_CAST(CASE WHEN LENGTH(CAST(hour_start AS VARCHAR)) = 13 "
+                "THEN CAST(hour_start AS VARCHAR) || ':00:00Z' "
+                "ELSE CAST(hour_start AS VARCHAR) END AS TIMESTAMPTZ)"
+            )
+            select_clauses.append(
+                f"SELECT {metric_expressions.sum_or_zero('requests')} AS num "
+                f"FROM read_parquet([{ov_paths_sql}]) "
+                f"WHERE {hour_ts_expr} >= TIMESTAMPTZ '{st_hour_tz}' "
+                f"  AND {hour_ts_expr} < TIMESTAMPTZ '{et_tz}'"
+            )
 
         # Missing-hour live heal: see try_time_series_from_rollup — a CLOSED
         # hour with no time_series bundle is a writer-coverage gap, not zero
         # traffic.
-        if plan.missing_hours:
+        if missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
             if heal_base_table:
-                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {plan.heal_where()}")
+                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where_sql}")
 
         direct_live_tmp: str | None = None
         live_needs_params = False

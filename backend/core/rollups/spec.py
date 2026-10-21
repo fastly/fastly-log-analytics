@@ -82,6 +82,7 @@ DAY_COMPACTORS: tuple[DayCompactorSpec, ...] = (
     DayCompactorSpec("perf_dims", "compact_perf_dims_closed_days_to_daily", "perf_ttl_dist_days"),
     DayCompactorSpec("ngwaf_bots", "compact_ngwaf_bots_closed_days_to_daily", "ngwaf_bots_days"),
     DayCompactorSpec("overview", "compact_overview_closed_days_to_daily", "overview_days"),
+    DayCompactorSpec("time_series", "compact_time_series_closed_days_to_daily"),
     DayCompactorSpec("pop_health", "compact_pop_health_closed_days_to_daily"),
 )
 

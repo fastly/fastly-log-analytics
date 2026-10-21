@@ -396,6 +396,42 @@ def get_sqlite_queries() -> list[dict]:
     return res
 
 
+def record_telemetry_query(
+    engine: str,
+    sql: str,
+    duration_ms: float,
+    service_id: str | None = None,
+) -> None:
+    """Record a DuckDB or ClickHouse query into telemetry_queries when X-Page-Load-ID is active."""
+    if _RECORDING_TELEMETRY.get():
+        return
+    plid = get_page_load_id()
+    if not plid:
+        return
+    token = _RECORDING_TELEMETRY.set(True)
+    try:
+        sid = service_id
+        if not sid:
+            from backend import config as svcconfig
+
+            sid = svcconfig.get_active_service_id()
+        if sid:
+            from backend.core.metadata import usage_log
+
+            usage_log.log_telemetry_query(
+                service_id=sid,
+                page_load_id=plid,
+                request_id="unknown",
+                engine=engine,
+                sql=sql,
+                duration_ms=duration_ms,
+            )
+    except Exception as e:
+        logger.debug("Failed to record %s query to telemetry: %s", engine, e)
+    finally:
+        _RECORDING_TELEMETRY.reset(token)
+
+
 def debug_envelope(res: dict, *, gated: bool, is_cached: bool | None = False, inject_calls: bool = False) -> dict:
     """Attach the ``_debug_*`` / ``_is_cached`` envelope to a plain-dict response.
 

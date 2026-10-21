@@ -1135,13 +1135,60 @@ def get_connection(
             time.sleep(min(delay, remaining))
             delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
 
-    # Apply per-connection settings. DuckDB applies these to the session only.
+    # Apply per-connection and instance settings BEFORE attaching DuckLake or S3
+    # so `temp_directory` is configured before any buffer-manager allocations occur.
+    # In DuckDB, `SET max_memory` is an instance-wide buffer manager setting when
+    # connections share a file-backed `.duckdb` database, so `DUCKDB_MEMORY_LIMIT`
+    # takes precedence over `DUCKDB_POOL_CONN_MEMORY_LIMIT` on shared file-backed
+    # instances (whereas `durable_serving` uses isolated `:memory:` instances).
     try:
-        limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
+        limit = (
+            (DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT)
+            if durable_serving
+            else (DUCKDB_MEMORY_LIMIT or DUCKDB_POOL_CONN_MEMORY_LIMIT)
+        )
         if limit:
             con.execute(f"SET max_memory = '{limit}';")
     except Exception:
         logger.debug("get_connection: step failed (ignored)", exc_info=True)
+    try:
+        con.execute("SET preserve_insertion_order = false;")
+    except Exception:
+        logger.debug("get_connection: preserve_insertion_order failed (ignored)", exc_info=True)
+
+    # File-backed connections keep temp files beside their database. Durable
+    # serving connections are in-memory and need an explicit writable path
+    # because the container root filesystem is read-only.
+    if durable_serving:
+        _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
+        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+    else:
+        _service_temp_dir = None
+    if _service_temp_dir:
+        try:
+            os.makedirs(_service_temp_dir, exist_ok=True)
+            from backend.utils.sql_validator import escape_sql_literal
+
+            _escaped_dir = escape_sql_literal(_service_temp_dir)
+            con.execute(f"SET temp_directory = '{_escaped_dir}';")
+        except Exception as e:
+            err_msg = str(e)
+            if "cannot switch temporary directory" in err_msg.lower():
+                logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
+            else:
+                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+
+    try:
+        _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
+        con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
+    except Exception as e:
+        err_msg = str(e)
+        if "cannot switch temporary directory" in err_msg.lower() or "cannot change" in err_msg.lower():
+            logger.debug(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
+        else:
+            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+
     # DUCKDB_THREADS is consumed below inside _cached_n_threads initialization
     # (removed the early SET here — it was immediately overridden by the SET
     # threads call at line ~1022 and had no effect).
@@ -1202,41 +1249,6 @@ def get_connection(
                 _cached_mem_limit_gb = 4
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
-
-    # File-backed connections keep temp files beside their database. Durable
-    # serving connections are in-memory and need an explicit writable path
-    # because the container root filesystem is read-only.
-    if durable_serving:
-        _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
-    elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
-        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
-    else:
-        _service_temp_dir = None
-    if _service_temp_dir:
-        try:
-            os.makedirs(_service_temp_dir, exist_ok=True)
-            # Lazy: sql_validator enumerates table functions at import time via this module.
-            from backend.utils.sql_validator import escape_sql_literal
-
-            _escaped_dir = escape_sql_literal(_service_temp_dir)
-            con.execute(f"SET temp_directory = '{_escaped_dir}';")
-        except Exception as e:
-            err_msg = str(e)
-            if "cannot switch temporary directory" in err_msg.lower():
-                logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
-            else:
-                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
-
-    # Configure max temp directory size with environment override or default to 10GB
-    try:
-        _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
-        con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
-    except Exception as e:
-        err_msg = str(e)
-        if "cannot switch temporary directory" in err_msg.lower() or "cannot change" in err_msg.lower():
-            logger.debug(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
-        else:
-            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
 
     # ALWAYS update the view to ensure local buffer files
     # are included. DuckDB views are session-scoped when they reference temp tables

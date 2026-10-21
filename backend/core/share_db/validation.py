@@ -252,6 +252,12 @@ def apply_pii_policy(obj, policy: dict):
                 if isinstance(v, str) and k in masked_keys:
                     out[k] = mask_ip(v)
                     continue
+                # Schema min/max bounds (e.g. in /api/bootstrap and /api/schema)
+                # may hold IPv4/IPv6 sample addresses on IP columns (or any column
+                # whose min/max is IP-shaped). Mask IP-shaped min/max values.
+                if k in ("min", "max") and isinstance(v, str):
+                    out[k] = _mask_ip_scalar(v)
+                    continue
                 # Dashboard top-N panels carry the dimension value under the
                 # generic key ``value`` (``data["ip"]["top"][i]["value"]`` —
                 # backend/repositories/dashboard.py:608/655), NOT under ``ip``,

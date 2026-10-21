@@ -142,7 +142,13 @@ services:
       # its 12GB cap (1.57GB RSS) -- the bottleneck was this per-connection
       # ceiling, not host/container capacity. 1GB x 4 pooled connections
       # worst-case = 4GB, still well under the 6/11/12GB budget above.
-      - DUCKDB_POOL_CONN_MEMORY_LIMIT=1GB
+      # Note: in DuckDB, `SET max_memory` modifies the database-instance-wide
+      # buffer manager ceiling (shared across all connections to the same
+      # file-backed `.duckdb` instance). Setting 1GB here starved the shared
+      # file-backed buffer manager to 953.6 MiB when dashboard filtered scans
+      # overlapped background rollup crons. Default to 6GB (matching
+      # DUCKDB_MEMORY_LIMIT) while still allowing override for durable_serving.
+      - DUCKDB_POOL_CONN_MEMORY_LIMIT=${DUCKDB_POOL_CONN_MEMORY_LIMIT:-6GB}
       # Optional emergency switch for the local active-hour optimization.
       # Readers fall back to the existing live scan when this is disabled.
       - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}

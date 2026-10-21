@@ -38,6 +38,7 @@ from ._common import (
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_TOP_K,
+    TIME_SERIES_BUNDLE_FILENAME,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
     _day_bundled_root,
     _day_rollups_root,
@@ -1210,6 +1211,41 @@ def compact_overview_closed_days_to_daily(
         service_id,
         source,
         jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
+        lookback_days=lookback_days,
+        logger=logger,
+    )
+
+
+def compact_time_series_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
+    """Consolidate closed-day per-hour time_series parquets into per-day files."""
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"    bucket, "
+            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"    CAST(SUM(status_4xx) AS BIGINT) AS status_4xx, "
+            f"    CAST(SUM(status_5xx) AS BIGINT) AS status_5xx, "
+            f"    CAST(SUM(hits) AS BIGINT) AS hits, "
+            f"    CAST(SUM(cache_total) AS BIGINT) AS cache_total, "
+            f"    CAST(SUM(resp_bytes_sum) AS BIGINT) AS resp_bytes_sum, "
+            f"    CAST(SUM(ttfb_sum) AS DOUBLE) AS ttfb_sum, "
+            f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY bucket "
+            f"  ORDER BY bucket"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(TIME_SERIES_BUNDLE_FILENAME, ".tmp_ts_day_", _copy_sql)],
         lookback_days=lookback_days,
         logger=logger,
     )

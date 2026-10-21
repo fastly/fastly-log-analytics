@@ -102,6 +102,7 @@ _UNAUTH_ANALYST_PATHS = {
     # Public RUM assets and beacon endpoints
     "/js/rum.js",
     "/js/faro-sdk.js",
+    "/rum-beacon",
     "/api/web-vitals",
     "/api/ux-events",
 }
@@ -1299,7 +1300,9 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # bootstrap so the cookie-setting /api/share/* responses (whose
             # Set-Cookie headers must survive verbatim) are left untouched.
             if path == "/api/bootstrap":
-                response = await _strip_analyst_envelope(response)
+                sid_boot = request.cookies.get("analyst_session_id")
+                boot_session = mgr.validate_session(sid_boot) if sid_boot else None
+                response = await _strip_analyst_envelope(response, analyst_session=boot_session)
             return apply_response_hardening(response)
 
         # All other analyst paths require a valid session.
