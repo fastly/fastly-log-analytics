@@ -594,3 +594,68 @@ class TestSQLiteInstrumentation:
         hist = singleton.snapshot(include_completed=True)["completed"]
         recent = [c for c in hist if c["db_type"] == "SQLite"]
         assert len(recent) >= 3
+
+
+# ── cancel on client disconnect ─────────────────────────────────────────────────────────────────────────
+
+
+def _register_for(registry: QueryRegistry, key: str | None, con: _RecordingConn, db: str = "DuckDB", slot=None) -> int:
+    token = current_attribution.set(
+        Attribution.admin(
+            admin_id="1.2.3.4", request_path="/api/dashboard/bundle", request_id="shared-trace", cancel_key=key
+        )
+    )
+    try:
+        return registry.register(db, "SELECT 1", service_id="svc", con=con, pool_slot=slot)
+    finally:
+        current_attribution.reset(token)
+
+
+def test_the_cancel_key_survives_the_attribution_copies_the_registry_makes():
+    attr = Attribution.admin(admin_id="a", request_path="/p", request_id="r", cancel_key="k1")
+
+    assert attr.with_caller("q", "f.py:1").cancel_key == "k1"
+    assert attr.with_pool_slot("svc#1").cancel_key == "k1"
+    assert (
+        Attribution.analyst(
+            analyst_id="x", analyst_name=None, request_path="/p", request_id="r", cancel_key="k2"
+        ).cancel_key
+        == "k2"
+    )
+
+
+def test_cancel_for_key_interrupts_only_that_requests_duckdb_queries():
+    registry = QueryRegistry()
+    mine, mine_second, sibling, other_db = _RecordingConn(), _RecordingConn(), _RecordingConn(), _RecordingConn()
+    q1 = _register_for(registry, "me", mine)
+    _register_for(registry, "me", mine_second, slot="svc#2")
+    _register_for(registry, "sibling", sibling)  # same request_id (shared trace), different request
+    _register_for(registry, "me", other_db, db="SQLite")
+
+    assert registry.cancel_for_key("me") == 2
+
+    assert (mine.interrupts, mine_second.interrupts) == (1, 1)
+    assert sibling.interrupts == 0, "a sibling request sharing the trace id must not be cancelled"
+    assert other_db.interrupts == 0, "only DuckDB serving queries are interrupted"
+    assert registry._queries[q1].cancelled_at is not None
+
+
+def test_cancel_for_key_is_idempotent_and_ignores_unknown_keys():
+    registry = QueryRegistry()
+    conn = _RecordingConn()
+    _register_for(registry, "me", conn)
+
+    assert registry.cancel_for_key("nobody") == 0
+    assert registry.cancel_for_key("me") == 1
+    assert registry.cancel_for_key("me") == 0
+    assert conn.interrupts == 1
+
+
+def test_cancel_for_key_without_a_key_cancels_nothing():
+    registry = QueryRegistry()
+    conn = _RecordingConn()
+    _register_for(registry, None, conn)
+
+    assert registry.cancel_for_key("") == 0
+    assert registry.cancel_for_key(None) == 0  # type: ignore[arg-type]
+    assert conn.interrupts == 0

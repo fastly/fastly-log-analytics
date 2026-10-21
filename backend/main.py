@@ -906,12 +906,16 @@ async def telemetry_middleware(request: Request, call_next):
         request.state.request_id = request_id
     except Exception:
         pass
+    import secrets as _cancel_secrets
+
+    cancel_key = _cancel_secrets.token_hex(8)
     if analyst_session is not None:
         attr = _Attribution.analyst(
             analyst_id=getattr(analyst_session, "session_id", None) or "unknown",
             analyst_name=getattr(analyst_session, "name", None) or None,
             request_path=request_path,
             request_id=request_id,
+            cancel_key=cancel_key,
         )
     else:
         from backend.utils.remote_access import client_ip as _client_ip
@@ -920,6 +924,7 @@ async def telemetry_middleware(request: Request, call_next):
             admin_id=_client_ip(request, default="unknown") or "admin",
             request_path=request_path,
             request_id=request_id,
+            cancel_key=cancel_key,
         )
     _prev_attr = _current_attribution.get()
     _current_attribution.set(attr)
@@ -927,6 +932,18 @@ async def telemetry_middleware(request: Request, call_next):
     with process_context_scope(ctx_name):
         try:
             response = await call_next(request)
+        except asyncio.CancelledError:
+            # The client went away (a reload aborts its fetches) and Starlette cancelled the handler. The DuckDB
+            # statements it already started keep running in worker threads, each holding a scarce pool slot; every
+            # further reload would add another orphan until the pool saturates ("pool for <svc> saturated at 4").
+            # Interrupt this request's queries (and only this request's) so the slots free immediately.
+            from backend.core.query_registry import query_registry as _qr
+
+            try:
+                _qr.cancel_for_key(cancel_key)
+            except Exception:
+                pass
+            raise
         finally:
             # Active-request gate (perf #84): balance the increment above so the
             # cron-defer counter falls back to 0 when the request finishes.

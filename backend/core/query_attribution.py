@@ -95,6 +95,9 @@ class Attribution:
     caller_file: str = "<unknown>"
     request_path: str | None = None
     request_id: str | None = None
+    # Unique per HTTP request (request_id can be shared: it is the OTel trace id when one is propagated). Lets the
+    # request's queries be interrupted if the client disconnects, without touching a sibling request's queries.
+    cancel_key: str | None = None
 
     # Per-connection pool slot (DuckDB only) — filled by the registry when
     # the connection is known. Helps ops correlate with duckdb_pool stats.
@@ -108,6 +111,7 @@ class Attribution:
         analyst_name: str | None,
         request_path: str | None,
         request_id: str | None,
+        cancel_key: str | None = None,
     ) -> Attribution:
         return cls(
             kind="analyst",
@@ -115,6 +119,7 @@ class Attribution:
             analyst_name=analyst_name,
             request_path=request_path,
             request_id=request_id,
+            cancel_key=cancel_key,
         )
 
     @classmethod
@@ -124,12 +129,14 @@ class Attribution:
         admin_id: str,
         request_path: str | None,
         request_id: str | None,
+        cancel_key: str | None = None,
     ) -> Attribution:
         return cls(
             kind="admin",
             admin_id=admin_id,
             request_path=request_path,
             request_id=request_id,
+            cancel_key=cancel_key,
         )
 
     @classmethod
@@ -188,6 +195,7 @@ class Attribution:
             caller_file=file_line,
             request_path=self.request_path,
             request_id=self.request_id,
+            cancel_key=self.cancel_key,
             pool_slot=self.pool_slot,
         )
         return new
@@ -206,6 +214,7 @@ class Attribution:
             caller_file=self.caller_file,
             request_path=self.request_path,
             request_id=self.request_id,
+            cancel_key=self.cancel_key,
             pool_slot=slot,
         )
 

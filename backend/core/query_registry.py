@@ -447,6 +447,28 @@ class QueryRegistry:
         _metric_safe(lambda: _metric_cancelled_total.add(1, {"db": target_db, "kind": target_kind}))
         return "cancelled"
 
+    def cancel_for_key(self, cancel_key: str | None, *, admin_id: str = "client-disconnect") -> int:
+        """Interrupt every still-running DuckDB query started by the request that owns ``cancel_key``.
+
+        Called when the client abandons a request: Starlette cancels the handler coroutine, but the synchronous
+        DuckDB work already running in a worker thread would otherwise run to completion (up to the pool
+        watchdog's 120 s) holding one of the few pool slots. Matching is by the per-request ``cancel_key``, never
+        by ``request_id`` (shared when it is a propagated trace id), so a sibling request is never touched.
+        Idempotent; returns how many queries were interrupted.
+        """
+        if not cancel_key:
+            return 0
+        interrupted = 0
+        for active in tuple(self._queries.values()):
+            if (
+                active.db_type == "DuckDB"
+                and active.cancelled_at is None
+                and active.attribution.cancel_key == cancel_key
+                and self.cancel_query(active.query_id, admin_id=admin_id) == "cancelled"
+            ):
+                interrupted += 1
+        return interrupted
+
     # ── reads ────────────────────────────────────────────────────────────────
 
     def snapshot(
