@@ -122,6 +122,5 @@ export type ShareBanner = WithRequiredNullable<
 
 export type SessionsResponse = components['schemas']['SessionsResponse']
 
-export type LogsQueryResponse = components['schemas']['LogsQueryResponse']
 
 export type SessionDetailResponse = components['schemas']['SessionDetailResponse']

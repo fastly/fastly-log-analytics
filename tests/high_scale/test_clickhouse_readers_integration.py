@@ -32,7 +32,6 @@ from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
 from backend.high_scale.cmcd import cmcd_aggregates
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
-from backend.high_scale.logs import logs_query_endpoint
 from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.projections import project_cmcd
@@ -40,7 +39,6 @@ from backend.high_scale.sessions import sessions_endpoint
 from backend.models.cmcd import CmcdRequest
 from backend.models.dashboard import SessionsRequest
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
-from backend.models.logs import LogsQueryRequest
 from backend.repositories.insights.registry import registry
 
 pytestmark = pytest.mark.skipif(
@@ -343,33 +341,6 @@ def test_cache_collapse_detail_reads_real_rows(traffic: _Fixture, service: Simpl
     assert result.baseline_hit_rate == pytest.approx(90.0)
     assert result.timeline and result.recent_misses
     assert all(point.bucket.endswith("Z") for point in result.timeline)
-
-
-def test_logs_filters_columns_and_hostile_keys(traffic: _Fixture, service: SimpleNamespace) -> None:
-    start, end = (NOW - timedelta(hours=3)).isoformat(), NOW.isoformat()
-
-    filtered = logs_query_endpoint(
-        service,  # type: ignore[arg-type]
-        LogsQueryRequest(limit=5, filters={"country": {"mode": "include", "values": ["NZ"]}}),
-        start,
-        end,
-        False,
-    )
-    assert filtered["total_count"] == 6 and len(filtered["rows"]) == 5 and filtered["has_more"] is True
-    assert {"status", "cache", "elapsed"} <= set(filtered["columns"])
-    assert filtered["rows"][0]["timestamp"].endswith("Z")
-
-    projected = logs_query_endpoint(service, LogsQueryRequest(limit=2, columns=["url", "cache"]), start, end, True)  # type: ignore[arg-type]
-    assert projected["columns"] == ["timestamp", "url", "cache"]
-
-    hostile = logs_query_endpoint(
-        service,  # type: ignore[arg-type]
-        LogsQueryRequest(filters={"status'] = '200' OR 1=1 --": {"mode": "include", "values": ["x"]}}),
-        start,
-        end,
-        False,
-    )
-    assert hostile["total_count"] == 0
 
 
 def test_sessions_group_stitch_count_and_flag_availability(

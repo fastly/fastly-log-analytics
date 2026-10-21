@@ -1070,7 +1070,6 @@ from backend.routers import (
     dashboard,
     high_scale,
     insights,
-    logs,
     network,
     origin,
     performance,
@@ -1078,7 +1077,6 @@ from backend.routers import (
     rum,
     security,
     sessions,
-    stream,
     value,
     views,
 )
@@ -1100,8 +1098,6 @@ app.include_router(cmcd.router)
 app.include_router(rum.router)
 app.include_router(rum.asset_router)
 app.include_router(assets.router)
-app.include_router(logs.router)
-app.include_router(stream.router)
 
 from backend.routers import (
     admin,

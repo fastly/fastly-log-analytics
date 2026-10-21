@@ -62,10 +62,6 @@ def _build_test_app() -> FastAPI:
     def _cron_run_stream(run_id: str):
         return {"ok": True}
 
-    @app.get("/api/services/{service_id}/stream")
-    def _service_live_stream(service_id: str):
-        return {"ok": True}
-
     # Analyst-allowlisted SSE channel (header-badge push). Used by the
     # idle-timer exemption test below — it passes the SSE allowlist gate,
     # so it's a true positive for "reached the touch logic but skipped it".
@@ -531,20 +527,6 @@ def test_analyst_blocked_from_unlisted_hyphenated_stream_route(client):
     )
     assert r.status_code == 403
     assert r.json()["error"] == "sse_blocked"
-
-
-def test_analyst_allowed_on_service_live_stream_but_not_other_stream_suffixes(client):
-    """The live-log feed /api/services/{id}/stream is analyst-visible; the
-    allowlist must not widen to every ``*/stream`` route."""
-    _start_share()
-    invite = _seed_invite(service_ids=["svcA"])
-    _login_analyst(client, invite)
-    hdrs = {"X-Remote-Analyst": "1", "Host": "testserver"}
-    ok = client.get("/api/services/svcA/stream", headers=hdrs)
-    assert ok.status_code == 200
-    blocked = client.get("/api/cron-runs/7/stream", headers=hdrs)
-    assert blocked.status_code == 403
-    assert client.get("/api/cron/stream", headers=hdrs).json()["error"] == "sse_blocked"
 
 
 def test_analyst_blocked_from_admin_events_stream(client):

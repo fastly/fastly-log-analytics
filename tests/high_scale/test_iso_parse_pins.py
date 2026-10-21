@@ -10,10 +10,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale import aggregates, logs, publication, raw_query, sessions
+from backend.high_scale import aggregates, publication, raw_query, sessions
 
 
-@pytest.mark.parametrize("module", [logs, sessions])
+@pytest.mark.parametrize("module", [sessions])
 def test_parse_ts_range_value_family(module) -> None:
     assert module._parse_ts(None) is None
     assert module._parse_ts("") is None
@@ -22,8 +22,7 @@ def test_parse_ts_range_value_family(module) -> None:
     assert module._parse_ts("2026-01-02T03:04:05+02:00").utcoffset().total_seconds() == 7200
 
 
-def test_logs_parse_ts_swallows_garbage_but_sessions_raises() -> None:
-    assert logs._parse_ts("not-a-date") is None
+def test_sessions_parse_ts_raises_on_garbage() -> None:
     with pytest.raises(ValueError):
         sessions._parse_ts("not-a-date")
 

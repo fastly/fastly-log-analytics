@@ -28,7 +28,6 @@ backend/routers/admin/events.py 3
 backend/routers/control_room.py 1
 backend/routers/provision.py 1
 backend/routers/services/core.py 1
-backend/routers/stream.py 1
 backend/utils/valkey_publisher.py 1
 '
 

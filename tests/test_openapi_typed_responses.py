@@ -16,8 +16,6 @@ UNTYPED_JSON: frozenset[str] = frozenset()
 NON_JSON_EXEMPT = frozenset(
     {
         "GET /api/admin/quarantine/download/{item_id}",
-        "GET /api/stream/{service_id}",
-        "GET /api/services/{service_id}/stream",
         "GET /api/services/{service_id}/control-room/error-stream",
         "GET /api/admin/events/stream",
         "GET /api/admin/usage-log/export",

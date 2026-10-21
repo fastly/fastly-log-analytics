@@ -128,18 +128,6 @@ export const handlers = [
   http.delete(`${API_BASE}/api/admin/slow-queries`, () =>
     HttpResponse.json({ deleted: 0, service_id: 'svc-default' }),
   ),
-  http.post(`${API_BASE}/api/logs/query`, () =>
-    HttpResponse.json({
-      rows: [],
-      total_count: 0,
-      has_more: false,
-      limit: 100,
-      offset: 0,
-      columns: [],
-      schema_columns: [],
-      missing_fields: [],
-    }),
-  ),
   http.post(`${API_BASE}/api/high-scale/services/:service_id/request-facts`, () =>
     HttpResponse.json({
       rows: [],

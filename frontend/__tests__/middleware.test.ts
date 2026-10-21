@@ -126,9 +126,8 @@ describe('middleware /admin gate (security)', () => {
     expect(res.status).toBe(200)
   })
 
-  // /logs (Raw Logs) is analyst-visible since the raw logs explorer shipped
-  // (backend allows POST /api/logs/query for analysts), so Caddy-proxied
-  // requests must NOT be redirected or blocked.
+  // /logs is analyst-visible, so Caddy-proxied requests must NOT be
+  // redirected or blocked.
   it('does not block /logs for analysts behind Caddy', () => {
     const page = middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' }))
     expect(page.status).toBe(200)

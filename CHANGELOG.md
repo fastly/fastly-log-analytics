@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Removed the raw-logs and live-tail endpoints `POST /api/logs`, `POST /api/logs/query`, `GET /api/logs`, `GET /api/logs/{service_id}`, `GET /api/stream/{service_id}` and `GET /api/services/{service_id}/stream`. Their only consumers, the `/logs` Raw Logs and Live Tail tabs, were removed; use `POST /api/query` raw-query mode instead.
+
 ## [3.0.0-beta4] - 2026-10-20
 
 ### Added
