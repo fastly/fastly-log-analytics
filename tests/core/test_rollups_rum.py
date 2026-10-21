@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import duckdb
 
-from backend.core.rollups.rum import recompute_rum_aggregates, table_exists
+from backend.core.rollups.rum import backfill_missing_rum_aggregates, recompute_rum_aggregates, table_exists
 
 
 def test_recompute_rum_aggregates_idempotency_and_correctness():
@@ -359,3 +361,71 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
     res = compaction._run_rollup_hour_heal.__wrapped__(sid, manual=True)
     assert res["status"] == "success"
     assert backfill_calls == [(fake_con, sid, 30)]
+
+
+def _seeded_file_db(path: Path, hours: int = 4) -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, "
+        "req_id VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE client_errors (timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, "
+        "error_line INT, error_col INT, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, "
+        "cid VARCHAR, req_id VARCHAR)"
+    )
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    for h in range(hours):
+        for i in range(10):
+            con.execute(
+                "INSERT INTO client_vitals VALUES (?, 'LCP', 1000, 'good', '/p', 'c', 'o', 'd', ?, ?)",
+                [now - timedelta(hours=h) + timedelta(seconds=i), f"c{i}", f"r{h}_{i}"],
+            )
+    return con
+
+
+def _duplicate_keys(con: duckdb.DuckDBPyConnection) -> int:
+    return con.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM rum_vitals_aggregates GROUP BY service_id, bucket_start, dimension, value "
+        "HAVING COUNT(*) > 1)"
+    ).fetchone()[0]
+
+
+def test_concurrent_recomputes_never_duplicate_aggregate_rows(tmp_path: Path):
+    con = _seeded_file_db(tmp_path / "rum.duckdb")
+    recompute_rum_aggregates(con, "svc")
+
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            recompute_rum_aggregates(con.cursor(), "svc")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    for _ in range(10):
+        threads = [threading.Thread(target=run) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert errors == []
+    assert _duplicate_keys(con) == 0
+
+
+def test_heal_rebuilds_hours_whose_total_beacons_row_is_duplicated(tmp_path: Path):
+    con = _seeded_file_db(tmp_path / "rum.duckdb")
+    recompute_rum_aggregates(con, "svc")
+    con.execute("INSERT INTO rum_vitals_aggregates SELECT * FROM rum_vitals_aggregates WHERE value = 'total_beacons'")
+    assert _duplicate_keys(con) > 0
+
+    healed = backfill_missing_rum_aggregates(con, "svc", lookback_days=30)
+
+    assert healed
+    assert _duplicate_keys(con) == 0
+    assert (
+        con.execute("SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE value = 'total_beacons'").fetchone()[0]
+        == 40
+    )

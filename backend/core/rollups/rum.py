@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import ensure_utc
 
 logger = logging.getLogger(__name__)
+
+_RECOMPUTE_LOCKS: dict[str, threading.Lock] = {}
+_RECOMPUTE_LOCKS_GUARD = threading.Lock()
+
+
+def _recompute_lock(service_id: str) -> threading.Lock:
+    with _RECOMPUTE_LOCKS_GUARD:
+        return _RECOMPUTE_LOCKS.setdefault(service_id, threading.Lock())
 
 
 def _normalize_hour_dt(dt_val: datetime) -> datetime:
@@ -78,7 +87,16 @@ def rum_count_and_latest(con):
 
 
 def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
-    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently."""
+    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently.
+
+    Serialized per service: the delete-then-insert below is not atomic, so two concurrent runs (commit cron, compaction
+    heal, admin recompute) over the same hours each delete nothing and both insert, doubling every beacon count.
+    """
+    with _recompute_lock(service_id):
+        _recompute_rum_aggregates_locked(con, service_id, hours)
+
+
+def _recompute_rum_aggregates_locked(con, service_id: str, hours: list[datetime] | list[str] | None) -> None:
     logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")
     con.execute("""
         CREATE TABLE IF NOT EXISTS rum_vitals_aggregates (
@@ -472,7 +490,7 @@ def backfill_missing_rum_aggregates(
 ) -> list[datetime]:
     """Detect and heal hours in ``client_vitals`` / ``client_errors`` within
     ``lookback_days`` that are either absent from ``rum_vitals_aggregates`` or
-    lack a ``total_beacons`` aggregate row.
+    lack a ``total_beacons`` aggregate row or carry more than one (a past concurrent recompute).
 
     Historical hours aggregated before commit ``3fcbcd27`` already have rows in
     ``rum_vitals_aggregates`` (for ``LCP``/``CLS``/``pageviews``/etc.) and would
@@ -508,13 +526,13 @@ def backfill_missing_rum_aggregates(
             SELECT DISTINCT r.bucket_start
             FROM ({raw_union}) r
             WHERE r.bucket_start IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1
+              AND (
+                  SELECT COUNT(*)
                   FROM rum_vitals_aggregates a
                   WHERE a.service_id = ?
                     AND a.bucket_start = r.bucket_start
                     AND a.value = 'total_beacons'
-              )
+              ) <> 1
             ORDER BY r.bucket_start ASC
         """
         rows = con.execute(sql, [*params, service_id]).fetchall()
@@ -537,7 +555,7 @@ def backfill_missing_rum_aggregates(
 
     if missing_hours:
         logger.info(
-            "[rum_rollups] %s: Healing %d RUM aggregate hour(s) missing total_beacons (lookback=%dd)",
+            "[rum_rollups] %s: Healing %d RUM aggregate hour(s) with a missing or duplicated total_beacons row (lookback=%dd)",
             service_id,
             len(missing_hours),
             lookback_days,
