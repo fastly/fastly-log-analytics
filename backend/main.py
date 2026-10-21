@@ -590,10 +590,13 @@ async def _application_lifespan(app: FastAPI):
     )
     if registered_high_scale:
         logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
+
         # Per-service least-privilege ClickHouse identities for analyst SQL (no-op without a console secret).
-        provisioned = await asyncio.to_thread(
-            console_access.provision_configured_services, clickhouse, registered_high_scale
-        )
+        def _provision() -> tuple[str, ...]:
+            with console_access.provisioning_client(clickhouse) as admin:
+                return console_access.provision_configured_services(admin, registered_high_scale)
+
+        provisioned = await asyncio.to_thread(_provision)
         if provisioned:
             logging.info("[fastapi] Provisioned analyst console access for %d service(s).", len(provisioned))
 

@@ -492,3 +492,41 @@ def test_the_probe_query_the_console_runs_first_is_allowed_for_the_identity(clie
     )
 
     assert rows == [{"n": 0}]
+
+
+def test_a_column_added_to_a_base_table_later_is_invisible_to_both_identities_until_reprovisioning(
+    server: _Server, clients: access.ConsoleClients
+) -> None:
+    server.admin_sql("ALTER TABLE request_facts ADD COLUMN IF NOT EXISTS drift_probe String DEFAULT 'would-leak'")
+    try:
+        for masked in (True, False):
+            granted = _identity(clients, "svc-a", masked)
+            with pytest.raises(ClickHouseError):
+                granted.client.execute(f"SELECT drift_probe FROM {granted.tables['request_facts']} LIMIT 1")
+    finally:
+        server.admin_sql("ALTER TABLE request_facts DROP COLUMN IF EXISTS drift_probe")
+
+
+def test_grants_a_pre_existing_identity_picked_up_elsewhere_are_revoked_on_the_next_provisioning(
+    server: _Server,
+) -> None:
+    user, _ = access.console_identity("svc-a", SECRET, masked=True)
+    server.admin_sql(f"GRANT SELECT ON {DB}.other_secret TO `{user}`")
+    stale = server.client(*access.console_identity("svc-a", SECRET, masked=True))
+    try:
+        assert stale.execute("SELECT x FROM other_secret") == [{"x": "top-secret"}], "sanity: the stray grant works"
+    finally:
+        stale.close()
+
+    admin = server.client("admin", "adminpw")
+    try:
+        access.provision_console_access(admin, DB, "svc-a", SECRET)
+    finally:
+        admin.close()
+
+    after = server.client(*access.console_identity("svc-a", SECRET, masked=True))
+    try:
+        with pytest.raises(ClickHouseError):
+            after.execute("SELECT x FROM other_secret")
+    finally:
+        after.close()

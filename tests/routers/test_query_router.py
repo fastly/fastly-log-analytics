@@ -712,3 +712,65 @@ def test_analyst_console_stays_closed_when_the_identity_fails_its_isolation_chec
     assert resp.status_code == 403
     assert resp.json()["detail"]["error"] == "console_unavailable_for_analysts"
     assert main_calls == []
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    ("policy", "expected_masked"),
+    [
+        (None, True),
+        ({}, True),
+        ({"mask_ips": None}, True),
+        ({"mask_ips": "false"}, True),
+        ({"mask_ips": True}, True),
+        ({"mask_ips": False}, False),
+    ],
+)
+def test_the_console_picks_the_masked_identity_unless_the_invite_explicitly_disables_masking(
+    client, in_memory_duckdb, test_service_source, policy, expected_masked
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    asked: list[bool] = []
+    console_client = SimpleNamespace(
+        execute=lambda sql, params=None, settings=None: [{"n": 0}] if "system.one" in sql else [{"n": 1}]
+    )
+
+    def client_for(sid, masked=True):
+        asked.append(masked)
+        return SimpleNamespace(client=console_client, tables={"request_facts": "fla_cv_view_req"})
+
+    session = SimpleNamespace(session_id="s", pii_policy=policy, service_ids=[test_service_source["service_id"]])
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        session=session,
+        path="/api/query",
+        time_bounds=TimeBounds(
+            start=datetime(2026, 6, 17, 9, 0, tzinfo=UTC), end=datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
+        ),
+    )
+    hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=SimpleNamespace(execute=lambda *a, **k: []))
+    with (
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=SimpleNamespace(resolve=lambda sid: hs_service),
+        ),
+        patch(
+            "backend.high_scale.console_access.get_console_clients",
+            return_value=SimpleNamespace(client_for=client_for),
+        ),
+    ):
+        resp = client.post(
+            "/api/query",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"sql": "SELECT count(*) AS n FROM logs"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert asked == [expected_masked]

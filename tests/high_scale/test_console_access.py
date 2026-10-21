@@ -72,7 +72,7 @@ def _stmts(admin: _Admin, prefix: str) -> list[str]:
 
 def _view_stmt(admin: _Admin, service_id: str, masked: bool, table: str) -> str:
     view = access.console_tables(service_id, masked)[table]
-    return next(s for s in _stmts(admin, "CREATE OR REPLACE VIEW") if f"`{view}`" in s)
+    return next(s for s in _stmts(admin, "CREATE VIEW") if f"`{view}`" in s)
 
 
 # ── identities ──────────────────────────────────────────────────────────────────────────────────────────
@@ -125,11 +125,67 @@ def test_a_masked_view_replaces_client_ips_and_sensitive_map_keys_in_the_data() 
     access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
 
     view = _view_stmt(admin, "svc-a", True, "request_facts")
-    assert "SELECT * REPLACE (" in view
     assert "if(isNull(`client_ip`) OR `client_ip` = '', `client_ip`, '[redacted]') AS `client_ip`" in view
     assert "mapApply((k, v) -> (k, if(lower(k) IN (" in view and "AS `custom_fields`" in view and "AS `cmcd`" in view
-    for key in ("cookie_session", "cid", "ip", "client_ip", "client_id"):
+    for key in ("cookie_session", "cid", "ip", "client_ip", "client_id", "sid", "x-forwarded-for", "true-client-ip"):
         assert f"'{key}'" in view
+
+
+def test_a_masked_view_lists_its_columns_explicitly_so_a_new_base_column_is_invisible_not_leaked() -> None:
+    admin = _Admin()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    for table, columns in _SCHEMAS.items():
+        view = _view_stmt(admin, "svc-a", True, table)
+        select = view.split(" AS SELECT ", 1)[1].split(" FROM ", 1)[0]
+        assert not re.search(r"(^|,\s)\*(\s|,|$)", select), "no SELECT *: columns added later must not pass through"
+        for name, _ in columns:
+            assert f"`{name}`" in select
+
+
+def test_a_masked_view_refuses_to_pass_through_a_map_it_cannot_redact() -> None:
+    class _Odd(_Admin):
+        def execute(self, sql, params=None, *, settings=None):
+            if sql.startswith("DESCRIBE TABLE") and "`request_facts`" in sql:
+                return [{"name": "service_id", "type": "String"}, {"name": "tags", "type": "Map(String, UInt64)"}]
+            return super().execute(sql, params, settings=settings)
+
+    admin = _Odd()
+
+    with pytest.raises(RuntimeError, match="cannot redact"):
+        access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    assert not _stmts(admin, "GRANT")
+
+
+@pytest.mark.parametrize("type_", ["IPv4", "IPv6", "Nullable(IPv6)", "UInt32"])
+def test_a_masked_view_refuses_a_sensitive_column_whose_type_it_cannot_redact(type_: str) -> None:
+    class _Odd(_Admin):
+        def execute(self, sql, params=None, *, settings=None):
+            if sql.startswith("DESCRIBE TABLE") and "`request_facts`" in sql:
+                return [{"name": "service_id", "type": "String"}, {"name": "client_ip", "type": type_}]
+            return super().execute(sql, params, settings=settings)
+
+    with pytest.raises(RuntimeError, match="cannot redact"):
+        access.provision_console_access(_Odd(), "fla_db", "svc-a", SECRET)
+
+
+@pytest.mark.parametrize(
+    "type_", ["Map(String, String)", "Map(LowCardinality(String), String)", "Map(String, Nullable(String))"]
+)
+def test_string_keyed_string_maps_of_any_wrapping_are_redacted(type_: str) -> None:
+    class _Maps(_Admin):
+        def execute(self, sql, params=None, *, settings=None):
+            if sql.startswith("DESCRIBE TABLE") and "`request_facts`" in sql:
+                return [{"name": "service_id", "type": "String"}, {"name": "m", "type": type_}]
+            return super().execute(sql, params, settings=settings)
+
+    admin = _Maps()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    assert "AS `m`" in _view_stmt(admin, "svc-a", True, "request_facts")
 
 
 def test_the_rum_client_id_is_redacted_in_masked_rum_views_including_nullable_columns() -> None:
@@ -156,7 +212,7 @@ def test_every_view_fixes_the_service_and_the_publication_fence_and_runs_with_de
 
     access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
 
-    views = _stmts(admin, "CREATE OR REPLACE VIEW")
+    views = _stmts(admin, "CREATE VIEW")
     assert len(views) == 6  # 3 tables x 2 modes
     for view in views:
         assert "DEFINER = CURRENT_USER SQL SECURITY DEFINER" in view
@@ -202,7 +258,7 @@ def test_each_users_views_are_created_and_verified_before_that_user_is_granted_a
         last_view = max(
             i
             for i, s in enumerate(admin.statements)
-            if s.startswith("CREATE OR REPLACE VIEW") and any(f"`{v}`" in s for v in views.values())
+            if s.startswith("CREATE VIEW") and any(f"`{v}`" in s for v in views.values())
         )
         verify = next(
             i
@@ -215,6 +271,20 @@ def test_each_users_views_are_created_and_verified_before_that_user_is_granted_a
         assert last_view < verify < first_grant
 
 
+def test_any_pre_existing_grants_are_revoked_before_the_identity_is_granted_its_views() -> None:
+    admin = _Admin()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    for masked in (True, False):
+        user, _ = access.console_identity("svc-a", SECRET, masked)
+        revoke = next(i for i, s in enumerate(admin.statements) if s == f"REVOKE ALL ON *.* FROM `{user}`")
+        first_grant = min(
+            i for i, s in enumerate(admin.statements) if s.startswith("GRANT") and s.endswith(f"`{user}`")
+        )
+        assert revoke < first_grant
+
+
 def test_missing_views_abort_provisioning_before_any_grant() -> None:
     admin = _Admin(hide_views=True)
 
@@ -225,7 +295,7 @@ def test_missing_views_abort_provisioning_before_any_grant() -> None:
 
 
 def test_a_failed_view_statement_aborts_before_granting_anything() -> None:
-    admin = _Admin(fail_on="CREATE OR REPLACE VIEW")
+    admin = _Admin(fail_on="CREATE VIEW")
 
     with pytest.raises(RuntimeError):
         access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
@@ -257,7 +327,7 @@ def test_a_hostile_service_id_cannot_break_out_of_any_literal() -> None:
 
     access.provision_console_access(admin, "fla_db", "x' OR 1=1 --", SECRET)
 
-    for view in _stmts(admin, "CREATE OR REPLACE VIEW"):
+    for view in _stmts(admin, "CREATE VIEW"):
         assert "x\\' OR 1=1 --" in view and "x' OR" not in view
 
 
@@ -384,7 +454,10 @@ def test_a_masked_identity_is_also_probed_for_unredacted_client_ips() -> None:
     masked.client_for("svc-a", masked=True)
     raw.client_for("svc-a", masked=False)
 
-    assert any("client_ip != '' AND client_ip != '[redacted]'" in sql for sql in masked_built[0].sql)
+    probed = " ".join(masked_built[0].sql)
+    assert "client_ip != '' AND client_ip != '[redacted]'" in probed
+    assert "custom_fields['cookie_session']" in probed and "custom_fields['cid']" in probed
+    assert "FROM fla_cv_" in probed and "client_id != ''" in probed, "the RUM views are checked too"
     assert not any("[redacted]" in sql for sql in raw_built[0].sql)
 
 
@@ -465,3 +538,127 @@ def test_settings_replacement_keeps_every_other_connection_field() -> None:
         base.database,
         base.secure,
     )
+
+
+# ── startup provisioning runs as a separate, short-lived account when one is configured ─────────────────
+
+
+def test_provisioning_uses_the_separate_provisioner_account_and_closes_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[_FakeClient] = []
+    provisioner = dataclasses.replace(_settings(), user="fla_provisioner", password="prov-pw")
+    monkeypatch.setattr(access.config, "load_clickhouse_provisioner_config", lambda: provisioner)
+    monkeypatch.setattr(access, "ClickHouseClient", lambda settings: built.append(_FakeClient(settings)) or built[-1])
+    app_user_client = _FakeClient(_settings())
+
+    with access.provisioning_client(app_user_client) as admin:
+        assert admin is built[0]
+        assert (admin.settings.user, admin.settings.password) == ("fla_provisioner", "prov-pw")
+        assert not admin.closed
+
+    assert built[0].closed, "the elevated account must not outlive startup provisioning"
+    assert not app_user_client.closed
+
+
+def test_provisioning_falls_back_to_the_application_client_without_a_provisioner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(access.config, "load_clickhouse_provisioner_config", lambda: None)
+    app_user_client = _FakeClient(_settings())
+
+    with access.provisioning_client(app_user_client) as admin:
+        assert admin is app_user_client
+
+    assert not app_user_client.closed, "the application's own client is never closed by provisioning"
+
+
+def test_the_provisioner_is_closed_even_when_provisioning_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[_FakeClient] = []
+    monkeypatch.setattr(
+        access.config, "load_clickhouse_provisioner_config", lambda: dataclasses.replace(_settings(), user="p")
+    )
+    monkeypatch.setattr(access, "ClickHouseClient", lambda settings: built.append(_FakeClient(settings)) or built[-1])
+
+    with pytest.raises(RuntimeError), access.provisioning_client(_FakeClient(_settings())):
+        raise RuntimeError("provisioning failed")
+
+    assert built[0].closed
+
+
+# ── schema drift guard ──────────────────────────────────────────────────────────────────────────────────
+
+_COMMON = {
+    "service_id", "event_id", "event_timestamp", "ingest_timestamp", "source_object_key", "source_object_version",
+    "line_ordinal", "transform_version", "batch_id", "publication_state", "country",
+}  # fmt: skip
+# Every column of the three fact tables, each reviewed once for client identifiers. A column that is not listed
+# here fails this test, so adding one forces the author to decide how a masked analyst identity sees it
+# (add it here when it is not an identifier; otherwise extend MASKED_KEYS / `_redaction`).
+_REVIEWED_COLUMNS = {
+    "request_facts": _COMMON | {"client_ip", "url", "custom_fields", "cmcd"},
+    "rum_vitals_facts": _COMMON
+    | {"client_id", "request_event_id", "metric_name", "metric_value", "metric_rating", "pathname", "browser", "os"}
+    | {"device", "city", "region", "pop", "tls", "ttfb"},
+    "rum_error_facts": _COMMON
+    | {"client_id", "request_event_id", "error_message", "error_file", "pathname", "error_line", "error_col"}
+    | {"browser", "os", "device", "city", "region", "pop", "tls", "ttfb"},
+}
+
+
+def _ddl_columns() -> dict[str, set[str]]:
+    from pathlib import Path
+
+    found: dict[str, set[str]] = {}
+    for name in ("request_schema.sql", "rum_schema.sql"):
+        text = (Path("backend/high_scale/sql") / name).read_text()
+        for match in re.finditer(
+            r"CREATE TABLE IF NOT EXISTS (request_facts|rum_vitals_facts|rum_error_facts)\s*\((.*?)\)\s*ENGINE",
+            text,
+            re.S,
+        ):
+            columns, depth, current = [], 0, ""
+            for char in match.group(2):
+                depth += char == "("
+                depth -= char == ")"
+                if char == "," and depth == 0:
+                    columns.append(current.strip())
+                    current = ""
+                else:
+                    current += char
+            columns.append(current.strip())
+            found[match.group(1)] = {c.split()[0] for c in columns if c}
+    return found
+
+
+def test_every_fact_table_column_has_been_reviewed_for_client_identifiers() -> None:
+    declared = _ddl_columns()
+
+    assert set(declared) == set(_REVIEWED_COLUMNS)
+    for table, columns in declared.items():
+        unreviewed = columns - _REVIEWED_COLUMNS[table]
+        assert not unreviewed, (
+            f"{table} gained {sorted(unreviewed)}: decide how a masked analyst sees it "
+            "(console_access.MASKED_KEYS / _redaction) and then list it in _REVIEWED_COLUMNS"
+        )
+        assert not (_REVIEWED_COLUMNS[table] - columns), f"{table}: reviewed columns no longer in the DDL"
+
+
+def test_every_masked_key_that_is_a_column_name_is_handled_by_the_redaction() -> None:
+    declared = _ddl_columns()
+
+    for table, columns in declared.items():
+        for column in columns & set(access.MASKED_KEYS):
+            type_ = "String"
+            assert access._redaction(column, type_, "'k'") is not None, f"{table}.{column} would pass through"
+
+
+def test_views_are_dropped_and_created_never_replaced_so_no_drop_table_privilege_is_needed() -> None:
+    admin = _Admin()
+
+    access.provision_console_access(admin, "fla_db", "svc-a", SECRET)
+
+    assert not any("OR REPLACE VIEW" in s or "DROP TABLE" in s for s in admin.statements)
+    for masked in (True, False):
+        for view in access.console_tables("svc-a", masked).values():
+            drop = next(i for i, s in enumerate(admin.statements) if s == f"DROP VIEW IF EXISTS `fla_db`.`{view}`")
+            create = next(i for i, s in enumerate(admin.statements) if s.startswith(f"CREATE VIEW `fla_db`.`{view}`"))
+            assert drop < create

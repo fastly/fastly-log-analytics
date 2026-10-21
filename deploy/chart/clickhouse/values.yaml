@@ -11,6 +11,20 @@ auth:
   password: fla_password_123
   database: fastly_log_analytics
   existingSecret: ""
+  # Whether the application user (auth.username) may manage access (CREATE USER, GRANT, ...). It defaults to true
+  # for compatibility, so the app can provision the analyst-console identities itself. Prefer false together with
+  # provisioner.enabled: a user that can run SQL should not be able to mint users.
+  accessManagement: true
+
+# A separate account used only during backend startup to provision the per-service analyst-console identities
+# (docs/runbooks/high-scale-analyst-console.md). It holds access management plus SELECT / CREATE VIEW / DROP VIEW
+# WITH GRANT OPTION on the application database, and nothing else. Point the backend at it with
+# CLICKHOUSE_PROVISION_USER / CLICKHOUSE_PROVISION_PASSWORD. The password lives in the auth secret under
+# CLICKHOUSE_PROVISIONER_PASSWORD (add that key yourself when auth.existingSecret is used).
+provisioner:
+  enabled: false
+  username: fla_provisioner
+  password: ""
 
 keeper:
   enabled: false

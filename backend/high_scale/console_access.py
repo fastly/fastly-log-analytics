@@ -20,6 +20,7 @@ per service has to be stored. With no secret configured analysts get no console 
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import hmac
@@ -27,7 +28,7 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from backend import config
@@ -43,8 +44,13 @@ PROFILE = "fla_console_ro"
 MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
-# Per-client identifiers redacted for a mask_ips analyst: the standard console's families plus the RUM client id.
-MASKED_KEYS = tuple(sorted(IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_id"}))
+# Per-client identifiers redacted for a mask_ips analyst: the standard console's families, the RUM client id, the
+# CMCD session id (as stable a correlator as cookie_session) and the client-IP request headers a service may log.
+MASKED_KEYS = tuple(
+    sorted(
+        IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_id", "sid", "x-forwarded-for", "true-client-ip", "fastly-client-ip"}
+    )
+)
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 # Mirrors the per-query settings ClickHouseClient._request always sends, plus the three the console adds. Any
@@ -100,6 +106,28 @@ def console_tables(service_id: str, masked: bool) -> dict[str, str]:
     return {table: f"fla_cv_{_service_hash(service_id)}_{_mode(masked)}_{table}" for table in FACT_DOMAINS}
 
 
+def _redaction(name: str, type_: str, keys: str) -> str | None:
+    """The expression that redacts column ``name`` for a masked identity, or None to pass it through unchanged.
+
+    Raises when a column holds identifiers the code cannot redact: a view must never pass such a column through,
+    so provisioning fails (the service gets no analyst console) rather than leaking.
+    """
+    redacted = _literal(REDACTED)
+    if type_.startswith("Map("):
+        match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
+        if not match or "String" not in match.group(1) or "String" not in match.group(2):
+            raise RuntimeError(f"cannot redact column {name} of type {type_}")
+        return (
+            f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND NOT (isNull(v) OR v = ''), {redacted}, v)), "
+            f"`{name}`) AS `{name}`"
+        )
+    if name.lower() in MASKED_KEYS:
+        if "String" not in type_:
+            raise RuntimeError(f"cannot redact column {name} of type {type_}")
+        return f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {redacted}) AS `{name}`"
+    return None
+
+
 def _view_select(database: str, table: str, columns: list[tuple[str, str]], service_id: str, masked: bool) -> str:
     sid = _literal(service_id)
     fence = (
@@ -107,18 +135,13 @@ def _view_select(database: str, table: str, columns: list[tuple[str, str]], serv
         f"WHERE service_id = {sid} AND domain = '{FACT_DOMAINS[table]}' AND publication_state = 'visible')"
     )
     source = f"FROM `{database}`.`{table}` WHERE service_id = {sid} AND publication_state = 'visible' AND {fence}"
-    replacements: list[str] = []
+    if not masked:
+        return f"SELECT * {source}"
+    # Explicit column list, never `*`: a column added to the base table later must be invisible to a masked
+    # identity until provisioning (which runs at every startup) has decided how to redact it.
     keys = ", ".join(_literal(key) for key in MASKED_KEYS)
-    for name, type_ in columns if masked else []:
-        if type_.startswith("Map(String, String"):
-            replacements.append(
-                f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND v != '', {_literal(REDACTED)}, v)), "
-                f"`{name}`) AS `{name}`"
-            )
-        elif name.lower() in MASKED_KEYS and "String" in type_:
-            replacements.append(f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {_literal(REDACTED)}) AS `{name}`")
-    projection = f"SELECT * REPLACE ({', '.join(replacements)})" if replacements else "SELECT *"
-    return f"{projection} {source}"
+    projection = ", ".join(_redaction(name, type_, keys) or f"`{name}`" for name, type_ in columns)
+    return f"SELECT {projection} {source}"
 
 
 def provision_console_access(admin: Any, database: str, service_id: str, secret: bytes) -> dict[str, str]:
@@ -160,8 +183,12 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
             f"ALTER USER `{user}` IDENTIFIED WITH sha256_password BY {_literal(password)} SETTINGS PROFILE '{PROFILE}'"
         )
         for table, view in views.items():
+            # DROP + CREATE rather than CREATE OR REPLACE: the latter works through a temporary table and needs
+            # DROP TABLE, which would let the provisioner drop the data tables. The gap between the statements
+            # fails closed (a grant on a missing view reads nothing) and a tampered view is still replaced.
+            admin.execute(f"DROP VIEW IF EXISTS {db}.`{view}`")
             admin.execute(
-                f"CREATE OR REPLACE VIEW {db}.`{view}` DEFINER = CURRENT_USER SQL SECURITY DEFINER AS "
+                f"CREATE VIEW {db}.`{view}` DEFINER = CURRENT_USER SQL SECURITY DEFINER AS "
                 + _view_select(database, table, schemas[table], service_id, masked)
             )
         present = {
@@ -174,10 +201,31 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
         missing = set(views.values()) - present
         if missing:
             raise RuntimeError(f"console views missing for {service_id}: {sorted(missing)}; nothing was granted")
+        # A pre-existing user of this name must not keep grants from an earlier life.
+        admin.execute(f"REVOKE ALL ON *.* FROM `{user}`")
         for view in views.values():
             admin.execute(f"GRANT SELECT ON {db}.`{view}` TO `{user}`")
         users["masked" if masked else "raw"] = user
     return users
+
+
+@contextlib.contextmanager
+def provisioning_client(default_admin: Any) -> Iterator[Any]:
+    """The client to provision with: a separate startup-only account when ``CLICKHOUSE_PROVISION_USER`` is set.
+
+    Creating users and views needs access management, which the long-running application user should not hold.
+    The provisioner is opened for this block and closed immediately; the application's own client is never
+    closed here.
+    """
+    settings = config.load_clickhouse_provisioner_config()
+    if settings is None:
+        yield default_admin
+        return
+    client = ClickHouseClient(settings)
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def provision_configured_services(admin: Any, service_ids: Iterable[str]) -> tuple[str, ...]:
@@ -261,12 +309,21 @@ class ConsoleClients:
             if not rows or int(rows[0].get("n", 1)) != 0:
                 raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {view}")
         if masked:
-            view = access.tables["request_facts"]
-            rows = access.client.execute(
-                f"SELECT count() AS n FROM {view} WHERE client_ip != '' AND client_ip != {_literal(REDACTED)}"
-            )
-            if not rows or int(rows[0].get("n", 1)) != 0:
-                raise RuntimeError(f"console identity for {service_id} failed the masking check on {view}")
+            red = _literal(REDACTED)
+            unmasked = {
+                "request_facts": (
+                    f"(client_ip != '' AND client_ip != {red}) "
+                    f"OR custom_fields['cookie_session'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cid'] NOT IN ('', {red})"
+                ),
+                "rum_vitals_facts": f"client_id != '' AND client_id != {red}",
+                "rum_error_facts": f"client_id != '' AND client_id != {red}",
+            }
+            for table, condition in unmasked.items():
+                view = access.tables[table]
+                rows = access.client.execute(f"SELECT count() AS n FROM {view} WHERE {condition}")
+                if not rows or int(rows[0].get("n", 1)) != 0:
+                    raise RuntimeError(f"console identity for {service_id} failed the masking check on {view}")
 
     def close(self) -> None:
         with self._lock:

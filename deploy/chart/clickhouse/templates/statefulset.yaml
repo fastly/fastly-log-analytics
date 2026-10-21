@@ -85,7 +85,14 @@ spec:
               name: {{ include "clickhouse.secretName" $ }}
               key: CLICKHOUSE_PASSWORD
         - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
-          value: "1"
+          value: {{ ternary "1" "0" $.Values.auth.accessManagement | quote }}
+        {{- if $.Values.provisioner.enabled }}
+        - name: CLICKHOUSE_PROVISIONER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "clickhouse.secretName" $ }}
+              key: CLICKHOUSE_PROVISIONER_PASSWORD
+        {{- end }}
         resources:
           {{- toYaml $.Values.resources | nindent 10 }}
         securityContext:
@@ -113,6 +120,11 @@ spec:
         - name: config
           mountPath: /etc/clickhouse-server/config.d/system-logs.xml
           subPath: system-logs.xml
+        {{- if $.Values.provisioner.enabled }}
+        - name: config
+          mountPath: /etc/clickhouse-server/users.d/provisioner-user.xml
+          subPath: provisioner-user.xml
+        {{- end }}
         {{- if or $.Values.keeper.enabled (or (gt (int $.Values.shards) 1) (gt (int $.Values.replicas) 1)) }}
         - name: config
           mountPath: /etc/clickhouse-server/config.d/remote-servers.xml

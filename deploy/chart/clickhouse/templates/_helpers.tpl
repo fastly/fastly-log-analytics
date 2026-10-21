@@ -68,4 +68,15 @@ Validate topology settings
 {{- if and .Values.keeper.enabled (lt (int .Values.keeper.replicas) 1) }}
 {{- fail "keeper.replicas must be at least 1" }}
 {{- end }}
+{{- if .Values.provisioner.enabled }}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]{0,63}$" .Values.provisioner.username) }}
+{{- fail "provisioner.username must be a simple identifier" }}
+{{- end }}
+{{- if eq .Values.provisioner.username .Values.auth.username }}
+{{- fail "provisioner.username must differ from auth.username" }}
+{{- end }}
+{{- if and (not .Values.auth.existingSecret) (not .Values.provisioner.password) }}
+{{- fail "provisioner.password is required when provisioner.enabled and auth.existingSecret is unset" }}
+{{- end }}
+{{- end }}
 {{- end }}

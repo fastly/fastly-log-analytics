@@ -28,6 +28,7 @@ Config file schema:
 
 import contextlib
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -153,6 +154,26 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
         pool_timeout_s=_clickhouse_number("CLICKHOUSE_POOL_TIMEOUT_S", 5, 60),
         pool_max_size=_clickhouse_number("CLICKHOUSE_POOL_MAX_SIZE", 8, 64, integer=True),
     )
+
+
+def load_clickhouse_provisioner_config() -> ClickHouseConfig | None:
+    """Credentials for the startup-only ClickHouse provisioner, or None to provision as the application user.
+
+    Creating users, profiles and views needs access management, which the long-running application user should
+    not hold (anything that can run SQL as it could then mint users). CLICKHOUSE_PROVISION_USER/PASSWORD name a
+    separate account used only during startup provisioning and then closed; every other connection setting is
+    shared with the application's own CLICKHOUSE_* configuration.
+    """
+    app = load_clickhouse_config()
+    user = os.getenv("CLICKHOUSE_PROVISION_USER", "").strip()
+    if app is None or not user:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", user):
+        raise ValueError("CLICKHOUSE_PROVISION_USER contains unsupported characters")
+    password = os.getenv("CLICKHOUSE_PROVISION_PASSWORD", "")
+    if not password.strip() and (app.secure or app.host not in ("localhost", "clickhouse")):
+        raise ValueError("CLICKHOUSE_PROVISION_PASSWORD is required except for explicit HTTP loopback tests")
+    return dataclasses.replace(app, user=user, password=password)
 
 
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}

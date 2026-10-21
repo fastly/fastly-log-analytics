@@ -1046,3 +1046,47 @@ def test_concurrent_mutate_config_writers_do_not_lose_each_others_keys():
     final = svcconfig.load_config("svc-1")
     for prefix in ("a", "b"):
         assert all(final[f"{prefix}{i}"] == i for i in range(rounds))
+
+
+def test_clickhouse_provisioner_is_absent_unless_a_user_is_configured(clickhouse_env):
+    assert svcconfig.load_clickhouse_provisioner_config() is None
+
+
+def test_clickhouse_provisioner_reuses_the_connection_settings_with_its_own_credentials(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_PASSWORD", "provisioner-pw")
+    app = svcconfig.load_clickhouse_config()
+
+    provisioner = svcconfig.load_clickhouse_provisioner_config()
+
+    assert (provisioner.user, provisioner.password) == ("fla_provisioner", "provisioner-pw")
+    assert (provisioner.host, provisioner.port, provisioner.database, provisioner.secure) == (
+        app.host,
+        app.port,
+        app.database,
+        app.secure,
+    )
+
+
+def test_clickhouse_provisioner_needs_a_password_for_a_secure_or_remote_endpoint(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+    monkeypatch.setenv("CLICKHOUSE_SECURE", "true")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "app-pw")
+
+    with pytest.raises(ValueError, match="CLICKHOUSE_PROVISION_PASSWORD"):
+        svcconfig.load_clickhouse_provisioner_config()
+
+
+def test_clickhouse_provisioner_user_must_look_like_a_user_name(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "bad user; DROP")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_PASSWORD", "pw")
+
+    with pytest.raises(ValueError, match="CLICKHOUSE_PROVISION_USER"):
+        svcconfig.load_clickhouse_provisioner_config()
+
+
+def test_clickhouse_provisioner_is_none_when_clickhouse_is_disabled(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", "false")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+
+    assert svcconfig.load_clickhouse_provisioner_config() is None

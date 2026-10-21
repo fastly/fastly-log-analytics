@@ -29,7 +29,8 @@ per service is stored. User names are `fla_console_<first 16 hex of sha256(servi
 
 | Variable | Meaning |
 |---|---|
-| `CLICKHOUSE_CONSOLE_SECRET` | At least 32 bytes. Unset means analysts get **no** console (403 `console_unavailable_for_analysts`). Admins are unaffected. |
+| `CLICKHOUSE_CONSOLE_SECRET` | At least 32 bytes with at least 8 distinct byte values. Unset means analysts get **no** console (403 `console_unavailable_for_analysts`). Admins are unaffected. |
+| `CLICKHOUSE_PROVISION_USER` / `CLICKHOUSE_PROVISION_PASSWORD` | Optional startup-only account used for provisioning instead of the application user (see "Keeping access management away from the application user"). |
 
 Set it as a secret on the backend deployment only (the workers do not need it). It is read at process start.
 
@@ -42,12 +43,38 @@ an analyst console; it never blocks startup.
 
 Statement order is deliberate: **each user's views are created and verified present before that user is granted
 anything.** A half-finished provision leaves a grantless user, never a leaky one. Provisioning also removes the
-pre-view identity (`fla_console_<hash>` with base-table grants and a row policy), re-creates the views with
-`CREATE OR REPLACE` (so a tampered view is repaired), and re-applies the profile and password.
+pre-view identity (`fla_console_<hash>` with base-table grants and a row policy), drops and re-creates the views (so
+a tampered view is repaired), revokes any stray grants from the identities, and re-applies the profile and password.
+A column added to a base table later is invisible to both identities until provisioning runs again (views fix their
+column list when created), and a masked view refuses to be created over a column it cannot redact.
 
 On first use per process the app also checks each identity: every view must return no row for another
 `service_id`, and a masked identity must see only `'[redacted]'`/empty `client_ip`. If either check fails it refuses
 to serve, so even a mis-provisioned user fails closed.
+
+## Keeping access management away from the application user (recommended)
+
+By default the application's own ClickHouse user provisions the identities, which requires it to hold access
+management (the ClickHouse chart sets `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1`). Anything that can run SQL as that
+user could then mint users and grants. To avoid it, give provisioning its own account that is used only during
+backend startup and then closed:
+
+1. **ClickHouse chart** (`deploy/chart/clickhouse`): set `provisioner.enabled=true`, `provisioner.password=<secret>`
+   and `auth.accessManagement=false`. The chart then defines `fla_provisioner` in `users.d` (password read from
+   the `CLICKHOUSE_PROVISIONER_PASSWORD` env var, which comes from the auth secret) holding exactly
+   `GRANT ACCESS MANAGEMENT ON *.*` and `GRANT SELECT, CREATE VIEW, DROP VIEW ON <database>.* WITH GRANT OPTION`,
+   and starts the application user without access management. **Applying this restarts ClickHouse**, so roll it
+   out in a maintenance window.
+2. **Backend**: set `CLICKHOUSE_PROVISION_USER=fla_provisioner` and `CLICKHOUSE_PROVISION_PASSWORD` (a secret,
+   backend only). Startup provisioning then runs on a separate connection as that account and closes it; if the
+   variables are unset the application client is used (the previous behaviour).
+
+The provisioner never gets `DROP TABLE`, `INSERT` or `CREATE TABLE`: it can read the data tables (its views run with
+its rights) and manage access, and nothing else. For that reason views are dropped and created rather than
+`CREATE OR REPLACE`d (which works through a temporary table and needs `DROP TABLE`); the brief gap between the two
+statements fails closed. Do not combine `<access_management>` with `<grants>` in the `users.d` XML: ClickHouse
+refuses to start with that user definition. `tests/high_scale/test_console_provisioner_chart_integration.py` renders
+the chart with `helm`, boots a real server from the rendered configuration and proves all of the above.
 
 ## Rotating the secret
 

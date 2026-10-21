@@ -23,6 +23,27 @@ data:
       </merge_tree>
     </clickhouse>
 
+  {{- if .Values.provisioner.enabled }}
+  provisioner-user.xml: |
+    <clickhouse>
+      <users>
+        <{{ .Values.provisioner.username }}>
+          <password from_env="CLICKHOUSE_PROVISIONER_PASSWORD"/>
+          <networks>
+            <ip>::/0</ip>
+          </networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <!-- ClickHouse refuses to start if access_management is combined with <grants>; the grant below carries it. -->
+          <grants>
+            <query>GRANT ACCESS MANAGEMENT ON *.* WITH GRANT OPTION</query>
+            <query>GRANT SELECT, CREATE VIEW, DROP VIEW ON {{ .Values.auth.database }}.* WITH GRANT OPTION</query>
+          </grants>
+        </{{ .Values.provisioner.username }}>
+      </users>
+    </clickhouse>
+  {{- end }}
+
   system-logs.xml: |
     <clickhouse>
       {{- range .Values.config.disableSystemLogs }}

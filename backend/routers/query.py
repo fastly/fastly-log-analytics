@@ -31,6 +31,16 @@ def _redact_paths(msg: str) -> str:
 router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPONSES)
 
 
+def _console_masked(analyst_session: object) -> bool:
+    """Masked identity unless the invite's policy EXPLICITLY sets ``mask_ips`` to false.
+
+    ``mask_ips_for`` treats a missing or malformed policy as unmasked, which is the existing behaviour of the other
+    surfaces; on the free-form console a policy that is absent, ``None`` or revoked mid-session must fail closed.
+    """
+    policy = getattr(analyst_session, "pii_policy", None)
+    return not (isinstance(policy, dict) and policy.get("mask_ips") is False)
+
+
 @router.post("/query", response_model=QueryResponse, response_model_exclude_unset=True)
 def query_endpoint(
     req: QueryRequest,
@@ -77,7 +87,9 @@ def query_endpoint(
             from backend.high_scale.console_access import get_console_clients
 
             try:
-                console = get_console_clients().client_for(high_scale_service.service_id, masked=bool(mask_ips))
+                console = get_console_clients().client_for(
+                    high_scale_service.service_id, masked=_console_masked(analyst_session)
+                )
             except Exception:
                 logger.warning(
                     "analyst console identity unavailable for %s", high_scale_service.service_id, exc_info=True
