@@ -150,6 +150,16 @@ export default async function RootLayout({
     // round-trip — only the share page pays it, and only on direct load.
     // The small global share_banner stays on the bootstrap response for the
     // header.
+    const shareBanner = (bootstrap as Record<string, unknown>)?.share_banner as
+      | { sharing_active?: boolean; public_url?: string | null }
+      | null
+      | undefined;
+    if (shareBanner && typeof shareBanner === "object") {
+      client.setQueryData(queryKeys.shareBanner(), {
+        sharing_active: !!shareBanner.sharing_active,
+        public_url: typeof shareBanner.public_url === "string" ? shareBanner.public_url : null,
+      });
+    }
     dehydratedState = dehydrate(client);
   }
   const loadRumScript = shouldLoadRumScript({

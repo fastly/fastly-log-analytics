@@ -472,26 +472,26 @@ export function QueueClient() {
               loadingMessage="Loading ingest telemetry..."
               error={error as AnalyticsCardError | null}
             >
-              <div className="grid grid-cols-2 gap-4 pt-2" data-testid="admin-queue-standard-ingest-summary">
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+              <div className="grid grid-cols-2 gap-4 pt-1" data-testid="admin-queue-standard-ingest-summary">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Ingested Files</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
                     {standardIngestedFiles.toLocaleString()}
                   </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Tracked in PostgreSQL ingested_files
                   </div>
                 </div>
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Quarantined Items</div>
                   <div
-                    className={`text-2xl font-semibold tabular-nums mt-1 ${
+                    className={`text-2xl font-semibold tabular-nums mt-0.5 ${
                       standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''
                     }`}
                   >
                     {standardQuarantinedItems.toLocaleString()}
                   </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Corrupt files &amp; lines preserved on disk
                   </div>
                 </div>
@@ -507,22 +507,22 @@ export function QueueClient() {
               loadingMessage="Loading scheduler telemetry..."
               error={error as AnalyticsCardError | null}
             >
-              <div className="grid grid-cols-2 gap-4 pt-2" data-testid="admin-queue-standard-scheduler-summary">
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+              <div className="grid grid-cols-2 gap-4 pt-1" data-testid="admin-queue-standard-scheduler-summary">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Registered Schedules</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
                     {inprocessSchedules.length}
                   </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Active APScheduler jobs
                   </div>
                 </div>
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
                   <div className="text-xs text-muted-foreground uppercase">Active Cron Runs</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-1">
+                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
                     {inprocessActiveRuns.length}
                   </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
                     Currently executing in-process jobs
                   </div>
                 </div>
@@ -535,13 +535,13 @@ export function QueueClient() {
               title="Total Queue Depth (1h)"
               description="Aggregate sum of all Celery queue lengths."
               className="min-h-[200px]"
-              isLoading={trendsLoading}
+              isLoading={isLoading || trendsLoading}
               isFetching={trendsFetching}
               loadingMessage="Loading queue telemetry..."
               error={trendsError as AnalyticsCardError | null}
-              isEmpty={!trendsLoading && !trendsError && queuePoints.length === 0}
+              isEmpty={!isLoading && !trendsLoading && !trendsError && queuePoints.length === 0}
             >
-              <div className="flex items-baseline justify-between mb-2">
+              <div className="flex items-baseline justify-between mb-1">
                 <div className="text-2xl font-semibold tabular-nums">
                   {latestQueue === null ? '–' : latestQueue}
                 </div>
@@ -549,10 +549,10 @@ export function QueueClient() {
                   {queuePoints.length > 0 ? `${queuePoints.length} samples` : 'no samples yet'}
                 </div>
               </div>
-              <div className="text-foreground/70">
+              <div className="h-[64px] text-foreground/70">
                 <Sparkline
-                  points={queuePoints}
-                  height={80}
+                  points={isLoading ? [] : queuePoints}
+                  height={64}
                   label="Queue Depth"
                   formatValue={(v) => String(v)}
                 />
@@ -563,13 +563,13 @@ export function QueueClient() {
               title="Active Tasks (1h)"
               description="Total actively executing Celery tasks across all workers."
               className="min-h-[200px]"
-              isLoading={trendsLoading}
+              isLoading={isLoading || trendsLoading}
               isFetching={trendsFetching}
               loadingMessage="Loading queue telemetry..."
               error={trendsError as AnalyticsCardError | null}
-              isEmpty={!trendsLoading && !trendsError && workerPoints.length === 0}
+              isEmpty={!isLoading && !trendsLoading && !trendsError && workerPoints.length === 0}
             >
-              <div className="flex items-baseline justify-between mb-2">
+              <div className="flex items-baseline justify-between mb-1">
                 <div className="text-2xl font-semibold tabular-nums">
                   {latestWorker === null ? '–' : latestWorker}
                 </div>
@@ -577,10 +577,10 @@ export function QueueClient() {
                   {workerPoints.length > 0 ? `${workerPoints.length} samples` : 'no samples yet'}
                 </div>
               </div>
-              <div className="text-foreground/70">
+              <div className="h-[64px] text-foreground/70">
                 <Sparkline
-                  points={workerPoints}
-                  height={80}
+                  points={isLoading ? [] : workerPoints}
+                  height={64}
                   label="Active Tasks"
                   formatValue={(v) => String(v)}
                 />
@@ -754,12 +754,12 @@ export function QueueClient() {
 
       <div
         data-testid="admin-queue-ledger-reservation"
-        className="min-h-[180px] [contain-intrinsic-size:auto_180px] [content-visibility:auto]"
+        className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
       >
         <AnalyticsCard
           title="Ingest Ledger Status"
           helpTitle="Ingest Ledger Status"
-          className="min-h-[180px]"
+          className="min-h-[240px]"
           isLoading={isLoading}
           isFetching={isFetching}
           loadingMessage="Loading queue telemetry..."

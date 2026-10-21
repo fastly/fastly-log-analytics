@@ -190,7 +190,7 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
 
 
 def standard_ingest_summary() -> dict[str, int]:
-    """Aggregate standard-mode ingested_files and ingest_quarantine counts across all configured services."""
+    """Aggregate standard-mode ingested_files and quarantine counts across all configured services."""
     ingested_files = 0
     quarantined_items = 0
     try:
@@ -203,30 +203,52 @@ def standard_ingest_summary() -> dict[str, int]:
             if not sid or sid in seen:
                 continue
             seen.add(sid)
+            svc_ingested = 0
             try:
                 con = get_con(sid)
                 cur = con.cursor()
                 cur.execute(
-                    "SELECT count(*) FROM ingested_files WHERE service_id = ?",
+                    "SELECT COALESCE(SUM(file_count), 0) FROM ingested_files_summary WHERE source_name = ?",
                     (sid,),
                 )
                 rows = cur.fetchall()
                 if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                    ingested_files += int(rows[0][0])
+                    svc_ingested = int(rows[0][0])
             except Exception:
                 pass
-            try:
-                con = get_con(sid)
-                cur = con.cursor()
-                cur.execute(
-                    "SELECT count(*) FROM ingest_quarantine WHERE service_id = ?",
-                    (sid,),
-                )
-                rows = cur.fetchall()
-                if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                    quarantined_items += int(rows[0][0])
-            except Exception:
-                pass
+            if svc_ingested == 0:
+                for col in ("source_name", "service_id"):
+                    try:
+                        con = get_con(sid)
+                        cur = con.cursor()
+                        cur.execute(
+                            f"SELECT count(*) FROM ingested_files WHERE {col} = ?",
+                            (sid,),
+                        )
+                        rows = cur.fetchall()
+                        if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
+                            svc_ingested = int(rows[0][0])
+                            if svc_ingested > 0:
+                                break
+                    except Exception:
+                        continue
+            ingested_files += svc_ingested
+
+            svc_quarantined = 0
+            for tbl in ("quarantine_evidence", "quarantined_files", "ingest_quarantine"):
+                try:
+                    con = get_con(sid)
+                    cur = con.cursor()
+                    cur.execute(
+                        f"SELECT count(*) FROM {tbl} WHERE service_id = ?",
+                        (sid,),
+                    )
+                    rows = cur.fetchall()
+                    if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
+                        svc_quarantined += int(rows[0][0])
+                except Exception:
+                    continue
+            quarantined_items += svc_quarantined
     except Exception as e:
         logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
     return {
