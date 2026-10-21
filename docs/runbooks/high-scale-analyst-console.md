@@ -76,6 +76,53 @@ statements fails closed. Do not combine `<access_management>` with `<grants>` in
 refuses to start with that user definition. `tests/high_scale/test_console_provisioner_chart_integration.py` renders
 the chart with `helm`, boots a real server from the rendered configuration and proves all of the above.
 
+### Elevation (company `standard-chart` release)
+
+Elevation's ClickHouse (`fastly-log-analytics-clickhouse`) is a release of the company `standard-chart` deployed
+by the platform tooling, not of `deploy/chart/clickhouse`, so apply the same change through that release's values
+(`app.components[name=clickhouse]`), mirroring how `logger-override.xml` is already injected:
+
+```yaml
+configs:
+  provisioner-user.xml: |        # same XML the chart renders and the integration test boots
+    <clickhouse>
+      <users>
+        <fla_provisioner>
+          <password from_env="CLICKHOUSE_PROVISIONER_PASSWORD"/>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants>
+            <query>GRANT ACCESS MANAGEMENT ON *.* WITH GRANT OPTION</query>
+            <query>GRANT SELECT, CREATE VIEW, DROP VIEW ON fastly_log_analytics.* WITH GRANT OPTION</query>
+          </grants>
+        </fla_provisioner>
+      </users>
+    </clickhouse>
+containers:
+  - envs:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+      CLICKHOUSE_PROVISIONER_PASSWORD: "<from your secret mechanism>"
+    image:
+      tag: "26.9.1.1629"          # pin: the release uses `latest` with pullPolicy Always
+    mounts:
+      - path: /etc/clickhouse-server/users.d/provisioner-user.xml
+        sub_path: provisioner-user.xml
+        volume_name: clickhouse-config-override
+```
+
+Things to know before applying it:
+
+- The release uses `update_strategy: Recreate`, so ClickHouse is down for the restart (ingest retries; serving
+  returns errors). Data is on a PVC and is kept.
+- The image is `latest` with `pullPolicy: Always`: **any** restart pulls whatever is newest. Pin the tag you are
+  running (`SELECT version()`), as above, or the restart is also an unplanned ClickHouse upgrade over the data volume.
+- Order: (1) apply the ClickHouse values and confirm `fla_provisioner` can log in; (2) only then create the Secret
+  `fla-provisioner-secret` (keys `CLICKHOUSE_PROVISION_USER`, `CLICKHOUSE_PROVISION_PASSWORD`) in the namespace;
+  (3) run `./scripts/dev/deploy_test_all.sh`, which wires that secret into the backend when it exists. Pointing the
+  backend at an account that does not exist yet means provisioning fails (logged) and analysts get no console.
+- Once step 3 is verified, the application user no longer holds access management.
+
 ## Rotating the secret
 
 1. Change `CLICKHOUSE_CONSOLE_SECRET` and restart the backend. Startup re-runs `ALTER USER ... IDENTIFIED` for every
