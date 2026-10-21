@@ -344,13 +344,11 @@ Output rows: ``(ua: str, ip: str, cnt: int)``.
 # ── VPN & Proxy Watchdog Templates ───────────────────────────────────────────
 
 GET_PROXY_STATS = """
-    WITH metrics AS (
+    WITH geo_dist AS (
         SELECT
-            ip,
-            pop,
-            rtt_min / 1000.0 AS rtt_min_ms,
-            lat AS client_lat,
-            lon AS client_lon,
+            pop AS g_pop,
+            lat AS g_lat,
+            lon AS g_lon,
             -- Haversine formula distance calculation using a default coordinate for POP
             -- If pop is SJC, use SJC coords, else a reasonable US default or central pop fallback
             CASE
@@ -358,9 +356,27 @@ GET_PROXY_STATS = """
                 WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
                 WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
                 ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-            END AS distance_km,
+            END AS distance_km
+        FROM (
+            SELECT DISTINCT pop, lat, lon
+            FROM {temp_table}
+            WHERE lat IS NOT NULL AND lon IS NOT NULL
+        )
+    ),
+    metrics AS (
+        SELECT
+            ip,
+            pop,
+            rtt_min / 1000.0 AS rtt_min_ms,
+            lat AS client_lat,
+            lon AS client_lon,
+            geo_dist.distance_km AS distance_km,
             tcp_rtt
         FROM {temp_table}
+        LEFT JOIN geo_dist
+            ON pop IS NOT DISTINCT FROM geo_dist.g_pop
+           AND lat IS NOT DISTINCT FROM geo_dist.g_lat
+           AND lon IS NOT DISTINCT FROM geo_dist.g_lon
     )
     SELECT
         COUNT(DISTINCT CASE
@@ -405,7 +421,25 @@ GET_SUSPICIOUS_ISPS = """
 """
 
 GET_ACTIVE_PROXY_CLIENTS = """
-    WITH metrics AS (
+    WITH geo_dist AS (
+        SELECT
+            pop AS g_pop,
+            lat AS g_lat,
+            lon AS g_lon,
+            -- Haversine distance formula matching GET_PROXY_STATS
+            CASE
+                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
+                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
+                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
+                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
+            END AS distance_km
+        FROM (
+            SELECT DISTINCT pop, lat, lon
+            FROM {temp_table}
+            WHERE rtt_min IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL
+        )
+    ),
+    metrics AS (
         SELECT
             ip,
             pop,
@@ -426,15 +460,13 @@ GET_ACTIVE_PROXY_CLIENTS = """
                 WHEN pop = 'NRT' THEN 140.3929
                 ELSE -97.0
             END AS pop_lon,
-            -- Haversine distance formula matching GET_PROXY_STATS
-            CASE
-                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
-                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
-                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
-                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-            END AS distance_km
+            geo_dist.distance_km AS distance_km
             {select_country_city_inner}
         FROM {temp_table}
+        LEFT JOIN geo_dist
+            ON pop IS NOT DISTINCT FROM geo_dist.g_pop
+           AND lat IS NOT DISTINCT FROM geo_dist.g_lat
+           AND lon IS NOT DISTINCT FROM geo_dist.g_lon
         WHERE rtt_min IS NOT NULL
     )
     SELECT

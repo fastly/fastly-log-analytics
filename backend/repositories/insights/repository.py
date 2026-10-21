@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import heapq
 import logging
 import threading
@@ -22,6 +23,7 @@ from backend.repositories._sql.insights import (
     COALESCED_URL_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
+from backend.utils.telemetry import record_telemetry_query
 
 from .registry import registry
 
@@ -65,8 +67,10 @@ def _execute_on_cursor(
     t0 = time.time()
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
+    compact_sql = _compact_sql_for_debug(sql)
+    record_telemetry_query("duckdb", compact_sql, elapsed_ms)
     with debug_lock:
-        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms, "engine": "DuckDB"})
+        runner.debug_queries.append({"sql": compact_sql, "time_ms": elapsed_ms, "engine": "DuckDB"})
     return res
 
 
@@ -508,6 +512,7 @@ def get_insights(
     mask_ips: bool = False,
     clamp_cache_key: str | None = None,
     force_refresh: bool = False,
+    filters: dict | None = None,
     max_workers: int = 4,
 ) -> dict:
     """Compute the insight cards for ``src`` over the window/baseline ranges.
@@ -593,7 +598,20 @@ def get_insights(
         key_clamp = f"{clamp_start or ''}:{clamp_end or ''}"
     else:
         key_clamp = ""
-    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}"
+    filter_key_part = ""
+    if filters:
+        from backend.repositories.utils.filters import filter_spec_attr
+
+        f_items = []
+        for k in sorted(filters.keys()):
+            spec = filters[k]
+            mode = filter_spec_attr(spec, "mode") or "include"
+            vals = filter_spec_attr(spec, "values") or []
+            if vals:
+                f_items.append(f"{k}:{mode}:{','.join(str(v) for v in vals)}")
+        if f_items:
+            filter_key_part = ":" + "|".join(f_items)
+    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}{filter_key_part}"
     if INSIGHTS_CACHE_TTL > 0 and not force_refresh:
         with _insights_cache_lock:
             entry = _insights_cache.get(cache_key)
@@ -693,7 +711,18 @@ def get_insights(
     # are connection-scoped and invisible to ``con.cursor()`` shadow
     # connections; tables in an ATTACH'd :memory: DB are visible to every
     # cursor on the parent connection.
-    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ)"
+    extra_filter_sql = ""
+    if filters:
+        from backend.repositories.utils.filters import build_where_clause
+
+        _, f_where = build_where_clause(None, None, filters, actual_cols, inline_params=True)
+        if f_where and f_where.strip():
+            cleaned = f_where.strip()
+            if cleaned.upper().startswith("WHERE "):
+                cleaned = cleaned[6:].strip()
+            if cleaned and cleaned != "1=1":
+                extra_filter_sql = f" AND ({cleaned})"
+    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){extra_filter_sql}"
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
@@ -957,10 +986,10 @@ def get_insights(
         with ThreadPoolExecutor(
             max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
         ) as _coalesce_pool:
-            _fut_waf = _coalesce_pool.submit(_task_waf)
-            _fut_city = _coalesce_pool.submit(_task_city)
-            _fut_url = _coalesce_pool.submit(_task_url)
-            _fut_ip = _coalesce_pool.submit(_task_ip)
+            _fut_waf = _coalesce_pool.submit(contextvars.copy_context().run, _task_waf)
+            _fut_city = _coalesce_pool.submit(contextvars.copy_context().run, _task_city)
+            _fut_url = _coalesce_pool.submit(contextvars.copy_context().run, _task_url)
+            _fut_ip = _coalesce_pool.submit(contextvars.copy_context().run, _task_ip)
             waf_table = _fut_waf.result()
             city_precomputed = _fut_city.result()
             url_precomputed = _fut_url.result()
@@ -1147,8 +1176,9 @@ def get_insights(
         # around the SQL.
         if tasks:
             pool_workers = max(1, min(max_workers, len(tasks)))
+            ctx_tasks = [(contextvars.copy_context(), t) for t in tasks]
             with ThreadPoolExecutor(max_workers=pool_workers, thread_name_prefix="insights") as pool:
-                for res in pool.map(_safe_run, tasks):
+                for res in pool.map(lambda pair: pair[0].run(_safe_run, pair[1]), ctx_tasks):
                     if res:
                         insights_list.append(res)
 

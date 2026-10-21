@@ -1,3 +1,5 @@
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -248,9 +250,7 @@ def network_health(
         map_asn_sql = f" AND {_ASN} = {{map_asn:Int32}}"
         params["map_asn"] = int(map_asn)
 
-    # ── Heatmap inputs: per (asn, bucket) health components ─────────────────
-    heatmap_rows = _run(
-        f"""
+    heatmap_sql = f"""
         SELECT
             {_ASN} AS asn,
             {bucket_expr} AS bucket_ts,
@@ -265,12 +265,10 @@ def network_health(
         FROM request_facts
         WHERE {rtt_where} AND {_ASN} IS NOT NULL
         GROUP BY asn, bucket_ts
-        """
-    )
-
-    # ── World-map inputs: per (country, city, bucket) ───────────────────────
-    map_rows = _run(
-        f"""
+        ORDER BY reqs DESC
+        LIMIT {top_n * 200}
+    """
+    map_sql = f"""
         SELECT
             country AS country,
             custom_fields['city'] AS city,
@@ -285,12 +283,10 @@ def network_health(
         FROM request_facts
         WHERE {rtt_where} AND country != ''{map_asn_sql}
         GROUP BY country, city, lat, lon, metro, bucket_ts
-        """
-    )
-
-    # ── Metro leaderboard inputs: per (country, city, region, metro) ────────
-    metro_rows = _run(
-        f"""
+        ORDER BY reqs DESC
+        LIMIT 5000
+    """
+    metro_sql = f"""
         SELECT
             country AS country,
             custom_fields['city'] AS city,
@@ -304,29 +300,24 @@ def network_health(
         GROUP BY country, city, region, metro
         ORDER BY total_reqs DESC
         LIMIT 200
-        """
-    )
-
-    # ── Speed-class mix per ASN ─────────────────────────────────────────────
-    speed_rows = _run(
-        f"""
+    """
+    speed_sql = f"""
         SELECT {_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt
         FROM request_facts
         WHERE {rtt_where} AND {_ASN} IS NOT NULL AND custom_fields['c_speed'] != ''
         GROUP BY asn, c_speed
         ORDER BY cnt DESC
-        """
-    )
-
-    # ── P95 / P99 RTT per ASN ───────────────────────────────────────────────
-    pct_rows = _run(
-        f"""
+    """
+    pct_sql = f"""
         SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99
         FROM request_facts
         WHERE {rtt_where} AND {_ASN} IS NOT NULL
         GROUP BY asn
-        """
-    )
+    """
+    sql_batch = [heatmap_sql, map_sql, metro_sql, speed_sql, pct_sql]
+    with ThreadPoolExecutor(max_workers=len(sql_batch), thread_name_prefix="hs-net-health") as pool:
+        futs = [pool.submit(contextvars.copy_context().run, _run, q) for q in sql_batch]
+        heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = [f.result() for f in futs]
 
     # ── Derive top ASNs by request volume ───────────────────────────────────
     all_asns_seen: dict[int, int] = {}
@@ -619,6 +610,7 @@ def network_health(
         worst_country=worst_country,
     )
 
+    want_map_payload = not sections or "health" in sections or "map_buckets" in sections or "cities" in sections
     return NetworkHealthResponse.with_telemetry(
         available=True,
         has_data=bool(heatmap_rows),
@@ -626,8 +618,8 @@ def network_health(
         bucket_seconds=bs,
         buckets=all_buckets,
         heatmap=heatmap,
-        map_buckets=map_buckets,
-        cities=[NetworkCityEntry(**c) for c in cities_list],
+        map_buckets=map_buckets if want_map_payload else [],
+        cities=[NetworkCityEntry(**c) for c in cities_list] if want_map_payload else [],
         leaderboard=leaderboard,
         metro_leaderboard=metro_leaderboard,
         summary=summary,
@@ -679,10 +671,31 @@ def network_quality(
             )
         return out
 
-    by_country = _bar("country")
-    by_asn = _bar(_ASN)
-    by_region = _bar("custom_fields['region']", extra_where=" AND country = {region_country:String}")
-    by_pop = _bar("custom_fields['pop']")
+    scatter_sql = f"""
+        SELECT
+            {_RTT} / 1000.0 AS rtt_ms,
+            {_TTFB} * 1000.0 AS ttfb_ms,
+            if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state
+        FROM request_facts
+        WHERE {rtt_where} AND {_TTFB} > 0
+        ORDER BY cityHash64(event_id)
+        LIMIT {_SCATTER_SAMPLE}
+        """
+
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="hs-net-quality") as pool:
+        f_country = pool.submit(contextvars.copy_context().run, _bar, "country")
+        f_asn = pool.submit(contextvars.copy_context().run, _bar, _ASN)
+        f_region = pool.submit(
+            contextvars.copy_context().run,
+            _bar,
+            "custom_fields['region']",
+            " AND country = {region_country:String}",
+        )
+        f_pop = pool.submit(contextvars.copy_context().run, _bar, "custom_fields['pop']")
+        f_scatter = pool.submit(contextvars.copy_context().run, service.client.execute, scatter_sql, params)
+        by_country, by_asn, by_region, by_pop, scatter_rows = [
+            f.result() for f in (f_country, f_asn, f_region, f_pop, f_scatter)
+        ]
 
     if by_asn:
         # Mirror the standard path: "Name (7922)" label, bare ASN stays the filter key.
@@ -692,20 +705,6 @@ def network_quality(
                 row["label"] = _asn_label(int(row["value"]), names)
 
     countries = sorted({row["value"] for row in by_country})
-
-    scatter_rows = service.client.execute(
-        f"""
-        SELECT
-            {_RTT} / 1000.0 AS rtt_ms,
-            {_TTFB} * 1000.0 AS ttfb_ms,
-            if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state
-        FROM request_facts
-        WHERE {rtt_where} AND {_TTFB} > 0
-        ORDER BY cityHash64(event_id)
-        LIMIT {_SCATTER_SAMPLE}
-        """,
-        params,
-    )
     scatter = [
         {
             "rtt_ms": round(float(r["rtt_ms"]), 2),
@@ -803,7 +802,29 @@ def get_transport_metrics(
         FROM request_facts
         WHERE {base_where}
     """
-    rows = service.client.execute(sql, params)
+    proto_sql = f"""
+        SELECT
+            caseWithExpression(
+                custom_fields['proto'],
+                '3.0', 'HTTP/3',
+                '3', 'HTTP/3',
+                '2.0', 'HTTP/2',
+                '2', 'HTTP/2',
+                '1.1', 'HTTP/1.1',
+                '1.0', 'HTTP/1.0',
+                if(empty(custom_fields['proto']), 'Other', custom_fields['proto'])
+            ) AS proto_clean,
+            count() AS reqs
+        FROM request_facts
+        WHERE {base_where}
+        GROUP BY proto_clean
+        ORDER BY reqs DESC
+    """
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-transport") as pool:
+        f_main = pool.submit(contextvars.copy_context().run, service.client.execute, sql, params)
+        f_proto = pool.submit(contextvars.copy_context().run, service.client.execute, proto_sql, params)
+        rows = f_main.result()
+        p_rows = f_proto.result()
 
     if rows:
         r = rows[0]
@@ -827,26 +848,7 @@ def get_transport_metrics(
         tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
         retrans_rate = packet_loss = delivery_rate = None
 
-    proto_sql = f"""
-        SELECT
-            caseWithExpression(
-                custom_fields['proto'],
-                '3.0', 'HTTP/3',
-                '3', 'HTTP/3',
-                '2.0', 'HTTP/2',
-                '2', 'HTTP/2',
-                '1.1', 'HTTP/1.1',
-                '1.0', 'HTTP/1.0',
-                if(empty(custom_fields['proto']), 'Other', custom_fields['proto'])
-            ) AS proto_clean,
-            count() AS reqs
-        FROM request_facts
-        WHERE {base_where}
-        GROUP BY proto_clean
-        ORDER BY reqs DESC
-    """
     protocol_distribution = []
-    p_rows = service.client.execute(proto_sql, params)
     sum_p = sum(r.get("reqs", 0) for r in p_rows) or total_requests or 1
     for pr in p_rows:
         p_name = str(pr.get("proto_clean", "Other"))
@@ -883,22 +885,49 @@ def network_bundle(
 ) -> NetworkBundleResponse:
     sections = set(req.sections) if req.sections else None
     want_health = sections is None or "health" in sections or bool(sections & (_CORE_SECTIONS | {"shielding_analysis"}))
-    health_resp = network_health(service, req, start_time, end_time) if want_health else None
+    want_quality = sections is None or "quality" in sections
+    want_pop = sections is None or "pop_health" in sections
+    want_transport = sections is None or "transport" in sections
 
-    quality_resp = None
-    if sections is None or "quality" in sections:
-        quality_req = NetworkQualityRequest(
-            region_country=req.region_country, filters=req.filters, start_time=start_time, end_time=end_time
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-net-bundle") as pool:
+        f_health = (
+            pool.submit(contextvars.copy_context().run, network_health, service, req, start_time, end_time)
+            if want_health
+            else None
         )
-        quality_resp = network_quality(service, quality_req, start_time, end_time)
-
-    pop_health = None
-    if sections is None or "pop_health" in sections:
-        pop_health = get_pop_health(service, _range_value(start_time), _range_value(end_time)).data
-
-    transport_resp = None
-    if sections is None or "transport" in sections:
-        transport_resp = get_transport_metrics(service, start_time, end_time, req.filters)
+        f_quality = (
+            pool.submit(
+                contextvars.copy_context().run,
+                network_quality,
+                service,
+                NetworkQualityRequest(
+                    region_country=req.region_country, filters=req.filters, start_time=start_time, end_time=end_time
+                ),
+                start_time,
+                end_time,
+            )
+            if want_quality
+            else None
+        )
+        f_pop = (
+            pool.submit(
+                contextvars.copy_context().run,
+                lambda: get_pop_health(service, _range_value(start_time), _range_value(end_time)).data,
+            )
+            if want_pop
+            else None
+        )
+        f_transport = (
+            pool.submit(
+                contextvars.copy_context().run, get_transport_metrics, service, start_time, end_time, req.filters
+            )
+            if want_transport
+            else None
+        )
+        health_resp = f_health.result() if f_health else None
+        quality_resp = f_quality.result() if f_quality else None
+        pop_health = f_pop.result() if f_pop else None
+        transport_resp = f_transport.result() if f_transport else None
 
     return NetworkBundleResponse.with_telemetry(
         available=True,

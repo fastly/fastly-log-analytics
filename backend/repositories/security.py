@@ -476,6 +476,7 @@ def get_top_bots(
     filters: FiltersDict,
     n: int = 10,
     shared_temp_table: str | None = None,
+    parent_runner: QueryRunner | None = None,
 ) -> dict:
     """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
     import hashlib as _hashlib
@@ -520,7 +521,7 @@ def get_top_bots(
             return cached_res.copy()
 
     table_name = _safe_table(source_name)
-    runner = QueryRunner(con, src)
+    runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 
     _t = _time.perf_counter()
     actual_cols = runner.get_schema_cols()
@@ -1310,7 +1311,9 @@ def _build_security_response(
         if "top_bots" in live_sections and temp_table:
             _t = _time.perf_counter()
             try:
-                tb = get_top_bots(con, src, start_time, end_time, filters or {}, shared_temp_table=temp_table)
+                tb = get_top_bots(
+                    con, src, start_time, end_time, filters or {}, shared_temp_table=temp_table, parent_runner=runner
+                )
                 results["bots"] = tb.get("bots", [])
                 results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
             except Exception as e:
@@ -1321,7 +1324,14 @@ def _build_security_response(
             _t = _time.perf_counter()
             try:
                 px = get_security_proxies(
-                    con, src, start_time, end_time, filters, shared_temp_table=temp_table, mask_ips=mask_ips
+                    con,
+                    src,
+                    start_time,
+                    end_time,
+                    filters,
+                    shared_temp_table=temp_table,
+                    mask_ips=mask_ips,
+                    parent_runner=runner,
                 )
                 for k, v in px.items():
                     if k not in ["section_timings", "debug_calls", "debug_queries"]:
@@ -1379,6 +1389,7 @@ def get_security_proxies(
     filters: dict[str, Any] | None = None,
     shared_temp_table: str | None = None,
     mask_ips: bool = False,
+    parent_runner: QueryRunner | None = None,
 ) -> dict[str, Any]:
     from backend.repositories._base import QueryRunner, _safe_table
     from backend.repositories._sql import security as SQL
@@ -1386,7 +1397,7 @@ def get_security_proxies(
 
     source_name = src["name"]
     table_name = _safe_table(source_name)
-    runner = QueryRunner(con, src)
+    runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 
     actual_cols = runner.get_schema_cols()
     required = ["ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"]
@@ -1424,24 +1435,32 @@ def get_security_proxies(
             }
 
         # Fetch stats
-        stats_df = runner.execute(SQL.GET_PROXY_STATS.format(temp_table=temp_table)).fetchdf()
-        stats = stats_df.to_dict(orient="records")[0] if not stats_df.empty else {}
+        stats_row = runner.execute(SQL.GET_PROXY_STATS.format(temp_table=temp_table)).fetchone()
+        stats = (
+            {
+                "active_proxies_count": stats_row[0] or 0,
+                "total_requests_count": stats_row[1] or 0,
+                "distance_mismatches_count": stats_row[2] or 0,
+            }
+            if stats_row
+            else {}
+        )
 
         # Fetch traffic quality segments
-        quality_df = runner.execute(SQL.GET_TRAFFIC_QUALITY.format(temp_table=temp_table)).fetchdf()
+        quality_rows = runner.execute(SQL.GET_TRAFFIC_QUALITY.format(temp_table=temp_table)).fetchall()
         traffic_quality = []
-        if not quality_df.empty:
-            total_count = int(quality_df["count"].sum())
+        if quality_rows:
+            total_count = sum(int(r[1] or 0) for r in quality_rows)
             if total_count > 0:
-                for row in quality_df.to_dict(orient="records"):
-                    label = str(row.get("type", "Unknown"))
-                    item_count = float(row.get("count", 0))
+                for row_type, row_count in quality_rows:
+                    label = str(row_type if row_type is not None else "Unknown")
+                    item_count = float(row_count or 0)
                     value = round((item_count / total_count) * 100, 1)
                     traffic_quality.append({"label": label, "value": value})
 
         # Fetch top suspicious networks
-        isps_df = runner.execute(SQL.GET_SUSPICIOUS_ISPS.format(temp_table=temp_table)).fetchdf()
-        raw_isps = isps_df.to_dict(orient="records") if not isps_df.empty else []
+        isp_rows = runner.execute(SQL.GET_SUSPICIOUS_ISPS.format(temp_table=temp_table)).fetchall()
+        raw_isps = [{"asn": r[0], "count": r[1]} for r in isp_rows]
 
         # Fetch active clients
         select_country_city_inner = ""
@@ -1458,14 +1477,15 @@ def get_security_proxies(
         select_country_city_outer += ",\n        country"
         select_country_city_outer += ",\n        city"
 
-        clients_df = runner.execute(
+        clients_cur = runner.execute(
             SQL.GET_ACTIVE_PROXY_CLIENTS.format(
                 temp_table=temp_table,
                 select_country_city_inner=select_country_city_inner,
                 select_country_city_outer=select_country_city_outer,
             )
-        ).fetchdf()
-        raw_clients = clients_df.to_dict(orient="records") if not clients_df.empty else []
+        )
+        client_cols = [c[0] for c in (clients_cur.description or ())]
+        raw_clients = [dict(zip(client_cols, r, strict=False)) for r in clients_cur.fetchall()]
 
         # Gather all distinct ASNs to resolve
         asns_to_resolve = set()

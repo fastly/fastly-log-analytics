@@ -310,65 +310,93 @@ def performance_aggregates(
     *,
     sections: set[str] | None = None,
 ) -> PerformanceAggregatesResponse:
+    import concurrent.futures
+    import contextvars
+
     wanted = _ALL_SECTIONS if sections is None else sections
     filters = _active_filters(req)
     sort_column = _SORT_COLUMNS.get(getattr(req, "sort_by", "p99"), "p99_ms")
     result: dict[str, Any] = {}
 
+    # Pre-validate filter clauses on the caller thread so unsupported filter
+    # fields raise immediately and deterministically.
+    facts_where_params: tuple[str, dict[str, Any]] | None = None
+    if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
+        facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
+
+    tasks: list[tuple[str, Any]] = []
+
     if "top_urls" in wanted:
-        if filters:
-            where, params = _facts_where(service.service_id, start_time, end_time, filters)
-            rows = _facts_percentile_rows(
-                service,
-                marker="top_urls",
-                key_expr="url",
-                where=where,
-                params=params,
-                sort_column=sort_column,
-                min_requests=_MIN_URL_REQUESTS,
-            )
-        else:
-            rows = _projection_percentile_rows(
-                service,
-                marker="top_urls",
-                dimension="url",
-                start_time=start_time,
-                end_time=end_time,
-                sort_column=sort_column,
-                min_requests=_MIN_URL_REQUESTS,
-            )
-        result["top_urls"] = [{"url": row["value"], **_latency_row(row)} for row in rows]
+
+        def _fetch_top_urls() -> list[dict[str, Any]]:
+            if facts_where_params is not None:
+                where, params = facts_where_params
+                rows = _facts_percentile_rows(
+                    service,
+                    marker="top_urls",
+                    key_expr="url",
+                    where=where,
+                    params=params,
+                    sort_column=sort_column,
+                    min_requests=_MIN_URL_REQUESTS,
+                )
+            else:
+                rows = _projection_percentile_rows(
+                    service,
+                    marker="top_urls",
+                    dimension="url",
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_column=sort_column,
+                    min_requests=_MIN_URL_REQUESTS,
+                )
+            return [{"url": row["value"], **_latency_row(row)} for row in rows]
+
+        tasks.append(("top_urls", _fetch_top_urls))
 
     if "top_asns" in wanted:
-        if filters:
-            where, params = _facts_where(service.service_id, start_time, end_time, filters)
-            rows = _facts_percentile_rows(
-                service,
-                marker="top_asns",
-                key_expr="custom_fields['asn']",
-                where=where,
-                params=params,
-                sort_column=sort_column,
-                min_requests=_MIN_ASN_REQUESTS,
-            )
-        else:
-            rows = _projection_percentile_rows(
-                service,
-                marker="top_asns",
-                dimension="asn",
-                start_time=start_time,
-                end_time=end_time,
-                sort_column=sort_column,
-                min_requests=_MIN_ASN_REQUESTS,
-            )
-        result["top_asns"] = _asn_rows(service, rows)
+
+        def _fetch_top_asns() -> list[dict[str, Any]]:
+            if facts_where_params is not None:
+                where, params = facts_where_params
+                rows = _facts_percentile_rows(
+                    service,
+                    marker="top_asns",
+                    key_expr="custom_fields['asn']",
+                    where=where,
+                    params=params,
+                    sort_column=sort_column,
+                    min_requests=_MIN_ASN_REQUESTS,
+                )
+            else:
+                rows = _projection_percentile_rows(
+                    service,
+                    marker="top_asns",
+                    dimension="asn",
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_column=sort_column,
+                    min_requests=_MIN_ASN_REQUESTS,
+                )
+            return _asn_rows(service, rows)
+
+        tasks.append(("top_asns", _fetch_top_asns))
 
     if "ttl_dist" in wanted:
-        result["ttl_dist"] = _ttl_dist(service, start_time, end_time, filters)
+        tasks.append(("ttl_dist", lambda: _ttl_dist(service, start_time, end_time, filters)))
     if "waterfall" in wanted:
-        result["waterfall"] = _waterfall(service, start_time, end_time, filters)
+        tasks.append(("waterfall", lambda: _waterfall(service, start_time, end_time, filters)))
     if "scatter" in wanted:
-        result["scatter"] = _scatter(service, start_time, end_time, filters)
+        tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
+
+    if len(tasks) == 1:
+        k, fn = tasks[0]
+        result[k] = fn()
+    elif tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
+            for k, fut in futs:
+                result[k] = fut.result()
 
     # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
     # are exact ClickHouse quantiles over the matching facts.

@@ -250,6 +250,10 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       }
 
       const max = Math.max(...countryEntries.map(([, v]) => v))
+      if (!(max > 0)) {
+        map.current.setPaintProperty('countries', 'fill-color', countryFill(theme === 'dark'))
+        return
+      }
       const matchExpression: (string | string[])[] = ['match', ['get', 'name']]
 
       for (const [cc, count] of countryEntries) {

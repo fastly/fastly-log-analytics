@@ -110,12 +110,14 @@ def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
     assert result["ip_health"]["rows"][0]["error_pct"] == pytest.approx(14.285714)
     assert all("high_scale_batch_publications FINAL" in sql for sql, _ in client.calls)
     assert all(params["service_id"] == "svc" for _, params in client.calls)
-    assert client.calls[2][1]["limit"] == 20
+    slow_urls_call = next((sql, params) for sql, params in client.calls if "origin:slow_urls" in sql)
+    assert slow_urls_call[1]["limit"] == 20
     dimension_queries = [sql for sql, _ in client.calls if "FROM origin_minute_dimensions" in sql]
     assert dimension_queries
     assert all("sum(origin_minute_dimensions.requests)" in sql for sql in dimension_queries)
     assert all("sum(requests)" not in sql for sql in dimension_queries)
-    assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in client.calls[-1][0]
+    ip_health_sql = next(sql for sql, _ in client.calls if "origin:ip_health" in sql)
+    assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in ip_health_sql
 
 
 class _FactsClient:

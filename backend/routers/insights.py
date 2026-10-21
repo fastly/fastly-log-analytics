@@ -84,14 +84,24 @@ async def insights_endpoint(
         ctx, req.baseline_hours, req.window_size_hrs
     )
     high_scale_service = ctx.high_scale
+    force_refresh = req.force_refresh if ctx.analyst_session is None else False
+    sem = _get_insights_sem(ctx.service_id)
     if high_scale_service is not None:
         from backend.high_scale.insights import insights_endpoint as hs_insights
 
-        return await asyncio.to_thread(hs_insights, high_scale_service, req, clamp_start, clamp_end, mask_ips)
+        async with sem:
+            return await asyncio.to_thread(
+                hs_insights,
+                high_scale_service,
+                req,
+                clamp_start,
+                clamp_end,
+                mask_ips,
+                clamp_cache_key=clamp_cache_key,
+                force_refresh=force_refresh,
+            )
 
     await ctx.prewarm_con()
-    force_refresh = req.force_refresh if ctx.analyst_session is None else False
-    sem = _get_insights_sem(ctx.service_id)
     async with sem:
 
         def _run_insights(con):
@@ -106,6 +116,7 @@ async def insights_endpoint(
                 mask_ips=mask_ips,
                 clamp_cache_key=clamp_cache_key,
                 force_refresh=force_refresh,
+                filters=req.filters,
             )
 
         return await asyncio.to_thread(execute_with_stale_view_retry, ctx.con, ctx.source, _run_insights)

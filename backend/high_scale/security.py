@@ -15,6 +15,9 @@ error envelope instead of rendering as an empty card.
 
 from __future__ import annotations
 
+import contextvars
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -389,35 +392,57 @@ def security_aggregates(
     def want(name: str) -> bool:
         return sections is None or name in sections
 
-    res: dict[str, Any] = {}
+    tasks: list[tuple[str, Callable[[], Any]]] = []
     if want("tls_fingerprints"):
-        res["tls_fingerprints"] = _tls_fingerprints(service, scope)
+        tasks.append(("tls_fingerprints", lambda: _tls_fingerprints(service, scope)))
     if want("fingerprint_coverage"):
-        res["fingerprint_coverage"] = _fingerprint_coverage(service, scope)
+        tasks.append(("fingerprint_coverage", lambda: _fingerprint_coverage(service, scope)))
     if want("req_size_dist"):
-        res["req_size_dist"] = _req_size_dist(service, scope)
+        tasks.append(("req_size_dist", lambda: _req_size_dist(service, scope)))
     if want("top_ips_header"):
-        res["top_ips_header"] = _top_ips_header(service, scope, mask_ips)
+        tasks.append(("top_ips_header", lambda: _top_ips_header(service, scope, mask_ips)))
     if want("ipv6_adoption"):
-        res["ipv6_adoption"] = _ipv6_adoption(service, scope)
+        tasks.append(("ipv6_adoption", lambda: _ipv6_adoption(service, scope)))
     if want("proxy_dist"):
-        res["proxy_dist"] = _proxy_dist(service, scope)
+        tasks.append(("proxy_dist", lambda: _proxy_dist(service, scope)))
     if want("conn_reuse_dist"):
-        res["conn_reuse_dist"] = _conn_reuse_dist(service, scope)
+        tasks.append(("conn_reuse_dist", lambda: _conn_reuse_dist(service, scope)))
     if want("verified_bots_ts"):
-        res["verified_bots_ts"] = _verified_bots_ts(service, scope, bucket_seconds)
+        tasks.append(("verified_bots_ts", lambda: _verified_bots_ts(service, scope, bucket_seconds)))
     if want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"):
-        res["ngwaf_configured"] = _ngwaf_configured(service)
-        res["ngwaf_verified_bots"] = _ngwaf_verified_bots(service, scope)
-        res["ngwaf_verified_bots_ts"] = _ngwaf_verified_bots_ts(service, scope, bucket_seconds)
+        tasks.append(("ngwaf_configured", lambda: _ngwaf_configured(service)))
+        tasks.append(("ngwaf_verified_bots", lambda: _ngwaf_verified_bots(service, scope)))
+        tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
     if want("wellknown_bots"):
-        res["wellknown_bots"] = _wellknown_bots(service, scope)
+        tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
     if want("top_bots"):
-        bots = _top_bots(service, scope)
-        res["bots"] = bots["bots"]
-        res["ngwaf_bots"] = bots["ngwaf_bots"]
+        tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
     if want("proxies"):
-        res.update(_proxies(service, scope, mask_ips))
+        tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
+
+    res: dict[str, Any] = {}
+    if len(tasks) == 1:
+        k, fn = tasks[0]
+        val = fn()
+        if k == "_top_bots":
+            res["bots"] = val["bots"]
+            res["ngwaf_bots"] = val["ngwaf_bots"]
+        elif k == "_proxies":
+            res.update(val)
+        else:
+            res[k] = val
+    elif tasks:
+        with ThreadPoolExecutor(max_workers=min(8, len(tasks)), thread_name_prefix="hs-sec") as pool:
+            futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
+            for k, fut in futs:
+                val = fut.result()
+                if k == "_top_bots":
+                    res["bots"] = val["bots"]
+                    res["ngwaf_bots"] = val["ngwaf_bots"]
+                elif k == "_proxies":
+                    res.update(val)
+                else:
+                    res[k] = val
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
@@ -467,72 +492,87 @@ _PROXY_SOURCE = f"""
 
 
 def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[str, Any]:
-    stats = _run(
-        service,
-        scope,
-        "proxy_stats",
-        f"""
-        SELECT uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS active_proxies_count,
-               countIf({_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS total_requests_count,
-               uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count
-        {_PROXY_SOURCE}
-        """,
-    )
-    stat = stats[0] if stats else {}
+    def _q_stats():
+        return _run(
+            service,
+            scope,
+            "proxy_stats",
+            f"""
+            SELECT uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS active_proxies_count,
+                   countIf({_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS total_requests_count,
+                   uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count
+            {_PROXY_SOURCE}
+            """,
+        )
 
-    quality_rows = _run(
-        service,
-        scope,
-        "traffic_quality",
-        f"""
-        SELECT multiIf(
-                   rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection',
-                   tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy',
-                   tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile',
-                   'Direct Connection') AS type,
-               count() AS count
-        {_PROXY_SOURCE}
-        GROUP BY type ORDER BY count DESC
-        """,
-    )
+    def _q_quality():
+        return _run(
+            service,
+            scope,
+            "traffic_quality",
+            f"""
+            SELECT multiIf(
+                       rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection',
+                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy',
+                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile',
+                       'Direct Connection') AS type,
+                   count() AS count
+            {_PROXY_SOURCE}
+            GROUP BY type ORDER BY count DESC
+            """,
+        )
+
+    def _q_isps():
+        return _run(
+            service,
+            scope,
+            "suspicious_isps",
+            f"""
+            SELECT asn, count() AS count
+            {_PROXY_SOURCE}
+            WHERE {_TUNNEL}
+            GROUP BY asn ORDER BY count DESC LIMIT 10
+            """,
+        )
+
+    def _q_clients():
+        return _run(
+            service,
+            scope,
+            "active_clients",
+            f"""
+            SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms,
+                   {_DISTANCE_KM} AS distance_km, pop,
+                   lat AS client_lat, lon AS client_lon, pop_lat, pop_lon,
+                   {_IMPOSSIBLE_DISTANCE} AS impossible_distance,
+                   multiIf({_IMPOSSIBLE_DISTANCE}, 'High',
+                           {_TUNNEL}, 'High',
+                           ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium',
+                           'Low') AS risk_level,
+                   country, city
+            {_PROXY_SOURCE}
+            WHERE rtt_min IS NOT NULL
+              AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0))
+            ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100
+            """,
+        )
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
+        f_stats = pool.submit(contextvars.copy_context().run, _q_stats)
+        f_qual = pool.submit(contextvars.copy_context().run, _q_quality)
+        f_isps = pool.submit(contextvars.copy_context().run, _q_isps)
+        f_cli = pool.submit(contextvars.copy_context().run, _q_clients)
+        stats = f_stats.result()
+        quality_rows = f_qual.result()
+        isp_rows = f_isps.result()
+        client_rows = f_cli.result()
+
+    stat = stats[0] if stats else {}
     quality_total = sum(int(r["count"]) for r in quality_rows)
     traffic_quality = (
         [{"label": str(r["type"]), "value": round(int(r["count"]) / quality_total * 100, 1)} for r in quality_rows]
         if quality_total > 0
         else []
-    )
-
-    isp_rows = _run(
-        service,
-        scope,
-        "suspicious_isps",
-        f"""
-        SELECT asn, count() AS count
-        {_PROXY_SOURCE}
-        WHERE {_TUNNEL}
-        GROUP BY asn ORDER BY count DESC LIMIT 10
-        """,
-    )
-
-    client_rows = _run(
-        service,
-        scope,
-        "active_clients",
-        f"""
-        SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms,
-               {_DISTANCE_KM} AS distance_km, pop,
-               lat AS client_lat, lon AS client_lon, pop_lat, pop_lon,
-               {_IMPOSSIBLE_DISTANCE} AS impossible_distance,
-               multiIf({_IMPOSSIBLE_DISTANCE}, 'High',
-                       {_TUNNEL}, 'High',
-                       ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium',
-                       'Low') AS risk_level,
-               country, city
-        {_PROXY_SOURCE}
-        WHERE rtt_min IS NOT NULL
-          AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0))
-        ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100
-        """,
     )
 
     from backend.core.duckdb import get_asn_names

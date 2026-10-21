@@ -287,14 +287,15 @@ def get_performance_aggregates(
 
         if "scatter_waterfall" in live_sections and temp_table:
             # Scatter sample + waterfall averages from a single MATERIALIZED CTE
-            # pass — the derived rowset is spooled once and read by both the
-            # 300-row sample and the four AVG aggregates.
+            # Single-pass CTE over the already-materialized in-memory temp table:
+            # avoid `AS MATERIALIZED` here so DuckDB does not spool a second
+            # copy of the rows on top of `{temp_table}`.
             _t = _time.perf_counter()
             ottfb_expr = coalesce("CAST(ottfb AS DOUBLE) / 1000.0", "0") if "ottfb" in actual_cols else "0"
             ottlb_expr = coalesce("CAST(ottlb AS DOUBLE) / 1000.0", "0") if "ottlb" in actual_cols else "0"
 
             combined_q = f"""
-                WITH components AS MATERIALIZED (
+                WITH components AS (
                     SELECT
                         cache::VARCHAR AS cache,
                         CAST(ttfb AS DOUBLE) * 1000.0 AS origin_ms,

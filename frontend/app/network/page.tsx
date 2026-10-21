@@ -337,7 +337,7 @@ function NetworkBody({
         }
       })
       return data
-    }
+    },
   )
 
   // `available`/`has_metro`/`reason` come back on every section response

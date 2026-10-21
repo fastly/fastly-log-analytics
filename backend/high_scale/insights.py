@@ -17,6 +17,7 @@ from typing import Any
 
 from backend.core.clickhouse_client import ClickHouseError
 from backend.core.share_db.validation import mask_ip
+from backend.high_scale._filters import build_clickhouse_filters
 from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.insight_queries import (
     AUTH_REGEX,
@@ -35,12 +36,15 @@ from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import definitions as _definitions  # noqa: F401  (registers the detections)
 from backend.repositories.insights.registry import InsightDefinition, registry
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import parse_iso_utc, safe_iso
 
 _MAX_WORKERS = 4
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
+
+_INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
 
 
 def _window(
@@ -168,11 +172,33 @@ def insights_endpoint(
     clamp_start: str | None,
     clamp_end: str | None,
     mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
 ) -> InsightsResponse:
     window_hours = float(req.window_size_hrs)
     baseline_hours = float(req.baseline_hours)
+    req_filters = getattr(req, "filters", None)
+    filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
+    key_clamp = clamp_cache_key if clamp_cache_key is not None else f"{clamp_start or ''}:{clamp_end or ''}"
+    cache_key = (
+        service.service_id,
+        id(service.client),
+        window_hours,
+        baseline_hours,
+        key_clamp,
+        int(mask_ips),
+        filter_clause,
+        tuple(sorted((k, str(v)) for k, v in filter_params.items())),
+    )
+    if not force_refresh:
+        cached = _INSIGHTS_CACHE.get(cache_key)
+        if cached is not None:
+            return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
+
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
+    if filter_clause:
+        scope = f"{scope} AND ({filter_clause})"
     params: dict[str, Any] = {
         "service_id": service.service_id,
         "baseline_start": baseline_start,
@@ -184,6 +210,7 @@ def insights_endpoint(
         "compress_regex": COMPRESSIBLE_REGEX,
         "auth_regex": AUTH_REGEX,
         "bot_ua_regex": BOT_UA_REGEX,
+        **filter_params,
     }
     in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
 
@@ -223,7 +250,13 @@ def insights_endpoint(
                 [],
             )
         try:
-            rows = [tuple(row.values()) for row in service.client.execute(_base_sql(detection, definition.id), params)]
+            sql = _base_sql(detection, definition.id)
+            if filter_clause:
+                sql = sql.replace(
+                    "AND event_timestamp <= {window_end:DateTime64(3)}",
+                    f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
+                )
+            rows = [tuple(row.values()) for row in service.client.execute(sql, params)]
             context = {
                 "window_hours": window_hours,
                 "baseline_hours": baseline_hours,
@@ -254,17 +287,20 @@ def insights_endpoint(
         cards = [future.result() for future in futures]
 
     computed_at = now.isoformat()
-    return InsightsResponse.with_telemetry(
-        insights=cards,
-        window_start=window_start.isoformat(),
-        window_end=computed_at,
-        baseline_start=baseline_start.isoformat(),
-        baseline_end=window_start.isoformat(),
-        computed_at=computed_at,
-        window_hours=window_hours,
-        baseline_hours=baseline_hours,
-        window_total_requests=window_total,
-    )
+    payload = {
+        "insights": cards,
+        "window_start": window_start.isoformat(),
+        "window_end": computed_at,
+        "baseline_start": baseline_start.isoformat(),
+        "baseline_end": window_start.isoformat(),
+        "computed_at": computed_at,
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "window_total_requests": window_total,
+    }
+    if not any(c.get("severity") == "error" for c in cards):
+        _INSIGHTS_CACHE[cache_key] = payload
+    return InsightsResponse.with_telemetry(**payload)
 
 
 def _bucket_interval(total_hours: float) -> str:

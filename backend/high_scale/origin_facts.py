@@ -142,6 +142,7 @@ _TIMESERIES_METRICS = {
     ("ttfb", "p99"): ("latency_us", 0.99),
     ("ttlb", "p50"): ("ottlb_us", 0.5),
     ("ttlb", "p95"): ("ottlb_us", 0.95),
+    ("ttlb", "p99"): ("ottlb_us", 0.99),
 }
 
 

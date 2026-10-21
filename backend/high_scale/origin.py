@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from backend.high_scale import origin_facts
@@ -152,6 +154,7 @@ def _timeseries(
         ("ttfb", "p99"): ("latency", 0.99),
         ("ttlb", "p50"): ("ttlb", 0.5),
         ("ttlb", "p95"): ("ttlb", 0.95),
+        ("ttlb", "p99"): ("ttlb", 0.99),
     }.get((req.timeseries_metric, req.timeseries_percentile))
     if metric is None:
         raise ValueError("high-scale Origin timeseries does not support the requested metric and percentile")
@@ -336,30 +339,10 @@ def aggregates(
         )
 
     sections = sections or set(_EMPTY)
-    result: dict[str, Any] = {}
-    if "summary" in sections:
-        result["summary"] = (
-            _summary(service, start_time, end_time) if facts is None else origin_facts.summary(service, facts)
-        )
-    if "timeseries" in sections:
-        result["timeseries"] = (
-            _timeseries(service, req, start_time, end_time)
-            if facts is None
-            else origin_facts.timeseries(service, facts, req)
-        )
-    if "slow_urls" in sections:
-        result["slow_urls"] = (
-            _slow_urls(service, req, start_time, end_time)
-            if facts is None
-            else origin_facts.slow_urls(service, facts, req)
-        )
-    if "status_codes" in sections:
-        result["status_codes"] = (
-            _status_codes(service, start_time, end_time) if facts is None else origin_facts.status_codes(service, facts)
-        )
-    if "path_breakdown" in sections:
+
+    def _build_path_breakdown() -> dict[str, Any]:
         rows = latency_rows("path_breakdown", "edge")
-        result["path_breakdown"] = {
+        return {
             "has_data": bool(rows),
             "shielding_detected": any(row["value"] == "false" for row in rows),
             "rows": [
@@ -373,12 +356,13 @@ def aggregates(
             ],
             **approx,
         }
-    if "pop_latency" in sections:
+
+    def _build_pop_latency() -> dict[str, Any]:
         rows = latency_rows("pop_latency", "pop", limit=req.pop_latency_limit)
         p95s = [value for row in rows if (value := _milliseconds(_quantile(row, "latency", 1))) is not None]
         p95s.sort()
         median_p95 = p95s[len(p95s) // 2] if p95s else 0
-        result["pop_latency"] = {
+        return {
             "has_data": bool(rows),
             "requires_group_c": False,
             "median_p95_ms": median_p95,
@@ -394,14 +378,15 @@ def aggregates(
             ],
             **approx,
         }
-    if "ip_health" in sections:
+
+    def _build_ip_health() -> dict[str, Any]:
         rows = latency_rows(
             "ip_health",
             "oip",
             limit=req.ip_health_limit,
             having="sum(origin_minute_dimensions.requests) >= 10",
         )
-        result["ip_health"] = {
+        return {
             "has_data": bool(rows),
             "rows": [
                 {
@@ -416,6 +401,67 @@ def aggregates(
             ],
             **approx,
         }
+
+    tasks: list[tuple[str, Any]] = []
+    if "summary" in sections:
+        tasks.append(
+            (
+                "summary",
+                lambda: (
+                    _summary(service, start_time, end_time) if facts is None else origin_facts.summary(service, facts)
+                ),
+            )
+        )
+    if "timeseries" in sections:
+        tasks.append(
+            (
+                "timeseries",
+                lambda: (
+                    _timeseries(service, req, start_time, end_time)
+                    if facts is None
+                    else origin_facts.timeseries(service, facts, req)
+                ),
+            )
+        )
+    if "slow_urls" in sections:
+        tasks.append(
+            (
+                "slow_urls",
+                lambda: (
+                    _slow_urls(service, req, start_time, end_time)
+                    if facts is None
+                    else origin_facts.slow_urls(service, facts, req)
+                ),
+            )
+        )
+    if "status_codes" in sections:
+        tasks.append(
+            (
+                "status_codes",
+                lambda: (
+                    _status_codes(service, start_time, end_time)
+                    if facts is None
+                    else origin_facts.status_codes(service, facts)
+                ),
+            )
+        )
+    if "path_breakdown" in sections:
+        tasks.append(("path_breakdown", _build_path_breakdown))
+    if "pop_latency" in sections:
+        tasks.append(("pop_latency", _build_pop_latency))
+    if "ip_health" in sections:
+        tasks.append(("ip_health", _build_ip_health))
+
+    result: dict[str, Any] = {}
+    if len(tasks) <= 1:
+        for key, fn in tasks:
+            result[key] = fn()
+    else:
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = [(key, pool.submit(contextvars.copy_context().run, fn)) for key, fn in tasks]
+            for key, fut in futures:
+                result[key] = fut.result()
+
     summary = result.get("summary", _EMPTY["summary"])
     return {"has_data": bool(summary.get("has_data")), **result}
 

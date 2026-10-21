@@ -2,8 +2,9 @@
 
 import React, { useState, useMemo } from 'react'
 import Link from 'next/link'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import type { FiltersPayload } from '@/types/filters'
 import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
@@ -240,6 +241,7 @@ interface InsightsBodyProps {
   windowHours: string
   baselineHours: string
   statusFilter: string
+  filterPayload?: FiltersPayload
   initialTab?: string | null
   relative: (iso: string) => string
   full: (iso: string) => string
@@ -251,6 +253,7 @@ function InsightsBody({
   windowHours,
   baselineHours,
   statusFilter,
+  filterPayload,
   initialTab,
   relative,
   full,
@@ -260,22 +263,26 @@ function InsightsBody({
   // selection survives the loading→loaded swap between the two InsightTabs
   // instances and the status-filter regrouping.
   const [activeTab, setActiveTab] = useState<string | null>(() => normalizeTabKey(initialTab))
+  const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['insights', activeServiceId, windowHours, baselineHours],
+    queryKey: hasActiveFilters
+      ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
+      : ['insights', activeServiceId, windowHours, baselineHours],
     queryFn: async ({ signal }) => {
       const { data } = await client.POST("/api/insights", { signal,
         body: {
           window_size_hrs: parseFloat(windowHours),
           baseline_hours: parseFloat(baselineHours),
-          filters: {},
+          filters: filterPayload ?? {},
           force_refresh: false,
         }
       })
       return data
     },
     enabled: !!activeServiceId,
-    staleTime: 60000
+    staleTime: 60000,
+    placeholderData: keepPreviousData,
   })
 
   const { data: availability, error: availabilityError } = useQuery({
@@ -661,6 +668,7 @@ export default function InsightsClient({
           windowHours={appliedWindowHours}
           baselineHours={appliedBaselineHours}
           statusFilter={statusFilter}
+          filterPayload={ctx.filterPayload}
           initialTab={initialTab}
           relative={relative}
           full={full}

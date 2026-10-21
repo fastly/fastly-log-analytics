@@ -197,6 +197,11 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       }
 
       const max = Math.max(...data.map(d => d.count))
+      if (!(max > 0)) {
+        map.current.setPaintProperty('countries', 'fill-color', countryFill(theme === 'dark'))
+        map.current.resize()
+        return
+      }
       const [first, ...others] = data.map((d): [string, string] => {
         const intensity = 0.2 + (d.count / max) * 0.8
         const englishName = resolveCountryName(d.country)
