@@ -84,14 +84,18 @@ The **Streaming** page turns Common Media Client Data (CMCD v1/v2) that players 
 
 ## 8. Performance, Cost & Telemetry Budgets
 
-These are the targets the rest of the analytics pages hold themselves to. They have not been re-measured for this page yet.
+Measured by the deploy verifier (`scripts/verify_dashboard.js`, `[PERF Streaming]` lines) on commit `40ee38b7`, first load of `/streaming?range=24h` under continuous load-test traffic, from the operator machine (high-scale goes through the admin gateway).
 
-| Metric | Target (Standard) | Target (High-Scale) | Measurement Method |
-|---|---|---|---|
-| **LCP** | < 1500 ms | < 1500 ms | Web Vitals / Playwright |
-| **Cumulative Layout Shift (CLS)** | <= 0.05 (Target 0.00) | <= 0.05 (Target 0.00) | PerformanceObserver |
-| **API Latency (`/api/cmcd/aggregates`)** | to be measured | to be measured | HAR log / API timing |
-| **Telemetry Capture** | 100% queries captured | 100% queries captured | `telemetry_queries` audit |
+| Metric | Target | Local Standard | Remote Standard | Remote High-Scale |
+|---|---|---|---|---|
+| **TTFB** | - | 92 ms | 455 ms | 1,953 ms |
+| **FCP / LCP** | LCP < 1500 ms | 224 ms | 696 ms | 2,480 ms |
+| **Cumulative Layout Shift (CLS)** | <= 0.05 (aim 0.00) | 0.013 | 0.013 | 0.013 |
+| **`/api/cmcd/aggregates` latency** | < 1000 ms (proposed) | 4,603 ms | 3,340 ms | 2,769 ms |
+| **`/api/cmcd/aggregates` payload** | - | 9.9 KB | 10.9 KB | 9.5 KB |
+| **Duplicate data requests** | 0 | 0 | 0 | 0 |
+
+What that says: the shell paints fast, layout is stable (all three under 0.05, none at 0.00), and the data query is the slow part. High-Scale LCP is over budget because TTFB is about 2 s through the gateway; Standard environments are well inside it. The aggregates endpoint takes 2.8 to 4.6 s everywhere. That is the optimization target, and the latency goal above is a proposal until we agree on one. Remote Standard also logs four `/api/web-vitals` beacons per load, which are expected telemetry and not data fetches.
 
 ---
 
@@ -99,17 +103,17 @@ These are the targets the rest of the analytics pages hold themselves to. They h
 
 - [x] **1. Real data on all three environments:** `scripts/verify_dashboard.js` loads `/streaming?range=24h` and requires the Total Sessions and Peak Viewers cards, a populated Plotly chart, and no empty-state panels. Passed on Local Standard, Remote Standard and Remote High-Scale for commit `f70b048e` (2026-10-21).
 - [x] **2. CMCD traffic exists:** `scripts/dev/scale_harness.py --cmcd-ratio` sends CMCD playback traffic (headers and `?CMCD=`, v1/v2, 300-session pool, rebuffer and startup flags). The deploy script seeds with `--cmcd-ratio 0.35`.
-- [ ] **3. Zero layout shift:** CLS <= 0.05 measured on this page.
-- [ ] **4. Accessibility:** `/streaming` is not in `e2e/a11y-routes.spec.ts`; add it and run axe.
+- [x] **3. Layout stability:** CLS 0.013 on all three environments (budget 0.05); the e2e test also holds CLS <= 0.05 on a warm reload.
+- [x] **4. Accessibility:** `/streaming` is in `e2e/a11y-routes.spec.ts` and the populated page is axe-checked in `e2e/pages/streaming.spec.ts`; both pass on chromium, firefox and webkit.
 - [ ] **5. Role verification:** confirm Analyst Path B can load the page and that no section exposes a client IP.
-- [ ] **6. Telemetry and query audit:** no duplicate queries; latency recorded for both architectures.
-- [ ] **7. Not-enabled state:** with CMCD off, the page shows the "CMCD data not available" message and the nav link is hidden.
+- [x] **6. Duplicate-request audit:** one `/api/cmcd/aggregates` call per load on every environment. Latency is recorded in section 8 and is above a sensible target (open).
+- [x] **7. Not-enabled state:** covered by a unit test and an e2e test with `available: false`; the nav link hides when the schema has no `cmcd_sid`.
 
 ---
 
 ## 10. Automated Test Suite & Traffic Generation
 
 - **Backend tests:** `tests/routers/test_cmcd.py` (absolute range and range-token requests), `tests/high_scale/test_aggregate_query.py`, `tests/high_scale/test_clickhouse_readers_integration.py`. Provisioning side: `tests/provision/test_cmcd_enable_call_order.py`, `test_cmcd_disable_call_order.py`, `test_system_fields.py`.
-- **Frontend unit tests:** none for `StreamingClient` yet.
-- **Playwright E2E:** none for this page yet (the old `streaming.spec.ts` tested the removed live tail). Coverage today is the deploy-time check in `scripts/verify_dashboard.js`.
+- **Frontend unit tests:** `frontend/__tests__/app/streaming.test.tsx` (request contract, populated cards, not-available state, failed query).
+- **Playwright E2E:** `frontend/e2e/pages/streaming.spec.ts` (5 tests, aggregates endpoint stubbed because the e2e backend has no CMCD columns) plus the axe route entry in `frontend/e2e/a11y-routes.spec.ts`. Real data is checked live by the deploy-time check in `scripts/verify_dashboard.js`, which also logs the `[PERF Streaming]` numbers above.
 - **Synthetic Traffic Profile:** `scale_harness.py` with `--cmcd-ratio` and `--diversify` (see section 9); sessions get a stable `sid`/`cid`, a mix of video, audio, manifest and image objects, and about 4% rebuffer events.
