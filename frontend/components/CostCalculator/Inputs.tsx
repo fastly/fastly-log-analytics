@@ -30,7 +30,7 @@ export function Inputs({ s, r, set }: InputsProps) {
           <NumInput value={s.rumBeaconsDay} onChange={set('rumBeaconsDay')} wide />
         </Row>
         <Row label='Edge-only logging' tooltip="Only log requests handled by the Edge, omitting Shield requests. This uses the 'Edge requests per day' volume for calculation.">
-          <Switch checked={s.edgeOnly} onCheckedChange={set('edgeOnly')} />
+          <Switch aria-label="Edge-only logging" checked={s.edgeOnly} onCheckedChange={set('edgeOnly')} />
         </Row>
         {s.edgeOnly && (
           <Row label='Edge requests per day' tooltip="Total requests handled directly by the Edge (excluding Shield requests). If 'Edge only logging' is enabled, this lower volume is used to calculate costs.">
@@ -52,7 +52,7 @@ export function Inputs({ s, r, set }: InputsProps) {
           <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
         </Row>
         <Row label='Local parquet cache enabled' tooltip="Download and cache Parquet files locally to avoid paying Class B operations on every query.">
-          <Switch checked={s.cacheEnabled} onCheckedChange={set('cacheEnabled')} />
+          <Switch aria-label="Local parquet cache enabled" checked={s.cacheEnabled} onCheckedChange={set('cacheEnabled')} />
         </Row>
         <Row label='Dashboard page loads per day' tooltip="Page loads across dashboard, charts, etc. Costs FOS reads if local cache is disabled.">
           <NumInput value={s.queriesDay} onChange={set('queriesDay')} />
@@ -61,16 +61,16 @@ export function Inputs({ s, r, set }: InputsProps) {
           <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />
         </Row>
         <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
-          <Switch checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
+          <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
         </Row>
         <Row label='Data retention (days)' tooltip="How many days to keep data in Object Storage before deleting.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
         </Row>
         <Row label='Auto-delete raw .gz logs after ingest' tooltip="Delete raw .gz log files immediately after ingesting them into Iceberg. They will still be billed for the FOS minimum 30 days, but doing this prevents redundant long-term storage since Iceberg writes its own optimized Parquet files.">
-          <Switch checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
+          <Switch aria-label="Auto-delete raw .gz logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
         </Row>
         <Row label='Iceberg table optimization enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. This happens automatically but you can model the cost impact here.">
-          <Switch checked={s.icebergOptimizeEnabled} onCheckedChange={set('icebergOptimizeEnabled')} />
+          <Switch aria-label="Iceberg table optimization enabled" checked={s.icebergOptimizeEnabled} onCheckedChange={set('icebergOptimizeEnabled')} />
         </Row>
         <Row label='Active remote analysts' tooltip="How many other team members have this service open on their computer simultaneously. Each analyst syncs metadata every 2 minutes.">
           <NumInput value={s.activeAnalysts} onChange={set('activeAnalysts')} min={0} />
