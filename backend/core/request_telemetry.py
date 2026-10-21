@@ -330,6 +330,10 @@ class RequestTelemetry:
         )
         self._owns_root_span = True
 
+    def elapsed_ms(self) -> float:
+        """Milliseconds since :meth:`start_request` (0.0 before it has run)."""
+        return (time.monotonic() - self._t_start) * 1000 if self._t_start else 0.0
+
     def end_request(self, status_code: int | None = None) -> None:
         """Attach final attributes and close the root span — but only if
         this instance opened it. A borrowed (FastAPIInstrumentor) span

@@ -38,8 +38,15 @@ def cmcd_aggregates(
         res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
         return CmcdAggregatesResponse.with_telemetry(**res)
 
+    # Time spent before and around the repository call (dependency setup, pool
+    # wait for the connection) is invisible to the repository's own section
+    # timer, so record it as leading entries of `_section_timings`.
+    t_entered = ctx.telemetry.elapsed_ms()
+    con = ctx.con
+    t_connected = ctx.telemetry.elapsed_ms()
+
     res = repo.get_cmcd_aggregates(
-        con=ctx.con,
+        con=con,
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
@@ -49,4 +56,9 @@ def cmcd_aggregates(
         sections=sections,
         mask_ips=mask_ips,
     )
+    res["section_timings"] = [
+        {"section": "request_setup", "time_ms": round(t_entered, 2)},
+        {"section": "connection_acquire", "time_ms": round(t_connected - t_entered, 2)},
+        *res.get("section_timings", []),
+    ]
     return CmcdAggregatesResponse.with_telemetry(**res)
