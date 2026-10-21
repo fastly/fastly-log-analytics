@@ -34,14 +34,17 @@ export function DashboardHeader({
           on the server pass, leaving the SSR'd button with no
           accessible name. The visible "Cards" text is
           `hidden sm:inline` so on <640px viewports it's empty too —
-          the label is the only reliable name across both states. */}
+          the label is the only reliable name across both states. The
+          name must contain the visible text ("Cards" + count, separated
+          by the {' '} text node) or axe flags label-content-name-mismatch. */}
       <PopoverTrigger
-        aria-label="Toggle visible dashboard cards"
+        aria-label={`Cards ${visibleCardsCount}, toggle visible dashboard cards`}
         render={
           <Button variant="outline" size="sm" className="h-9 gap-1.5">
             <span className="flex items-center gap-1.5">
               <LayoutDashboard className="h-4 w-4" />
               <span className="hidden sm:inline text-xs">Cards</span>
+              {' '}
               <Badge variant="secondary" className="h-4 text-[10px] px-1.5">
                 {visibleCardsCount}
               </Badge>
