@@ -613,7 +613,30 @@ RUM_ANY_DATA = """
 
 
 RUM_LIVE_EVENTS = """
-WITH vitals_base AS (
+WITH vitals_recent AS (
+    SELECT
+        timestamp,
+        pathname,
+        metric_name,
+        metric_value,
+        metric_rating,
+        browser,
+        os,
+        device,
+        cid,
+        req_id,
+        city,
+        region,
+        country,
+        pop,
+        tls,
+        ttfb
+    FROM client_vitals
+    WHERE {where_sql}
+    ORDER BY timestamp DESC
+    LIMIT 250
+),
+vitals_base AS (
     SELECT
         'pageview' AS type,
         timestamp,
@@ -633,9 +656,31 @@ WITH vitals_base AS (
         pop,
         tls,
         ttfb
-    FROM client_vitals
-    WHERE {where_sql}
+    FROM vitals_recent
     QUALIFY ROW_NUMBER() OVER (PARTITION BY timestamp, metric_name, pathname, cid, req_id ORDER BY timestamp) = 1
+),
+errors_recent AS (
+    SELECT
+        timestamp,
+        pathname,
+        browser,
+        os,
+        device,
+        cid,
+        req_id,
+        error_message,
+        error_file,
+        error_line,
+        city,
+        region,
+        country,
+        pop,
+        tls,
+        ttfb
+    FROM client_errors
+    WHERE {where_sql}
+    ORDER BY timestamp DESC
+    LIMIT 250
 ),
 errors_base AS (
     SELECT
@@ -657,8 +702,7 @@ errors_base AS (
         pop,
         tls,
         ttfb
-    FROM client_errors
-    WHERE {where_sql}
+    FROM errors_recent
     QUALIFY ROW_NUMBER() OVER (PARTITION BY timestamp, error_message, error_file, error_line, pathname, cid, req_id ORDER BY timestamp) = 1
 ),
 combined AS (

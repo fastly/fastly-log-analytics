@@ -32,6 +32,37 @@ _response_cache = _memo.cache
 _CacheRegistry.register("assets._response_cache", _response_cache)
 
 
+def _build_cache_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+) -> str:
+    return digest_cache_key(
+        {
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": serialize_filters_for_key(filters),
+        },
+        src,
+    )
+
+
+def check_assets_cache(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+) -> dict | None:
+    """Fast pre-connection cache check for production file-backed services."""
+    if not src.get("duckdb_path") and not src.get("cache_dir"):
+        return None
+    cached = _memo.get(_build_cache_key(src, start_time, end_time, filters))
+    if cached is not None:
+        return {**cached, "section_timings": []}
+    return None
+
+
 def get_assets_aggregates(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -78,17 +109,10 @@ def get_assets_aggregates(
 
     has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
     cache_key: str | None = None
-    if has_partition_cols and src.get("cache_dir"):
-        cache_key = digest_cache_key(
-            {
-                "s": bucket_time_to_minute(start_time),
-                "e": bucket_time_to_minute(end_time),
-                "f": serialize_filters_for_key(filters),
-            },
-            src,
-        )
+    if has_partition_cols or src.get("duckdb_path") or src.get("cache_dir"):
+        cache_key = _build_cache_key(src, start_time, end_time, filters)
         cached = _memo.get(cache_key)
-        if cached is not None:
+        if cached is not None and not missing_fields:
             return {**cached, "section_timings": section_timings, **runner.telemetry()}
 
     results = {
@@ -121,11 +145,13 @@ def get_assets_aggregates(
 
     import uuid as _uuid
 
+    from backend.high_scale.assets import compute_summary_from_dims
+
     temp_table: str | None = f"t_{_uuid.uuid4().hex}"
 
     create_sql = f"""
         CREATE TEMP TABLE "{temp_table}" AS
-        WITH grouped_base AS (
+        WITH grouped_raw AS (
             SELECT
                 {url_expr} as url,
                 {cache_expr} as cache,
@@ -134,11 +160,16 @@ def get_assets_aggregates(
                 COUNT(*) as req_cnt,
                 {sum_or_zero(bytes_expr)} as sum_bytes,
                 {sum_or_zero(ttl_expr, zero="0.0")} as sum_ttl,
-                COUNT({ttl_expr}) as cnt_ttl,
-                LOWER({url_expr}) as url_lower
+                COUNT({ttl_expr}) as cnt_ttl
             FROM {table_name}
             WHERE {where_clause} AND {url_expr} IS NOT NULL
             GROUP BY 1, 2, 3, 4
+        ),
+        grouped_base AS (
+            SELECT
+                *,
+                LOWER(url) as url_lower
+            FROM grouped_raw
         )
         SELECT
             url,
@@ -175,148 +206,92 @@ def get_assets_aggregates(
 
     try:
         _t = _time.perf_counter()
-        # Pre-enriched table allows the downstream queries to run directly against the temp table
-        cte_base = f"""
-            WITH assets_enriched AS (
-                SELECT * FROM "{temp_table}"
-            )
-        """
-
-        # 1. Asset Type Breakdown
-        breakdown_q = f"""
-            {cte_base}
-            SELECT
-                asset_type,
-                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
-                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as egress_bytes,
-                COALESCE(
-                    SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC') THEN req_cnt ELSE 0 END) * 1.0 /
-                    NULLIF(SUM(CASE WHEN cache IN ('HIT', 'HIT-SYNTHETIC', 'MISS', 'PASS', 'BYPASS') THEN req_cnt ELSE 0 END), 0),
-                    0.0
-                ) as cache_hit_ratio,
-                COALESCE(
-                    SUM(CASE WHEN is_compressible = 1 AND is_compressed = 1 THEN req_cnt ELSE 0 END) * 1.0 /
-                    NULLIF(SUM(CASE WHEN is_compressible = 1 THEN req_cnt ELSE 0 END), 0),
-                    0.0
-                ) as compression_rate
-            FROM assets_enriched
-            GROUP BY asset_type
-            ORDER BY requests DESC
-        """
-        breakdown_res = runner.execute(breakdown_q).fetchall()
-        results["asset_type_breakdown"] = [
-            {
-                "asset_type": r[0],
-                "requests": int(r[1] or 0),
-                "egress_bytes": int(r[2] or 0),
-                "cache_hit_ratio": float(r[3] or 0.0),
-                "compression_rate": float(r[4] or 0.0),
-            }
-            for r in breakdown_res
-        ]
-
-        # 2. Cache Performance
-        cache_q = f"""
-            {cte_base}
+        # 1-3 Combined: Asset Type Breakdown, Cache Performance, and Compression Performance
+        dims_q = f"""
             SELECT
                 asset_type,
                 cache as cache_status,
-                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
-                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as bytes
-            FROM assets_enriched
-            GROUP BY asset_type, cache
-            ORDER BY asset_type, requests DESC
-        """
-        cache_res = runner.execute(cache_q).fetchall()
-        results["cache_performance"] = [
-            {
-                "asset_type": r[0],
-                "cache_status": r[1],
-                "requests": int(r[2] or 0),
-                "bytes": int(r[3] or 0),
-            }
-            for r in cache_res
-        ]
-
-        # 3. Compression Performance
-        comp_q = f"""
-            {cte_base}
-            SELECT
-                asset_type,
                 CASE
                     WHEN LOWER(content_encoding) LIKE '%br%' THEN 'br'
                     WHEN LOWER(content_encoding) LIKE '%gzip%' THEN 'gzip'
                     WHEN content_encoding != '' THEN content_encoding
                     ELSE 'uncompressed'
-                END as content_encoding,
+                END as content_encoding_norm,
+                is_compressed,
+                is_compressible,
                 CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
                 CAST({sum_or_zero("sum_bytes")} AS BIGINT) as bytes
-            FROM assets_enriched
-            GROUP BY asset_type, 2
-            ORDER BY asset_type, requests DESC
+            FROM "{temp_table}"
+            GROUP BY 1, 2, 3, 4, 5
         """
-        comp_res = runner.execute(comp_q).fetchall()
-        results["compression_performance"] = [
-            {
-                "asset_type": r[0],
-                "content_encoding": r[1],
-                "requests": int(r[2] or 0),
-                "bytes": int(r[3] or 0),
-            }
-            for r in comp_res
-        ]
+        dim_rows = runner.execute(dims_q).fetchall()
+        (
+            results["asset_type_breakdown"],
+            results["cache_performance"],
+            results["compression_performance"],
+        ) = compute_summary_from_dims(dim_rows)
 
-        # 4. Large Uncompressed Assets
-        large_q = f"""
-            {cte_base}
-            SELECT
-                url,
-                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
-                SUM(sum_bytes) * 1.0 / NULLIF(SUM(req_cnt), 0) as avg_bytes,
-                CAST({sum_or_zero("sum_bytes")} AS BIGINT) as total_bytes,
-                status
-            FROM assets_enriched
-            WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-            GROUP BY url, status
-            ORDER BY total_bytes DESC
-            LIMIT 20
+        # 4-5 Combined: Large Uncompressed Assets + Low-TTL Cache Hotspots
+        hotspots_q = f"""
+            WITH large_top AS (
+                SELECT
+                    'large' AS kind,
+                    url,
+                    CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
+                    SUM(sum_bytes) * 1.0 / NULLIF(SUM(req_cnt), 0) as metric_float,
+                    CAST({sum_or_zero("sum_bytes")} AS BIGINT) as total_bytes,
+                    status,
+                    CAST(NULL AS VARCHAR) as asset_type
+                FROM "{temp_table}"
+                WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
+                GROUP BY url, status
+                ORDER BY total_bytes DESC
+                LIMIT 20
+            ),
+            low_ttl_top AS (
+                SELECT
+                    'low_ttl' AS kind,
+                    url,
+                    CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
+                    SUM(sum_ttl) * 1.0 / NULLIF(SUM(cnt_ttl), 0) as metric_float,
+                    CAST(0 AS BIGINT) as total_bytes,
+                    CAST(0 AS INTEGER) as status,
+                    asset_type
+                FROM "{temp_table}"
+                WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
+                GROUP BY url, asset_type
+                ORDER BY requests DESC
+                LIMIT 20
+            )
+            SELECT * FROM large_top
+            UNION ALL
+            SELECT * FROM low_ttl_top
         """
-        large_res = runner.execute(large_q).fetchall()
-        results["large_uncompressed_assets"] = [
-            {
-                "url": r[0],
-                "requests": int(r[1] or 0),
-                "avg_bytes": float(r[2] or 0.0),
-                "total_bytes": int(r[3] or 0),
-                "status": r[4],
-            }
-            for r in large_res
-        ]
-
-        # 5. Low-TTL Cache Hotspots (Origin Misses)
-        low_ttl_q = f"""
-            {cte_base}
-            SELECT
-                url,
-                CAST({sum_or_zero("req_cnt")} AS BIGINT) as requests,
-                SUM(sum_ttl) * 1.0 / NULLIF(SUM(cnt_ttl), 0) as avg_ttl,
-                asset_type
-            FROM assets_enriched
-            WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
-            GROUP BY url, asset_type
-            ORDER BY requests DESC
-            LIMIT 20
-        """
-        low_ttl_res = runner.execute(low_ttl_q).fetchall()
-        results["low_ttl_assets"] = [
-            {
-                "url": r[0],
-                "requests": int(r[1] or 0),
-                "avg_ttl": float(r[2] or 0.0),
-                "asset_type": r[3],
-            }
-            for r in low_ttl_res
-        ]
+        hotspot_rows = runner.execute(hotspots_q).fetchall()
+        large_uncompressed_assets = []
+        low_ttl_assets = []
+        for kind, url, reqs, metric_float, total_bytes, status, asset_type in hotspot_rows:
+            if kind == "large":
+                large_uncompressed_assets.append(
+                    {
+                        "url": url,
+                        "requests": int(reqs or 0),
+                        "avg_bytes": float(metric_float or 0.0),
+                        "total_bytes": int(total_bytes or 0),
+                        "status": status,
+                    }
+                )
+            elif kind == "low_ttl":
+                low_ttl_assets.append(
+                    {
+                        "url": url,
+                        "requests": int(reqs or 0),
+                        "avg_ttl": float(metric_float or 0.0),
+                        "asset_type": asset_type,
+                    }
+                )
+        results["large_uncompressed_assets"] = large_uncompressed_assets
+        results["low_ttl_assets"] = low_ttl_assets
 
         timer.mark("queries_execution", _t)
 
@@ -330,6 +305,6 @@ def get_assets_aggregates(
 
     results.update(runner.telemetry())
     results["section_timings"] = section_timings
-    if cache_key is not None:
+    if cache_key is not None and not missing_fields and results["asset_type_breakdown"]:
         _memo.put(cache_key, results, strip=("section_timings",))
     return results

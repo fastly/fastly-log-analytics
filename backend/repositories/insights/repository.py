@@ -500,12 +500,78 @@ def _coalesced_ip_security_aggregates(
     }
 
 
+def _build_insights_cache_key(
+    source_name: str,
+    window_hours: float = 24,
+    baseline_hours: float = 168,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+    mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    filters: dict | None = None,
+) -> str:
+    from backend.repositories.utils.response_cache import bucket_time_to_minute
+
+    if clamp_cache_key is not None:
+        key_clamp = clamp_cache_key
+    elif clamp_start or clamp_end:
+        key_clamp = f"{bucket_time_to_minute(clamp_start) or ''}:{bucket_time_to_minute(clamp_end) or ''}"
+    else:
+        key_clamp = ""
+    filter_key_part = ""
+    if filters:
+        from backend.repositories.utils.filters import filter_spec_attr
+
+        f_items = []
+        for k in sorted(filters.keys()):
+            spec = filters[k]
+            mode = filter_spec_attr(spec, "mode") or "include"
+            vals = filter_spec_attr(spec, "values") or []
+            if vals:
+                f_items.append(f"{k}:{mode}:{','.join(str(v) for v in vals)}")
+        if f_items:
+            filter_key_part = ":" + "|".join(f_items)
+    return f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}{filter_key_part}"
+
+
+def check_insights_cache(
+    src: dict,
+    window_hours: float = 24,
+    baseline_hours: float = 168,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+    mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
+    filters: dict | None = None,
+) -> dict | None:
+    """Fast pre-connection check for a cached insights payload."""
+    if INSIGHTS_CACHE_TTL <= 0 or force_refresh:
+        return None
+    cache_key = _build_insights_cache_key(
+        src["name"],
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        filters=filters,
+    )
+    with _insights_cache_lock:
+        entry = _insights_cache.get(cache_key)
+    if entry is not None:
+        cached = entry[1].copy()
+        cached["is_cached"] = True
+        return cached
+    return None
+
+
 def get_insights(
     con: duckdb.DuckDBPyConnection,
     src: dict,
-    window_hours: float,
-    baseline_hours: float,
-    *,
+    window_hours: float = 24,
+    baseline_hours: float = 168,
     service_id: str | None = None,
     clamp_start: str | None = None,
     clamp_end: str | None = None,
@@ -513,7 +579,7 @@ def get_insights(
     clamp_cache_key: str | None = None,
     force_refresh: bool = False,
     filters: dict | None = None,
-    max_workers: int = 4,
+    max_workers: int = 8,
 ) -> dict:
     """Compute the insight cards for ``src`` over the window/baseline ranges.
 
@@ -592,26 +658,16 @@ def get_insights(
     #                            overwrites the admin entry).
     #   - neither              → "" (the admin / prewarmer unclamped shape).
     # ``mask_ips`` stays in the key so masked and unmasked never share.
-    if clamp_cache_key is not None:
-        key_clamp = clamp_cache_key
-    elif clamp_start or clamp_end:
-        key_clamp = f"{clamp_start or ''}:{clamp_end or ''}"
-    else:
-        key_clamp = ""
-    filter_key_part = ""
-    if filters:
-        from backend.repositories.utils.filters import filter_spec_attr
-
-        f_items = []
-        for k in sorted(filters.keys()):
-            spec = filters[k]
-            mode = filter_spec_attr(spec, "mode") or "include"
-            vals = filter_spec_attr(spec, "values") or []
-            if vals:
-                f_items.append(f"{k}:{mode}:{','.join(str(v) for v in vals)}")
-        if f_items:
-            filter_key_part = ":" + "|".join(f_items)
-    cache_key = f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}{filter_key_part}"
+    cache_key = _build_insights_cache_key(
+        source_name,
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        filters=filters,
+    )
     if INSIGHTS_CACHE_TTL > 0 and not force_refresh:
         with _insights_cache_lock:
             entry = _insights_cache.get(cache_key)
@@ -722,7 +778,16 @@ def get_insights(
                 cleaned = cleaned[6:].strip()
             if cleaned and cleaned != "1=1":
                 extra_filter_sql = f" AND ({cleaned})"
-    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){extra_filter_sql}"
+    pruning_clauses: list[str] = []
+    if "dt" in actual_cols:
+        pruning_clauses.append(f"dt >= '{baseline_start.strftime('%Y-%m-%d')}' AND dt <= '{now.strftime('%Y-%m-%d')}'")
+    if "timestamp_hour" in actual_cols:
+        pruning_clauses.append(
+            f"timestamp_hour >= '{baseline_start.strftime('%Y-%m-%d-%H')}' AND timestamp_hour <= '{now.strftime('%Y-%m-%d-%H')}'"
+        )
+    pruning_sql = (" AND " + " AND ".join(pruning_clauses)) if pruning_clauses else ""
+
+    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){pruning_sql}{extra_filter_sql}"
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
@@ -732,9 +797,15 @@ def get_insights(
     # ip-security aggregate scans instead of sequentially before them.
 
     try:
-        # Available history
+        # Available history + window total in a single scan over the scratch table
+        w_total = 0
         try:
-            earliest_ts = runner.execute(f"SELECT min(timestamp) FROM {temp_table}").fetchone()[0]
+            row_stats = runner.execute(
+                f"SELECT min(timestamp), count(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM {temp_table}",
+                [window_start_s],
+            ).fetchone()
+            earliest_ts: Any = row_stats[0] if row_stats else None
+            w_total = int(row_stats[1] or 0) if row_stats else 0
             if earliest_ts:
                 if isinstance(earliest_ts, str):
                     from backend.utils.date_utils import parse_iso_utc
@@ -756,6 +827,12 @@ def get_insights(
                 available_history_hours = 0.0
         except Exception:
             available_history_hours = 0.0
+            try:
+                w_total = runner.execute(
+                    f"SELECT count(*) FROM {temp_table} WHERE timestamp >= CAST(? AS TIMESTAMPTZ)", [window_start_s]
+                ).fetchone()[0]
+            except Exception:
+                w_total = 0
 
         # Insight definitions — Phase 7 caller migration. The new
         # field_registry re-exports INSIGHT_DEFINITIONS verbatim (same list
@@ -787,13 +864,6 @@ def get_insights(
                     "items": [],
                 }
             return None
-
-        try:
-            w_total = runner.execute(
-                f"SELECT count(*) FROM {temp_table} WHERE timestamp >= CAST(? AS TIMESTAMPTZ)", [window_start_s]
-            ).fetchone()[0]
-        except Exception:
-            w_total = 0
 
         table_name = temp_table
 

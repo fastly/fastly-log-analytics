@@ -10,7 +10,12 @@ from backend.high_scale._projection_utils import range_value
 from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
+from backend.repositories.utils.response_cache import ResponseMemo, bucket_time_to_minute, digest_cache_key
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import safe_iso
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_CacheRegistry.register("high_scale.sessions._response_cache", _memo.cache)
 
 _DEFAULT_MIN_REQS_FLAG = 1000
 _DEFAULT_MIN_4XX_PCT_FLAG = 20.0
@@ -39,7 +44,7 @@ _HELPER_COLUMNS = (
 _DETAIL_LIMIT = 500
 
 _SESSIONS_CTE = """
-    WITH base AS (
+    WITH raw_events AS (
         SELECT
             client_ip AS ip,
             custom_fields['ja4'] AS ja4,
@@ -57,41 +62,63 @@ _SESSIONS_CTE = """
         FROM request_facts
         WHERE {where}
     ),
+    base AS (
+        SELECT
+            ip,
+            ja4,
+            toStartOfMinute(ts) AS bucket_ts,
+            min(ts) AS min_ts,
+            max(ts) AS max_ts,
+            count() AS req_count,
+            min(asn) AS asn,
+            min(country) AS country,
+            uniqState(url) AS url_state,
+            min(ua) AS ua,
+            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
+            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
+            sum(resp_bytes) AS total_bytes,
+            medianState(tcp_rtt) AS rtt_state,
+            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
+            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
+            max(edge_sid) AS edge_sid,
+            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+        FROM raw_events
+        GROUP BY ip, ja4, bucket_ts
+    ),
     gaps AS (
         SELECT
             *,
-            dateDiff('second', lagInFrame(ts) OVER (PARTITION BY ip, ja4 ORDER BY ts), ts) AS gap
+            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
         FROM base
-    ),
-    marks AS (
-        SELECT *, if(gap IS NULL OR gap > 1800, 1, 0) AS is_new FROM gaps
     ),
     sessions_raw AS (
         SELECT
             *,
-            sum(is_new) OVER (PARTITION BY ip, ja4 ORDER BY ts
-                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
-        FROM marks
+            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
+                PARTITION BY ip, ja4 ORDER BY min_ts
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS sid
+        FROM gaps
     ),
     sessions_agg AS (
         SELECT
             ip,
             ja4,
-            min(ts) AS session_start,
-            max(ts) AS session_end,
-            count() AS req_count,
+            min(min_ts) AS session_start,
+            max(max_ts) AS session_end,
+            sum(req_count) AS req_count,
             min(asn) AS asn,
             min(country) AS country,
-            count(DISTINCT url) AS unique_urls,
+            uniqMerge(url_state) AS unique_urls,
             min(ua) AS ua,
-            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
-            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
-            sum(resp_bytes) AS total_bytes,
-            median(tcp_rtt) / 1000.0 AS median_rtt_ms,
-            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
-            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
+            sum(reqs_4xx) AS reqs_4xx,
+            sum(reqs_5xx) AS reqs_5xx,
+            sum(total_bytes) AS total_bytes,
+            medianMerge(rtt_state) / 1000.0 AS median_rtt_ms,
+            sum(edge_count) AS edge_count,
+            sum(shield_count) AS shield_count,
             max(edge_sid) AS edge_sid,
-            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs,
+            sum(streaming_reqs) AS streaming_reqs,
             sid
         FROM sessions_raw
         GROUP BY ip, ja4, sid
@@ -163,6 +190,28 @@ def sessions_endpoint(
     cte = _SESSIONS_CTE.format(where=where)
     sort_by = req.sort_by if req.sort_by in _SORTABLE else "session_start"
     sort_dir = "ASC" if str(req.sort_dir).lower() == "asc" else "DESC"
+    memo_key = digest_cache_key(
+        {
+            "cid": id(service.client),
+            "s": bucket_time_to_minute(start_time) if start_time else start_dt.strftime("%Y-%m-%dT%H:%M"),
+            "e": bucket_time_to_minute(end_time) if end_time else end_dt.strftime("%Y-%m-%dT%H:%M"),
+            "p": req.page,
+            "l": req.limit,
+            "sb": sort_by,
+            "sd": sort_dir,
+            "mr": min_reqs_flag,
+            "m4": min_4xx_pct_flag,
+            "fo": bool(req.flagged_only),
+            "so": bool(req.streaming_only),
+            "fc": list(filter_clauses),
+            "fp": sorted((k, str(v)) for k, v in filter_params.items()),
+        },
+        {"service_id": service.service_id},
+    )
+    cached = _memo.get(memo_key)
+    if cached is not None:
+        return cached
+
     rows = service.client.execute(
         "/* sessions:page */ "
         + cte
@@ -205,7 +254,7 @@ def sessions_endpoint(
         sessions.append(session)
 
     asns = sorted({int(session["asn"]) for session in sessions if session.get("asn") is not None})
-    return {
+    result = {
         "sessions": sessions,
         "asn_names": _asn_label_map(service.service_id, asns) if asns else {},
         "total": total,
@@ -219,6 +268,8 @@ def sessions_endpoint(
         "min_reqs_flag": min_reqs_flag,
         "min_4xx_pct_flag": min_4xx_pct_flag,
     }
+    _memo.put(memo_key, result)
+    return result
 
 
 def sessions_detail(

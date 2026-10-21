@@ -972,6 +972,14 @@ async def rum_analytics(
         )
 
 
+from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+
+_live_events_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=15)
+_CacheRegistry.register("rum._live_events_cache", _live_events_cache)
+
+
 @router.get("/{service_id}/rum/live-events")
 async def rum_live_events(
     start_time: str | None = None,
@@ -1021,13 +1029,69 @@ async def rum_live_events(
 
     from backend.repositories.utils.filters import build_where_clause
 
-    params, where_sql = build_where_clause(start_time, end_time, parsed_filters)
-
     rum_source = rum_source_for(ctx.source)
+    rum_db_path = rum_source.get("duckdb_path")
+    db_mtime = 0
+    if rum_db_path:
+        try:
+            db_mtime = os.stat(rum_db_path).st_mtime_ns
+        except OSError:
+            db_mtime = 0
+
+    cache_key = digest_cache_key(
+        {
+            "svc": service_id,
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": filters or "",
+            "m": db_mtime,
+        },
+        rum_source,
+    )
+    cached_events = _live_events_cache.get(cache_key)
+    if cached_events:
+        return list(cached_events)
 
     try:
 
         def _get_live_events(con):
+            from backend.utils.date_utils import iso_z
+
+            actual_cols: list[str] | None = None
+            try:
+                desc = con.execute("SELECT * FROM client_vitals LIMIT 0").description
+                if desc:
+                    actual_cols = [d[0] for d in desc]
+            except Exception:
+                actual_cols = None
+
+            # Try a narrow 2-hour recent window first with partition pruning when window > 2h
+            s_dt = parse_iso_utc(start_time) if start_time else None
+            e_dt = parse_iso_utc(end_time) if end_time else None
+            if s_dt and e_dt and (e_dt - s_dt) > datetime.timedelta(hours=2):
+                narrow_start = iso_z(e_dt - datetime.timedelta(hours=2))
+                narrow_params, narrow_where = build_where_clause(
+                    narrow_start,
+                    end_time,
+                    parsed_filters,
+                    actual_cols=actual_cols,
+                    partition_pruning=True,
+                    exclude_invalid_ips=False,
+                )
+                narrow_rows = rum_repo.fetch_rum_live_events(
+                    con, where_sql=narrow_where, params=narrow_params, source=rum_source
+                )
+                if len(narrow_rows) >= 50:
+                    return narrow_rows
+
+            params, where_sql = build_where_clause(
+                start_time,
+                end_time,
+                parsed_filters,
+                actual_cols=actual_cols,
+                partition_pruning=True,
+                exclude_invalid_ips=False,
+            )
             return rum_repo.fetch_rum_live_events(con, where_sql=where_sql, params=params, source=rum_source)
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
@@ -1042,7 +1106,7 @@ async def rum_live_events(
             mval,
             mrating,
             browser,
-            os,
+            os_name,
             device,
             cid,
             req_id,
@@ -1078,11 +1142,11 @@ async def rum_live_events(
                     "path": path or "/",
                     "desc": desc,
                     "browser": browser or "Unknown",
-                    "os": os or "Unknown",
+                    "os": os_name or "Unknown",
                     "raw_log": {
                         "meta": {
                             "browser": {"name": browser or "Unknown"},
-                            "os": {"name": os or "Unknown"},
+                            "os": {"name": os_name or "Unknown"},
                             "device": {"type": device or "Unknown"},
                             "page": {"url": path or "/"},
                         },
@@ -1115,6 +1179,8 @@ async def rum_live_events(
                 }
             )
 
+        if events:
+            _live_events_cache[cache_key] = events
         return events
     except Exception as e:
         logger.error(f"[rum] Failed to fetch live events for {service_id}: {e}")

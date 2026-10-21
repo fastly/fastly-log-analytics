@@ -21,6 +21,15 @@ def _assets_aggregates_impl(
 ) -> AssetsAggregatesResponse:
     with process_context_scope("assets:aggregates"):
         start_time, end_time = ctx.resolve_window(req)
+        high_scale_service = ctx.high_scale
+        if high_scale_service is not None:
+            from backend.high_scale.assets import assets_aggregates as hs_assets_aggregates
+
+            return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
+
+        cached = repo.check_assets_cache(ctx.source, start_time, end_time, req.filters)
+        if cached is not None:
+            return AssetsAggregatesResponse.with_telemetry(**cached)
 
         def _run(con):
             return repo.get_assets_aggregates(

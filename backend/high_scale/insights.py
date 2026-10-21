@@ -40,12 +40,12 @@ from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc, safe_iso
 
-_MAX_WORKERS = 4
+_MAX_WORKERS = 12
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
 
-_INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
+_INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 
 
@@ -181,7 +181,14 @@ def insights_endpoint(
     baseline_hours = float(req.baseline_hours)
     req_filters = getattr(req, "filters", None)
     filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
-    key_clamp = clamp_cache_key if clamp_cache_key is not None else f"{clamp_start or ''}:{clamp_end or ''}"
+    from backend.repositories.utils.response_cache import bucket_time_to_minute
+
+    if clamp_cache_key is not None:
+        key_clamp = clamp_cache_key
+    elif clamp_start or clamp_end:
+        key_clamp = f"{bucket_time_to_minute(clamp_start) or ''}:{bucket_time_to_minute(clamp_end) or ''}"
+    else:
+        key_clamp = ""
     cache_key = (
         service.service_id,
         id(service.client),
@@ -217,12 +224,25 @@ def insights_endpoint(
     }
     in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
 
-    history = service.client.execute(
+    history_sql = (
         "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
         "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
-        f"FROM request_facts WHERE {scope} AND {in_range}",
-        params,
+        f"FROM request_facts WHERE {scope} AND {in_range}"
     )
+    sample_sql = (
+        "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
+        f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
+        f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
+    )
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta") as meta_pool:
+        fut_history = meta_pool.submit(
+            contextvars.copy_context().run, lambda: service.client.execute(history_sql, params)
+        )
+        fut_sample = meta_pool.submit(
+            contextvars.copy_context().run, lambda: service.client.execute(sample_sql, params)
+        )
+        history = fut_history.result()
+        sample = fut_sample.result()
     earliest = history[0].get("earliest") if history else None
     window_total = int(history[0].get("window_total") or 0) if history else 0
     earliest_dt = parse_iso_utc(earliest) if isinstance(earliest, str) else earliest
@@ -231,13 +251,6 @@ def insights_endpoint(
         history_hours = (now - earliest_dt).total_seconds() / 3600.0
     else:
         history_hours = 0.0
-
-    sample = service.client.execute(
-        "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
-        f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
-        f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})",
-        params,
-    )
     present = set(_BASE_FIELDS)
     present.update(sample[0].get("fields") or [] if sample else [])
     fingerprint = _fingerprint_column(present) or "ja3"

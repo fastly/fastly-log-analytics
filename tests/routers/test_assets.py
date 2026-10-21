@@ -145,3 +145,76 @@ def test_assets_aggregates_with_populated_logs(client, in_memory_duckdb, test_se
     assert "resp_header_content_encoding" not in data["missing_fields"]
     assert "ttl" not in data["missing_fields"]
     assert data["missing_fields"] == []
+
+
+def test_assets_aggregates_high_scale():
+    """Verify high-scale assets_aggregates computes breakdown, hotspots, and memoizes warm hits."""
+    from types import SimpleNamespace
+
+    from backend.high_scale.assets import assets_aggregates
+    from backend.models.assets import AssetsRequest
+
+    calls: list[tuple[str, dict]] = []
+
+    class _FakeCHClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            calls.append((sql, params or {}))
+            if "assets:summary_dims" in sql:
+                return [
+                    {
+                        "asset_type": "JavaScript/CSS",
+                        "cache_status": "HIT",
+                        "content_encoding_norm": "br",
+                        "is_compressed": 1,
+                        "is_compressible": 1,
+                        "requests": 80,
+                        "bytes": 80000,
+                    },
+                    {
+                        "asset_type": "JavaScript/CSS",
+                        "cache_status": "MISS",
+                        "content_encoding_norm": "uncompressed",
+                        "is_compressed": 0,
+                        "is_compressible": 1,
+                        "requests": 20,
+                        "bytes": 2000000,
+                    },
+                ]
+            if "assets:hotspots" in sql:
+                return [
+                    {
+                        "kind": "large",
+                        "url": "/static/app.js",
+                        "requests": 20,
+                        "metric_float": 100000.0,
+                        "total_bytes": 2000000,
+                        "status": 200,
+                        "asset_type": "",
+                    },
+                    {
+                        "kind": "low_ttl",
+                        "url": "/static/app.js",
+                        "requests": 20,
+                        "metric_float": 0.0,
+                        "total_bytes": 0,
+                        "status": 0,
+                        "asset_type": "JavaScript/CSS",
+                    },
+                ]
+            return []
+
+    svc = SimpleNamespace(service_id="hs-svc-1", client=_FakeCHClient())
+    req = AssetsRequest(filters={}, start_time="2026-08-19T12:00:00Z", end_time="2026-08-19T13:00:00Z")
+    res1 = assets_aggregates(svc, req, "2026-08-19T12:00:00Z", "2026-08-19T13:00:00Z")  # type: ignore[arg-type]
+    assert len(res1.asset_type_breakdown) == 1
+    assert res1.asset_type_breakdown[0].asset_type == "JavaScript/CSS"
+    assert res1.asset_type_breakdown[0].cache_hit_ratio == 0.8
+    assert res1.asset_type_breakdown[0].compression_rate == 0.8
+    assert len(res1.large_uncompressed_assets) == 1
+    assert len(res1.low_ttl_assets) == 1
+    assert len(calls) == 2
+
+    # Warm call within the same minute hits ResponseMemo without querying ClickHouse
+    res2 = assets_aggregates(svc, req, "2026-08-19T12:00:30Z", "2026-08-19T13:00:45Z")  # type: ignore[arg-type]
+    assert res2.is_cached is True
+    assert len(calls) == 2

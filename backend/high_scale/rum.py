@@ -378,41 +378,49 @@ def rum_live_events(
     def scope(domain: str) -> str:
         return " AND ".join([*visible_fact_clauses(domain), *window, *filter_clauses])
 
-    # ClickHouse binds a trailing ORDER BY / LIMIT to the last SELECT only, so the union is wrapped.
+    # Push ORDER BY + LIMIT into each branch before sorting the union.
     query = f"""
     /* rum_live_events */
     SELECT * FROM (
-    SELECT
-        event_timestamp AS timestamp,
-        'pageview' AS type,
-        pathname,
-        metric_name,
-        metric_value,
-        metric_rating,
-        browser, os, device,
-        client_id AS cid,
-        toString(request_event_id) AS req_id,
-        '' AS error_message,
-        city, region, country, pop, tls, ttfb
-    FROM rum_vitals_facts
-    WHERE {scope("rum_vitals")}
+    SELECT * FROM (
+        SELECT
+            event_timestamp AS timestamp,
+            'pageview' AS type,
+            pathname,
+            metric_name,
+            metric_value,
+            metric_rating,
+            browser, os, device,
+            client_id AS cid,
+            toString(request_event_id) AS req_id,
+            '' AS error_message,
+            city, region, country, pop, tls, ttfb
+        FROM rum_vitals_facts
+        WHERE {scope("rum_vitals")}
+        ORDER BY event_timestamp DESC
+        LIMIT {{limit:UInt32}}
+    )
 
     UNION ALL
 
-    SELECT
-        event_timestamp AS timestamp,
-        'error' AS type,
-        pathname,
-        '' AS metric_name,
-        CAST(NULL AS Nullable(Float64)) AS metric_value,
-        '' AS metric_rating,
-        browser, os, device,
-        client_id AS cid,
-        toString(request_event_id) AS req_id,
-        error_message,
-        city, region, country, pop, tls, ttfb
-    FROM rum_error_facts
-    WHERE {scope("rum_errors")}
+    SELECT * FROM (
+        SELECT
+            event_timestamp AS timestamp,
+            'error' AS type,
+            pathname,
+            '' AS metric_name,
+            CAST(NULL AS Nullable(Float64)) AS metric_value,
+            '' AS metric_rating,
+            browser, os, device,
+            client_id AS cid,
+            toString(request_event_id) AS req_id,
+            error_message,
+            city, region, country, pop, tls, ttfb
+        FROM rum_error_facts
+        WHERE {scope("rum_errors")}
+        ORDER BY event_timestamp DESC
+        LIMIT {{limit:UInt32}}
+    )
     )
     ORDER BY timestamp DESC
     LIMIT {{limit:UInt32}}

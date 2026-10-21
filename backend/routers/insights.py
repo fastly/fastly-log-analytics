@@ -101,6 +101,20 @@ async def insights_endpoint(
                 force_refresh=force_refresh,
             )
 
+    cached = repo.check_insights_cache(
+        src=ctx.source,
+        window_hours=req.window_size_hrs,
+        baseline_hours=req.baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        force_refresh=force_refresh,
+        filters=req.filters,
+    )
+    if cached is not None:
+        return cached
+
     await ctx.prewarm_con()
     async with sem:
 
