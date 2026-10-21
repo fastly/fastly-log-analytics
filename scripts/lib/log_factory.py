@@ -845,7 +845,7 @@ _CMCD_TOP_BITRATE_KBPS = _CMCD_BITRATES_KBPS[-1]
 _CMCD_TITLES = ["news-live", "sports-live", "movie-001", "movie-002", "series-s1e1", "series-s1e2", "kids-001"]
 _CMCD_OBJECT_TYPES = ["v", "v", "v", "v", "a", "m", "i"]
 _CMCD_REBUFFER_RATE = 0.04
-_CMCD_V2_RATE = 0.5
+_CMCD_V2_RATE = 0.1
 _CMCD_SESSION_POOL_SIZE = 300
 _BOT_UA_RATE = 0.15
 
