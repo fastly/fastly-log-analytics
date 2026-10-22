@@ -408,65 +408,31 @@ export function getSecurityContent(id: string): InsightContent | null {
 
     case 'crawler_disparity':
       return {
-        title: 'Crawler Referral & Bandwidth Disparity',
+        title: 'Bot & Crawler Referral & Bandwidth Disparity',
         icon: <Bot className="h-5 w-5 text-primary" />,
         fields: ['ua', 'referer', 'ip', 'resp_bytes', 'timestamp'],
         description: (
           <div className="space-y-4">
             <p>
-              Identifies search, AI, and SEO crawlers performing intensive, high-volume scraping and bandwidth consumption while driving virtually zero human referrals or organic traffic back to your platform.
+              Identifies bots, scrapers, and search/AI crawlers consuming high request volume and egress bandwidth (<code>resp_bytes</code>) while driving negligible human referral traffic back to your platform.
             </p>
             <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
               <li className="flex gap-3">
                 <Bot className="h-5 w-5 shrink-0 text-blue-500" />
                 <span>
-                  <strong>Requests &amp; Bandwidth Cost:</strong> Automated crawlers and AI bots crawl your pages at a high rate, consuming significant egress bandwidth (<code>resp_bytes</code>) and origin resources.
+                  <strong>Requests &amp; Bandwidth Cost:</strong> Automated crawlers, AI training scrapers, headless browsers, and programmatic HTTP clients consume significant egress bandwidth (<code>resp_bytes</code>) and origin resources.
                 </span>
               </li>
               <li className="flex gap-3">
                 <Search className="h-5 w-5 shrink-0 text-yellow-500" />
                 <span>
-                  <strong>Negligible Referral Traffic:</strong> A genuine search or AI answer crawler drives actual user referral clicks (where User-Agent is human and HTTP referer or user-triggered agent matches the platform). If the crawls-to-referral or bytes-to-referral ratio is extremely high, the crawler is extracting content without returning organic value.
+                  <strong>Negligible Referral Traffic:</strong> Genuine search or AI answer engines drive human referral clicks (where User-Agent is human and HTTP <code>Referer</code> matches the platform domain). When crawls-per-referral or bytes-per-referral is high, the bot is extracting content without returning organic value.
                 </span>
               </li>
               <li className="flex gap-3">
                 <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
                 <span>
-                  <strong>Actionable Mitigation:</strong> Update your <code>robots.txt</code> to block or throttle aggressive crawler user-agents, or deploy rate-limiting and bandwidth-throttling rules at the Fastly CDN edge.
-                </span>
-              </li>
-            </ul>
-          </div>
-        )
-      }
-
-    case 'bot_bandwidth_disparity':
-      return {
-        title: 'Bot Bandwidth & Referral Disparity',
-        icon: <Bot className="h-5 w-5 text-primary" />,
-        fields: ['ua', 'referer', 'ip', 'resp_bytes', 'timestamp'],
-        description: (
-          <div className="space-y-4">
-            <p>
-              Measures total egress bandwidth (<code>resp_bytes</code>) and request volume across all bot families — including AI training scrapers, headless browsers, and programmatic HTTP clients — relative to the human referral traffic they send back.
-            </p>
-            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
-              <li className="flex gap-3">
-                <Activity className="h-5 w-5 shrink-0 text-blue-500" />
-                <span>
-                  <strong>Egress Bandwidth Attribution:</strong> Ranks bots by bandwidth consumed and share of total site egress, highlighting scrapers (`CCBot`, `Bytespider`, `GPTBot`, `ClaudeBot`, `PetalBot`, headless browsers) that drain megabytes or gigabytes with zero referrals.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
-                <span>
-                  <strong>Cost vs. Value:</strong> Compares each bot&apos;s bandwidth and request volume against unique human visitors referred from its domain so you can immediately distinguish high-value search engines from pure cost sinks.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
-                <span>
-                  <strong>Per-Bot Evidence:</strong> Click the magnifier on any flagged row to inspect total bandwidth, site bandwidth share, request count, referred human IPs, and cost-per-referral metrics.
+                  <strong>Actionable Mitigation:</strong> Click the magnifier on any flagged row to inspect total bandwidth, site egress share, request count, and referred human IPs, then throttle or challenge zero-referral scrapers at the Fastly CDN edge.
                 </span>
               </li>
             </ul>

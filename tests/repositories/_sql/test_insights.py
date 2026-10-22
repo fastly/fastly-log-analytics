@@ -64,7 +64,6 @@ def test_registry_sql_templates_match_module_constants():
         "origin_ip_failure": "ORIGIN_IP_FAILURE",
         "shield_path_degradation": "SHIELD_PATH_DEGRADATION",
         "crawler_disparity": "CRAWLER_DISPARITY",
-        "bot_bandwidth_disparity": "BOT_BANDWIDTH_DISPARITY",
         "stale_browser_version": "STALE_BROWSER_VERSION",
         "orphaned_deep_crawl": "ORPHANED_DEEP_CRAWL",
         "residential_fingerprint_dispersion": "RESIDENTIAL_FINGERPRINT_DISPERSION",
@@ -419,17 +418,9 @@ def test_crawler_disparity_renders():
     assert "crawler_traffic" in rendered
     assert "w_bytes" in rendered
     assert "bytes_per_referral" in rendered
+    assert "bandwidth_share_pct" in rendered
     assert rendered.count("?") == 4
     assert _placeholders(SQL.CRAWLER_DISPARITY) == ["table_name"]
-
-
-def test_bot_bandwidth_disparity_renders():
-    rendered = SQL.BOT_BANDWIDTH_DISPARITY.format(table_name="t_logs")
-    assert "bot_stats" in rendered
-    assert "referral_traffic" in rendered
-    assert "bandwidth_share_pct" in rendered
-    assert rendered.count("?") == 3
-    assert _placeholders(SQL.BOT_BANDWIDTH_DISPARITY) == ["table_name"]
 
 
 def test_no_hardcoded_bot_brands_in_disparity_or_efficiency_sql():
@@ -452,7 +443,6 @@ def test_no_hardcoded_bot_brands_in_disparity_or_efficiency_sql():
     ]
     for name, template in [
         ("CRAWLER_DISPARITY", SQL.CRAWLER_DISPARITY),
-        ("BOT_BANDWIDTH_DISPARITY", SQL.BOT_BANDWIDTH_DISPARITY),
         ("BOT_EFFICIENCY", sec_sql.BOT_EFFICIENCY),
     ]:
         lower_sql = template.lower()

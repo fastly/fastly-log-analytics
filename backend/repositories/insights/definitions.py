@@ -1784,15 +1784,16 @@ registry.register(
 )
 
 
-# ── 46. Crawler Referral & Bandwidth Disparity ──────────────────────────────
+# ── 46. Bot & Crawler Referral & Bandwidth Disparity ─────────────────────────
 
 
 def crawler_disparity_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [raw_tok, w_crawls, w_referrals, w_bytes, crawls_per_referral,
-    #              baseline_crawls_per_referral, bytes_per_referral, baseline_bytes_per_referral]
+    #              baseline_crawls_per_referral, bytes_per_referral,
+    #              baseline_bytes_per_referral, bandwidth_share_pct]
     from backend.utils.bot_sources import resolve_bot_display_name
 
-    brand = resolve_bot_display_name(row[0], default="Other Crawler")
+    brand = resolve_bot_display_name(row[0], default="Other Bot")
     w_crawls = int(row[1] or 0)
     w_referrals = int(row[2] or 0)
     if len(row) >= 8:
@@ -1801,12 +1802,14 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
         b_c_per_r = float(row[5] or 0)
         bytes_per_r = float(row[6] or 0)
         b_bytes_per_r = float(row[7] or 0)
+        bw_pct = round(float(row[8] or 0), 2) if len(row) >= 9 else 0.0
     else:
         w_bytes = 0
         c_per_r = float(row[3] or 0)
         b_c_per_r = float(row[4] or 0)
         bytes_per_r = 0.0
         b_bytes_per_r = 0.0
+        bw_pct = 0.0
     return {
         "label": brand,
         "current_val": c_per_r,
@@ -1816,12 +1819,15 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
             "crawls": w_crawls,
             "referrals": w_referrals,
             "w_bytes": w_bytes,
+            "bandwidth_share_pct": bw_pct,
             "crawls_per_referral": c_per_r,
             "baseline_crawls_per_referral": b_c_per_r,
             "bytes_per_referral": bytes_per_r,
             "baseline_bytes_per_referral": b_bytes_per_r,
         },
-        "severity": "critical" if c_per_r >= 10000 or w_bytes >= 500_000_000 else "warning",
+        "severity": "critical"
+        if c_per_r >= 5000 or w_bytes >= 500_000_000 or (bw_pct >= 10.0 and w_referrals == 0)
+        else "warning",
     }
 
 
@@ -1829,58 +1835,11 @@ registry.register(
     InsightDefinition(
         id="crawler_disparity",
         category=InsightCategory.security,
-        title="Crawler Referral & Bandwidth Disparity",
-        description="Identifies search, AI, and SEO crawlers performing high-volume scraping and bandwidth consumption while driving negligible human referral traffic back to the platform",
+        title="Bot & Crawler Referral & Bandwidth Disparity",
+        description="Identifies bots, scrapers, and search/AI crawlers consuming high request volume and egress bandwidth while driving negligible human referral traffic back to the platform",
         sql_template=SQL.CRAWLER_DISPARITY,
         required_fields=["ua", "referer", "ip", "resp_bytes", "timestamp"],
         row_processor=crawler_disparity_processor,
-    )
-)
-
-
-# ── 46b. Bot Bandwidth & Referral Disparity ──────────────────────────────────
-
-
-def bot_bandwidth_disparity_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [raw_tok, w_reqs, w_bytes, bandwidth_share_pct, w_referrals,
-    #              requests_per_referral, bytes_per_referral]
-    from backend.utils.bot_sources import resolve_bot_display_name
-
-    family = resolve_bot_display_name(row[0], default="Other Bot")
-    w_reqs = int(row[1] or 0)
-    w_bytes = int(row[2] or 0)
-    bw_pct = round(float(row[3] or 0), 2)
-    w_referrals = int(row[4] or 0)
-    reqs_per_r = round(float(row[5] or 0), 1)
-    bytes_per_r = round(float(row[6] or 0), 1)
-    mb_consumed = round(w_bytes / (1024 * 1024), 2)
-    return {
-        "label": family,
-        "current_val": mb_consumed,
-        "baseline_val": w_referrals,
-        "baseline_label": "referrals",
-        "unit": "MB",
-        "meta": {
-            "requests": w_reqs,
-            "w_bytes": w_bytes,
-            "bandwidth_share_pct": bw_pct,
-            "referrals": w_referrals,
-            "requests_per_referral": reqs_per_r,
-            "bytes_per_referral": bytes_per_r,
-        },
-        "severity": "critical" if (bw_pct >= 10.0 and w_referrals == 0) or reqs_per_r >= 5000 else "warning",
-    }
-
-
-registry.register(
-    InsightDefinition(
-        id="bot_bandwidth_disparity",
-        category=InsightCategory.security,
-        title="Bot Bandwidth & Referral Disparity",
-        description="Identifies all bots and scrapers (AI, search, and non-referring automated tools) consuming disproportionate egress bandwidth and request volume relative to human referral traffic",
-        sql_template=SQL.BOT_BANDWIDTH_DISPARITY,
-        required_fields=["ua", "referer", "ip", "resp_bytes", "timestamp"],
-        row_processor=bot_bandwidth_disparity_processor,
     )
 )
 

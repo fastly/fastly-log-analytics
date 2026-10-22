@@ -84,11 +84,11 @@ def test_crawler_matching_preserves_referrals(
         ],
     )
     rows = con.execute(SQL.CRAWLER_DISPARITY.format(table_name="ua_logs"), [boundary] * 4).fetchall()
-    assert rows == [(raw_tok, 1000, 1, 2048000, 1000.0, 10.0, 2048000.0, 10240.0)]
+    assert rows == [(raw_tok, 1000, 1, 2048000, 1000.0, 10.0, 2048000.0, 10240.0, 99.83)]
     assert resolve_bot_display_name(rows[0][0]) == display_name
 
 
-def test_bot_bandwidth_disparity_sql(
+def test_crawler_disparity_includes_non_referring_bots_and_bandwidth_share(
     in_memory_duckdb: duckdb.DuckDBPyConnection,
 ) -> None:
     from backend.utils.bot_sources import resolve_bot_display_name
@@ -106,16 +106,26 @@ def test_bot_bandwidth_disparity_sql(
         "INSERT INTO ua_logs SELECT ?, '203.0.113.10', 'Mozilla/5.0 Safari/537.36', 'https://example.com', 10000 FROM range(500)",
         [boundary],
     )
-    rows = con.execute(SQL.BOT_BANDWIDTH_DISPARITY.format(table_name="ua_logs"), [boundary] * 3).fetchall()
+    rows = con.execute(SQL.CRAWLER_DISPARITY.format(table_name="ua_logs"), [boundary] * 4).fetchall()
     assert len(rows) == 1
-    bot_tok, w_requests, w_bytes, bw_share_pct, w_referrals, req_per_ref, bytes_per_ref = rows[0]
+    (
+        bot_tok,
+        w_crawls,
+        w_referrals,
+        w_bytes,
+        crawls_per_ref,
+        _base_crawls_per_ref,
+        bytes_per_ref,
+        _base_bytes_per_ref,
+        bw_share_pct,
+    ) = rows[0]
     assert bot_tok == "ccbot"
     assert resolve_bot_display_name(bot_tok) == "Commoncrawl Crawler"
-    assert w_requests == 100
+    assert w_crawls == 100
     assert w_bytes == 5_000_000
     assert round(bw_share_pct, 1) == 50.0
     assert w_referrals == 0
-    assert req_per_ref == 100.0
+    assert crawls_per_ref == 100.0
     assert bytes_per_ref == 5_000_000.0
 
 
@@ -288,26 +298,23 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
     res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
     by_id = {i["id"]: i for i in res["insights"]}
 
-    # Verify crawler_disparity
+    # Verify unified crawler_disparity (no duplicate bot_bandwidth_disparity card)
+    assert "bot_bandwidth_disparity" not in by_id
     assert "crawler_disparity" in by_id
     cd = by_id["crawler_disparity"]
+    assert cd["title"] == "Bot & Crawler Referral & Bandwidth Disparity"
     assert cd["category"] == "security"
-    assert len(cd["items"]) > 0
-    assert cd["items"][0]["label"] == "Anthropic Crawler Search"
-    assert cd["items"][0]["meta"]["crawls"] == 150
-    assert cd["items"][0]["meta"]["w_bytes"] == 3_000_000
-    assert cd["items"][0]["meta"]["bytes_per_referral"] == 3_000_000.0
-
-    # Verify bot_bandwidth_disparity
-    assert "bot_bandwidth_disparity" in by_id
-    bbd = by_id["bot_bandwidth_disparity"]
-    assert bbd["category"] == "security"
-    assert len(bbd["items"]) >= 2
-    bbd_labels = {item["label"]: item for item in bbd["items"]}
-    assert "Commoncrawl Crawler" in bbd_labels
-    assert bbd_labels["Commoncrawl Crawler"]["meta"]["requests"] == 60
-    assert bbd_labels["Commoncrawl Crawler"]["meta"]["w_bytes"] == 3_000_000
-    assert bbd_labels["Commoncrawl Crawler"]["meta"]["referrals"] == 0
+    assert len(cd["items"]) >= 2
+    cd_labels = {item["label"]: item for item in cd["items"]}
+    assert "Anthropic Crawler Search" in cd_labels
+    assert cd_labels["Anthropic Crawler Search"]["meta"]["crawls"] == 150
+    assert cd_labels["Anthropic Crawler Search"]["meta"]["w_bytes"] == 3_000_000
+    assert cd_labels["Anthropic Crawler Search"]["meta"]["bytes_per_referral"] == 3_000_000.0
+    assert cd_labels["Anthropic Crawler Search"]["meta"]["bandwidth_share_pct"] > 0
+    assert "Commoncrawl Crawler" in cd_labels
+    assert cd_labels["Commoncrawl Crawler"]["meta"]["crawls"] == 60
+    assert cd_labels["Commoncrawl Crawler"]["meta"]["w_bytes"] == 3_000_000
+    assert cd_labels["Commoncrawl Crawler"]["meta"]["referrals"] == 0
 
     # Verify stale_browser_version
     assert "stale_browser_version" in by_id

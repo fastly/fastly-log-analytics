@@ -75,7 +75,6 @@ export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClic
             />
           )}
           {(insight.id === 'crawler_disparity' ||
-            insight.id === 'bot_bandwidth_disparity' ||
             insight.id === 'stale_browser_version' ||
             insight.id === 'orphaned_deep_crawl' ||
             insight.id === 'residential_fingerprint_dispersion') &&
@@ -89,9 +88,6 @@ export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClic
                   switch (insight.id) {
                     case 'crawler_disparity':
                       onBotFindingClick({ insightId: 'crawler_disparity', item: insight.items[index] })
-                      break
-                    case 'bot_bandwidth_disparity':
-                      onBotFindingClick({ insightId: 'bot_bandwidth_disparity', item: insight.items[index] })
                       break
                     case 'stale_browser_version':
                       onBotFindingClick({ insightId: 'stale_browser_version', item: insight.items[index] })

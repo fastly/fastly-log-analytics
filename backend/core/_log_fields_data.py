@@ -1692,16 +1692,8 @@ INSIGHT_DEFINITIONS = [
     {
         "id": "crawler_disparity",
         "category": "security",
-        "title": "Crawler Referral & Bandwidth Disparity",
-        "description": "Identifies search, AI, and SEO crawlers performing high-volume scraping and bandwidth consumption while driving negligible human referral traffic back to the platform",
-        "required_fields": ["ua", "referer", "ip", "resp_bytes", "timestamp"],
-        "required_groups": ["A"],
-    },
-    {
-        "id": "bot_bandwidth_disparity",
-        "category": "security",
-        "title": "Bot Bandwidth & Referral Disparity",
-        "description": "Identifies all bots and scrapers (AI, search, and non-referring automated tools) consuming disproportionate egress bandwidth and request volume relative to human referral traffic",
+        "title": "Bot & Crawler Referral & Bandwidth Disparity",
+        "description": "Identifies bots, scrapers, and search/AI crawlers consuming high request volume and egress bandwidth while driving negligible human referral traffic back to the platform",
         "required_fields": ["ua", "referer", "ip", "resp_bytes", "timestamp"],
         "required_groups": ["A"],
     },

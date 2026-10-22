@@ -12,7 +12,6 @@ from backend.models.insight_meta import (
     AsnConcentrationMeta,
     AsnHostingShiftMeta,
     AsnMetroPerformanceMeta,
-    BotBandwidthDisparityMeta,
     BotnetGroupingMeta,
     CacheabilityRegressionMeta,
     CacheCollapseMeta,
@@ -301,10 +300,6 @@ class CrawlerDisparityInsightCard(InsightCardBase[CrawlerDisparityMeta]):
     id: Literal["crawler_disparity"]
 
 
-class BotBandwidthDisparityInsightCard(InsightCardBase[BotBandwidthDisparityMeta]):
-    id: Literal["bot_bandwidth_disparity"]
-
-
 class StaleBrowserVersionInsightCard(InsightCardBase[StaleBrowserVersionMeta]):
     id: Literal["stale_browser_version"]
 
@@ -372,7 +367,6 @@ InsightCard = Annotated[
     | SessionHarvestingInsightCard
     | TimeoutSplitInsightCard
     | CrawlerDisparityInsightCard
-    | BotBandwidthDisparityInsightCard
     | StaleBrowserVersionInsightCard
     | OrphanedDeepCrawlInsightCard
     | ResidentialFingerprintDispersionInsightCard

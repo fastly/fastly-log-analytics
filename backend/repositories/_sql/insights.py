@@ -1572,7 +1572,7 @@ CRAWLER_DISPARITY = """
                 l_ua,
                 regexp_extract(
                     l_ua,
-                    '([a-z0-9_.-]*(bot|crawler|spider|slurp|archiver|externalagent|extended|other|preview)[a-z0-9_.-]*)',
+                    '([a-z0-9_.-]*(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)',
                     1
                 ) AS raw_tok,
                 regexp_extract(l_ua, 'http[s]*://(www\\.)*([^/.:;\\s)]+)', 2) AS ua_dom,
@@ -1597,6 +1597,12 @@ CRAWLER_DISPARITY = """
                 ) AS stem
             FROM ua_extracted
         ),
+        site_win AS (
+            SELECT
+                GREATEST(CAST(COALESCE(SUM(COALESCE(resp_bytes, 0)), 0) AS BIGINT), 1) AS total_site_bytes
+            FROM {table_name}
+            WHERE timestamp >= CAST(? AS TIMESTAMPTZ)
+        ),
         crawler_win AS (
             SELECT
                 COALESCE(u.stem, u.raw_tok) AS bot_stem,
@@ -1609,7 +1615,7 @@ CRAWLER_DISPARITY = """
             WHERE t.timestamp >= CAST(? AS TIMESTAMPTZ)
               AND u.is_crawler
             GROUP BY COALESCE(u.stem, u.raw_tok)
-            HAVING w_crawls >= 100
+            HAVING w_crawls >= 50
         ),
         crawler_base AS (
             SELECT
@@ -1648,20 +1654,21 @@ CRAWLER_DISPARITY = """
         referred_raw AS (
             SELECT
                 t.ip,
-                t.timestamp,
+                (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w,
                 COALESCE(NULLIF(u.user_fetcher_stem, ''), r.ref_dom) AS ref_stem
             FROM {table_name} t
             JOIN ua_info u ON t.ua = u.ua
             LEFT JOIN ref_info r ON t.referer = r.referer
             WHERE u.is_human
               AND t.ip IS NOT NULL
+              AND t.timestamp IS NOT NULL
               AND EXISTS (SELECT 1 FROM crawler_traffic)
         ),
         referred_traffic AS (
             SELECT
                 c.bot_stem,
-                COUNT(DISTINCT rr.ip) FILTER (WHERE rr.timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_referrals,
-                COUNT(DISTINCT rr.ip) FILTER (WHERE rr.timestamp < CAST(? AS TIMESTAMPTZ)) AS b_referrals
+                COUNT(DISTINCT rr.ip) FILTER (WHERE rr.is_w) AS w_referrals,
+                COUNT(DISTINCT rr.ip) FILTER (WHERE NOT rr.is_w) AS b_referrals
             FROM crawler_traffic c
             JOIN referred_raw rr
               ON rr.ref_stem IS NOT NULL AND rr.ref_stem != ''
@@ -1687,124 +1694,19 @@ CRAWLER_DISPARITY = """
             c.w_crawls * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) AS crawls_per_referral,
             c.b_crawls * 1.0 / GREATEST(COALESCE(r.b_referrals, 0), 1) AS baseline_crawls_per_referral,
             c.w_bytes * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) AS bytes_per_referral,
-            c.b_bytes * 1.0 / GREATEST(COALESCE(r.b_referrals, 0), 1) AS baseline_bytes_per_referral
+            c.b_bytes * 1.0 / GREATEST(COALESCE(r.b_referrals, 0), 1) AS baseline_bytes_per_referral,
+            ROUND(c.w_bytes * 100.0 / s.total_site_bytes, 2) AS bandwidth_share_pct
         FROM crawler_traffic c
-        LEFT JOIN referred_traffic r ON c.bot_stem = r.bot_stem
-        WHERE c.w_crawls >= 100 AND (r.w_referrals IS NULL OR c.w_crawls * 1.0 / GREATEST(r.w_referrals, 1) >= 1000.0)
-        ORDER BY crawls_per_referral DESC LIMIT 10
-    """
-
-
-BOT_BANDWIDTH_DISPARITY = """
-        WITH ua_extracted AS (
-            SELECT
-                ua,
-                l_ua,
-                regexp_extract(
-                    l_ua,
-                    '([a-z0-9_.-]*(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)',
-                    1
-                ) AS raw_tok,
-                regexp_extract(l_ua, 'http[s]*://(www\\.)*([^/.:;\\s)]+)', 2) AS ua_dom,
-                regexp_extract(l_ua, '([a-z0-9]+)-(user|externalfetcher)', 1) AS user_fetcher_stem
-            FROM (SELECT DISTINCT ua, lower(ua) AS l_ua FROM {table_name} WHERE ua IS NOT NULL)
-        ),
-        ua_info AS (
-            SELECT
-                ua,
-                raw_tok,
-                ua_dom,
-                user_fetcher_stem,
-                (raw_tok != '') AS is_bot,
-                (raw_tok = '') AS is_human,
-                NULLIF(
-                    regexp_replace(
-                        raw_tok,
-                        '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
-                        ''
-                    ),
-                    ''
-                ) AS stem
-            FROM ua_extracted
-        ),
-        site_win AS (
-            SELECT
-                GREATEST(CAST(COALESCE(SUM(COALESCE(resp_bytes, 0)), 0) AS BIGINT), 1) AS total_site_bytes
-            FROM {table_name}
-            WHERE timestamp >= CAST(? AS TIMESTAMPTZ)
-        ),
-        bot_stats AS (
-            SELECT
-                COALESCE(u.stem, u.raw_tok) AS bot_stem,
-                MIN(u.raw_tok) AS raw_tok,
-                MAX(u.ua_dom) AS ua_dom,
-                COUNT(*) AS w_reqs,
-                CAST(COALESCE(SUM(COALESCE(t.resp_bytes, 0)), 0) AS BIGINT) AS w_bytes
-            FROM {table_name} t
-            JOIN ua_info u ON t.ua = u.ua
-            WHERE t.timestamp >= CAST(? AS TIMESTAMPTZ)
-              AND u.is_bot
-            GROUP BY COALESCE(u.stem, u.raw_tok)
-            HAVING COUNT(*) >= 50
-        ),
-        ref_info AS (
-            SELECT
-                referer,
-                NULLIF(regexp_extract(l_ref, 'http[s]*://(www\\.)*([^/.:;\\s]+)', 2), '') AS ref_dom
-            FROM (
-                SELECT DISTINCT referer, lower(referer) AS l_ref
-                FROM {table_name}
-                WHERE referer IS NOT NULL AND EXISTS (SELECT 1 FROM bot_stats)
-            )
-        ),
-        referred_raw AS (
-            SELECT
-                t.ip,
-                t.timestamp,
-                COALESCE(NULLIF(u.user_fetcher_stem, ''), r.ref_dom) AS ref_stem
-            FROM {table_name} t
-            JOIN ua_info u ON t.ua = u.ua
-            LEFT JOIN ref_info r ON t.referer = r.referer
-            WHERE u.is_human
-              AND t.ip IS NOT NULL
-              AND EXISTS (SELECT 1 FROM bot_stats)
-        ),
-        referral_traffic AS (
-            SELECT
-                b.bot_stem,
-                COUNT(DISTINCT rr.ip) AS w_referrals
-            FROM bot_stats b
-            JOIN referred_raw rr
-              ON rr.ref_stem IS NOT NULL AND rr.ref_stem != ''
-             AND (
-                 b.bot_stem = rr.ref_stem
-                 OR (
-                     length(regexp_replace(b.bot_stem, '[aeiou]', '', 'g')) >= 3
-                     AND regexp_replace(b.bot_stem, '[aeiou]', '', 'g') = regexp_replace(rr.ref_stem, '[aeiou]', '', 'g')
-                 )
-                 OR (
-                     length(b.bot_stem) >= 3 AND length(rr.ref_stem) >= 3
-                     AND (contains(rr.ref_stem, b.bot_stem) OR contains(b.bot_stem, rr.ref_stem))
-                 )
-                 OR (b.ua_dom != '' AND b.ua_dom = rr.ref_stem)
-             )
-            WHERE rr.timestamp >= CAST(? AS TIMESTAMPTZ)
-            GROUP BY b.bot_stem
-        )
-        SELECT
-            b.raw_tok AS label,
-            b.w_reqs,
-            b.w_bytes,
-            ROUND(b.w_bytes * 100.0 / s.total_site_bytes, 2) AS bandwidth_share_pct,
-            COALESCE(r.w_referrals, 0) AS w_referrals,
-            b.w_reqs * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) AS requests_per_referral,
-            b.w_bytes * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) AS bytes_per_referral
-        FROM bot_stats b
         CROSS JOIN site_win s
-        LEFT JOIN referral_traffic r ON b.bot_stem = r.bot_stem
-        WHERE b.w_reqs >= 50
-          AND (COALESCE(r.w_referrals, 0) = 0 OR b.w_reqs * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) >= 100.0 OR b.w_bytes * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) >= 1048576.0)
-        ORDER BY b.w_bytes DESC, b.w_reqs DESC LIMIT 10
+        LEFT JOIN referred_traffic r ON c.bot_stem = r.bot_stem
+        WHERE c.w_crawls >= 50
+          AND (
+              r.w_referrals IS NULL
+              OR r.w_referrals = 0
+              OR c.w_crawls * 1.0 / GREATEST(r.w_referrals, 1) >= 100.0
+              OR c.w_bytes * 1.0 / GREATEST(r.w_referrals, 1) >= 1048576.0
+          )
+        ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10
     """
 
 
@@ -2021,7 +1923,6 @@ __all__ = [
     "SESSION_HARVESTING",
     "TIMEOUT_SPLIT",
     "CRAWLER_DISPARITY",
-    "BOT_BANDWIDTH_DISPARITY",
     "STALE_BROWSER_VERSION",
     "ORPHANED_DEEP_CRAWL",
     "RESIDENTIAL_FINGERPRINT_DISPERSION",

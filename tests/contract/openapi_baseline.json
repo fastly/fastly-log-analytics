@@ -55387,6 +55387,56 @@
         ],
         "title": "BootstrapService"
       },
+      "BotEfficiencyRow": {
+        "properties": {
+          "bot_name": {
+            "type": "string",
+            "title": "Bot Name"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          },
+          "resp_bytes": {
+            "type": "integer",
+            "title": "Resp Bytes",
+            "default": 0
+          },
+          "bandwidth_pct": {
+            "type": "number",
+            "title": "Bandwidth Pct",
+            "default": 0.0
+          },
+          "referrals": {
+            "type": "integer",
+            "title": "Referrals",
+            "default": 0
+          },
+          "requests_per_referral": {
+            "type": "number",
+            "title": "Requests Per Referral",
+            "default": 0.0
+          },
+          "bytes_per_referral": {
+            "type": "number",
+            "title": "Bytes Per Referral",
+            "default": 0.0
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bot_name",
+          "category",
+          "request_count"
+        ],
+        "title": "BotEfficiencyRow",
+        "description": "Bot & crawler value vs. cost row (requests + bandwidth consumed vs. human referrals)."
+      },
       "BotMetrics": {
         "properties": {
           "bot_requests": {
@@ -59467,6 +59517,16 @@
             "type": "integer",
             "title": "Referrals"
           },
+          "w_bytes": {
+            "type": "integer",
+            "title": "W Bytes",
+            "default": 0
+          },
+          "bandwidth_share_pct": {
+            "type": "number",
+            "title": "Bandwidth Share Pct",
+            "default": 0.0
+          },
           "crawls_per_referral": {
             "type": "number",
             "title": "Crawls Per Referral"
@@ -59474,6 +59534,16 @@
           "baseline_crawls_per_referral": {
             "type": "number",
             "title": "Baseline Crawls Per Referral"
+          },
+          "bytes_per_referral": {
+            "type": "number",
+            "title": "Bytes Per Referral",
+            "default": 0.0
+          },
+          "baseline_bytes_per_referral": {
+            "type": "number",
+            "title": "Baseline Bytes Per Referral",
+            "default": 0.0
           }
         },
         "additionalProperties": true,
@@ -86874,6 +86944,7 @@
                     "ngwaf_verified_bots",
                     "ngwaf_verified_bots_ts",
                     "wellknown_bots",
+                    "bot_efficiency",
                     "tls_fingerprints",
                     "fingerprint_coverage",
                     "req_size_dist",
@@ -87033,6 +87104,14 @@
             },
             "type": "array",
             "title": "Wellknown Bots",
+            "default": []
+          },
+          "bot_efficiency": {
+            "items": {
+              "$ref": "#/components/schemas/BotEfficiencyRow"
+            },
+            "type": "array",
+            "title": "Bot Efficiency",
             "default": []
           },
           "bots": {

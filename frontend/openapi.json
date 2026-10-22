@@ -55387,98 +55387,6 @@
         ],
         "title": "BootstrapService"
       },
-      "BotBandwidthDisparityInsightCard": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "const": "bot_bandwidth_disparity",
-            "title": "Id"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          },
-          "description": {
-            "type": "string",
-            "title": "Description"
-          },
-          "severity": {
-            "type": "string",
-            "title": "Severity"
-          },
-          "summary": {
-            "type": "string",
-            "title": "Summary"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/InsightItem_BotBandwidthDisparityMeta_"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "category": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Category"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "title",
-          "description",
-          "severity",
-          "summary",
-          "items"
-        ],
-        "title": "BotBandwidthDisparityInsightCard"
-      },
-      "BotBandwidthDisparityMeta": {
-        "properties": {
-          "requests": {
-            "type": "integer",
-            "title": "Requests"
-          },
-          "w_bytes": {
-            "type": "integer",
-            "title": "W Bytes"
-          },
-          "bandwidth_share_pct": {
-            "type": "number",
-            "title": "Bandwidth Share Pct"
-          },
-          "referrals": {
-            "type": "integer",
-            "title": "Referrals"
-          },
-          "requests_per_referral": {
-            "type": "number",
-            "title": "Requests Per Referral"
-          },
-          "bytes_per_referral": {
-            "type": "number",
-            "title": "Bytes Per Referral"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "requests",
-          "w_bytes",
-          "bandwidth_share_pct",
-          "referrals",
-          "requests_per_referral",
-          "bytes_per_referral"
-        ],
-        "title": "BotBandwidthDisparityMeta"
-      },
       "BotEfficiencyRow": {
         "properties": {
           "bot_name": {
@@ -59613,6 +59521,11 @@
             "type": "integer",
             "title": "W Bytes",
             "default": 0
+          },
+          "bandwidth_share_pct": {
+            "type": "number",
+            "title": "Bandwidth Share Pct",
+            "default": 0.0
           },
           "crawls_per_referral": {
             "type": "number",
@@ -65450,88 +65363,6 @@
         ],
         "title": "InsightItem[AsnMetroPerformanceMeta]"
       },
-      "InsightItem_BotBandwidthDisparityMeta_": {
-        "properties": {
-          "label": {
-            "type": "string",
-            "title": "Label"
-          },
-          "current_val": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Current Val"
-          },
-          "baseline_val": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Baseline Val"
-          },
-          "baseline_label": {
-            "type": "string",
-            "title": "Baseline Label",
-            "default": "baseline"
-          },
-          "unit": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unit"
-          },
-          "severity": {
-            "type": "string",
-            "title": "Severity",
-            "default": "clean"
-          },
-          "meta": {
-            "$ref": "#/components/schemas/BotBandwidthDisparityMeta"
-          },
-          "investigate_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Investigate Url"
-          },
-          "tooltip": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tooltip"
-          }
-        },
-        "type": "object",
-        "required": [
-          "label",
-          "meta"
-        ],
-        "title": "InsightItem[BotBandwidthDisparityMeta]"
-      },
       "InsightItem_BotnetGroupingMeta_": {
         "properties": {
           "label": {
@@ -69850,9 +69681,6 @@
                   "$ref": "#/components/schemas/CrawlerDisparityInsightCard"
                 },
                 {
-                  "$ref": "#/components/schemas/BotBandwidthDisparityInsightCard"
-                },
-                {
                   "$ref": "#/components/schemas/StaleBrowserVersionInsightCard"
                 },
                 {
@@ -69871,7 +69699,6 @@
                   "asn_concentration": "#/components/schemas/AsnConcentrationInsightCard",
                   "asn_hosting_shift": "#/components/schemas/AsnHostingShiftInsightCard",
                   "asn_metro_performance": "#/components/schemas/AsnMetroPerformanceInsightCard",
-                  "bot_bandwidth_disparity": "#/components/schemas/BotBandwidthDisparityInsightCard",
                   "botnet_grouping": "#/components/schemas/BotnetGroupingInsightCard",
                   "cache_collapse": "#/components/schemas/CacheCollapseInsightCard",
                   "cache_hit_cliff": "#/components/schemas/CacheHitCliffInsightCard",

@@ -6,7 +6,6 @@ export type ImpossibleDistanceItem = CardOf<'impossible_distance'>['items'][numb
 export type RepeatedPatternsItem = CardOf<'repeated_patterns'>['items'][number]
 export type RepeatedPatternsFpItem = CardOf<'repeated_patterns_fp'>['items'][number]
 export type CrawlerDisparityItem = CardOf<'crawler_disparity'>['items'][number]
-export type BotBandwidthDisparityItem = CardOf<'bot_bandwidth_disparity'>['items'][number]
 export type StaleBrowserVersionItem = CardOf<'stale_browser_version'>['items'][number]
 export type OrphanedDeepCrawlItem = CardOf<'orphaned_deep_crawl'>['items'][number]
 export type ResidentialFingerprintDispersionItem = CardOf<'residential_fingerprint_dispersion'>['items'][number]
@@ -15,10 +14,6 @@ export type BotFindingModalData =
   | {
       insightId: 'crawler_disparity'
       item: CrawlerDisparityItem
-    }
-  | {
-      insightId: 'bot_bandwidth_disparity'
-      item: BotBandwidthDisparityItem
     }
   | {
       insightId: 'stale_browser_version'

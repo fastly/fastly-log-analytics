@@ -80,16 +80,22 @@ export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalP
         const wBytes = m.w_bytes ?? 0
         const bytesPerRef = m.bytes_per_referral ?? 0
         const baseBytesPerRef = m.baseline_bytes_per_referral ?? 0
+        const bwSharePct = m.bandwidth_share_pct ?? 0
         const isZeroReferral = m.referrals === 0
         return (
           <>
             <div className="p-4 rounded-lg bg-muted/30 border border-border">
               <p className="text-sm leading-relaxed">
                 <span className="font-semibold">{item.label}</span> executed{' '}
-                <span className="font-semibold">{formatCount(m.crawls)}</span> crawl requests
+                <span className="font-semibold">{formatCount(m.crawls)}</span> automated requests
                 {wBytes > 0 && (
                   <>
                     {' '}consuming <span className="font-semibold">{formatBytes(wBytes)}</span> of egress bandwidth
+                    {bwSharePct > 0 && (
+                      <>
+                        {' '}(<span className="font-semibold">{bwSharePct.toFixed(1)}%</span> of site bandwidth)
+                      </>
+                    )}
                   </>
                 )}{' '}
                 while driving only{' '}
@@ -109,10 +115,10 @@ export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalP
               </p>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
               <StatCard
                 icon={<Hash className="h-3 w-3" />}
-                label="Crawl Requests"
+                label="Bot / Crawl Requests"
                 value={formatCount(m.crawls)}
                 hint="current window"
               />
@@ -120,7 +126,7 @@ export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalP
                 icon={<HardDrive className="h-3 w-3" />}
                 label="Bandwidth Used"
                 value={formatBytes(wBytes)}
-                hint="total resp_bytes"
+                hint={bwSharePct > 0 ? `${bwSharePct.toFixed(1)}% of site bandwidth` : 'total resp_bytes'}
               />
               <StatCard
                 icon={<Users className="h-3 w-3" />}
@@ -142,87 +148,10 @@ export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalP
                 value={formatBytes(bytesPerRef)}
                 hint={baseBytesPerRef > 0 ? `baseline: ${formatBytes(baseBytesPerRef)}` : 'cost per referred visitor'}
               />
-            </div>
-
-            <div className="rounded-lg bg-muted/10 border border-border p-4">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-1.5">
-                <ScanSearch className="h-3.5 w-3.5" /> How we read the evidence
-              </h4>
-              <ul className="space-y-2.5 text-xs leading-relaxed">
-                <li>
-                  <span className="font-semibold">Crawler attribution.</span>{' '}
-                  Requests are matched by the platform&apos;s known crawler User-Agent tokens (search indexers, AI answer crawlers, and training bots).
-                </li>
-                <li>
-                  <span className="font-semibold">Human referral correlation.</span>{' '}
-                  We count distinct client IPs arriving with a non-bot User-Agent and an HTTP <code>Referer</code> matching the platform&apos;s domain (or user-triggered fetcher).
-                </li>
-                <li>
-                  <span className="font-semibold">Value vs. cost disparity.</span>{' '}
-                  High crawl volume and bandwidth combined with near-zero referrals means this crawler is harvesting content without returning organic search or discovery traffic.
-                </li>
-              </ul>
-            </div>
-          </>
-        )
-      }
-
-      case 'bot_bandwidth_disparity': {
-        const m = item.meta
-        const isZeroReferral = m.referrals === 0
-        return (
-          <>
-            <div className="p-4 rounded-lg bg-muted/30 border border-border">
-              <p className="text-sm leading-relaxed">
-                <span className="font-semibold">{item.label}</span> consumed{' '}
-                <span className="font-semibold text-red-500">{formatBytes(m.w_bytes)}</span> across{' '}
-                <span className="font-semibold">{formatCount(m.requests)}</span> requests (
-                <span className="font-semibold">{m.bandwidth_share_pct.toFixed(1)}%</span> of total site bandwidth) while sending{' '}
-                <span className={cn('font-semibold', isZeroReferral ? 'text-red-500' : 'text-amber-500')}>
-                  {formatCount(m.referrals)}
-                </span>{' '}
-                referred human visitors.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <StatCard
-                icon={<HardDrive className="h-3 w-3" />}
-                label="Bandwidth Consumed"
-                value={formatBytes(m.w_bytes)}
-                valueClass="text-red-500"
-                hint={`${m.bandwidth_share_pct.toFixed(1)}% of site bandwidth`}
-              />
-              <StatCard
-                icon={<Hash className="h-3 w-3" />}
-                label="Bot Requests"
-                value={formatCount(m.requests)}
-                hint="current window"
-              />
-              <StatCard
-                icon={<Users className="h-3 w-3" />}
-                label="Human Referrals"
-                value={formatCount(m.referrals)}
-                valueClass={isZeroReferral ? 'text-red-500' : 'text-amber-500'}
-                hint="distinct referred IPs"
-              />
-              <StatCard
-                icon={<Scale className="h-3 w-3" />}
-                label="Bandwidth / Referral"
-                value={formatBytes(m.bytes_per_referral)}
-                valueClass="text-red-500"
-                hint={isZeroReferral ? 'zero referrals (unbounded cost)' : 'bytes per referred IP'}
-              />
-              <StatCard
-                icon={<Scale className="h-3 w-3" />}
-                label="Requests / Referral"
-                value={formatCount(m.requests_per_referral, { maximumFractionDigits: 1 })}
-                hint="requests per referred IP"
-              />
               <StatCard
                 icon={<Bot className="h-3 w-3" />}
                 label="Site Egress Share"
-                value={`${m.bandwidth_share_pct.toFixed(1)}%`}
+                value={`${bwSharePct.toFixed(1)}%`}
                 hint="of total resp_bytes"
               />
             </div>
@@ -233,12 +162,16 @@ export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalP
               </h4>
               <ul className="space-y-2.5 text-xs leading-relaxed">
                 <li>
-                  <span className="font-semibold">All-bot scope.</span>{' '}
-                  Unlike crawler-only checks, this covers AI training scrapers (`CCBot`, `Bytespider`, `GPTBot`, `ClaudeBot`), headless browsers, and script libraries (`python-requests`, `curl`, `Go-http-client`).
+                  <span className="font-semibold">Unified bot &amp; crawler attribution.</span>{' '}
+                  Requests are grouped dynamically from automated User-Agent tokens — covering search indexers, AI answer crawlers, training scrapers, headless browsers, and programmatic HTTP clients.
                 </li>
                 <li>
-                  <span className="font-semibold">Egress cost attribution.</span>{' '}
-                  Bandwidth is summed from <code>resp_bytes</code> and compared against total site egress in the same window so you can see how much capacity each bot family consumes.
+                  <span className="font-semibold">Human referral correlation.</span>{' '}
+                  We count distinct client IPs arriving with a non-bot User-Agent and an HTTP <code>Referer</code> matching the platform&apos;s domain.
+                </li>
+                <li>
+                  <span className="font-semibold">Value vs. cost disparity.</span>{' '}
+                  High crawl volume and egress bandwidth combined with near-zero referrals means this bot or crawler is harvesting content without returning organic search or discovery traffic.
                 </li>
               </ul>
             </div>

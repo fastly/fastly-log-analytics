@@ -347,19 +347,11 @@ class CrawlerDisparityMeta(WireSafeModel):
     crawls: int
     referrals: int
     w_bytes: int = 0
+    bandwidth_share_pct: float = 0.0
     crawls_per_referral: float
     baseline_crawls_per_referral: float
     bytes_per_referral: float = 0.0
     baseline_bytes_per_referral: float = 0.0
-
-
-class BotBandwidthDisparityMeta(WireSafeModel):
-    requests: int
-    w_bytes: int
-    bandwidth_share_pct: float
-    referrals: int
-    requests_per_referral: float
-    bytes_per_referral: float
 
 
 class StaleBrowserVersionMeta(WireSafeModel):
