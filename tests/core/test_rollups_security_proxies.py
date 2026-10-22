@@ -281,3 +281,74 @@ def test_day_compaction_merges_hours_exactly(tmp_path):
     assert sorted((r["ip"], r["cnt"]) for r in flagged) == [("10.0.0.2", 24), ("10.0.0.4", 24), ("10.0.0.5", 24)]
     bot_eff = pq.read_table(str(day_root / "security_bot_eff.parquet")).to_pylist()
     assert [(r["cnt"], r["resp_bytes"]) for r in bot_eff if r["kind"] == "site"] == [(6 * 24, 6100 * 24)]
+
+
+def test_proxies_reader_handles_sparse_and_empty_flagged_hours(tmp_path):
+    """Hours with 0 flagged proxy rows write a .done marker instead of
+    security_proxy_flagged.parquet; the reader must still serve from rollups."""
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-sp-7"}
+    base_dt = (datetime.now(UTC) - timedelta(hours=30)).replace(minute=0, second=0, microsecond=0)
+    hours = [base_dt + timedelta(hours=i) for i in range(24)]
+    direct_only = [_ROWS[0]]  # Direct connection, never flagged
+    for dt in hours:
+        _build_hour(cache_root, src, "logs_sparse", dt, direct_only)
+
+    con = duckdb.connect(":memory:")
+    runner = QueryRunner(con, src)
+    st_iso = hours[0].isoformat().replace("+00:00", "Z")
+    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rolled = runner.try_security_proxies_from_rollup(st_iso, et_iso, has_filters=False)
+
+    assert rolled is not None
+    assert rolled["stats"] == {
+        "active_proxies_count": 0,
+        "total_requests_count": 0,
+        "distance_mismatches_count": 0,
+    }
+    assert rolled["quality_rows"] == [("Direct Connection", 24)]
+    assert rolled["isps"] == []
+    assert rolled["clients"] == []
+
+
+def test_blank_ip_requests_never_appear_as_suspicious_clients(tmp_path):
+    """Requests logged before the capture snippet ran (redirects) carry no IP, UA or country but
+    still have edge RTT/geo, so they used to pass the proxy flags and render as blank-IP rows."""
+    from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
+
+    blank = ("", 700, "IAD", 1000, 50000, 39.0, -77.1, "", "", "", None, 0)
+    rows = [*_ROWS, blank]
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    base_dt = (datetime.now(UTC) - timedelta(hours=100)).replace(minute=0, second=0, microsecond=0)
+    hours = [base_dt + timedelta(hours=i) for i in range(50)]
+    for dt in hours:
+        _build_hour(cache_root, {"name": "svc-sp-blank"}, "logs_par", dt, rows)
+
+    live_con = duckdb.connect(":memory:")
+    _seed_logs(live_con, "t_blank", rows, hours[0])
+    live = live_con.execute(
+        GET_SECURITY_PROXIES_COMBINED.format(
+            temp_table="t_blank",
+            select_country_city_inner=",\n            country,\n            city",
+            select_country_city_outer=",\n                country,\n                city",
+        )
+    ).fetchall()
+    assert [r[1] for r in live if r[0] == "client" and not r[1]] == []
+    assert next(r for r in live if r[0] == "stats")[2] == 2  # active proxies: the tunnel + the Tokyo mismatch
+
+    from backend.repositories._base import QueryRunner
+
+    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc-sp-blank"})
+    st_iso = hours[0].isoformat().replace("+00:00", "Z")
+    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rolled = runner.try_security_proxies_from_rollup(st_iso, et_iso, has_filters=False)
+    assert rolled is not None
+    assert all(c["ip"] for c in rolled["clients"])
+    assert rolled["stats"]["active_proxies_count"] == 2

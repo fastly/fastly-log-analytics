@@ -35,16 +35,26 @@ export function WebVitalsReporter() {
     enabledRef.current = webVitalsEnabled
   }, [webVitalsEnabled])
 
+  const pathnameRef = React.useRef(pathname)
+  React.useEffect(() => {
+    pathnameRef.current = pathname
+  }, [pathname])
+
   const disabledRef = React.useRef(false)
-  useReportWebVitals((metric) => {
+  const sentKeysRef = React.useRef<Set<string>>(new Set())
+
+  const handleReportWebVitals = React.useCallback((metric: Parameters<Parameters<typeof useReportWebVitals>[0]>[0]) => {
     if (disabledRef.current) return
     if (!enabledRef.current) return
+    const dedupeKey = `${metric.name}:${metric.id}:${metric.value}`
+    if (sentKeysRef.current.has(dedupeKey)) return
+    sentKeysRef.current.add(dedupeKey)
     const body = {
       id: metric.id,
       name: metric.name,
       value: metric.value,
       rating: metric.rating,
-      pathname,
+      pathname: pathnameRef.current,
       navigation_type: metric.navigationType,
       delta: metric.delta,
     }
@@ -77,7 +87,9 @@ export function WebVitalsReporter() {
       // Telemetry is fire-and-forget; never let a failed report break
       // the page that triggered it.
     }
-  })
+  }, [])
+
+  useReportWebVitals(handleReportWebVitals)
 
   return null
 }

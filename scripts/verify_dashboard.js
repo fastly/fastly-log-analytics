@@ -327,7 +327,7 @@ async function logPagePerf(page, name, sectionTimings = {}) {
       setTimeout(() => {
         const api = {};
         for (const r of performance.getEntriesByType('resource')) {
-          if (!r.name.includes('/api/')) continue;
+          if (!r.name.includes('/api/') || r.name.includes('/api/web-vitals') || r.name.includes('/api/ux-events')) continue;
           const key = new URL(r.name).pathname;
           const row = api[key] || (api[key] = { n: 0, maxMs: 0, kb: 0 });
           row.n += 1;

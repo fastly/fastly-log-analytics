@@ -157,6 +157,11 @@ interface SSRGetOpts {
    * classified the request, so the body cannot affect audience scoping.
    */
   body?: unknown
+  /**
+   * Optional per-call timeout override in milliseconds. Defaults to
+   * ``TIMEOUT_MS`` (5000ms).
+   */
+  timeoutMs?: number
 }
 
 export async function ssrUpstreamGet({
@@ -166,6 +171,7 @@ export async function ssrUpstreamGet({
   extraHeaders,
   method = 'GET',
   body,
+  timeoutMs = TIMEOUT_MS,
 }: SSRGetOpts): Promise<SSRUpstreamResponse | null> {
   const base = process.env.API_PROXY_URL
   if (!base) {
@@ -253,11 +259,11 @@ export async function ssrUpstreamGet({
     upstreamHeaders['Connection'] = 'close'
 
     try {
-      return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
+      return await rawRequest(`${base}${path}`, upstreamHeaders, timeoutMs, method, serialisedBody)
     } catch (firstErr) {
       const code = (firstErr as NodeJS.ErrnoException | undefined)?.code
       if (code === 'ECONNRESET' || code === 'EPIPE') {
-        return await rawRequest(`${base}${path}`, upstreamHeaders, TIMEOUT_MS, method, serialisedBody)
+        return await rawRequest(`${base}${path}`, upstreamHeaders, timeoutMs, method, serialisedBody)
       }
       throw firstErr
     }

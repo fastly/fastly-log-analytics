@@ -17,6 +17,18 @@ from typing import Any
 from backend.high_scale._projection_utils import range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.cmcd import CmcdRequest
+from backend.repositories.utils import single_flight
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.cache_registry import CacheRegistry
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 
 _DEFAULT_WINDOW = timedelta(days=1)
 _BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -175,6 +187,40 @@ def cmcd_aggregates(
     mask_ips: bool,
 ) -> dict[str, Any]:
     """Return the standard CMCD response shape; ``mask_ips`` is moot because no section emits an IP."""
+    memo_key = digest_cache_key(
+        {
+            "ep": "hs_cmcd_aggregates",
+            "cid": client_cache_token(service.client),
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "b": int(req.bucket_seconds),
+            "n": int(req.top_n),
+            "sec": sorted(str(s) for s in sections) if sections else None,
+            "m": bool(mask_ips),
+            "f": serialize_filters_for_key(req.filters or {}),
+        },
+        {"name": service.service_id, "service_id": service.service_id},
+    )
+    cached_resp = _memo.get(memo_key)
+    if cached_resp is not None:
+        return dict(cached_resp)
+
+    def _compute() -> dict[str, Any]:
+        return _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
+
+    result, _is_leader = single_flight.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
+    _memo.put(memo_key, result)
+    return dict(result)
+
+
+def _cmcd_aggregates_compute(
+    service: HighScaleService,
+    req: CmcdRequest,
+    start_time: str | None,
+    end_time: str | None,
+    sections: set[Any] | None,
+    mask_ips: bool,
+) -> dict[str, Any]:
     start, end = _window(start_time, end_time)
     where, params = _scope(service, req, start, end)
     events = _EVENTS.format(where=where)

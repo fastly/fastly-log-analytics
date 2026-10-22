@@ -35,6 +35,7 @@ from backend.repositories.security import (
     classify_ua_counts,
     summarize_wellknown_bot_rows,
 )
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
@@ -95,7 +96,10 @@ _DISTANCE_KM = (
     "6371 * 2 * asin(sqrt(pow(sin(radians(lat - pop_lat) / 2), 2) "
     "+ cos(radians(pop_lat)) * cos(radians(lat)) * pow(sin(radians(lon - pop_lon) / 2), 2)))"
 )
-_IMPOSSIBLE_DISTANCE = f"ifNull({_DISTANCE_KM} > (rtt_min / 1000.0 * 100.0 + 150.0), 0)"
+_IMPOSSIBLE_DISTANCE = (
+    f"multiIf(rtt_min IS NULL OR lat IS NULL OR lon IS NULL, 0, "
+    f"ifNull({_DISTANCE_KM} > (rtt_min / 1000.0 * 100.0 + 150.0), 0))"
+)
 _TUNNEL = "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 0)"
 
 
@@ -388,23 +392,31 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         scope,
         "bot_efficiency",
         """
-        WITH site_totals AS (
+        WITH ua_all AS (
             SELECT
-                'site' AS kind,
-                '' AS key,
-                count() AS cnt,
-                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes
-            FROM request_facts WHERE __WHERE__
-        ),
-        ua_agg AS (
-            SELECT
-                'ua' AS kind,
                 custom_fields['ua'] AS key,
                 count() AS cnt,
                 ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes
             FROM request_facts
-            WHERE __WHERE__ AND custom_fields['ua'] != ''
+            WHERE __WHERE__
             GROUP BY key
+        ),
+        site_totals AS (
+            SELECT
+                'site' AS kind,
+                '' AS key,
+                ifNull(sum(cnt), 0) AS cnt,
+                ifNull(sum(resp_bytes), 0) AS resp_bytes
+            FROM ua_all
+        ),
+        ua_agg AS (
+            SELECT
+                'ua' AS kind,
+                key,
+                cnt,
+                resp_bytes
+            FROM ua_all
+            WHERE key != ''
             ORDER BY resp_bytes DESC, cnt DESC
             LIMIT 2000
         ),
@@ -483,65 +495,73 @@ def security_aggregates(
     if cached is not None:
         return SecurityAggregatesResponse.with_telemetry(**cached)
 
-    scope = _scope(service, req, start_time, end_time)
+    def _compute() -> dict[str, Any]:
+        cached_inner = _memo.get(memo_key)
+        if cached_inner is not None:
+            return cached_inner
 
-    def want(name: str) -> bool:
-        return sections is None or name in sections
+        scope = _scope(service, req, start_time, end_time)
 
-    tasks: list[tuple[str, Callable[[], Any]]] = []
-    if want("tls_fingerprints"):
-        tasks.append(("tls_fingerprints", lambda: _tls_fingerprints(service, scope)))
-    if want("fingerprint_coverage"):
-        tasks.append(("fingerprint_coverage", lambda: _fingerprint_coverage(service, scope)))
-    if want("req_size_dist"):
-        tasks.append(("req_size_dist", lambda: _req_size_dist(service, scope)))
-    if want("top_ips_header"):
-        tasks.append(("top_ips_header", lambda: _top_ips_header(service, scope, mask_ips)))
-    if want("ipv6_adoption"):
-        tasks.append(("ipv6_adoption", lambda: _ipv6_adoption(service, scope)))
-    if want("proxy_dist"):
-        tasks.append(("proxy_dist", lambda: _proxy_dist(service, scope)))
-    if want("conn_reuse_dist"):
-        tasks.append(("conn_reuse_dist", lambda: _conn_reuse_dist(service, scope)))
-    if want("verified_bots_ts"):
-        tasks.append(("verified_bots_ts", lambda: _verified_bots_ts(service, scope, bucket_seconds)))
-    if want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"):
-        tasks.append(("ngwaf_configured", lambda: _ngwaf_configured(service)))
-        tasks.append(("ngwaf_verified_bots", lambda: _ngwaf_verified_bots(service, scope)))
-        tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
-    if want("wellknown_bots"):
-        tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
-    if want("bot_efficiency"):
-        tasks.append(("bot_efficiency", lambda: _bot_efficiency(service, scope)))
-    if want("top_bots"):
-        tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
-    if want("proxies"):
-        tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
+        def want(name: str) -> bool:
+            return sections is None or name in sections
 
-    res: dict[str, Any] = {}
-    if len(tasks) == 1:
-        k, fn = tasks[0]
-        val = fn()
-        if k == "_top_bots":
-            res["bots"] = val["bots"]
-            res["ngwaf_bots"] = val["ngwaf_bots"]
-        elif k == "_proxies":
-            res.update(val)
-        else:
-            res[k] = val
-    elif tasks:
-        with ThreadPoolExecutor(max_workers=min(8, len(tasks)), thread_name_prefix="hs-sec") as pool:
-            futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
-            for k, fut in futs:
-                val = fut.result()
-                if k == "_top_bots":
-                    res["bots"] = val["bots"]
-                    res["ngwaf_bots"] = val["ngwaf_bots"]
-                elif k == "_proxies":
-                    res.update(val)
-                else:
-                    res[k] = val
-    _memo.put(memo_key, dict(res))
+        tasks: list[tuple[str, Callable[[], Any]]] = []
+        if want("tls_fingerprints"):
+            tasks.append(("tls_fingerprints", lambda: _tls_fingerprints(service, scope)))
+        if want("fingerprint_coverage"):
+            tasks.append(("fingerprint_coverage", lambda: _fingerprint_coverage(service, scope)))
+        if want("req_size_dist"):
+            tasks.append(("req_size_dist", lambda: _req_size_dist(service, scope)))
+        if want("top_ips_header"):
+            tasks.append(("top_ips_header", lambda: _top_ips_header(service, scope, mask_ips)))
+        if want("ipv6_adoption"):
+            tasks.append(("ipv6_adoption", lambda: _ipv6_adoption(service, scope)))
+        if want("proxy_dist"):
+            tasks.append(("proxy_dist", lambda: _proxy_dist(service, scope)))
+        if want("conn_reuse_dist"):
+            tasks.append(("conn_reuse_dist", lambda: _conn_reuse_dist(service, scope)))
+        if want("verified_bots_ts"):
+            tasks.append(("verified_bots_ts", lambda: _verified_bots_ts(service, scope, bucket_seconds)))
+        if want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"):
+            tasks.append(("ngwaf_configured", lambda: _ngwaf_configured(service)))
+            tasks.append(("ngwaf_verified_bots", lambda: _ngwaf_verified_bots(service, scope)))
+            tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
+        if want("wellknown_bots"):
+            tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
+        if want("bot_efficiency"):
+            tasks.append(("bot_efficiency", lambda: _bot_efficiency(service, scope)))
+        if want("top_bots"):
+            tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
+        if want("proxies"):
+            tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
+
+        res: dict[str, Any] = {}
+        if len(tasks) == 1:
+            k, fn = tasks[0]
+            val = fn()
+            if k == "_top_bots":
+                res["bots"] = val["bots"]
+                res["ngwaf_bots"] = val["ngwaf_bots"]
+            elif k == "_proxies":
+                res.update(val)
+            else:
+                res[k] = val
+        elif tasks:
+            with ThreadPoolExecutor(max_workers=min(4, len(tasks)), thread_name_prefix="hs-sec") as pool:
+                futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
+                for k, fut in futs:
+                    val = fut.result()
+                    if k == "_top_bots":
+                        res["bots"] = val["bots"]
+                        res["ngwaf_bots"] = val["ngwaf_bots"]
+                    elif k == "_proxies":
+                        res.update(val)
+                    else:
+                        res[k] = val
+        _memo.put(memo_key, dict(res))
+        return res
+
+    res, _ = single_flight.coalesce(f"hs_security_agg:{memo_key}", _compute)
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
@@ -585,7 +605,7 @@ _PROXY_SOURCE = f"""
                toInt64OrNull(custom_fields['asn']) AS asn,
                {_POP_LAT} AS pop_lat,
                {_POP_LON} AS pop_lon
-        FROM request_facts WHERE __WHERE__
+        FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != ''
     )
 """
 
@@ -609,14 +629,18 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             service,
             scope,
             "traffic_quality",
-            f"""
+            """
             SELECT multiIf(
                        rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection',
                        tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy',
                        tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile',
                        'Direct Connection') AS type,
                    count() AS count
-            {_PROXY_SOURCE}
+            FROM (
+                SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min,
+                       toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt
+                FROM request_facts WHERE __WHERE__
+            )
             GROUP BY type ORDER BY count DESC
             """,
         )
@@ -656,7 +680,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             """,
         )
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-proxies") as pool:
         f_stats = pool.submit(contextvars.copy_context().run, _q_stats)
         f_qual = pool.submit(contextvars.copy_context().run, _q_quality)
         f_isps = pool.submit(contextvars.copy_context().run, _q_isps)

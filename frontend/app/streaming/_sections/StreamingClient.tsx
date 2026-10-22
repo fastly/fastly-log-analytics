@@ -4,6 +4,7 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useMounted } from '@/hooks/useMounted'
 import { useFilterStore } from '@/stores/filterStore'
 import { quantizeAnchor } from '@/lib/time-window'
 import type { FiltersPayload } from '@/types/filters'
@@ -156,7 +157,7 @@ function StreamingBody({
       if (error) throw error
       return data
     },
-    { refetchInterval: 30_000 },
+    { staleTime: 30_000, refetchInterval: 30_000 },
   )
 
   const data = cmcdQuery.data
@@ -638,12 +639,16 @@ function StreamingBody({
   )
 }
 
-export default function StreamingClient() {
+export default function StreamingClient({ nowServerStr }: { nowServerStr?: string }) {
+  const mounted = useMounted()
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
   const storeEndTime = useFilterStore((s) => s.endTime)
 
-  const anchor = React.useMemo(() => quantizeAnchor(storeEndTime), [storeEndTime])
+  const anchor = React.useMemo(() => {
+    const baseStr = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout

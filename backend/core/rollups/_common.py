@@ -814,9 +814,14 @@ def backfill_missing_bundles(
             hour = entry[len("hour=") :]
             if parse_hour_token(hour) is None:
                 continue
-            if not os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet")):
+            if not (
+                os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet"))
+                or os.path.isfile(os.path.join(bundled_root, entry, TIME_SERIES_BUNDLE_FILENAME))
+            ):
                 continue
-            if os.path.isfile(os.path.join(bundled_root, entry, bundle_filename)):
+            if os.path.isfile(os.path.join(bundled_root, entry, bundle_filename)) or os.path.isfile(
+                os.path.join(bundled_root, entry, f"{bundle_filename}.done")
+            ):
                 continue
             hours_to_build.append(hour)
     except OSError:

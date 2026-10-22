@@ -65,6 +65,7 @@ from .slow_urls import build_slow_urls_bundles  # noqa: F401
 from .spec import HOUR_WRITERS
 from .time_series import build_time_series_bundles  # noqa: F401
 from .verified_bots_ts import build_verified_bots_ts_bundles  # noqa: F401
+from .wellknown_bots import recompute_wellknown_bots_rollup  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

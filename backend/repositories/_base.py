@@ -2369,6 +2369,7 @@ class QueryRunner:
         bundle_filename: str,
         *,
         skip_partial_start: bool = True,
+        allow_empty_with_done: bool = False,
     ) -> list[str] | None:
         """Collect day-prefer / hour-fallback rollup parquet paths for ``[st, et)``.
 
@@ -2389,7 +2390,14 @@ class QueryRunner:
         network_rtt, network_speed, verified_bots_ts, perf_latency); the
         per-feature SQL + result shaping stays in each caller.
         """
-        return collect_day_prefer_paths(self.src, st, et, bundle_filename, skip_partial_start=skip_partial_start)
+        return collect_day_prefer_paths(
+            self.src,
+            st,
+            et,
+            bundle_filename,
+            skip_partial_start=skip_partial_start,
+            allow_empty_with_done=allow_empty_with_done,
+        )
 
     def try_origin_summary_from_rollup(
         self,
@@ -4258,30 +4266,38 @@ class QueryRunner:
             return None
         st, et = win
 
-        quality_paths = self._collect_rollup_paths(st, et, SECURITY_PROXY_QUALITY_BUNDLE_FILENAME)
-        flagged_paths = self._collect_rollup_paths(st, et, SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME)
-        if quality_paths is None or flagged_paths is None:
+        quality_paths = self._collect_rollup_paths(
+            st, et, SECURITY_PROXY_QUALITY_BUNDLE_FILENAME, allow_empty_with_done=True
+        )
+        flagged_paths = self._collect_rollup_paths(
+            st, et, SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME, allow_empty_with_done=True
+        )
+        if not quality_paths or flagged_paths is None:
             return None
 
         prefix = (
-            f"WITH f AS ("
-            f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
-            f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
-            f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
-            f"), "
-            f"geo AS ("
-            f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "
-            f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL)"
-            f"), "
-            f"m AS MATERIALIZED ("
-            f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
-            f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
-            f"         {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon, "
-            f"         geo.distance_km AS distance_km, f.country, f.city, f.cnt "
-            f"  FROM f LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
-            f"                      AND f.lat IS NOT DISTINCT FROM geo.g_lat "
-            f"                      AND f.lon IS NOT DISTINCT FROM geo.g_lon"
-            f") "
+            (
+                f"WITH f AS ("
+                f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
+                f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
+                f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
+                f"), "
+                f"geo AS ("
+                f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "
+                f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL)"
+                f"), "
+                f"m AS MATERIALIZED ("
+                f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
+                f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
+                f"         {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon, "
+                f"         geo.distance_km AS distance_km, f.country, f.city, f.cnt "
+                f"  FROM f LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
+                f"                      AND f.lat IS NOT DISTINCT FROM geo.g_lat "
+                f"                      AND f.lon IS NOT DISTINCT FROM geo.g_lon"
+                f") "
+            )
+            if flagged_paths
+            else ""
         )
         dist_flag = "distance_km > (rtt_min_ms * 100.0 + 150.0)"
         tunnel_flag = "tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1"
@@ -4292,55 +4308,56 @@ class QueryRunner:
             ).fetchall()
             if not quality_rows:
                 return None
-            combined_rows = self.execute(
-                prefix + f"SELECT 'stats' AS _sec, "
-                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END) AS c1, "
-                f"  CAST({metric_expressions.sum_or_zero(f'CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END')} "
-                f"       AS BIGINT) AS c2, "
-                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) AS c3, "
-                f"  NULL::VARCHAR AS ip, NULL::BIGINT AS asn, NULL::DOUBLE AS rtt_min_ms, "
-                f"  NULL::DOUBLE AS tcp_rtt_ms, NULL::DOUBLE AS distance_km, NULL::VARCHAR AS pop, "
-                f"  NULL::DOUBLE AS client_lat, NULL::DOUBLE AS client_lon, NULL::DOUBLE AS pop_lat, "
-                f"  NULL::DOUBLE AS pop_lon, NULL::BOOLEAN AS impossible_distance, "
-                f"  NULL::VARCHAR AS risk_level, NULL::VARCHAR AS country, NULL::VARCHAR AS city "
-                f"FROM m "
-                f"UNION ALL "
-                f"SELECT * FROM ("
-                f"  SELECT 'isp' AS _sec, NULL::BIGINT, CAST(SUM(cnt) AS BIGINT) AS c2, NULL::BIGINT, "
-                f"    NULL::VARCHAR, asn, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, "
-                f"    NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::BOOLEAN, "
-                f"    NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR "
-                f"  FROM m "
-                f"  WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
-                f"  GROUP BY asn ORDER BY c2 DESC LIMIT 10"
-                f") "
-                f"UNION ALL "
-                f"SELECT * FROM ("
-                f"  SELECT 'client' AS _sec, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, "
-                f"    ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
-                f"    ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
-                f"    CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
-                f"    CASE WHEN {dist_flag} THEN 'High' "
-                f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
-                f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
-                f"         ELSE 'Low' END AS risk_level, country, city "
-                f"  FROM m "
-                f"  WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
-                f"  ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
-                f"  LIMIT 100"
-                f")"
-            ).fetchall()
             stats_row = (0, 0, 0)
             isp_rows = []
             client_rows = []
-            for r in combined_rows:
-                sec = r[0]
-                if sec == "stats":
-                    stats_row = (r[1], r[2], r[3])
-                elif sec == "isp":
-                    isp_rows.append((r[5], r[2]))
-                elif sec == "client":
-                    client_rows.append(r[4:])
+            if flagged_paths:
+                combined_rows = self.execute(
+                    prefix + f"SELECT 'stats' AS _sec, "
+                    f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END) AS c1, "
+                    f"  CAST({metric_expressions.sum_or_zero(f'CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END')} "
+                    f"       AS BIGINT) AS c2, "
+                    f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) AS c3, "
+                    f"  NULL::VARCHAR AS ip, NULL::BIGINT AS asn, NULL::DOUBLE AS rtt_min_ms, "
+                    f"  NULL::DOUBLE AS tcp_rtt_ms, NULL::DOUBLE AS distance_km, NULL::VARCHAR AS pop, "
+                    f"  NULL::DOUBLE AS client_lat, NULL::DOUBLE AS client_lon, NULL::DOUBLE AS pop_lat, "
+                    f"  NULL::DOUBLE AS pop_lon, NULL::BOOLEAN AS impossible_distance, "
+                    f"  NULL::VARCHAR AS risk_level, NULL::VARCHAR AS country, NULL::VARCHAR AS city "
+                    f"FROM m "
+                    f"UNION ALL "
+                    f"SELECT * FROM ("
+                    f"  SELECT 'isp' AS _sec, NULL::BIGINT, CAST(SUM(cnt) AS BIGINT) AS c2, NULL::BIGINT, "
+                    f"    NULL::VARCHAR, asn, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, "
+                    f"    NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::BOOLEAN, "
+                    f"    NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR "
+                    f"  FROM m "
+                    f"  WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
+                    f"  GROUP BY asn ORDER BY c2 DESC LIMIT 10"
+                    f") "
+                    f"UNION ALL "
+                    f"SELECT * FROM ("
+                    f"  SELECT 'client' AS _sec, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, "
+                    f"    ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
+                    f"    ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
+                    f"    CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
+                    f"    CASE WHEN {dist_flag} THEN 'High' "
+                    f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
+                    f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
+                    f"         ELSE 'Low' END AS risk_level, country, city "
+                    f"  FROM m "
+                    f"  WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
+                    f"  ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
+                    f"  LIMIT 100"
+                    f")"
+                ).fetchall()
+                for r in combined_rows:
+                    sec = r[0]
+                    if sec == "stats":
+                        stats_row = (r[1], r[2], r[3])
+                    elif sec == "isp":
+                        isp_rows.append((r[5], r[2]))
+                    elif sec == "client":
+                        client_rows.append(r[4:])
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:
@@ -4402,8 +4419,8 @@ class QueryRunner:
             return None
         st, et = win
 
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_BOT_EFF_BUNDLE_FILENAME)
-        if rollup_paths is None:
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_BOT_EFF_BUNDLE_FILENAME, allow_empty_with_done=True)
+        if not rollup_paths:
             return None
 
         sql = (

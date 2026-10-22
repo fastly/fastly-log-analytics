@@ -91,6 +91,7 @@ export async function fetchSecurityServerSide(
       logPrefix: 'ssr/security',
       method: 'POST',
       injectAdminToken: true,
+      timeoutMs: 8000,
       // Mirror SecurityBody's client request body EXACTLY. range_token + anchor
       // drive the scan window (the keyed path ignores start_time/end_time, so
       // they are omitted).

@@ -754,14 +754,20 @@ class _Pool:
             self._cond.notify_all()
         return closed
 
+    @staticmethod
+    def _strip_view_timing(fp: Any) -> Any:
+        if isinstance(fp, tuple) and len(fp) >= 7 and isinstance(fp[4], (int, float)) and isinstance(fp[5], bool):
+            return fp[:4] + fp[6:]
+        return fp
+
     def _current_view_fp(self) -> Any:
         from backend.core.iceberg import view as iceberg_view
 
         if self.service_key.endswith("::rum"):
-            v = iceberg_view._view_cache.get(f"{self.service_key}::client_vitals")
-            e = iceberg_view._view_cache.get(f"{self.service_key}::client_errors")
+            v = self._strip_view_timing(iceberg_view._view_cache.get(f"{self.service_key}::client_vitals"))
+            e = self._strip_view_timing(iceberg_view._view_cache.get(f"{self.service_key}::client_errors"))
             return (v, e) if (v is not None or e is not None) else None
-        return iceberg_view._view_cache.get(self.service_key)
+        return self._strip_view_timing(iceberg_view._view_cache.get(self.service_key))
 
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
         """Re-validate the view binding before handing the connection out.

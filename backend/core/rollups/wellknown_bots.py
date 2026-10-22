@@ -235,8 +235,10 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
 
     # Closed hours the recompute pipeline has touched (they carry an
-    # ``all_fields.parquet`` hour bundle) — the rebuildable set, the same
-    # universe every other per-hour rollup backfill walks.
+    # ``all_fields.parquet`` or ``time_series.parquet`` hour bundle) — the
+    # rebuildable set, the same universe every other per-hour rollup backfill
+    # walks. (``all_fields.parquet`` is retired after day compaction, while
+    # ``time_series.parquet`` stays in ``hour_bundled/hour=H``.)
     data_hours: set[str] = set()
     bundled_root = _hour_bundled_root(source)
     try:
@@ -247,7 +249,10 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
             if (
                 h < active_hour
                 and parse_hour_token(h) is not None
-                and os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet"))
+                and (
+                    os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet"))
+                    or os.path.isfile(os.path.join(bundled_root, entry, "time_series.parquet"))
+                )
             ):
                 data_hours.add(h)
     except OSError:
@@ -283,9 +288,8 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
             paths_sql = quote_path_list(all_paths)
             version_sql = escape_sql_literal(version)
             # One batched read of (hour, version) pairs across the tree.
-            # Empty partitions contribute no row → invisible here (a current
-            # empty re-builds harmlessly if it has data; a stale empty has no
-            # version row so it can't poison the reader — leave it).
+            # Empty partitions contribute no row → checked via parquet metadata
+            # below so valid 0-row partitions aren't perpetually rebuilt.
             rows = con.execute(
                 f"SELECT DISTINCT regexp_extract(filename, 'hour=([0-9-]+)', 1) AS hr, "
                 f"  (pattern_set_version = '{version_sql}') AS is_current "
@@ -298,6 +302,15 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
                     current_hours.add(hr)
                 else:
                     stale_hours.add(hr)
+            for hr, files in hour_paths.items():
+                if hr not in current_hours and hr not in stale_hours:
+                    try:
+                        import pyarrow.parquet as pq
+
+                        if all(pq.read_metadata(f).num_rows == 0 for f in files):
+                            current_hours.add(hr)
+                    except Exception:
+                        pass
         except duckdb.Error:
             current_hours = set()
             stale_hours = set()

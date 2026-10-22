@@ -212,7 +212,10 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     // costs a single refetch per flush window.
     schedule('schedule')
 
-    const payload = data && typeof data === 'object' ? (data as { task?: string; status?: string }) : null
+    const payload =
+      data && typeof data === 'object'
+        ? (data as { task?: string; status?: string; started_at?: string; duration_s?: number | null })
+        : null
     if (!payload) {
       // Malformed payload — fall back to invalidating the table so a
       // running cron still refreshes if its event shape is anything we
@@ -233,9 +236,20 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     }
     // last-sync needs BOTH start and completion sync events so the
     // badge can flip to "Last Sync: running" the moment a sync starts
-    // and flip back to "Xs ago" the moment it completes.
+    // and flip back to "Xs ago" the moment it completes. When the SSE
+    // event carries `started_at` + `status`, update the 1-row lastSync
+    // cache directly in place to avoid redundant `/api/cron-runs` HTTP
+    // refetches on every dashboard page load.
     if (payload.task === 'log_discovery') {
-      schedule('last-sync')
+      if (typeof payload.started_at === 'string' && typeof payload.status === 'string') {
+        qc.setQueryData(queryKeys.lastSync(serviceId), {
+          started_at: payload.started_at,
+          status: payload.status,
+          duration_s: typeof payload.duration_s === 'number' ? payload.duration_s : null,
+        })
+      } else {
+        schedule('last-sync')
+      }
     }
     // Iceberg panels only need to refresh once the mutating task
     // FINISHED — running-state events don't change the snapshot/file

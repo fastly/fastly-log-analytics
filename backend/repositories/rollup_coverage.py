@@ -473,6 +473,7 @@ def collect_day_prefer_paths(
     bundle_filename: str,
     *,
     skip_partial_start: bool = True,
+    allow_empty_with_done: bool = False,
 ) -> list[str] | None:
     """Day-prefer / hour-fallback rollup paths for ``[st, et)``, or ``None``.
 
@@ -505,8 +506,10 @@ def collect_day_prefer_paths(
                 if os.path.isfile(path):
                     paths.append(path)
                     covered_hours += 1
+                elif allow_empty_with_done and os.path.isfile(f"{path}.done"):
+                    covered_hours += 1
 
-    if not paths:
+    if not paths and not (allow_empty_with_done and covered_hours > 0):
         return None
     if not meets_coverage_floor(covered_hours, len(index.closed_hours)):
         return None

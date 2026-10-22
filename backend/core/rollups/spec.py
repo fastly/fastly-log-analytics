@@ -49,6 +49,7 @@ HOUR_WRITERS: tuple[RollupSpec, ...] = (
     RollupSpec("ngwaf_bots", "build_ngwaf_bots_bundles", fallback="direct join"),
     RollupSpec("overview", "build_overview_bundles"),
     RollupSpec("network_summary", "build_network_summary_bundles"),
+    RollupSpec("wellknown_bots", "recompute_wellknown_bots_rollup"),
 )
 
 

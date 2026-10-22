@@ -664,7 +664,11 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
 
-    configure_duckdb_s3(con)
+    from backend.core.duckdb_pool import _get_conn_state, _set_conn_state
+
+    fp_key = f"fast_path_view_fp_{target_table}"
+    if _get_conn_state(con, fp_key) is None:
+        configure_duckdb_s3(con)
 
     from backend import config as svcconfig
 
@@ -749,11 +753,14 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
                 existing_cols = set(dynamic_schema_field_names)
             else:
                 union_sql = " UNION ALL BY NAME ".join(new_parts)
-                existing_cols = _existing_union_cols(
-                    con,
-                    list(committed_sql_parts) if committed_sql_parts else [],
-                    active_buf_files[0] if active_buf_files else None,
-                )
+                if len(cached) > 8 and cached[8] and (cached[1] or cached[7]):
+                    existing_cols = set(cached[8])
+                else:
+                    existing_cols = _existing_union_cols(
+                        con,
+                        list(committed_sql_parts) if committed_sql_parts else [],
+                        active_buf_files[0] if active_buf_files else None,
+                    )
 
             final_sql = _finalize_view_sql(union_sql, source, target_table, dynamic_schema_field_names, existing_cols)
 
@@ -770,6 +777,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
                 True,  # was_fast_path = True
                 variant_fp,
                 committed_sql_parts,
+                frozenset(existing_cols),
             )
             cached = _view_cache[cache_key]
         except Exception as e:
@@ -780,6 +788,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         raise RuntimeError("cached is unexpectedly None")
     view_sql = cached[3]
     committed_sql_parts = cached[7] if len(cached) > 7 else ()
+    cached_existing_cols = cached[8] if len(cached) > 8 else frozenset()
     if view_sql:
         # Per-connection cache: if THIS connection has already bound the
         # same (metadata_loc, buf_set, schema_fp) on the fast path, skip
@@ -787,23 +796,9 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         # SQL is deterministic from the fingerprint tuple, so re-running
         # it produces the same DuckDB state — at ~70 ms of catalog work
         # per call that adds up across every read-side request.
-        from backend.core.duckdb_pool import _get_conn_state, _set_conn_state
-
-        fp_key = f"fast_path_view_fp_{target_table}"
         bound_fp = _get_conn_state(con, fp_key)
         target_fp = (metadata_loc, buf_set, schema_fp, variant_fp, target_table)
         if bound_fp == target_fp:
-            t_end = time.time()
-            _view_cache[cache_key] = (
-                metadata_loc,
-                buf_set,
-                schema_fp,
-                view_sql,
-                round((t_end - t_start) * 1000, 2),
-                True,
-                variant_fp,
-                committed_sql_parts,
-            )
             return True
 
         # Always bind as a TEMP view on the fast path — the persistent view
@@ -820,17 +815,19 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
             return False
         _set_conn_state(con, **{fp_key: target_fp})
 
-    t_end = time.time()
-    _view_cache[cache_key] = (
-        metadata_loc,
-        buf_set,
-        tuple(sorted(dynamic_schema_field_names)),
-        view_sql,
-        round((t_end - t_start) * 1000, 2),
-        True,
-        variant_fp,
-        committed_sql_parts,
-    )
+    if not cached[5]:
+        t_end = time.time()
+        _view_cache[cache_key] = (
+            metadata_loc,
+            buf_set,
+            tuple(sorted(dynamic_schema_field_names)),
+            view_sql,
+            round((t_end - t_start) * 1000, 2),
+            True,
+            variant_fp,
+            committed_sql_parts,
+            cached_existing_cols,
+        )
     return True
 
 
@@ -1076,6 +1073,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         False,
         variant_fp,
         tuple(committed_parts),
+        frozenset(existing_cols),
     )
     try:
         from backend.core.duckdb_pool import _set_conn_state

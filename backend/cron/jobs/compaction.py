@@ -245,6 +245,22 @@ def _run_rollup_hour_heal(
             lookback_days=lookback_days,
             max_missing_hours=max_missing_hours,
         )
+        # Ensure per-hour security/bot rollups are also backfilled for any closed
+        # hours that already had all_fields/time_series bundles before those writers
+        # were registered.
+        if not durable_mode:
+            try:
+                from backend.core.rollups import (
+                    backfill_security_proxies_bundles,
+                    backfill_wellknown_bots_rollup,
+                )
+
+                backfill_security_proxies_bundles(service_id, src)
+                backfill_wellknown_bots_rollup(service_id, src)
+            except Exception as sec_heal_err:
+                logger.warning(
+                    "[rollup-heal] %s: security rollup self-heal skipped/failed: %s", service_id, sec_heal_err
+                )
         # Also heal any historical RUM aggregate hours (up to 30d) missing
         # 'total_beacons' rows when RUM is enabled on this Standard service.
         try:

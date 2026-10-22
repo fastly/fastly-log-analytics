@@ -79,20 +79,30 @@ def _lock_cron_run(con: Any, service_id: str, run_id: int) -> None:
     )
 
 
-def _publish_cron_run_change(service_id: str, run_id: int, task: str, status: str) -> None:
+def _publish_cron_run_change(
+    service_id: str,
+    run_id: int,
+    task: str,
+    status: str,
+    *,
+    started_at: str | None = None,
+    duration_s: float | None = None,
+) -> None:
     try:
         from backend.cron_runs_publisher import publisher
 
-        publisher.publish(
-            service_id,
-            {
-                "event": "cron_run_changed",
-                "run_id": run_id,
-                "task": task,
-                "status": status,
-                "ts": iso_z_now(),
-            },
-        )
+        payload: dict[str, Any] = {
+            "event": "cron_run_changed",
+            "run_id": run_id,
+            "task": task,
+            "status": status,
+            "ts": iso_z_now(),
+        }
+        if started_at is not None:
+            payload["started_at"] = started_at
+        if duration_s is not None:
+            payload["duration_s"] = duration_s
+        publisher.publish(service_id, payload)
     except Exception:
         logger.exception("[cron_log] cron-runs SSE publish failed for %s/%s", service_id, task)
 
@@ -190,6 +200,8 @@ def start_cron_run(service_id: str, task: str) -> int:
                 "run_id": new_id,
                 "task": task,
                 "status": "running",
+                "started_at": started_at,
+                "duration_s": 0.0,
                 "ts": started_at,
             },
         )
@@ -229,9 +241,10 @@ def log_cron_run(
     keys_json = json.dumps(parquet_keys or [])
     outcome_counters = _normalize_outcome_counters(outcome_counters) if outcome_counters is not None else None
     final_status = status
+    row_started_at = started_at
 
     def _write() -> None:
-        nonlocal final_status
+        nonlocal final_status, row_started_at
         import time
 
         final_rows_ingested = rows_ingested
@@ -242,9 +255,12 @@ def log_cron_run(
                 _lock_cron_run(con, service_id, run_id)
                 lock_clause = " FOR UPDATE"
                 existing = con.execute(
-                    "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
+                    "SELECT started_at, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?"
+                    + lock_clause,
                     (run_id, service_id),
                 ).fetchone()
+                if existing and existing["started_at"]:
+                    row_started_at = str(existing["started_at"])
                 existing_raw_counters = existing["outcome_counters"] if existing else None
                 has_existing_counters = bool(existing_raw_counters and json.loads(existing_raw_counters))
                 existing_counters = _decode_outcome_counters(existing_raw_counters) if has_existing_counters else None
@@ -345,7 +361,14 @@ def log_cron_run(
     # Broad except so an SSE-channel failure never breaks cron
     # bookkeeping.
     if run_id is not None:
-        _publish_cron_run_change(service_id, run_id, task, final_status)
+        _publish_cron_run_change(
+            service_id,
+            run_id,
+            task,
+            final_status,
+            started_at=row_started_at,
+            duration_s=duration_s,
+        )
 
 
 def _record_ingest_object_outcome_inner(
@@ -372,6 +395,7 @@ def _record_ingest_object_outcome_inner(
         task = ledger_row["originating_task"]
         run_id = ledger_row["originating_run_id"]
         previous = _decode_outcome_counters(ledger_row["outcome_counters"])
+        prev_run_status: str | None = None
         new_run_status: str | None = None
         if run_id is not None:
             run_id = int(run_id)
@@ -384,6 +408,7 @@ def _record_ingest_object_outcome_inner(
                 raise RuntimeError(f"originating cron run {run_id} is missing for ledger object")
             if task != run_row["task"]:
                 raise RuntimeError(f"ledger origin task does not match cron run {run_id}")
+            prev_run_status = str(run_row["status"]) if run_row["status"] is not None else None
 
             totals = _decode_outcome_counters(run_row["outcome_counters"])
             for key in OUTCOME_COUNTER_KEYS:
@@ -428,7 +453,7 @@ def _record_ingest_object_outcome_inner(
         con.execute("ROLLBACK")
         raise
 
-    if run_id is not None and task is not None and new_run_status is not None:
+    if run_id is not None and task is not None and new_run_status is not None and new_run_status != prev_run_status:
         return True, (run_id, task, new_run_status)
     return True, None
 
