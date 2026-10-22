@@ -50,11 +50,9 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
   const [copiedPragmaMsg, setCopiedPragmaMsg] = React.useState(false)
 
-  React.useEffect(() => {
-    if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
-      setPragmaModalOpen(false)
-    }
-  }, [data?.preflight_pragmas_ready, pragmaModalOpen])
+  if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
+    setPragmaModalOpen(false)
+  }
 
   const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
 

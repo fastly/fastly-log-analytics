@@ -204,6 +204,36 @@ test.describe('/admin/session-scoring — Admin Session Scoring Configuration Co
     await expect(tabOverview).toHaveAttribute('aria-selected', 'true');
   });
 
+  test('prerequisite dialog stays closed after readiness recovers and later regresses', async ({ page }) => {
+    let ready = false;
+    await page.route(/\/api\/services\/[^/]+\/(?:session-)?scoring\/(?:config|status)(?:\?|$)/, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const status = { enabled: false, preflight_pragmas_ready: ready };
+      await route.fulfill({
+        response,
+        json: new URL(route.request().url()).pathname.endsWith('/config')
+          ? { ...body, status: { ...body.status, ...status } }
+          : { ...body, ...status },
+      });
+    });
+    await page.goto('/admin/session-scoring', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('admin-session-scoring-pragma-warning')).toBeVisible();
+    await page.getByTestId('admin-session-scoring-enable-btn').click();
+    const dialog = page.getByTestId('admin-session-scoring-pragma-modal');
+    await expect(dialog).toBeVisible();
+    ready = true;
+    await page.getByTestId('admin-session-scoring-pragma-recheck-btn').click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByTestId('admin-session-scoring-pragma-warning')).toBeHidden();
+    ready = false;
+    await page.getByTestId('admin-session-scoring-refresh-btn').click();
+    await expect(page.getByTestId('admin-session-scoring-pragma-warning')).toBeVisible();
+    await expect(dialog).toBeHidden();
+    await page.getByTestId('admin-session-scoring-enable-btn').click();
+    await expect(dialog).toBeVisible();
+  });
+
   test('5. Interactive manual refresh workflow and X-Page-Load-ID header attribution', async ({
     page,
   }) => {

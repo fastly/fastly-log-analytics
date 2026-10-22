@@ -5,7 +5,7 @@ import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
@@ -29,11 +29,14 @@ const SVC = 'svc-pragma-test'
 
 function renderPanel() {
   const qc = createTestQueryClient()
-  return render(
-    <QueryClientProvider client={qc}>
-      <StatusPanel serviceId={SVC} />
-    </QueryClientProvider>,
-  )
+  return {
+    queryClient: qc,
+    ...render(
+      <QueryClientProvider client={qc}>
+        <StatusPanel serviceId={SVC} />
+      </QueryClientProvider>,
+    ),
+  }
 }
 
 beforeEach(() => {
@@ -82,6 +85,31 @@ describe('StatusPanel preflight pragma gate', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('admin-session-scoring-pragma-modal')).not.toBeInTheDocument(),
     )
+  })
+
+  it('keeps a resolved prerequisite dialog closed if readiness later becomes missing again', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/status`, () =>
+        HttpResponse.json({ enabled: false, preflight_pragmas_ready: false }),
+      ),
+    )
+    const user = userEvent.setup()
+    const { queryClient } = renderPanel()
+    await screen.findByTestId('admin-session-scoring-pragma-warning')
+    await user.click(screen.getByTestId('admin-session-scoring-enable-btn'))
+    expect(await screen.findByTestId('admin-session-scoring-pragma-modal')).toBeInTheDocument()
+
+    act(() => {
+      queryClient.setQueryData(['scoring-status', SVC], { enabled: false, preflight_pragmas_ready: true })
+    })
+    await waitFor(() => expect(screen.queryByTestId('admin-session-scoring-pragma-modal')).not.toBeInTheDocument())
+    act(() => {
+      queryClient.setQueryData(['scoring-status', SVC], { enabled: false, preflight_pragmas_ready: false })
+    })
+    expect(await screen.findByTestId('admin-session-scoring-pragma-warning')).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-session-scoring-pragma-modal')).not.toBeInTheDocument()
+    await user.click(screen.getByTestId('admin-session-scoring-enable-btn'))
+    expect(await screen.findByTestId('admin-session-scoring-pragma-modal')).toBeInTheDocument()
   })
 
   it('opens the Enable Session Scoring SSEModal when preflight_pragmas_ready is true', async () => {

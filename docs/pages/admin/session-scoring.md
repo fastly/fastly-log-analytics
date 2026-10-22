@@ -95,6 +95,7 @@ The **Admin Session Scoring & Scorer Weights** page (`/admin/session-scoring`) m
 - **Tab Navigation (`Overview`, `Labels`, `Matrix history`, `Audit`):** Switches cleanly via `data-testid="admin-session-scoring-tab-overview"`, `data-testid="admin-session-scoring-tab-labels"`, `data-testid="admin-session-scoring-tab-matrix"`, and `data-testid="admin-session-scoring-tab-audit"`.
 - **Threshold, L2 Enforcement & Exclusion Updates:** Inline sliders and forms validate bounds (`enforce_threshold >= threshold`, regex syntax) and persist atomically to service config and Fastly KV.
 - **Enable / Redeploy / Disable (`data-testid="admin-session-scoring-enable-btn"`, `data-testid="admin-session-scoring-redeploy-btn"`, `data-testid="admin-session-scoring-disable-btn"`):** Streams step-by-step SSE provisioning/teardown progress.
+- **Preflight prerequisite dialog:** When prerequisites are missing, Enable opens instructions rather than starting provisioning. A successful readiness recheck clears the dialog's open state during render, without an effect-driven update. If readiness later becomes missing again, the dialog stays closed until Enable is clicked again.
 
 ---
 
@@ -126,4 +127,5 @@ The **Admin Session Scoring & Scorer Weights** page (`/admin/session-scoring`) m
 - **Backend Unit Tests:** `tests/routers/test_session_scoring_admin.py` (18 tests covering status, config composite, dashboard composite, threshold, enforce-threshold, l2-enforce, exclude-regex, enforce-status-code, matrix-versions, restore, rotate-key, audit, `/session-scoring/*` aliases, and Analyst Path B `403` enforcement).
 - **Route Table Tripwire & OpenAPI Snapshot:** `tests/remote_access/test_route_table_tripwire.py` & `tests/test_openapi_snapshot.py`.
 - **Frontend Unit Tests:** `frontend/__tests__/app/admin/session-scoring.test.tsx` (3 tests covering composite rendering + zero-CLS containers/tabs, manual refresh invalidation, and `/api/services` fallback).
-- **Playwright E2E Suite:** `frontend/e2e/pages/admin-session-scoring.spec.ts` (5 end-to-end contract tests verified across Local Standard, Remote Standard GCE, and High-Scale Elevation).
+- **Prerequisite Dialog Unit Tests:** `frontend/__tests__/components/SessionScoring/StatusPanel.test.tsx` covers the prerequisite gate, readiness recheck and keeping a resolved dialog closed across later readiness regression.
+- **Playwright E2E Suite:** `frontend/e2e/pages/admin-session-scoring.spec.ts` retains the five existing page-contract cases and adds a fixture-controlled prerequisite-dialog recovery/regression case. The new case is verified against the local mock test app; it is not deployed-environment evidence.
