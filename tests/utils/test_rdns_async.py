@@ -3,8 +3,8 @@
 
 Mocks aiodns at the resolver level (no network). The aiodns DNSResolver
 exposes `.gethostbyaddr(ip)` returning a NamedTuple-shaped object with
-`.name` (PTR hostname) and `.query(name, type)` returning a list of records
-with `.host`.
+`.name` (PTR hostname) and `.query_dns(name, type)` returning a pycares
+`DNSResult` whose `answer` records carry the address in `data.addr`.
 
 The sync `_do_lookup` path is covered by the existing `test_rdns_cache.py`
 suite. This file covers the async paths the existing tests don't reach.
@@ -43,8 +43,13 @@ def _ptr(name: str):
 
 
 def _forward_records(hosts: list[str]):
-    """Build the list of objects aiodns query() returns."""
-    return [MagicMock(host=h) for h in hosts]
+    """Build the real pycares DNSResult aiodns >= 4 ``query_dns()`` returns (not iterable;
+    the addresses are in ``answer[i].data.addr``). Mocking the pre-4 shape (a list of objects
+    with ``.host``) hid a bug where every FCrDNS check came back unverified."""
+    import pycares
+
+    records = [pycares.DNSRecord("h.example.", 1, 1, 60, pycares.ARecordData(addr=h)) for h in hosts]
+    return pycares.DNSResult(answer=records, authority=[], additional=[])
 
 
 def test_do_lookup_async_returns_resolved_when_ptr_succeeds_and_fcrdns_passes():

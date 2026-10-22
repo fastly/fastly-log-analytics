@@ -438,6 +438,42 @@ def test_attach_ngwaf_cache_passes_through_to_sqlite_attach(monkeypatch, tmp_pat
         con.close()
 
 
+def test_attach_ngwaf_cache_reads_postgres_not_a_stale_default_sqlite_file(monkeypatch, tmp_path):
+    """A leftover ``ngwaf_bot_cache.db`` at the DEFAULT path (pre-ADR-22 host) must not shadow
+    the Postgres cache: reading it left the verified-bots panels empty in production."""
+    import sqlite3
+
+    stale = tmp_path / "ngwaf_bot_cache.db"
+    sconn = sqlite3.connect(str(stale))
+    sconn.execute("CREATE TABLE ngwaf_bots (waf_req_id TEXT, bot_name TEXT, category TEXT, wellknown_bot_name TEXT)")
+    sconn.execute("INSERT INTO ngwaf_bots VALUES ('stale-id', 'OldBot', 'X', NULL)")
+    sconn.commit()
+    sconn.close()
+    monkeypatch.setattr("backend.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("backend.config.ngwaf_db_path", lambda: str(stale))
+
+    class _Cur:
+        def fetchall(self):
+            return [{"waf_req_id": "pg-id", "bot_name": "GoogleBot", "category": "SEARCH", "wellknown_bot_name": None}]
+
+    class _Pg:
+        def execute(self, *_a, **_k):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("backend.core.metadata.pg_connection.get_pg_readonly_connection", lambda: _Pg())
+    con = duckdb.connect(":memory:")
+    try:
+        with attach_ngwaf_cache(con, schema_cols=["waf_req_id"], alias="ng_pg") as attached:
+            assert attached is True
+            rows = con.execute("SELECT waf_req_id, bot_name FROM temp.ng_pg_ngwaf_bots").fetchall()
+        assert rows == [("pg-id", "GoogleBot")]
+    finally:
+        con.close()
+
+
 def test_attach_ngwaf_cache_materializes_without_sqlite_scan_or_attach(monkeypatch, tmp_path):
     """When the cache file exists, the helper reads it via plain sqlite3
     and materializes it into a real, distinctly-named in-memory DuckDB

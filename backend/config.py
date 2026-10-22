@@ -972,6 +972,19 @@ def ngwaf_db_path() -> str:
     return str(DATA_DIR / "ngwaf_bot_cache.db")
 
 
+def ngwaf_sqlite_cache_override() -> str | None:
+    """Path of a NON-default NGWAF cache SQLite file (a test/fixture override), else ``None``.
+
+    The deployed bot cache lives in PostgreSQL (ADR-22). The default
+    ``ngwaf_bot_cache.db`` may still exist on a host as a pre-migration leftover; it is
+    stale, and reading it in place of Postgres left the verified-bots panels empty
+    (only the few old rows in the leftover file could match). Readers therefore use
+    SQLite only when a caller points ``ngwaf_db_path`` somewhere other than the default.
+    """
+    path = ngwaf_db_path()
+    return path if path and path != str(DATA_DIR / "ngwaf_bot_cache.db") else None
+
+
 def get_ngwaf_workspace_id(service_id: str) -> str | None:
     """Return the ngwaf_workspace_id for a service, or None if not configured."""
     return _get_cfg_field("ngwaf_workspace_id", service_id, None) or None

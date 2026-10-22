@@ -91,6 +91,14 @@ def test_ngwaf_db_path_is_shared_across_services():
     assert svcconfig.ngwaf_db_path().endswith("data/ngwaf_bot_cache.db")
 
 
+def test_ngwaf_sqlite_cache_override_ignores_the_default_path(monkeypatch, tmp_path):
+    """The default ``ngwaf_bot_cache.db`` is a stale pre-Postgres leftover, never a data source;
+    only an explicitly different path (test fixtures) selects SQLite."""
+    assert svcconfig.ngwaf_sqlite_cache_override() is None
+    monkeypatch.setattr(svcconfig, "ngwaf_db_path", lambda: str(tmp_path / "fixture.db"))
+    assert svcconfig.ngwaf_sqlite_cache_override() == str(tmp_path / "fixture.db")
+
+
 # ── load_config / save_config / delete ───────────────────────────────────────
 
 

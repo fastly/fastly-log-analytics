@@ -329,7 +329,7 @@ def build_where_clause(
             if bot_names:
                 from backend import config as svcconfig
 
-                waf_req_ids = _lookup_ngwaf_waf_req_ids(bot_names, db_path=svcconfig.ngwaf_db_path())
+                waf_req_ids = _lookup_ngwaf_waf_req_ids(bot_names, db_path=svcconfig.ngwaf_sqlite_cache_override())
                 op = "NOT IN" if mode == "exclude" else "IN"
                 if waf_req_ids:
                     placeholders = ", ".join(_add_param(v) for v in waf_req_ids)

@@ -277,8 +277,10 @@ async def _do_lookup_async(
         forward_ips: set[str] = set()
         for record_type in ("A", "AAAA"):
             try:
+                # aiodns >= 4: a DNSResult whose ``answer`` records carry the address in
+                # ``data.addr`` (the result itself is not iterable).
                 ans = await resolver.query_dns(hostname, record_type)
-                forward_ips.update(r.host for r in ans)  # type: ignore[attr-defined]
+                forward_ips.update(addr for rec in ans.answer if (addr := getattr(rec.data, "addr", None)))
             except Exception:
                 continue
 

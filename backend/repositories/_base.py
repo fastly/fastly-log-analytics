@@ -289,8 +289,7 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
 
     from backend import config as svcconfig
 
-    db_path = svcconfig.ngwaf_db_path()
-    default_ngwaf_db = str(svcconfig.DATA_DIR / "ngwaf_bot_cache.db")
+    db_path = svcconfig.ngwaf_sqlite_cache_override()
     rows = []
     if db_path and os.path.exists(db_path):
         import sqlite3
@@ -307,7 +306,7 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         except Exception as e:
             _logger.warning("[ngwaf_bots] sqlite cache read failed for %s: %s", alias, e)
             return False
-    elif db_path and db_path != default_ngwaf_db:
+    elif db_path:
         return False
     else:
         try:
