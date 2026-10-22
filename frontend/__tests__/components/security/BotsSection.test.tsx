@@ -218,6 +218,18 @@ describe('BotsSection', () => {
               { id: 'gb', name: 'Googlebot', category: 'search-engine', request_count: 100, verified_count: 90, impersonator_count: 5, unverified_count: 3, pending_count: 2 },
             ],
             tls_fingerprints: [{ fingerprint: 'sha-abc', ip_count: 4, request_count: 50 }],
+            bot_efficiency: [
+              {
+                bot_name: 'Commoncrawl Crawler',
+                category: 'ai-scraper',
+                request_count: 40,
+                resp_bytes: 80000,
+                bandwidth_pct: 12.5,
+                referrals: 0,
+                requests_per_referral: 40,
+                bytes_per_referral: 80000,
+              },
+            ],
           }),
         })}
       />
@@ -231,12 +243,13 @@ describe('BotsSection', () => {
     const names = traces.map((t) => t.name).sort()
     expect(names).toEqual(['Anthropic', 'OpenAI'])
 
-    // All three tables receive their respective rows.
+    // All four tables receive their respective rows.
     const tableProps = dataTableMock.mock.calls.map((c) => c[0])
-    expect(tableProps).toHaveLength(3)
+    expect(tableProps).toHaveLength(4)
     expect(tableProps[0]?.data).toHaveLength(1) // ngwaf_verified_bots
     expect(tableProps[1]?.data).toHaveLength(1) // wellknown_bots
     expect(tableProps[2]?.data).toHaveLength(1) // tls_fingerprints
+    expect(tableProps[3]?.data).toHaveLength(1) // bot_efficiency
 
     // Custom-mocked DataTable renders the row label inline so a populated
     // row is observable from the DOM, not just from mock-call inspection.

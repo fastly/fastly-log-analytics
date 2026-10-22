@@ -73,10 +73,16 @@ def _attacher(catalog: str, data_path: str, read_only_override: bool = False):
     def _attach(con_arg, src_arg, read_only=False):
         con_arg.execute("INSTALL ducklake; LOAD ducklake;")
         ro = ", READ_ONLY" if (read_only or read_only_override) else ""
-        try:
-            con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-        except duckdb.Error:
-            pass  # already attached on this connection
+        for attempt in range(40):
+            try:
+                con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
+                break
+            except duckdb.Error as exc:
+                if "already exists" in str(exc).lower():
+                    break
+                if attempt == 39:
+                    raise
+                time.sleep(0.05)
         return True
 
     return _attach
@@ -103,7 +109,7 @@ def _batch_env(service_id: str, tmp_path, download, fos=None, read_only_override
 
 def _lake_reader(attach):
     con = duckdb.connect()
-    attach(con, None, read_only=True)
+    attach(con, None, read_only=False)
     return con
 
 

@@ -752,6 +752,65 @@ _BOT_TOKEN_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _DOMAIN_STEM_RE = re.compile(r"^(?:https?://)?(?:www\.)?([^/.:;\s]+)", re.IGNORECASE)
+_SEED_PATH = Path(__file__).parent / "well_known_bots_seed.json"
+_seed_entries_cache: list[dict] | None = None
+_seed_matcher_fn: Callable[[str], tuple[dict, ...]] | None = None
+_seed_lock = threading.RLock()
+
+
+def load_well_known_bots_catalog() -> list[dict]:
+    """Return cached well-known-bots entries, falling back to the bundled seed catalog
+    when the runtime cache has not yet been fetched (e.g. fresh startup or CI)."""
+    live = load_source("well-known-bots")
+    if live:
+        return live
+    global _seed_entries_cache
+    if _seed_entries_cache is not None:
+        return _seed_entries_cache
+    with _seed_lock:
+        if _seed_entries_cache is None:
+            try:
+                _seed_entries_cache = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                _seed_entries_cache = []
+        return _seed_entries_cache
+
+
+def build_well_known_bots_matcher() -> Callable[[str], tuple[dict, ...]]:
+    """Return the live UA matcher when cached sources exist on disk, otherwise a
+    compiled matcher over the bundled well-known-bots seed catalog."""
+    if load_source("well-known-bots"):
+        return build_matcher()
+    global _seed_matcher_fn
+    if _seed_matcher_fn is not None:
+        return _seed_matcher_fn
+    with _seed_lock:
+        if _seed_matcher_fn is None:
+            compiled: list[tuple[dict, list[re.Pattern]]] = []
+            for entry in load_well_known_bots_catalog():
+                raw_patterns = (entry.get("pattern") or {}).get("accepted") or []
+                pats: list[re.Pattern] = []
+                for rp in raw_patterns:
+                    try:
+                        pats.append(re.compile(rp, re.IGNORECASE))
+                    except re.error:
+                        continue
+                if pats:
+                    compiled.append((entry, pats))
+            _compiled = compiled
+
+            @functools.lru_cache(maxsize=10_000)
+            def _match_seed_ua(ua: str) -> tuple[dict, ...]:
+                matches = []
+                for entry, pats in _compiled:
+                    for pat in pats:
+                        if pat.search(ua):
+                            matches.append(entry)
+                            break
+                return tuple(matches)
+
+            _seed_matcher_fn = _match_seed_ua
+        return _seed_matcher_fn
 
 
 def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot") -> str:
@@ -764,7 +823,7 @@ def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot"
     raw = (token_or_ua or "").strip()
     if not raw:
         return default
-    matcher = build_matcher()
+    matcher = build_well_known_bots_matcher()
     matches = (
         matcher(raw)
         or matcher(f"Mozilla/5.0 (compatible; {raw}/2.0)")
@@ -778,7 +837,7 @@ def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot"
             return bot_id.replace("-", " ").title()
     raw_low = raw.lower().strip("/._- ")
     if raw_low:
-        for entry in load_source("well-known-bots"):
+        for entry in load_well_known_bots_catalog():
             bot_id = entry.get("id", "")
             if not bot_id:
                 continue

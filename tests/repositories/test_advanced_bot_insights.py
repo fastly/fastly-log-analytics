@@ -331,3 +331,33 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
     assert len(rfd["items"]) > 0
     assert rfd["items"][0]["label"] == "t13d1516h2_8e6120e8544e_3a4b5c6d7e8f"
     assert rfd["items"][0]["meta"]["asns"] == 8
+
+
+def test_resolve_bot_display_name_and_efficiency_without_runtime_cache(tmp_path, monkeypatch) -> None:
+    """When `data/cache/bot_sources/well-known-bots.json` is absent (fresh checkout or CI),
+    `resolve_bot_display_name` and `summarize_bot_efficiency_rows` fall back to the
+    bundled `well_known_bots_seed.json` catalog."""
+    from backend.repositories.security import summarize_bot_efficiency_rows
+    from backend.utils import bot_sources
+    from backend.utils.bot_sources import load_source, resolve_bot_display_name
+
+    monkeypatch.setattr(bot_sources, "_CACHE_DIR", tmp_path)
+    with bot_sources._matcher_lock:
+        bot_sources._matcher_cache.clear()
+    with bot_sources._source_cache_lock:
+        bot_sources._source_cache.clear()
+
+    assert load_source("well-known-bots") == []
+    assert resolve_bot_display_name("claude-searchbot") == "Anthropic Crawler Search"
+    assert resolve_bot_display_name("googlebot") == "Google Crawler"
+    assert resolve_bot_display_name("ccbot") == "Commoncrawl Crawler"
+
+    rows = [
+        ("site", "", 100, 500_000),
+        ("ua", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", 10, 100_000),
+        ("ref", "google", 2, 0),
+        ("ua", "CCBot/2.0 (https://commoncrawl.org/faq/)", 5, 100_000),
+    ]
+    by_name = {item["bot_name"]: item for item in summarize_bot_efficiency_rows(rows)}
+    assert by_name["Google Crawler"]["referrals"] == 2
+    assert by_name["Commoncrawl Crawler"]["referrals"] == 0

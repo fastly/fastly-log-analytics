@@ -578,9 +578,9 @@ def summarize_bot_efficiency_rows(
 
     from backend.utils.bot_sources import (
         _BOT_TOKEN_SUFFIX_RE,
-        build_matcher,
+        build_well_known_bots_matcher,
         extract_entry_referral_stems,
-        load_source,
+        load_well_known_bots_catalog,
         resolve_bot_display_name,
     )
 
@@ -589,8 +589,8 @@ def summarize_bot_efficiency_rows(
         re.IGNORECASE,
     )
 
-    matcher = build_matcher()
-    catalog = load_source("well-known-bots") or []
+    matcher = build_well_known_bots_matcher()
+    catalog = load_well_known_bots_catalog() or []
     vendor_stems: dict[str, set[str]] = {}
     for entry in catalog:
         if not isinstance(entry, dict):

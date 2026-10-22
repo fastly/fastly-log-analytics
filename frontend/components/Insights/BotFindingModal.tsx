@@ -58,15 +58,16 @@ function StatCard({ icon, label, value, valueClass, hint }: StatCardProps) {
 
 export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalProps) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const investigateUrl = data?.item.investigate_url
 
   const investigateHref = React.useMemo(() => {
-    if (!data?.item.investigate_url) return null
-    const url = new URL(data.item.investigate_url, 'http://localhost')
+    if (!investigateUrl) return null
+    const url = new URL(investigateUrl, 'http://localhost')
     if (!url.searchParams.has('service') && activeServiceId) {
       url.searchParams.set('service', activeServiceId)
     }
     return url.pathname + url.search
-  }, [data?.item.investigate_url, activeServiceId])
+  }, [investigateUrl, activeServiceId])
 
   if (!data) return null
 
