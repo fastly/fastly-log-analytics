@@ -51,6 +51,33 @@ class TestReconciliationIdempotence:
                 assert result1.activated_version == 1
 
 
+class TestDryRunSummaryCountsOnlyManagedRemovals:
+    """The operator's own snippets are never deleted, so the summary must not claim they are."""
+
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_operator_snippets_are_not_reported_as_removals(
+        self, mock_fetch_backends, mock_fetch_endpoints, mock_fetch_snippets, mock_fetch_active
+    ):
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = [
+            VCLSnippet(name="CAPTCHA check", subroutine="recv", body="# operator", priority=10),
+            VCLSnippet(name="Block Iran and North Korea - Recv", subroutine="recv", body="# operator", priority=10),
+            VCLSnippet(name="Fastly Log Analysis Capture", subroutine="recv", body="# legacy", priority=10),
+        ]
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+
+        with patch("pathlib.Path.exists", return_value=True), patch("pathlib.Path.read_text") as mock_read:
+            mock_read.return_value = json.dumps({"service_id": "srv_test", "log_period": 60, "sample_rate": 100})
+            result = reconcile_vcl_state("srv_test", "token", dry_run=True)
+
+        # Only the legacy managed snippet would be deleted; the two operator snippets stay.
+        assert result.changes_applied["snippets_removed"] == 1
+
+
 class TestReconciliationFeatures:
     """Test feature enable/disable scenarios."""
 

@@ -374,6 +374,13 @@ def reconcile_vcl_state(
             # Step 4.5: Detect and auto-remove legacy snippets (migration helper)
             _detect_and_queue_legacy_cleanup(current_snippets, diff, status_cb)
 
+            # compute_diff lists every snippet on the service that isn't desired,
+            # including the operator's own VCL. Only managed snippets are ever
+            # deleted, so keep just those: the dry-run summary then states what
+            # an apply would remove, and an already-correct service is empty
+            # (idempotent) instead of cloning a new version on every run.
+            diff.snippets_to_remove = [n for n in diff.snippets_to_remove if _is_managed_snippet(n)]
+
             # Idempotency: if no changes, exit early. Current Fastly state
             # already matches desired state, so any route the tracker
             # depends on (e.g. /js/faro-sdk.js) is already live — safe to
