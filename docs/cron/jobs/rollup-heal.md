@@ -16,7 +16,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Cron trigger (`cron`)
 - **Default Schedule:** Hourly at 5 minutes past the hour (`minute=5`, e.g. 01:05, 02:05 UTC).
-- **Startup Trigger:** Also scheduled with `next_run_time = NOW() + 30s` at scheduler boot.
+- **Startup Trigger:** Also scheduled with `next_run_time = NOW() + 5s` at scheduler boot.
 - **Politeness Gate:** Evaluates `should_defer_cron("rollup_hour_heal", service_id)`. Yields execution if user API queries are actively in flight.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=900s`.
@@ -81,7 +81,7 @@
 ---
 
 ## 9. Verification Checklist
-- [x] 1. Verified `_run_rollup_hour_heal` registration in `backend/cron/scheduler.py` at `minute=5` and startup (`NOW() + 30s`).
+- [x] 1. Verified `_run_rollup_hour_heal` registration in `backend/cron/scheduler.py` at `minute=5` and startup (`NOW() + 5s`).
 - [x] 2. Verified task mapping `"rollup_heal": "rollup_hour_heal"` in `backend/cron/schedule.py`.
 - [x] 3. Verified `lookback_days = 2` (48-hour lookback window) in `backend/cron/jobs/compaction.py`.
 - [x] 4. Verified live execution in running container (`fla-hs-backend-1` run id 12063 at 04:05:00Z and run id 12076).

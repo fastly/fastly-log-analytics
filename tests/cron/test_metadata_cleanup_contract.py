@@ -90,17 +90,22 @@ def _seed_cron_runs(service_id: str, rows: int, days_ago: int = 0) -> None:
     con.commit()
 
 
-def _seed_slow_queries(service_id: str, rows: int, days_ago: int = 0) -> None:
+def _seed_slow_queries(service_id: str, rows: int, days_ago: int = 0) -> list[int]:
     con = metadata_db.get_con(service_id)
     cutoff = time.time() - (days_ago * 86400)
-    con.executemany(
-        """INSERT INTO slow_queries (
-            query_id, db_type, service_id, started_at_utc, ended_at_utc, duration_ms,
-            outcome, sql_preview, sql_len, attr_kind, attr_label, attr_caller_qualname, attr_caller_file
-        ) VALUES (1, 'duckdb', ?, ?, ?, 100.0, 'success', 'SELECT 1', 8, 'api', 'test', 'test_caller', 'test.py')""",
-        [(service_id, cutoff, cutoff + 0.1) for _ in range(rows)],
-    )
+    ids = []
+    for _ in range(rows):
+        row = con.execute(
+            """INSERT INTO slow_queries (
+                query_id, db_type, service_id, started_at_utc, ended_at_utc, duration_ms,
+                outcome, sql_preview, sql_len, attr_kind, attr_label, attr_caller_qualname, attr_caller_file
+            ) VALUES (1, 'duckdb', ?, ?, ?, 100.0, 'success', 'SELECT 1', 8, 'api', 'test', 'test_caller', 'test.py')
+            RETURNING id""",
+            (service_id, cutoff, cutoff + 0.1),
+        ).fetchone()
+        ids.append(row[0])
     con.commit()
+    return ids
 
 
 @pytest.fixture
@@ -315,8 +320,8 @@ def test_contract_7_cron_runs_and_slow_queries_retention(monkeypatch, mc_contrac
     _seed_cron_runs(sid, 4, days_ago=15)
     _seed_cron_runs(sid, 2, days_ago=2)
 
-    _seed_slow_queries(sid, 5, days_ago=45)
-    _seed_slow_queries(sid, 3, days_ago=5)
+    expired_ids = _seed_slow_queries(sid, 5, days_ago=45)
+    recent_ids = _seed_slow_queries(sid, 3, days_ago=5)
 
     purge_mock = MagicMock()
     monkeypatch.setattr("backend.core.metric_snapshots.purge_old", purge_mock)
@@ -335,8 +340,13 @@ def test_contract_7_cron_runs_and_slow_queries_retention(monkeypatch, mc_contrac
     # 2 recent seeded (4 older than 7d trimmed, and log_cron_run was mocked) = 2
     assert remaining_cron_runs == 2
 
-    remaining_slow_queries = con.execute("SELECT count(*) FROM slow_queries WHERE service_id = ?", (sid,)).fetchone()[0]
-    assert remaining_slow_queries == 3
+    seeded_ids = expired_ids + recent_ids
+    placeholders = ", ".join("?" for _ in seeded_ids)
+    remaining_slow_queries = con.execute(
+        f"SELECT id FROM slow_queries WHERE service_id = ? AND id IN ({placeholders})",
+        (sid, *seeded_ids),
+    ).fetchall()
+    assert {row[0] for row in remaining_slow_queries} == set(recent_ids)
 
     # Check global metric_snapshots purge was invoked with retention_days=30
     purge_mock.assert_called_once_with(retention_days=30)

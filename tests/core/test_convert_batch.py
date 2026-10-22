@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import duckdb
+import pytest
 
 from backend.core.ingest import convert_batch_objects
 from tests._helpers.ledger import clear_ledger as _clear_ledger
@@ -396,7 +397,8 @@ def test_convert_batch_task_routes_to_ingest_queue():
     assert app.amqp.router.route({}, name)["queue"].name == "q.ingest"
 
 
-def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_run(tmp_path):
+@pytest.mark.parametrize("missing_count", [0, 2])
+def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_run(tmp_path, missing_count):
     """Regression test for the High-Scale /api/cron-runs refetch + ERR_ABORTED storm:
     when a batch of N files shares an originating ``log_discovery`` run_id,
     ``convert_batch_objects`` must aggregate all N object outcomes into
@@ -422,20 +424,42 @@ def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_ru
         )
     con.commit()
 
+    for object_key in keys[:missing_count]:
+        del s3_map[f"s3://{BUCKET}/{object_key}"]
+    fos = MagicMock()
+    fos.head_object.side_effect = Exception("An error occurred (404) when calling HeadObject: Not Found")
     with (
-        _batch_env(service_id, tmp_path, _download_stub(s3_map)),
+        _batch_env(service_id, tmp_path, _download_stub(s3_map), fos=fos),
         patch("backend.core.metadata.cron_log._publish_cron_run_change") as mock_publish,
     ):
         summary = convert_batch_objects(service_id, keys, "w-sse")
 
-    assert summary["committed"] == 8, summary
+    expected_committed = 8 - missing_count
+    assert summary["committed"] == expected_committed, summary
+    assert summary["dead_letter"] == missing_count, summary
     row = con.execute(
-        "SELECT status, rows_ingested FROM cron_runs WHERE id=? AND service_id=?",
+        "SELECT status, rows_ingested, outcome_counters FROM cron_runs WHERE id=? AND service_id=?",
         (run_id, service_id),
     ).fetchone()
-    assert row[0] == "success"
-    assert row[1] == 16
-    assert mock_publish.call_count == 1, (
-        f"Expected 1 coalesced cron_run_changed SSE publish for an 8-file batch, got {mock_publish.call_count}"
+    assert row[0] == ("error" if missing_count else "success")
+    assert row[1] == expected_committed * 2
+    counters = json.loads(row[2])
+    assert counters["objects_failed"] == missing_count
+    assert counters["valid_records"] == expected_committed * 2
+    if missing_count:
+        mock_publish.assert_called_once_with(service_id, run_id, "log_discovery", "error")
+    else:
+        mock_publish.assert_not_called()
+    with (
+        _batch_env(service_id, tmp_path, _download_stub(s3_map), fos=fos),
+        patch("backend.core.metadata.cron_log._publish_cron_run_change") as replay_publish,
+    ):
+        replay = convert_batch_objects(service_id, keys, "w-sse-replay")
+    assert replay["committed"] == 0
+    replay_publish.assert_not_called()
+    assert (
+        con.execute("SELECT rows_ingested FROM cron_runs WHERE id=? AND service_id=?", (run_id, service_id)).fetchone()[
+            0
+        ]
+        == expected_committed * 2
     )
-    mock_publish.assert_called_once_with(service_id, run_id, "log_discovery", "success")

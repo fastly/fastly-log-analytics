@@ -1,7 +1,7 @@
 """Contract test suite for Cron 5: rollup_heal_{service_id}.
 
 Verifies all requirements and checklist items from docs/cron/jobs/rollup-heal.md (§1–§9):
-1. Registration in backend/cron/scheduler.py at minute=5 and startup (NOW() + 30s).
+1. Registration in backend/cron/scheduler.py at minute=5 and startup (NOW() + 5s).
 2. Task mapping "rollup_heal": "rollup_hour_heal" in backend/cron/schedule.py.
 3. 48-hour lookback window (lookback_days = 2) in backend/cron/jobs/compaction.py.
 4. Politeness gate: yields via should_defer_cron("rollup_hour_heal", service_id) when user queries are active; manual bypass.
@@ -15,7 +15,7 @@ Verifies all requirements and checklist items from docs/cron/jobs/rollup-heal.md
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,9 +38,9 @@ def contract_service_source(tmp_path):
     }
 
 
-def test_scheduler_registration_and_schedule_mapping():
+def test_scheduler_registration_and_schedule_mapping(frozen_clock):
     """Verifies Checklist Items 1 & 2:
-    - Registration in backend/cron/scheduler.py at minute=5 and startup (NOW() + 30s).
+    - Registration in backend/cron/scheduler.py at minute=5 and startup (NOW() + 5s).
     - Task mapping "rollup_heal": "rollup_hour_heal" in backend/cron/schedule.py.
     """
     from backend.cron.schedule import TASK_MAP
@@ -85,11 +85,8 @@ def test_scheduler_registration_and_schedule_mapping():
     assert call.kwargs.get("max_instances") == 1
     assert call.kwargs.get("coalesce") is True
     assert call.kwargs.get("misfire_grace_time") == 900
-    # Startup run time is within ~30s of NOW
-    next_run = call.kwargs.get("next_run_time")
-    assert next_run is not None
-    delta = abs((next_run - datetime.now(UTC)).total_seconds() - 30)
-    assert delta < 5.0
+    expected_startup = datetime.now(UTC) + timedelta(seconds=5)
+    assert call.kwargs.get("next_run_time") == expected_startup
 
     # 2. Sync jobs registration
     mock_add.reset_mock()
@@ -107,6 +104,7 @@ def test_scheduler_registration_and_schedule_mapping():
     scall = sync_heal_calls[0]
     assert scall.args[0] == _run_rollup_hour_heal
     assert scall.kwargs.get("minute") == 5
+    assert scall.kwargs.get("next_run_time") == expected_startup
 
 
 def test_rollup_heal_lookback_window_48h(contract_service_source, monkeypatch):

@@ -667,6 +667,9 @@ def test_recompute_touched_hours_malformed_hour_skipped(tmp_path):
         stack.enter_context(patch("backend.core.rollups.recompute._run_per_field_copy", side_effect=_capture))
         stack.enter_context(patch("backend.core.rollups.recompute._run_ip_spread_per_field"))
         stack.enter_context(patch("backend.core.rollups.recompute.bundle_hours", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.bundle_hours_ip_spread", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_ngwaf_bots_ts_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.recompute_wellknown_bots_rollup", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_time_series_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_session_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_slow_urls_bundles", return_value=0))
@@ -844,8 +847,18 @@ def test_recompute_touched_hours_swallows_downstream_bundle_errors():
             )
         )
 
-        # Must not raise.
+        additional_writers = [
+            stack.enter_context(patch.object(recompute, name, side_effect=RuntimeError(f"{name}-boom")))
+            for name in (
+                "bundle_hours_ip_spread",
+                "build_security_proxies_bundles",
+                "build_ngwaf_bots_ts_bundles",
+                "recompute_wellknown_bots_rollup",
+            )
+        ]
         recompute.recompute_touched_hours("svc", {"name": "svc"}, {h})
+        for writer in additional_writers:
+            writer.assert_called_once()
 
 
 # ── backfill_rollups + markers ──────────────────────

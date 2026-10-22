@@ -798,22 +798,17 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         # per call that adds up across every read-side request.
         bound_fp = _get_conn_state(con, fp_key)
         target_fp = (metadata_loc, buf_set, schema_fp, variant_fp, target_table)
-        if bound_fp == target_fp:
-            return True
-
-        # Always bind as a TEMP view on the fast path — the persistent view
-        # is maintained by the locked rebuild path.  Concurrent fast-path
-        # callers (pool checkouts) would otherwise race on the shared catalog
-        # and trigger "write-write conflict on alter".
-        exec_sql = view_sql
-        if view_sql.startswith("CREATE OR REPLACE VIEW "):
-            exec_sql = view_sql.replace("CREATE OR REPLACE VIEW ", "CREATE OR REPLACE TEMP VIEW ", 1)
-        try:
-            con.execute(exec_sql)
-        except Exception as e:
-            logger.warning("[iceberg] fast-path view re-bind failed for %s: %s", source_key, e)
-            return False
-        _set_conn_state(con, **{fp_key: target_fp})
+        if bound_fp != target_fp:
+            # TEMP views avoid shared-catalog write conflicts between pooled readers.
+            exec_sql = view_sql
+            if view_sql.startswith("CREATE OR REPLACE VIEW "):
+                exec_sql = view_sql.replace("CREATE OR REPLACE VIEW ", "CREATE OR REPLACE TEMP VIEW ", 1)
+            try:
+                con.execute(exec_sql)
+            except Exception as e:
+                logger.warning("[iceberg] fast-path view re-bind failed for %s: %s", source_key, e)
+                return False
+            _set_conn_state(con, **{fp_key: target_fp})
 
     if not cached[5]:
         t_end = time.time()

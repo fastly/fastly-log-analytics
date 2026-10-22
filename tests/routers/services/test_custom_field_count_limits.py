@@ -104,6 +104,16 @@ def _post_payload(field_name: str) -> dict:
     return {**_BASE_PAYLOAD, "name": field_name}
 
 
+def _at_template_limit(svc_id: str) -> dict:
+    for count in range(1000):
+        overflow = _make_cfg(svc_id, n_existing=count + 1)
+        if len(fastly_api.load_log_format(overflow["log_fields"])) > fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX:
+            cfg = _make_cfg(svc_id, n_existing=count)
+            assert len(fastly_api.load_log_format(cfg["log_fields"])) <= fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX
+            return cfg
+    raise AssertionError("The fixture did not reach the template size limit")
+
+
 def test_no_numeric_cap_field_count_still_accepted(tmp_path, monkeypatch):
     """The Nth field is accepted because the gate is log_format size,
     not count. Pre-seeded ``n_existing`` short-named fields keep log_format
@@ -152,12 +162,9 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     ``FASTLY_LOG_FORMAT_SAFE_MAX`` (8000), the route returns 422 with
     ``LOG_FORMAT_TOO_LONG`` in the errors list.
 
-    The seeded count is calibrated to land just under the safe max so
-    a single additional field tips it over. The bytes_estimate-aware
-    substr default (min(max(est*4, 40), 2000)) means every field with
-    a declared estimate gets a shorter VCL substr limit than the old
-    blanket 2000, but all fields now get nonzero limits (no more
-    budget starvation), so the tipping point shifted to ~92.
+    Derive the seeded count from the real template producer so a single
+    additional same-shaped field crosses the safe max even as built-in
+    fields and capture expressions change.
 
     Pins TWO things at once:
       a) The exact 422 status code (not 400, not silent acceptance).
@@ -167,9 +174,9 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_logfmt_overflow"
-    # 92 seeded fields → log_format ≈ 7968 chars (just under safe max);
-    # adding cf092 tips the new format past 8000.
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=92))
+    cfg = _at_template_limit(svc_id)
+    count = len(cfg["log_fields"]["custom_fields"])
+    config.save_config(svc_id, cfg)
 
     client = TestClient(app)
     # No shutil.which patch needed — the length check at
@@ -177,7 +184,7 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     # invoked, so this branch is binary-independent.
     resp = client.post(
         f"/api/services/{svc_id}/custom-fields",
-        json=_post_payload("cf092"),
+        json=_post_payload(f"cf{count:03d}"),
     )
     assert resp.status_code == 422, (
         f"field that overflows log_format should 422; got {resp.status_code} body={resp.text}"
@@ -187,9 +194,8 @@ def test_creating_field_that_overflows_log_format_returns_422(tmp_path, monkeypa
     errors: list[str] = body["detail"]["errors"]
     assert any("LOG_FORMAT_TOO_LONG" in e for e in errors), f"expected LOG_FORMAT_TOO_LONG in errors, got: {errors}"
 
-    # The blocked field is NOT persisted — saved cfg still has 92.
     saved = config.load_config(svc_id)
-    assert len(saved["log_fields"]["custom_fields"]) == 92
+    assert saved["log_fields"]["custom_fields"] == cfg["log_fields"]["custom_fields"]
 
 
 def test_log_format_overflow_error_reports_chars_and_safe_max(tmp_path, monkeypatch):
@@ -226,23 +232,26 @@ def test_drop_a_field_at_the_size_limit_then_re_add_succeeds(tmp_path, monkeypat
     """
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     svc_id = "test_svc_drop_readd"
-    # Seed at the same just-under-limit count the overflow test uses.
-    config.save_config(svc_id, _make_cfg(svc_id, n_existing=92))
+    cfg = _at_template_limit(svc_id)
+    fields = cfg["log_fields"]["custom_fields"]
+    count = len(fields)
+    removed_name = fields[count // 2]["name"]
+    config.save_config(svc_id, cfg)
 
     client = TestClient(app)
-    # Adding the 93rd tips it over (matches the sibling overflow test).
     overflow = client.post(
         f"/api/services/{svc_id}/custom-fields",
-        json=_post_payload("cf092"),
+        json=_post_payload(f"cf{count:03d}"),
     )
     assert overflow.status_code == 422, f"setup invariant: expected 422 at limit; got {overflow.status_code}"
 
-    # Drop one of the seeded fields → the saved config now has 91.
-    resp = client.delete(f"/api/services/{svc_id}/custom-fields/cf050")
+    assert config.load_config(svc_id)["log_fields"]["custom_fields"] == fields
+    resp = client.delete(f"/api/services/{svc_id}/custom-fields/{removed_name}")
     assert resp.status_code == 200, f"DELETE expected 200; got {resp.status_code} body={resp.text}"
     saved = config.load_config(svc_id)
     remaining = [cf["name"] for cf in saved["log_fields"]["custom_fields"]]
-    assert "cf050" not in remaining, f"DELETE did not remove the field; remaining={remaining!r}"
+    assert removed_name not in remaining, f"DELETE did not remove the field; remaining={remaining!r}"
+    assert len(remaining) == count - 1
 
     # Re-add a same-sized field (5 char name) → the freed budget should
     # accept it. A static count-cap regression would still reject.
@@ -258,5 +267,6 @@ def test_drop_a_field_at_the_size_limit_then_re_add_succeeds(tmp_path, monkeypat
 
     saved = config.load_config(svc_id)
     names = {cf["name"] for cf in saved["log_fields"]["custom_fields"]}
-    assert "cf050" not in names
+    assert removed_name not in names
     assert "cf999" in names
+    assert len(names) == count
