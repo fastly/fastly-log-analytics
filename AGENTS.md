@@ -1222,6 +1222,13 @@ Always enforce the unified contract across both streams:
 
 `close_all_pg_connections()` drains every tracked thread connection (test teardown, shutdown). Handing a libpq connection back to the pool while its owner thread has a statement in flight frees it under the running query and segfaults or cuts off the owner (the 2026-10 background-query shutdown failures). Each `PgConnectionWrapper` therefore carries a `_busy` `RLock` held for the duration of `execute`; the drain takes it with `acquire(blocking=False)` and **skips** (leaves tracked, for a later drain) any connection it cannot take. Rules: never `putconn` / `_return_to_pool_once` a connection you do not own without taking `_busy` non-blocking first; never block on `_busy` from the drain path (a hung query would hang shutdown); a thread that is ending calls `release_pg_thread_connection()` for its own connection. Test: `tests/core/test_pg_thread_connection_stale.py`. The same shape applies to the `_checked_out` WeakSet: do not replace it with a strong list (it pinned dead threads' connections until the pool timed out).
 
+### 46. Gate non-SSR-seeded store/query state on `useMounted()` in route chunks (`React #418`)
+
+In Next.js App Router, `<RootLayout>` (`StoreHydrator`, `useBootstrap`, `useAdminEventStream`) mounts and executes effects **before** late-loaded route chunks (such as `app/admin/page.js`) finish hydrating. During that gap:
+1. `StoreHydrator` / `useBootstrap` sets `useServiceStore.activeServiceId` (which is `null` during SSR when no `?service=` URL param is present).
+2. `useAdminEventStream` (`SSE_SYNC_STATUS`, `SSE_USAGE_COST`) or fast local queries (`useSystemMetrics`, `useBotSources`, `useQuarantineSummary`, `useShareSettings`, `useSyncStatus`) can populate React Query / Zustand caches before the route's first client render.
+If a route component reads `activeServiceId` or non-SSR-seeded query data directly during its initial render, the client's first hydration pass will render populated DOM (e.g. `?service=xyz` hrefs, populated tables, or live metrics) where SSR rendered `null` or a skeleton, triggering `Minified React error #418` in `e2e/hydration-smoke.spec.ts`. Always gate `activeServiceId` (when not backed by a URL param) and non-SSR-seeded query/SSE data on `const mounted = useMounted()` so the first client pass matches SSR HTML byte-for-byte.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

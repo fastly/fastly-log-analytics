@@ -80,7 +80,7 @@ The **Insights** page runs 51 automated anomaly and pattern detectors comparing 
 12. `impossible_distance`: Impossible Distance / Spoofing (required fields: `pop`, `lat`, `lon`, `tcp_rtt`)
 13. `connection_abuse`: Connection Reuse Anomaly (required fields: `conn_requests`)
 14. `session_harvesting`: Session-ID Harvesting (required fields: `ip`, `cookie_session`)
-15. `crawler_disparity`: Crawler Referral Disparity (required fields: `ua`, `referer`, `ip`, `timestamp`)
+15. `crawler_disparity`: Bot & Crawler Referral & Bandwidth Disparity (required fields: `ua`, `referer`, `ip`, `timestamp`; optional bandwidth tracking via `resp_bytes`, dynamic `bot_sources` + NGWAF + HTTP client matching, and interactive `CrawlerDisparityModal` breakdown)
 16. `stale_browser_version`: Stale Headless Browser (required fields: `ua`, `ip`, `timestamp`)
 17. `orphaned_deep_crawl`: Orphaned Deep Crawl (required fields: `ip`, `url`, `referer`, `timestamp`)
 18. `residential_fingerprint_dispersion`: Residential Fingerprint Dispersion (required fields: `ja4`, `ip`, `asn`, `p_type`, `timestamp`)

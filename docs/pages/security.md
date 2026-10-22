@@ -50,7 +50,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 
 ### Endpoints Hit:
 1. `GET /api/security/bundle` and `POST /api/security/bundle` (or composite bundle):
-   - Returns WAF block rate, attack type distribution, Top Attacking IPs/ASNs, Verified vs Spoofed Bot counts, JA4 fingerprints, header anomalies, and VPN/proxy indicators.
+   - Returns WAF block rate, attack type distribution, Top Attacking IPs/ASNs, Verified vs Spoofed Bot counts, Bot & Crawler Value vs. Cost (`bot_disparity`: requests, bandwidth `bytes`, bandwidth share `%`, referred human IPs, `requests_per_referral`, and `bytes_per_referral` dynamically joined against `bot_sources`, NGWAF bot tags, and HTTP client User-Agent families), JA4 fingerprints, header anomalies, and VPN/proxy indicators.
 2. `GET /api/security/threat-intel`:
    - Returns active client threat intel, JA3/JA4 fingerprints, and NGWAF detections.
 3. `GET /api/security/proxies/export`:
