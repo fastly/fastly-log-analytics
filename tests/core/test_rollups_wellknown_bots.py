@@ -298,17 +298,18 @@ def test_read_falls_back_when_time_range_exceeds_366_days():
 
 
 def _write_data_dir(cache_root: str, hour: str) -> None:
-    """Mark a closed hour as having a committed raw data partition. The
-    backfill only probes for ``*.parquet`` presence here (recompute, which
-    actually reads them, is mocked in these tests), so a dummy file suffices."""
-    d = os.path.join(cache_root, "data", f"timestamp_hour={hour}")
+    """Mark a closed hour as touched by the recompute pipeline (it carries an
+    ``all_fields.parquet`` hour bundle). The backfill only probes for the file's
+    presence here (recompute, which actually reads the view, is mocked in these
+    tests), so a dummy file suffices."""
+    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
     os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "batch_x.parquet"), "wb") as f:
+    with open(os.path.join(d, "all_fields.parquet"), "wb") as f:
         f.write(b"x")
 
 
 def test_backfill_wellknown_rebuilds_data_backed_and_sweeps_unrebuildable_stale(tmp_path):
-    """The self-heal pass is keyed on raw data partitions:
+    """The self-heal pass is keyed on closed hours that have an all_fields hour bundle:
 
     - a data-backed hour with NO wellknown partition → rebuilt;
     - a data-backed hour with a STALE-version partition → rebuilt;

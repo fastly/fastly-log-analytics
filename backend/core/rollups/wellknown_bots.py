@@ -31,7 +31,15 @@ from datetime import UTC, datetime, timedelta
 from backend.utils.date_utils import parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
-from ._common import parquet_zstd_target, parse_hour_token, quote_path_list, unlink_quiet
+from ._common import (
+    _hour_bundled_root,
+    _safe_table_for,
+    acquire_rollup_connection_and_cols,
+    parquet_zstd_target,
+    parse_hour_token,
+    quote_path_list,
+    unlink_quiet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +50,6 @@ def _wellknown_bots_root(source: dict) -> str:
     return os.path.join(_cache_dir(source), "rollups", "wellknown_bots")
 
 
-def _hour_has_parquets(d: str) -> bool:
-    """True iff directory ``d`` holds at least one published parquet
-    (ignoring in-flight ``.tmp_`` writes). Cheaper than glob.glob."""
-    try:
-        for f in os.listdir(d):
-            if f.endswith(".parquet") and not f.startswith(".tmp_"):
-                return True
-    except OSError:
-        pass
-    return False
-
-
 def recompute_wellknown_bots_rollup(
     service_id: str,
     source: dict,
@@ -62,21 +58,12 @@ def recompute_wellknown_bots_rollup(
     """Pre-materialise (ua, ip, count) rows for the wellknown_bots
     request-path query for each touched hour.
 
-    Reads each CLOSED hour's committed Iceberg data partition directly —
-    ``cache/<svc>/data/timestamp_hour=<H>/*.parquet`` — via a private
-    ``:memory:`` DuckDB connection, rather than the per-service iceberg
-    *view*. The view UNIONs the in-progress ``buffer/`` parquets by
-    absolute path; a connection that binds the view once and loops for
-    minutes fails every COPY after a concurrent ingest flushes one of
-    those buffer files (observed 2026-06-27: a full historical backfill
-    of ~800 hours took ~27 min and every per-hour COPY after the first
-    buffer commit raised ``IO Error: Cannot open buffer/batch_*.parquet``,
-    so 0 hours migrated). A closed hour's rows are all committed under
-    ``data/timestamp_hour=<H>/`` — the buffer holds only the active hour —
-    so reading that partition is complete, and the glob is re-resolved
-    per hour, so a file rewritten by compaction mid-loop fails only that
-    one hour's COPY (the next backfill tick self-heals it) instead of the
-    whole run.
+    Reads each CLOSED hour through the per-service session view (the same
+    source every other rollup writer uses), so it sees DuckLake data — the
+    legacy ``cache/<svc>/data/timestamp_hour=*`` mirror this writer used to
+    read stops receiving rows after the DuckLake cutover, which left the
+    rollup permanently empty. A per-hour stale-view retry covers a buffer
+    file vanishing mid-loop (the 2026-06-27 backfill stall).
 
     Skips the active hour — its data is still in flight in the buffer and
     the security reader serves it live. Returns the number of hour
@@ -88,9 +75,7 @@ def recompute_wellknown_bots_rollup(
     """
     if not hours:
         return 0
-    import duckdb
 
-    from backend.core.duckdb import _cache_dir
     from backend.core.iceberg.view import _get_service_lock
     from backend.utils.bot_sources import get_bot_regex_pattern, get_pattern_set_version
 
@@ -114,61 +99,37 @@ def recompute_wellknown_bots_rollup(
     if not parsed:
         return 0
 
-    try:
-        cache_dir = _cache_dir(source)
-    except Exception:
-        return 0
-    data_root = os.path.join(cache_dir, "data")
-
-    # Restrict to hours whose committed data partition exists on disk.
-    # An hour with no partition is either genuinely empty or not yet
-    # flushed; the reader's coverage floor + live fallback handles it.
-    eligible: list[str] = [h for h in parsed if _hour_has_parquets(os.path.join(data_root, f"timestamp_hour={h}"))]
-    if not eligible:
+    table_ident = _safe_table_for(source)
+    if not table_ident:
         return 0
 
     bots_root = _wellknown_bots_root(source)
-    os.makedirs(bots_root, exist_ok=True)
     lock_key = source.get("name", "default")
     pattern_sql = escape_sql_literal(pattern)
     version_sql = escape_sql_literal(version)
 
     rebuilt = 0
-    # :memory: connection reads only static, already-committed parquet
-    # files — never the buffer-including per-service view. Matches the
-    # isolation bundle_hours / compact_closed_days / the rollup readers use.
-    from backend.core.duckdb import get_memory_connection
-
-    con = get_memory_connection()
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source, table_ident, logger=logger, log_label="wellknown_bots"
+    )
     try:
-        # Validate the source has the columns we need before per-hour
-        # work — saves N×(failed COPY) on services without UA/IP fields.
-        # Probe the first eligible hour's partition (closed hours share a
-        # schema); a later hour missing the column falls through to the
-        # per-hour COPY's own try/except.
-        probe_glob = escape_sql_literal(os.path.join(data_root, f"timestamp_hour={eligible[0]}", "*.parquet"))
-        try:
-            desc = con.execute(f"SELECT * FROM read_parquet('{probe_glob}', union_by_name=true) LIMIT 0").description
-            cols = {d[0] for d in (desc or [])}
-        except duckdb.Error as e:
-            logger.warning("[rollups] %s: bot-rollup column probe failed: %s", service_id, e)
-            return 0
-        if "ua" not in cols or "ip" not in cols:
+        # A service without UA/IP fields can't materialise bots; bail before
+        # N x (failed COPY).
+        if cols is None or "ua" not in cols or "ip" not in cols:
             return 0
 
-        for hour in eligible:
+        from backend.core.iceberg import execute_with_stale_view_retry
+
+        os.makedirs(bots_root, exist_ok=True)
+        for hour in parsed:
             # COPY ... TO '<path>' targets a SINGLE FILE when no
             # PARTITION_BY clause is present (a directory target only
-            # works alongside PARTITION_BY — observed 2026-06-12: an
-            # earlier draft used a tmp directory and DuckDB raised
-            # "Cannot open file: Is a directory"). Write to a unique
-            # tmp file under the final hour-partition dir, then rename
-            # to the canonical compacted_ name under the iceberg lock.
-            hour_glob = escape_sql_literal(os.path.join(data_root, f"timestamp_hour={hour}", "*.parquet"))
-            # Defense-in-depth on top of the partition glob: a half-open
-            # TIMESTAMPTZ range (absolute instants) is TZ-agnostic, unlike
-            # strftime(timestamp,...) which renders in the connection's
-            # session TZ. Matches build_per_hour_bundles / security_dims.
+            # works alongside PARTITION_BY). Write to a unique tmp file
+            # under the final hour-partition dir, then rename to the
+            # canonical compacted_ name under the iceberg lock.
+            # A half-open TIMESTAMPTZ range (absolute instants) is
+            # TZ-agnostic, unlike strftime(timestamp,...) which renders in
+            # the connection's session TZ.
             hour_dt = parse_hour_key_strict(hour)
             start_iso = hour_dt.isoformat()
             end_iso = (hour_dt + timedelta(hours=1)).isoformat()
@@ -176,22 +137,23 @@ def recompute_wellknown_bots_rollup(
             os.makedirs(hour_dir, exist_ok=True)
             tmp_path = os.path.join(hour_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             tmp_path_sql = escape_sql_literal(tmp_path)
+            copy_sql = (
+                f"COPY ("
+                f"  SELECT ua, ip, count(*) AS request_count, "
+                f"         '{version_sql}' AS pattern_set_version "
+                f"  FROM {table_ident} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+                f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+                f"    AND ua IS NOT NULL AND ip IS NOT NULL "
+                f"    AND regexp_matches(ua, '{pattern_sql}') "
+                f"  GROUP BY ua, ip "
+                f"  ORDER BY request_count DESC "
+                f"  LIMIT 50000"
+                f") {parquet_zstd_target(tmp_path_sql)}"
+            )
             try:
-                con.execute(
-                    f"COPY ("
-                    f"  SELECT ua, ip, count(*) AS request_count, "
-                    f"         '{version_sql}' AS pattern_set_version "
-                    f"  FROM read_parquet('{hour_glob}', union_by_name=true) "
-                    f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
-                    f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
-                    f"    AND ua IS NOT NULL AND ip IS NOT NULL "
-                    f"    AND regexp_matches(ua, '{pattern_sql}') "
-                    f"  GROUP BY ua, ip "
-                    f"  ORDER BY request_count DESC "
-                    f"  LIMIT 50000"
-                    f") {parquet_zstd_target(tmp_path_sql)}"
-                )
-            except duckdb.Error as e:
+                execute_with_stale_view_retry(con, source, lambda c, q=copy_sql: c.execute(q))
+            except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the iceberg retry hop
                 logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
                 unlink_quiet(tmp_path)
                 continue
@@ -224,7 +186,8 @@ def recompute_wellknown_bots_rollup(
                     continue
             rebuilt += 1
     finally:
-        con.close()
+        if owns_con:
+            con.close()
 
     return rebuilt
 
@@ -261,7 +224,6 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
     Idempotent. Returns the number of hour partitions (re)written; logs the
     stale-sweep count separately.
     """
-    from backend.core.duckdb import _cache_dir
     from backend.core.iceberg.view import _get_service_lock
     from backend.utils.bot_sources import get_pattern_set_version
 
@@ -269,22 +231,24 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
     if not version:
         return 0
 
-    try:
-        cache_dir = _cache_dir(source)
-    except Exception:
-        return 0
-    data_root = os.path.join(cache_dir, "data")
     bots_root = _wellknown_bots_root(source)
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
 
-    # Closed hours with a committed raw data partition — the rebuildable set.
+    # Closed hours the recompute pipeline has touched (they carry an
+    # ``all_fields.parquet`` hour bundle) — the rebuildable set, the same
+    # universe every other per-hour rollup backfill walks.
     data_hours: set[str] = set()
+    bundled_root = _hour_bundled_root(source)
     try:
-        for entry in os.listdir(data_root):
-            if not entry.startswith("timestamp_hour="):
+        for entry in os.listdir(bundled_root):
+            if not entry.startswith("hour="):
                 continue
-            h = entry[len("timestamp_hour=") :]
-            if h < active_hour and _hour_has_parquets(os.path.join(data_root, entry)):
+            h = entry[len("hour=") :]
+            if (
+                h < active_hour
+                and parse_hour_token(h) is not None
+                and os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet"))
+            ):
                 data_hours.add(h)
     except OSError:
         data_hours = set()
