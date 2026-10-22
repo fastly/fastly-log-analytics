@@ -716,6 +716,8 @@ ua_agg AS (
     FROM {temp_table} t
     WHERE t.ua IS NOT NULL AND t.ua != ''
     GROUP BY t.ua
+    ORDER BY resp_bytes DESC, cnt DESC
+    LIMIT 2000
 ),
 ref_extracted AS (
     SELECT
@@ -726,6 +728,11 @@ ref_extracted AS (
         ) AS ref_stem
     FROM {temp_table} t
     WHERE t.ip IS NOT NULL AND t.ip != ''
+      AND (
+          ({referer_expr} IS NOT NULL AND {referer_expr} != '' AND {referer_expr} != '-')
+          OR lower(COALESCE(t.ua, '')) LIKE '%-user%'
+          OR lower(COALESCE(t.ua, '')) LIKE '%-externalfetcher%'
+      )
       AND NOT regexp_matches(
           lower(COALESCE(t.ua, '')),
           '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)'

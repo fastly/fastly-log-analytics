@@ -149,6 +149,28 @@ export function BotsSection({
     }))
   }, [data, timezone, bucketSeconds])
 
+  const botEfficiencyChartData = React.useMemo((): PlotlyTrace[] => {
+    const rows = data?.bot_efficiency
+    if (!rows?.length) return []
+    const top = rows.slice(0, 10)
+    return [
+      {
+        x: top.map((r) => r.bot_name),
+        y: top.map((r) => r.request_count),
+        name: 'Bot Requests',
+        type: 'bar',
+        marker: { color: '#f97316' },
+      },
+      {
+        x: top.map((r) => r.bot_name),
+        y: top.map((r) => r.referrals),
+        name: 'Referred Traffic',
+        type: 'bar',
+        marker: { color: '#22c55e' },
+      },
+    ]
+  }, [data?.bot_efficiency])
+
   const botColumns: ColumnDef<WellknownBot>[] = [
     {
       accessorKey: 'name',
@@ -397,6 +419,7 @@ export function BotsSection({
             data={data?.wellknown_bots || []}
             emptyMessage={isLoading ? "" : "No known bots detected. Ensure bot sources are cached in Admin settings."}
             hideToolbar
+            tableContainerClassName="max-h-[280px]"
             columnVisibility={botVisibility}
             onColumnVisibilityChange={setBotVisibility}
           />
@@ -426,13 +449,45 @@ export function BotsSection({
             data={data?.tls_fingerprints || []}
             emptyMessage={isLoading ? "" : ((isFieldActive('ja3') || isFieldActive('ja4')) ? "No TLS fingerprints in this time range." : "Requires Security: TLS Fingerprinting (Group H) fields to be enabled in Fastly logging.")}
             hideToolbar
+            tableContainerClassName="max-h-[280px]"
             columnVisibility={fingerprintVisibility}
             onColumnVisibilityChange={setFingerprintVisibility}
           />
         </AnalyticsCard>
       </div>
 
-      <div className="mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <AnalyticsCard
+          title="Bot & Crawler Cost vs. Referrals"
+          icon={<Scale className="h-4 w-4" />}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading bot cost vs. referrals chart..."
+          error={error as AnalyticsCardError | null}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+          contentClassName="p-2"
+          helpTitle={SECURITY_INFO.bot_efficiency.title}
+          helpContent={SECURITY_INFO.bot_efficiency.body}
+        >
+          {botEfficiencyChartData.length === 0 && !isLoading ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
+              {isFieldActive('ua')
+                ? 'No bot or crawler traffic detected in this time window.'
+                : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'}
+            </div>
+          ) : (
+            <PlotlyChart
+              data={botEfficiencyChartData}
+              layout={{
+                barmode: 'group',
+                showlegend: true,
+                yaxis: { title: 'Count', separatethousands: true, exponentformat: 'none' },
+              }}
+              height="100%"
+            />
+          )}
+        </AnalyticsCard>
+
         <AnalyticsCard
           title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)"
           icon={<Scale className="h-4 w-4" />}
@@ -465,6 +520,7 @@ export function BotsSection({
                   : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
             }
             hideToolbar
+            tableContainerClassName="max-h-[280px]"
             columnVisibility={botEfficiencyVisibility}
             onColumnVisibilityChange={setBotEfficiencyVisibility}
           />

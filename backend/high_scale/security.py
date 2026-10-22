@@ -405,6 +405,8 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             FROM request_facts
             WHERE __WHERE__ AND custom_fields['ua'] != ''
             GROUP BY key
+            ORDER BY resp_bytes DESC, cnt DESC
+            LIMIT 2000
         ),
         ref_extracted AS (
             SELECT
@@ -417,6 +419,11 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             FROM request_facts
             WHERE __WHERE__
               AND client_ip != ''
+              AND (
+                  (custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
+                  OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                  OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
+              )
               AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
         ),
         ref_agg AS (
