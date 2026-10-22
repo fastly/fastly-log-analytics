@@ -101,8 +101,16 @@ class _ConnectionHolder:
     pooled so a poisoned connection doesn't get reused.
     """
 
-    def __init__(self, source: dict, skip_view_update: bool = False, read_only: bool = True, heavy: bool = False):
+    def __init__(
+        self,
+        source: dict,
+        skip_view_update: bool = False,
+        read_only: bool = True,
+        heavy: bool = False,
+        label: str | None = None,
+    ):
         self._source = source
+        self._label = label
         self._skip_view_update = skip_view_update
         self._read_only = read_only
         # Aggregate routes take a heavy slot so light requests keep pool capacity
@@ -147,7 +155,9 @@ class _ConnectionHolder:
 
         try:
             if use_pool:
-                self._pool_cm = duckdb_pool.checkout_connection(self._source, max_wait=max_wait, heavy=self._heavy)
+                self._pool_cm = duckdb_pool.checkout_connection(
+                    self._source, max_wait=max_wait, heavy=self._heavy, label=self._label
+                )
                 self.con = self._pool_cm.__enter__()
             else:
                 self.con = get_connection(

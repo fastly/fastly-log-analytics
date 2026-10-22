@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -165,3 +166,55 @@ def test_stats_report_the_heavy_section():
     assert heavy["cap"] == 3
     assert heavy["in_use"] == 1
     assert heavy["wait"]["count"] == 1
+
+
+def test_slow_checkout_is_logged_with_the_route_and_where_it_waited(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "50")
+    pool = _pool_with_fake_connections(4)
+
+    def slow_acquire(*_a, **_k):
+        time.sleep(0.12)
+        return MagicMock()
+
+    pool.acquire = MagicMock(side_effect=slow_acquire)  # type: ignore[method-assign]
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0, heavy=True, label="/api/cmcd/aggregates"):
+            pass
+
+    messages = [r.getMessage() for r in caplog.records if "slow checkout" in r.getMessage()]
+    assert len(messages) == 1
+    assert "route=/api/cmcd/aggregates" in messages[0]
+    assert "heavy=True" in messages[0]
+    assert "slot_wait_ms=0" in messages[0]
+    assert "pool_wait_ms=1" in messages[0]  # 120 ms in acquire
+
+
+def test_fast_checkout_is_not_logged(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "500")
+    pool = _pool_with_fake_connections(4)
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0, label="/api/cron-runs"):
+            pass
+    assert not [r for r in caplog.records if "slow checkout" in r.getMessage()]
+
+
+def test_slow_checkout_logging_can_be_disabled(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "0")
+    pool = _pool_with_fake_connections(4)
+    pool.acquire = MagicMock(side_effect=lambda *a, **k: (time.sleep(0.05), MagicMock())[1])  # type: ignore[method-assign]
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0):
+            pass
+    assert not [r for r in caplog.records if "slow checkout" in r.getMessage()]

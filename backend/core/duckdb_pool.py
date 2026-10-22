@@ -134,6 +134,14 @@ def is_heavy_route(route_template: str | None) -> bool:
     return route_template.rstrip("/").endswith(suffixes)
 
 
+def _slow_checkout_ms() -> float:
+    """Checkouts that wait at least this long are logged (0 disables; default 500 ms)."""
+    try:
+        return max(0.0, float(os.getenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "500")))
+    except (TypeError, ValueError):
+        return 500.0
+
+
 def _pool_conn_memory_limit() -> str | None:
     """Optional per-pool-connection memory cap.
 
@@ -998,6 +1006,7 @@ def checkout_connection(
     skip_view_update: bool = False,
     reuse_only: bool = False,
     heavy: bool = False,
+    label: str | None = None,
 ):
     """Yield a fully-configured DuckDB connection from the per-service pool.
 
@@ -1047,9 +1056,11 @@ def checkout_connection(
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    heavy_deadline = time.monotonic() + max_wait
+    t_start = time.monotonic()
+    heavy_deadline = t_start + max_wait
     if heavy:
         pool.acquire_heavy_slot(max_wait)
+    t_slot = time.monotonic()
     try:
         raw_con = pool.acquire(
             src,
@@ -1061,6 +1072,23 @@ def checkout_connection(
         if heavy:
             pool.release_heavy_slot()
         raise
+    t_done = time.monotonic()
+    threshold = _slow_checkout_ms()
+    if threshold and (t_done - t_start) * 1000.0 >= threshold:
+        # Says whether the wait was for a heavy slot or for a pool connection, and
+        # what the pool looked like, so a slow endpoint can be attributed.
+        logger.warning(
+            "[pool] slow checkout: service=%s route=%s heavy=%s slot_wait_ms=%d pool_wait_ms=%d open=%d idle=%d heavy_in_use=%d/%d",
+            service_key,
+            label,
+            heavy,
+            (t_slot - t_start) * 1000,
+            (t_done - t_slot) * 1000,
+            pool._in_use,
+            pool._idle.qsize(),
+            pool._heavy_in_use,
+            pool.heavy_cap,
+        )
     wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:
