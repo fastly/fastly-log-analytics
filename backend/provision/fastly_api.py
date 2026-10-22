@@ -868,6 +868,40 @@ def account_has_rate_limiting(token: str, *service_ids: str) -> bool | None:
     return None
 
 
+# Service-level VCL pragmas required for Session Scoring's preflight sub-fetch +
+# restart flow so POST/PUT/PATCH request bodies are neither streamed on the
+# GET-rewritten scorer preflight pass nor drained across the restart to origin.
+_FIX_UNSENT_BODY_DRAIN_RE = re.compile(r"fix_unsent_body_drain\s+true\b")
+_NO_BODY_IF_BEREQ_GET_OR_HEAD_RE = re.compile(r"no_body_if_bereq_is_get_or_head\s+true\b")
+
+
+def service_has_scoring_pragmas(service_id: str, token: str) -> bool | None:
+    """Detect whether ``service_id`` has both preflight body preservation
+    pragmas enabled in its compiled VCL.
+
+    Returns:
+    * ``True``  — both ``fix_unsent_body_drain true`` and
+      ``no_body_if_bereq_is_get_or_head true`` are present in the active
+      version's generated VCL.
+    * ``False`` — generated VCL was read, and at least one pragma is absent or
+      ``false``.
+    * ``None``  — inconclusive (missing ``service_id``/``token``, no active
+      version, empty generated VCL, or Fastly API error).
+    """
+    if not service_id or not token:
+        return None
+    try:
+        active_ver = get_active_version(service_id, token)
+        if active_ver is None:
+            return None
+        content = get_generated_vcl(service_id, active_ver, token)
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return None
+    if not content:
+        return None
+    return bool(_FIX_UNSENT_BODY_DRAIN_RE.search(content) and _NO_BODY_IF_BEREQ_GET_OR_HEAD_RE.search(content))
+
+
 def _validate_with_ratelimit_fallback(svc_id, ver, token, *, status_cb=None, ok_msg=None, ok_fallback_msg=None):
     """Validate ``svc_id``/``ver`` and, if it fails on a missing rate-limiting
     feature (ratecounter / penaltybox / ratelimit), redeploy the main VCL

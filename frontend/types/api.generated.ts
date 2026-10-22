@@ -18662,6 +18662,8 @@ export interface components {
             drift_detail?: string | null;
             /** Drift Known */
             drift_known?: boolean | null;
+            /** Preflight Pragmas Ready */
+            preflight_pragmas_ready?: boolean | null;
         } & {
             [key: string]: unknown;
         };

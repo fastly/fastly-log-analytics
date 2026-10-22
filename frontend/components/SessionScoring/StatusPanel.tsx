@@ -2,10 +2,18 @@
 
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
+import { AlertTriangle, Check, Copy, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { StatusPanelHelp } from '@/components/SessionScoring/help-content'
 import { SSEModal } from '@/components/SSEModal'
@@ -38,6 +46,27 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   })
 
   const enabled = !!data?.enabled
+  const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
+  const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
+  const [copiedPragmaMsg, setCopiedPragmaMsg] = React.useState(false)
+
+  React.useEffect(() => {
+    if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
+      setPragmaModalOpen(false)
+    }
+  }, [data?.preflight_pragmas_ready, pragmaModalOpen])
+
+  const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
+
+  const handleCopyPragmaMessage = React.useCallback(async () => {
+    try {
+      await navigator.clipboard?.writeText(accountTeamMessage)
+      setCopiedPragmaMsg(true)
+      setTimeout(() => setCopiedPragmaMsg(false), 2000)
+    } catch {
+      // Clipboard API unavailable in some non-HTTPS/test contexts; ignore.
+    }
+  }, [accountTeamMessage])
 
   // After an enable / disable / redeploy SSE stream closes, the scoring config
   // and analytics have all changed (or the stores were just created), so the
@@ -148,6 +177,95 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                 }
               />
             </div>
+          ) : pragmasMissing ? (
+            <>
+              <Button
+                variant="default"
+                size="sm"
+                data-testid="admin-session-scoring-enable-btn"
+                onClick={() => setPragmaModalOpen(true)}
+              >
+                <Power className="h-3.5 w-3.5 mr-1" /> Enable
+              </Button>
+              <Dialog open={pragmaModalOpen} onOpenChange={setPragmaModalOpen}>
+                <DialogContent className="sm:max-w-lg" data-testid="admin-session-scoring-pragma-modal">
+                  <DialogHeader>
+                    <DialogTitle>Preflight Request Body Preservation Required</DialogTitle>
+                    <DialogDescription>
+                      Before enabling the Session Scoring Compute scorer on{' '}
+                      <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>, your Fastly account team must
+                      enable preflight request body preservation on this service.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2 text-sm">
+                    <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+                      <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                      <div className="text-xs space-y-1">
+                        <div className="font-semibold">Why is this required?</div>
+                        <div>
+                          Session Scoring routes each request through a lightweight Compute preflight sub-request
+                          (rewritten to <code>GET</code>) and then restarts VCL to forward the original request to your
+                          origin. Without service-level preflight body preservation enabled,{' '}
+                          <code>POST</code>/<code>PUT</code>/<code>PATCH</code> request bodies can be drained or stall
+                          when forwarding to origin after the restart.
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-medium text-muted-foreground">
+                        Send this request to your Fastly account team:
+                      </div>
+                      <pre
+                        className="rounded border bg-muted/60 p-3 text-xs whitespace-pre-wrap break-words font-mono"
+                        data-testid="admin-session-scoring-pragma-message"
+                      >
+                        {accountTeamMessage}
+                      </pre>
+                    </div>
+                  </div>
+                  <DialogFooter className="gap-2 sm:justify-between">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCopyPragmaMessage}
+                      data-testid="admin-session-scoring-pragma-copy-btn"
+                    >
+                      {copiedPragmaMsg ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 mr-1" /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5 mr-1" /> Copy Message
+                        </>
+                      )}
+                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => refetch()}
+                        disabled={isFetching}
+                        data-testid="admin-session-scoring-pragma-recheck-btn"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isFetching ? 'animate-spin' : ''}`} />
+                        Check Again
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() => setPragmaModalOpen(false)}
+                      >
+                        Close
+                      </Button>
+                    </div>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </>
           ) : (
             <SSEModal
               title="Enable Session Scoring"
@@ -317,6 +435,19 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
 
           {!enabled && !isLoading && (
             <>
+              {pragmasMissing && (
+                <div
+                  className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900"
+                  data-testid="admin-session-scoring-pragma-warning"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <div className="text-xs">
+                    <span className="font-semibold">Prerequisite required.</span> Preflight request body
+                    preservation is not yet enabled on this service. Click <strong>Enable</strong> for instructions
+                    to share with your Fastly account team.
+                  </div>
+                </div>
+              )}
               <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900">
                 <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                 <div className="text-xs">

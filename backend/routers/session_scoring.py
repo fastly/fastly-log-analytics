@@ -94,6 +94,10 @@ _analytics_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=1000, ttl_seconds=
 # API; the status panel polls, so cache the result for 60s per service to avoid
 # a Fastly round-trip on every refresh.
 _scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
+# Cache positive (`True`) preflight-pragma checks for 60s per service; `False`
+# is intentionally not cached so clicking "Check Again" in the prerequisite
+# modal immediately re-probes Fastly's generated VCL.
+_scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
 # Global lock guards _analytics_cache + _inflight dict mutations only —
 # the actual `producer()` call runs under a PER-KEY lock so concurrent
 # misses on DIFFERENT keys (the dashboard's 8-card mount pattern) run
@@ -457,6 +461,29 @@ def scoring_enable(
 
     from backend import config as svcconfig
 
+    existing_cfg = svcconfig.load_config(service_id) or {}
+    if not (existing_cfg.get("scoring") or {}).get("enabled"):
+        from backend.provision.fastly_api import service_has_scoring_pragmas
+
+        pragmas_ready = service_has_scoring_pragmas(service_id, resolved_token)
+        if pragmas_ready is False:
+
+            def _missing_pragma_stream():
+                yield json.dumps(
+                    {
+                        "type": "error",
+                        "code": "missing_scoring_pragmas",
+                        "message": (
+                            f"Preflight request body preservation is not enabled on service {service_id}. "
+                            "Please contact your Fastly account team to enable the service pragmas that "
+                            "preserve unsent request bodies across restarts and omit request bodies when "
+                            "backend requests are rewritten to GET/HEAD, then try again."
+                        ),
+                    }
+                )
+
+            return sse_response(_missing_pragma_stream())
+
     svcconfig.mutate_config(
         service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
     )
@@ -700,7 +727,23 @@ def scoring_status(
         raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
     scoring = cfg.get("scoring")
     if not scoring or not scoring.get("enabled"):
-        return {"enabled": False}
+        result: dict = {"enabled": False}
+        token = stored_fastly_token(cfg)
+        if token:
+            ready = _scoring_pragma_cache.get(service_id)
+            if ready is None:
+                from backend.provision.fastly_api import service_has_scoring_pragmas
+
+                try:
+                    ready = service_has_scoring_pragmas(service_id, token)
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning("[scoring-status] pragma check failed for %s", service_id, exc_info=True)
+                    ready = None
+                if ready is True:
+                    _scoring_pragma_cache[service_id] = True
+            if ready is not None:
+                result["preflight_pragmas_ready"] = ready
+        return result
     result = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
 
     # Best-effort: surface the scoring Compute service's LIVE active version +
@@ -1587,3 +1630,4 @@ _CacheRegistry.register("session_scoring._analytics_cache", _analytics_cache)
 _CacheRegistry.register("session_scoring._inflight", _inflight)
 _CacheRegistry.register("session_scoring._reconstruct_labeled_sessions_cache", _reconstruct_labeled_sessions_cache)
 _CacheRegistry.register("session_scoring._table_columns_cache", _table_columns_cache)
+_CacheRegistry.register("session_scoring._scoring_pragma_cache", _scoring_pragma_cache)

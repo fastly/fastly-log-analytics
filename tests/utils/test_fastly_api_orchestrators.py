@@ -1291,3 +1291,55 @@ def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present()
     # Empty / None configs still fall back to the standard fields (unchanged).
     assert "req.url" in load_log_format({})
     assert "req.url" in load_log_format(None)
+
+
+def test_service_has_scoring_pragmas_requires_both_pragmas():
+    """service_has_scoring_pragmas returns True only when both
+    fix_unsent_body_drain and no_body_if_bereq_is_get_or_head are true in
+    generated VCL."""
+    both_vcl = (
+        "pragma optional_param fix_unsent_body_drain true;\n"
+        "pragma optional_param no_body_if_bereq_is_get_or_head true;\n"
+    )
+    only_drain_vcl = "pragma optional_param fix_unsent_body_drain true;\n"
+    only_no_body_vcl = "pragma optional_param no_body_if_bereq_is_get_or_head true;\n"
+    false_vcl = (
+        "pragma optional_param fix_unsent_body_drain true;\n"
+        "pragma optional_param no_body_if_bereq_is_get_or_head false;\n"
+    )
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value=both_vcl),
+    ):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is True
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value=only_drain_vcl),
+    ):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is False
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value=only_no_body_vcl),
+    ):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is False
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.get_generated_vcl", return_value=false_vcl),
+    ):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is False
+
+    assert fastly_api.service_has_scoring_pragmas("", "tok") is None
+    assert fastly_api.service_has_scoring_pragmas("svc_1", "") is None
+
+    with patch("backend.provision.fastly_api.get_active_version", return_value=None):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is None
+
+    with (
+        patch("backend.provision.fastly_api.get_active_version", return_value=10),
+        patch("backend.provision.fastly_api.get_generated_vcl", side_effect=RuntimeError("boom")),
+    ):
+        assert fastly_api.service_has_scoring_pragmas("svc_1", "tok") is None

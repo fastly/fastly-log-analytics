@@ -275,10 +275,11 @@ def test_recv_unsets_skip_inspection_on_real_origin_restart():
 
 def test_pass_injects_auth_and_service_id_on_scoring_backend():
     """When the upcoming sub-fetch is the scorer, set the auth + service-
-    id headers on bereq. These were in recv (on req) before — moved to
-    pass per the canonical preflight pattern (fiddle 4b1a74ee)."""
+    id headers on bereq and rewrite bereq.method to GET so inbound POST/PUT
+    bodies are preserved at the edge for the restarts == 1 origin pass."""
     vcl = pass_snippet("MyServiceId", "deadbeef1234567890")
     assert f"if (req.backend == {SCORING_BACKEND_VCL_NAME})" in vcl
+    assert 'set bereq.method = "GET";' in vcl
     assert 'set bereq.http.X-Edge-Service-Id = "MyServiceId";' in vcl
     assert 'set bereq.http.X-Edge-Scorer-Auth = "deadbeef1234567890";' in vcl
 

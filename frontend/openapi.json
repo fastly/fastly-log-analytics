@@ -86772,6 +86772,17 @@
               }
             ],
             "title": "Drift Known"
+          },
+          "preflight_pragmas_ready": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preflight Pragmas Ready"
           }
         },
         "additionalProperties": true,

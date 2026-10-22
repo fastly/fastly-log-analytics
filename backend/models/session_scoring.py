@@ -606,6 +606,7 @@ class ScoringStatusResponse(_ScoringRead):
     scorer_drift: bool | None = None
     drift_detail: str | None = None
     drift_known: bool | None = None
+    preflight_pragmas_ready: bool | None = None
 
 
 class ScoringConfigCompositeResponse(_ScoringRead):

@@ -302,15 +302,21 @@ if (req.restarts == 1) {{
 
 def pass_snippet(logging_service_id: str, request_secret: str) -> str:
     """vcl_pass snippet: when this is the scoring sub-fetch (backend ==
-    scorer), inject the auth + service-id headers on bereq for the
-    upcoming sub-fetch. Also unset bereq.http.x-edge-score so any
-    attacker-supplied inbound x-edge-score doesn't get echoed into the
-    scorer's view of the request."""
+    scorer), rewrite bereq.method to GET so the client request body stays
+    buffered at the edge for the restarts == 1 origin pass (paired with the
+    service's preflight body preservation pragmas), and inject the auth +
+    service-id headers on bereq for the upcoming sub-fetch. Also unset
+    bereq.http.x-edge-score so any attacker-supplied inbound x-edge-score
+    doesn't get echoed into the scorer's view of the request."""
     _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
     return f"""# Session Scoring: inject auth + service-id on the scorer sub-fetch.
 # vcl_pass is the right subroutine for bereq mutations when recv used
 # return(pass).
 if (req.backend == {SCORING_BACKEND_VCL_NAME}) {{
+  # Rewrite the preflight sub-fetch to GET so Fastly does not stream the
+  # inbound request body to the Compute scorer, preserving the body for
+  # the restarts == 1 origin pass.
+  set bereq.method = "GET";
   set bereq.http.X-Edge-Service-Id = "{logging_service_id}";
   # Shared-secret header — the scorer compares this to the
   # request_secret ConfigStore entry and 401s on mismatch. Embedded

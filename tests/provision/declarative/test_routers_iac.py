@@ -19,9 +19,10 @@ def mock_config_dir(tmp_path, monkeypatch):
 
 
 class TestRoutersIaC:
+    @patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=True)
     @patch("backend.routers.session_scoring._resolve_token", return_value="fake_token")
     @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
-    def test_scoring_enable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
+    def test_scoring_enable_route(self, mock_reconcile, mock_resolve, mock_pragmas, mock_config_dir):
         """Verify POST /api/services/{service_id}/scoring/enable works with the declarative loop."""
         cfg = {
             "service_id": "srv_123",

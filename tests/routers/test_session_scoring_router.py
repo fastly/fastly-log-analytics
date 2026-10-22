@@ -28,20 +28,25 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _clear_analytics_cache_between_tests():
+def _clear_analytics_cache_between_tests(monkeypatch):
     """The _analytics_cache + _inflight dicts are module-globals; without
     a between-test reset, a test that caches a {"rows": [...]} payload
     poisons the next test that expects a different shape (test-order
-    dependent failures observed locally)."""
+    dependent failures observed locally). Also default-stub
+    service_has_scoring_pragmas so router tests with fake tokens don't
+    make live Fastly API calls unless a test explicitly patches it."""
     from backend.routers import session_scoring as _ss
 
+    monkeypatch.setattr("backend.provision.fastly_api.service_has_scoring_pragmas", lambda *a, **kw: True)
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
     _ss._scoring_svc_version_cache.clear()
+    _ss._scoring_pragma_cache.clear()
     yield
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
     _ss._scoring_svc_version_cache.clear()
+    _ss._scoring_pragma_cache.clear()
 
 
 @pytest.fixture
@@ -74,6 +79,30 @@ def test_status_returns_disabled_when_block_present_but_false(client, with_confi
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": False}}
     r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
     assert r.json()["enabled"] is False
+
+
+def test_status_surfaces_preflight_pragmas_ready_when_disabled_and_token_present(client, with_config):
+    """When scoring is disabled and fastly_api_key is configured, /scoring/status
+    probes service_has_scoring_pragmas and includes preflight_pragmas_ready.
+    False results are not cached so 'Check Again' immediately re-probes."""
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "fastly_api_key": "tok_123", "scoring": {"enabled": False}}
+    with patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=False) as mock_probe:
+        r1 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+        assert r1.status_code == 200
+        assert r1.json()["enabled"] is False
+        assert r1.json()["preflight_pragmas_ready"] is False
+        assert mock_probe.call_count == 1
+
+    # Next call after pragmas are enabled on Fastly immediately sees True (False was not cached)
+    with patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=True) as mock_probe2:
+        r2 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+        assert r2.status_code == 200
+        assert r2.json()["preflight_pragmas_ready"] is True
+        assert mock_probe2.call_count == 1
+        # Second call while True hits the 60s cache
+        r3 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
+        assert r3.json()["preflight_pragmas_ready"] is True
+        assert mock_probe2.call_count == 1
 
 
 def test_status_returns_block_when_enabled(client, with_config):
@@ -369,6 +398,38 @@ def test_enable_streams_error_event_on_orchestrator_failure(client, with_config)
     assert "done" not in types  # error short-circuits before done
     err = next(e for e in events if e["type"] == "error")
     assert "validation" in err["message"].lower()
+
+
+def test_enable_blocked_when_preflight_pragmas_missing(client, with_config, monkeypatch):
+    """When service_has_scoring_pragmas returns False, /scoring/enable refuses to
+    mutate scoring.enabled or run the reconciler, and emits an SSE error event
+    without leaking internal pragma names."""
+    cfg = {"service_id": LOG_SVC, "fastly_api_key": "TOKEN", "scoring": {"enabled": False}}
+    with_config[LOG_SVC] = cfg
+    mutated = {"called": False}
+
+    def fake_mutate(*args, **kwargs):
+        mutated["called"] = True
+
+    monkeypatch.setattr("backend.config.mutate_config", fake_mutate)
+
+    with (
+        patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=False),
+        patch("backend.provision.orchestrator.run_with_events") as mock_run,
+    ):
+        r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
+
+    assert r.status_code == 200
+    assert mutated["called"] is False
+    mock_run.assert_not_called()
+    events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+    assert events[0]["code"] == "missing_scoring_pragmas"
+    assert "account team" in events[0]["message"].lower()
+    assert "fix_unsent_body_drain" not in events[0]["message"]
+    assert "no_body_if_bereq_is_get_or_head" not in events[0]["message"]
+    assert "hctl" not in events[0]["message"]
 
 
 # ── /scoring/disable ─────────────────────────────────────────────────────────
