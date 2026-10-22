@@ -396,25 +396,21 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             SELECT
                 custom_fields['ua'] AS key,
                 count() AS cnt,
-                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes
+                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
+                sum(count()) OVER () AS site_cnt,
+                ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
             FROM request_facts
             WHERE __WHERE__
             GROUP BY key
-        ),
-        site_totals AS (
-            SELECT
-                'site' AS kind,
-                '' AS key,
-                ifNull(sum(cnt), 0) AS cnt,
-                ifNull(sum(resp_bytes), 0) AS resp_bytes
-            FROM ua_all
         ),
         ua_agg AS (
             SELECT
                 'ua' AS kind,
                 key,
                 cnt,
-                resp_bytes
+                resp_bytes,
+                site_cnt,
+                site_resp_bytes
             FROM ua_all
             WHERE key != ''
             ORDER BY resp_bytes DESC, cnt DESC
@@ -424,7 +420,10 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             SELECT
                 client_ip AS ip,
                 if(
-                    extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
+                    (
+                        positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                        OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
+                    ) AND extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
                     extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
                     extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')
                 ) AS ref_stem
@@ -443,21 +442,28 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                 'ref' AS kind,
                 ref_stem AS key,
                 uniqExact(ip) AS cnt,
-                toInt64(0) AS resp_bytes
+                toInt64(0) AS resp_bytes,
+                toUInt64(0) AS site_cnt,
+                toInt64(0) AS site_resp_bytes
             FROM ref_extracted
             WHERE ref_stem != ''
             GROUP BY ref_stem
         )
-        SELECT kind, key, cnt, resp_bytes FROM site_totals
+        SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ua_agg
         UNION ALL
-        SELECT kind, key, cnt, resp_bytes FROM ua_agg
-        UNION ALL
-        SELECT kind, key, cnt, resp_bytes FROM ref_agg
+        SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
         """,
     )
-    return summarize_bot_efficiency_rows(
-        [(str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)) for r in rows]
-    )
+    tagged: list[tuple[str, str, int, int]] = []
+    has_site_row = any(str(r.get("kind") or "") == "site" for r in rows)
+    if not has_site_row:
+        for r in rows:
+            if str(r.get("kind") or "") == "ua" and ("site_cnt" in r or "site_resp_bytes" in r):
+                tagged.append(("site", "", int(r.get("site_cnt") or 0), int(r.get("site_resp_bytes") or 0)))
+                break
+    for r in rows:
+        tagged.append((str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)))
+    return summarize_bot_efficiency_rows(tagged)
 
 
 def _maybe_mask(ip: Any, mask_ips: bool) -> Any:
@@ -547,7 +553,7 @@ def security_aggregates(
             else:
                 res[k] = val
         elif tasks:
-            with ThreadPoolExecutor(max_workers=min(4, len(tasks)), thread_name_prefix="hs-sec") as pool:
+            with ThreadPoolExecutor(max_workers=min(8, len(tasks)), thread_name_prefix="hs-sec") as pool:
                 futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
                 for k, fut in futs:
                     val = fut.result()
@@ -680,7 +686,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             """,
         )
 
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-proxies") as pool:
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
         f_stats = pool.submit(contextvars.copy_context().run, _q_stats)
         f_qual = pool.submit(contextvars.copy_context().run, _q_quality)
         f_isps = pool.submit(contextvars.copy_context().run, _q_isps)

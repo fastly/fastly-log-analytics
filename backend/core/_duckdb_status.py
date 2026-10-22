@@ -1190,25 +1190,34 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
     if need:
         try:
+            import socket
+
             import cymruwhois  # type: ignore
 
-            c = cymruwhois.Client()
-            queries = [f"AS{asn}" for asn in need]
-            for result in c.lookupmany(queries):
-                if result and result.asn:
-                    asn_int = int(result.asn)
-                    raw_owner = result.owner or f"AS{asn_int}"
-                    if " - " in raw_owner:
-                        name = raw_owner.split(" - ", 1)[1]
-                    else:
-                        name = raw_owner
-                    resolved[asn_int] = name
-            # Negatively cache any ASN in `need` that cymruwhois did not resolve
-            # so unallocated/synthetic ASNs do not trigger a live WHOIS socket on
-            # every request when the lookup itself succeeded.
-            for asn in need:
-                if asn not in resolved:
-                    resolved[asn] = f"AS{asn}"
+            prev_timeout = socket.getdefaulttimeout()
+            if prev_timeout is None:
+                socket.setdefaulttimeout(2.0)
+            try:
+                c = cymruwhois.Client()
+                queries = [f"AS{asn}" for asn in need]
+                for result in c.lookupmany(queries):
+                    if result and result.asn:
+                        asn_int = int(result.asn)
+                        raw_owner = result.owner or f"AS{asn_int}"
+                        if " - " in raw_owner:
+                            name = raw_owner.split(" - ", 1)[1]
+                        else:
+                            name = raw_owner
+                        resolved[asn_int] = name
+                # Negatively cache any ASN in `need` that cymruwhois did not resolve
+                # so unallocated/synthetic ASNs do not trigger a live WHOIS socket on
+                # every request when the lookup itself succeeded.
+                for asn in need:
+                    if asn not in resolved:
+                        resolved[asn] = f"AS{asn}"
+            finally:
+                if prev_timeout is None:
+                    socket.setdefaulttimeout(None)
         except Exception:
             logger.warning("ASN resolution failed", exc_info=True)
 

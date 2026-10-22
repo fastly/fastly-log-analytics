@@ -192,7 +192,12 @@ def recompute_wellknown_bots_rollup(
     return rebuilt
 
 
-def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
+def backfill_wellknown_bots_rollup(
+    service_id: str,
+    source: dict,
+    *,
+    lookback_days: int | None = None,
+) -> int:
     """Self-heal the wellknown_bots rollup tree against the CURRENT
     ``pattern_set_version``: rebuild what it can, drop what it can't.
 
@@ -310,7 +315,7 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
                         if all(pq.read_metadata(f).num_rows == 0 for f in files):
                             current_hours.add(hr)
                     except Exception:
-                        pass
+                        logger.debug("[rollups] metadata check failed for hour=%s", hr, exc_info=True)
         except duckdb.Error:
             current_hours = set()
             stale_hours = set()
@@ -318,7 +323,17 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
             con.close()
 
     # Pass 1 — rebuild data-backed hours lacking a current-version partition.
-    missing = sorted(h for h in data_hours if h not in current_hours)
+    # Sort newest-first so active 24h dashboard windows heal immediately even
+    # when a multi-day historical backlog is present.
+    cutoff_hour = (
+        (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d-%H")
+        if lookback_days is not None
+        else None
+    )
+    missing = sorted(
+        (h for h in data_hours if h not in current_hours and (cutoff_hour is None or h >= cutoff_hour)),
+        reverse=True,
+    )
     n_written = recompute_wellknown_bots_rollup(service_id, source, missing) if missing else 0
 
     # Pass 2 — delete stale partitions that can't be rebuilt (raw data gone),

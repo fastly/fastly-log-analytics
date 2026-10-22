@@ -255,8 +255,8 @@ def _run_rollup_hour_heal(
                     backfill_wellknown_bots_rollup,
                 )
 
+                backfill_wellknown_bots_rollup(service_id, src, lookback_days=lookback_days)
                 backfill_security_proxies_bundles(service_id, src)
-                backfill_wellknown_bots_rollup(service_id, src)
             except Exception as sec_heal_err:
                 logger.warning(
                     "[rollup-heal] %s: security rollup self-heal skipped/failed: %s", service_id, sec_heal_err

@@ -4256,7 +4256,6 @@ class QueryRunner:
             SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
         )
         from backend.utils.pop_utils import (
-            build_pop_haversine_case_sql,
             build_pop_lat_case_sql,
             build_pop_lon_case_sql,
         )
@@ -4277,23 +4276,37 @@ class QueryRunner:
 
         prefix = (
             (
-                f"WITH f AS ("
+                f"WITH f AS MATERIALIZED ("
                 f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
                 f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
                 f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
                 f"), "
-                f"geo AS ("
-                f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "
-                f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL)"
+                f"pops AS MATERIALIZED ("
+                f"  SELECT pop AS p_code, "
+                f"         {build_pop_lat_case_sql()} AS pop_lat, "
+                f"         {build_pop_lon_case_sql()} AS pop_lon "
+                f"  FROM (SELECT DISTINCT pop FROM f)"
+                f"), "
+                f"geo AS MATERIALIZED ("
+                f"  SELECT g.pop AS g_pop, g.lat AS g_lat, g.lon AS g_lon, "
+                f"         6371 * 2 * ASIN(SQRT("
+                f"           POWER(SIN(RADIANS(g.lat - p.pop_lat) / 2), 2) "
+                f"           + COS(RADIANS(p.pop_lat)) * COS(RADIANS(g.lat)) "
+                f"           * POWER(SIN(RADIANS(g.lon - p.pop_lon) / 2), 2)"
+                f"         )) AS distance_km "
+                f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL) g "
+                f"  LEFT JOIN pops p ON g.pop IS NOT DISTINCT FROM p.p_code"
                 f"), "
                 f"m AS MATERIALIZED ("
                 f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
                 f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
-                f"         {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon, "
+                f"         p.pop_lat AS pop_lat, p.pop_lon AS pop_lon, "
                 f"         geo.distance_km AS distance_km, f.country, f.city, f.cnt "
-                f"  FROM f LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
-                f"                      AND f.lat IS NOT DISTINCT FROM geo.g_lat "
-                f"                      AND f.lon IS NOT DISTINCT FROM geo.g_lon"
+                f"  FROM f "
+                f"  LEFT JOIN pops p ON f.pop IS NOT DISTINCT FROM p.p_code "
+                f"  LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
+                f"               AND f.lat IS NOT DISTINCT FROM geo.g_lat "
+                f"               AND f.lon IS NOT DISTINCT FROM geo.g_lon"
                 f") "
             )
             if flagged_paths

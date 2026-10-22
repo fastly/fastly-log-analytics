@@ -1050,7 +1050,20 @@ def _build_security_response(
     #     (cold pool / writer hasn't run for this service yet)
     #   * either rollup read raises
     rollup_served_fp_cols: set[str] = set()
-    if not filters and schema_eligible_fp_cols:
+    if not filters and schema_eligible_fp_cols == ["tls_ciphers_sha"]:
+        try:
+            _t = _time.perf_counter()
+            cov_pre = runner.try_security_coverage_from_rollup(start_time, end_time, has_filters=False)
+            if cov_pre is not None and cov_pre[1] == 0:
+                timer.mark("fingerprint_coverage_rollup", _t)
+                results["tls_fingerprints"] = []
+                rollup_served_fp_cols.add("tls_ciphers_sha")
+                coverage_cols.append("tls_ciphers_sha")
+                if _want("fingerprint_coverage"):
+                    results["fingerprint_coverage"] = {"tls_ciphers_sha": 0.0}
+        except Exception:
+            _logger.debug("[security] pre-check coverage rollup failed", exc_info=True)
+    if not filters and schema_eligible_fp_cols and len(rollup_served_fp_cols) < len(schema_eligible_fp_cols):
         try:
             _t = _time.perf_counter()
             top_n_rows, _ = runner.execute_top_n_rollups(
@@ -1146,7 +1159,7 @@ def _build_security_response(
             coverage_cols.append(col)
         else:
             results[result_key] = []
-    if coverage_cols and _want("fingerprint_coverage"):
+    if coverage_cols and _want("fingerprint_coverage") and "fingerprint_coverage" not in results:
         # Coverage scans the temp for every fingerprint col that ran. When a
         # fingerprint col is ALREADY in the temp for the live FINGERPRINT_TOP_N
         # (rollup missed), reuse that temp scan. But when every fingerprint
