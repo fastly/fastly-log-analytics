@@ -375,10 +375,10 @@ def test_wrapper_finalizer_returns_connection_when_garbage_collected(monkeypatch
 
     pool = MagicMock()
     conn = _FakeConn()
-    pool.getconn.return_value = conn
+    pool.getconn.side_effect = lambda: _FakeConn()
     monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
 
-    wrapper = pgc.PgConnectionWrapper(conn)
+    wrapper = pgc.PgConnectionWrapper(conn, pool=pool)
     assert conn not in [c.args[0] for c in pool.putconn.call_args_list]
 
     del wrapper
@@ -402,10 +402,10 @@ def test_wrapper_finalizer_is_noop_after_explicit_close(monkeypatch):
 
     pool = MagicMock()
     conn = _FakeConn()
-    pool.getconn.return_value = conn
+    pool.getconn.side_effect = lambda: _FakeConn()
     monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
 
-    wrapper = pgc.PgConnectionWrapper(conn, return_to_pool_on_close=True)
+    wrapper = pgc.PgConnectionWrapper(conn, return_to_pool_on_close=True, pool=pool)
     wrapper.close()
     our_calls = [c for c in pool.putconn.call_args_list if c.args[0] is conn]
     assert len(our_calls) == 1

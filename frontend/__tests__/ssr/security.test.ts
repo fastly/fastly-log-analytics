@@ -169,7 +169,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
       expect(body.end_time).toBeUndefined()
 
       expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-admin-token']).toBeUndefined()
+      expect(captured['x-admin-token']).toBe('sekret')
       expect(captured['x-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))

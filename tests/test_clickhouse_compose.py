@@ -8,12 +8,10 @@ def test_prometheus_preserves_requested_bytes_series_via_recording_alias():
     assert "/etc/prometheus/clickhouse.rules.yml" in prometheus["rule_files"]
     overlay = yaml.safe_load(Path("docker-compose.observability.yml").read_text())
     assert (
-        "./deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml:/etc/prometheus/clickhouse.rules.yml:ro"
+        "./observability/clickhouse.rules.yml:/etc/prometheus/clickhouse.rules.yml:ro"
         in overlay["services"]["prometheus"]["volumes"]
     )
-    rules = yaml.safe_load(
-        Path("deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml").read_text()
-    )
+    rules = yaml.safe_load(Path("observability/clickhouse.rules.yml").read_text())
     assert rules["groups"][0]["rules"] == [
         {
             "record": "app_clickhouse_bytes_read_bytes_total",

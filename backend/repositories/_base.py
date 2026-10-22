@@ -685,11 +685,9 @@ class QueryRunner:
 
     @property
     def con(self) -> duckdb.DuckDBPyConnection:
-        if self._con is None:
-            if self._con_factory is None:
-                raise RuntimeError("QueryRunner has no connection or con_factory")
+        if self._con is None and self._con_factory is not None:
             self._con = self._con_factory()
-        return self._con
+        return self._con  # type: ignore[return-value]
 
     @con.setter
     def con(self, value: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection]) -> None:
@@ -4297,7 +4295,7 @@ class QueryRunner:
             combined_rows = self.execute(
                 prefix + f"SELECT 'stats' AS _sec, "
                 f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END) AS c1, "
-                f"  CAST(COALESCE(SUM(CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END), 0) "
+                f"  CAST({metric_expressions.sum_or_zero(f'CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END')} "
                 f"       AS BIGINT) AS c2, "
                 f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) AS c3, "
                 f"  NULL::VARCHAR AS ip, NULL::BIGINT AS asn, NULL::DOUBLE AS rtt_min_ms, "

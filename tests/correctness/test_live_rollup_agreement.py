@@ -777,7 +777,7 @@ def test_time_series_caller_gates_rollup_on_no_filters():
 
     from backend.repositories import dashboard
 
-    src_text = inspect.getsource(dashboard.get_aggregates)
+    src_text = inspect.getsource(dashboard.get_aggregates) + inspect.getsource(dashboard._compute_dashboard_aggregates)
     assert "not filters" in src_text, (
         "dashboard.get_aggregates no longer gates the time_series rollup on "
         "`not filters` — filtered charts could serve unfiltered rollup numbers"

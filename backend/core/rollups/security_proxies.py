@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 
+from backend.core.metric_expressions import coalesce, sum_or_zero
 from backend.utils.pop_utils import build_pop_haversine_case_sql
 
 from ._common import (
@@ -110,10 +111,18 @@ def _build_flagged_copy_sql(ctx: object, table_ident: str, start_iso: str, end_i
 
 def _build_bot_eff_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
     cols = ctx if isinstance(ctx, (set, frozenset)) else set()
-    resp_bytes = "COALESCE(t.resp_bytes, 0)" if "resp_bytes" in cols else "0"
+    resp_bytes = coalesce("t.resp_bytes", "0") if "resp_bytes" in cols else "0"
     referer = "t.referer" if "referer" in cols else "CAST(NULL AS VARCHAR)"
     select_referer = "referer" if "referer" in cols else "CAST(NULL AS VARCHAR) AS referer"
     select_bytes = "resp_bytes" if "resp_bytes" in cols else "CAST(0 AS BIGINT) AS resp_bytes"
+    sum_resp_bytes = sum_or_zero(resp_bytes)
+    empty = "''"
+    ua_low = f"lower({coalesce('t.ua', empty)})"
+    ref_low = f"lower({coalesce(referer, empty)})"
+    ref_stem = coalesce(
+        f"NULLIF(regexp_extract({ua_low}, '([a-z0-9]+)-(user|externalfetcher)', 1), '')",
+        f"NULLIF(regexp_extract({ref_low}, 'http[s]*://(www\\.)*([^/.:;\\s]+)', 2), '')",
+    )
     return (
         f"COPY ("
         f"  WITH t AS ("
@@ -122,24 +131,21 @@ def _build_bot_eff_copy_sql(ctx: object, table_ident: str, start_iso: str, end_i
         f"  ), "
         f"  site_totals AS ("
         f"    SELECT 'site' AS kind, '' AS key, COUNT(*) AS cnt, "
-        f"           CAST(COALESCE(SUM({resp_bytes}), 0) AS BIGINT) AS resp_bytes FROM t"
+        f"           CAST({sum_resp_bytes} AS BIGINT) AS resp_bytes FROM t"
         f"  ), "
         f"  ua_agg AS ("
         f"    SELECT 'ua' AS kind, t.ua AS key, COUNT(*) AS cnt, "
-        f"           CAST(COALESCE(SUM({resp_bytes}), 0) AS BIGINT) AS resp_bytes "
+        f"           CAST({sum_resp_bytes} AS BIGINT) AS resp_bytes "
         f"    FROM t WHERE t.ua IS NOT NULL AND t.ua != '' GROUP BY t.ua "
         f"    ORDER BY resp_bytes DESC, cnt DESC LIMIT {SECURITY_BOT_EFF_UA_TOP_K}"
         f"  ), "
         f"  ref_extracted AS ("
-        f"    SELECT t.ip, COALESCE("
-        f"      NULLIF(regexp_extract(lower(COALESCE(t.ua, '')), '([a-z0-9]+)-(user|externalfetcher)', 1), ''), "
-        f"      NULLIF(regexp_extract(lower(COALESCE({referer}, '')), 'http[s]*://(www\\.)*([^/.:;\\s]+)', 2), '')"
-        f"    ) AS ref_stem "
+        f"    SELECT t.ip, {ref_stem} AS ref_stem "
         f"    FROM t WHERE t.ip IS NOT NULL AND t.ip != '' "
         f"      AND (({referer} IS NOT NULL AND {referer} != '' AND {referer} != '-') "
-        f"           OR lower(COALESCE(t.ua, '')) LIKE '%-user%' "
-        f"           OR lower(COALESCE(t.ua, '')) LIKE '%-externalfetcher%') "
-        f"      AND NOT regexp_matches(lower(COALESCE(t.ua, '')), "
+        f"           OR {ua_low} LIKE '%-user%' "
+        f"           OR {ua_low} LIKE '%-externalfetcher%') "
+        f"      AND NOT regexp_matches({ua_low}, "
         f"          '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')"
         f"  ), "
         f"  ref_agg AS ("
