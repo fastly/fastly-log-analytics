@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time as _time
+from collections.abc import Callable
 
 import duckdb
 
@@ -16,6 +17,7 @@ from backend.repositories._base import (
     _safe_table,
     percentile_ms_expr,
 )
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -78,7 +80,7 @@ _PERF_TEMP_COL_ORDER = ("url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb"
 
 
 def get_performance_aggregates(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -93,6 +95,29 @@ def get_performance_aggregates(
         if cached is not None:
             return dict(cached)
 
+    def _compute() -> dict:
+        if cache_key is not None:
+            cached_inner = _memo.get_with_telemetry(cache_key)
+            if cached_inner is not None:
+                return dict(cached_inner)
+        return _compute_performance_aggregates(con, src, start_time, end_time, filters, sort_by, sections, cache_key)
+
+    if cache_key is not None:
+        coalesced, _ = single_flight.coalesce(f"perf_agg:{cache_key}", _compute)
+        return dict(coalesced)
+    return _compute()
+
+
+def _compute_performance_aggregates(
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    sort_by: str,
+    sections: set[str] | None,
+    cache_key: str | None,
+) -> dict:
     # Per-phase wall-clock timings surface in the response under
     # _section_timings so the perf harness can attribute /api/performance/
     # aggregates without ad-hoc instrumentation. Mirrors network.py.

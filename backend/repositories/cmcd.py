@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time as _time
+from collections.abc import Callable
 from typing import Any
 
 import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -51,7 +53,7 @@ def _response_cache_key(
 
 
 def get_cmcd_aggregates(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -68,6 +70,57 @@ def get_cmcd_aggregates(
     against the materialized rows. The four time-series sections share a
     single GROUP BY scan to cut I/O further.
     """
+    cache_key = _response_cache_key(
+        src=src,
+        start_time=start_time,
+        end_time=end_time,
+        filters=filters,
+        bucket_seconds=bucket_seconds,
+        top_n=top_n,
+        sections=sections,
+        mask_ips=mask_ips,
+    )
+    if start_time is not None and end_time is not None:
+        cached_fast = _memo.get(cache_key)
+        if cached_fast is not None:
+            return {**cached_fast, "section_timings": [], "debug_queries": [], "debug_calls": []}
+
+    def _compute() -> dict[str, Any]:
+        if start_time is not None and end_time is not None:
+            cached_inner = _memo.get(cache_key)
+            if cached_inner is not None:
+                return {**cached_inner, "section_timings": [], "debug_queries": [], "debug_calls": []}
+        return _compute_cmcd_aggregates(
+            con=con,
+            src=src,
+            start_time=start_time,
+            end_time=end_time,
+            filters=filters,
+            bucket_seconds=bucket_seconds,
+            top_n=top_n,
+            sections=sections,
+            mask_ips=mask_ips,
+            cache_key=cache_key,
+        )
+
+    if start_time is not None and end_time is not None:
+        coalesced, _ = single_flight.coalesce(f"cmcd_agg:{cache_key}", _compute)
+        return dict(coalesced)
+    return _compute()
+
+
+def _compute_cmcd_aggregates(
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    bucket_seconds: int,
+    top_n: int,
+    sections: set[str] | None,
+    mask_ips: bool,
+    cache_key: str,
+) -> dict[str, Any]:
     timer = SectionTimer()
     section_timings = timer.entries
 
@@ -88,16 +141,6 @@ def get_cmcd_aggregates(
             **runner.telemetry(),
         }
 
-    cache_key = _response_cache_key(
-        src=src,
-        start_time=start_time,
-        end_time=end_time,
-        filters=filters,
-        bucket_seconds=bucket_seconds,
-        top_n=top_n,
-        sections=sections,
-        mask_ips=mask_ips,
-    )
     cached = _memo.get(cache_key)
     if cached is not None:
         return {**cached, "section_timings": section_timings, **runner.telemetry()}

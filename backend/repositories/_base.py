@@ -34,7 +34,7 @@ from backend.repositories.rollup_coverage import (
 from backend.repositories.rollup_coverage import heal_where_clause as _heal_where_clause
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from datetime import datetime
 
 from backend.repositories.ip_spread_rollups import build_ip_spread_sql as _build_ip_spread_sql
@@ -673,6 +673,8 @@ class QueryRunner:
         # begin_shared_active_hour_temps). None = sharing disabled: every
         # _create_active_hour_temp_direct caller owns + drops its own temp.
         self._shared_active_temps: list[tuple[frozenset[str], Any, Any, str]] | None = None
+        self._shared_active_depth: int = 0
+        self._shared_active_seed_fields: tuple[str, ...] = ()
         # File count of the most recent direct active-hour read — telemetry
         # only (surfaced as live_active_hour:n_files).
         self._last_active_direct_n_files: int = 0
@@ -698,7 +700,7 @@ class QueryRunner:
             self._con = value  # type: ignore[assignment]
             self._con_factory = None
 
-    def begin_shared_active_hour_temps(self) -> None:
+    def begin_shared_active_hour_temps(self, seed_fields: Iterable[str] | None = None) -> None:
         """Enable request-scoped reuse of the direct active-hour temps.
 
         The dashboard rollup path reads the active hour up to THREE times
@@ -713,7 +715,18 @@ class QueryRunner:
         Callers inside the scope must release via
         :meth:`release_active_direct_temp` instead of a bare DROP.
         """
-        self._shared_active_temps = []
+        if self._shared_active_temps is None:
+            self._shared_active_temps = []
+            self._shared_active_depth = 1
+            self._shared_active_seed_fields = tuple(seed_fields) if seed_fields else ()
+        else:
+            self._shared_active_depth += 1
+            if seed_fields:
+                existing = list(self._shared_active_seed_fields)
+                for f in seed_fields:
+                    if f not in existing:
+                        existing.append(f)
+                self._shared_active_seed_fields = tuple(existing)
 
     def end_shared_active_hour_temps(self) -> None:
         """Drop every shared active-hour temp and disable sharing.
@@ -722,6 +735,11 @@ class QueryRunner:
         enabled) — callers put it in a ``finally`` so pooled connections
         never accumulate session temps across requests.
         """
+        if self._shared_active_depth > 1:
+            self._shared_active_depth -= 1
+            return
+        self._shared_active_depth = 0
+        self._shared_active_seed_fields = ()
         temps, self._shared_active_temps = self._shared_active_temps, None
         for _cols, _ws, _we, name in temps or []:
             try:
@@ -1008,24 +1026,23 @@ class QueryRunner:
         active_hour_token = live_start.strftime("%Y-%m-%d-%H")
         hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour_token}")
 
-        # Columns the temp will physically carry: timestamp + every
-        # requested field that actually exists in the schema.
-        projected: list[str] = ["timestamp"]
+        # Columns the caller requested that actually exist in the schema.
+        requested: list[str] = ["timestamp"]
         for f in fields:
-            if f in actual_cols and f not in projected:
-                projected.append(f)
-        projected_set = frozenset(projected)
+            if f in actual_cols and f not in requested:
+                requested.append(f)
+        requested_set = frozenset(requested)
 
         # Shared-scope reuse (see begin_shared_active_hour_temps): an
         # earlier temp over the SAME window whose projection covers this
         # caller's columns serves as-is — zero file opens.
         if self._shared_active_temps is not None:
             for cols_have, ws, we, name in self._shared_active_temps:
-                if ws == live_start and we == live_end and projected_set <= cols_have:
+                if ws == live_start and we == live_end and requested_set <= cols_have:
                     self._last_active_direct_n_files = 0
                     return name
             for cols_have, ws, we, name in self._shared_active_temps:
-                if ws <= live_start and we >= live_end and projected_set <= cols_have:
+                if ws <= live_start and we >= live_end and requested_set <= cols_have:
                     sub_name = f"t_active_direct_{_uuid.uuid4().hex}"
                     sub_where = (
                         f"timestamp >= TIMESTAMPTZ '{live_start.isoformat()}' "
@@ -1038,6 +1055,13 @@ class QueryRunner:
                         return sub_name
                     except Exception:
                         _logger.debug("QueryRunner: shared active temp slice failed", exc_info=True)
+
+        projected: list[str] = list(requested)
+        if self._shared_active_temps is not None and self._shared_active_seed_fields:
+            for f in self._shared_active_seed_fields:
+                if f in actual_cols and f not in projected:
+                    projected.append(f)
+        projected_set = frozenset(projected)
 
         # Enumerate candidate parquets EXPLICITLY (not a glob) so buffer
         # files that cannot contain live-window rows are pruned by mtime:
@@ -4251,7 +4275,7 @@ class QueryRunner:
             f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "
             f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL)"
             f"), "
-            f"m AS ("
+            f"m AS MATERIALIZED ("
             f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
             f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
             f"         {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon, "
@@ -4270,32 +4294,55 @@ class QueryRunner:
             ).fetchall()
             if not quality_rows:
                 return None
-            stats_row = self.execute(
-                prefix + f"SELECT "
-                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END), "
+            combined_rows = self.execute(
+                prefix + f"SELECT 'stats' AS _sec, "
+                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END) AS c1, "
                 f"  CAST(COALESCE(SUM(CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END), 0) "
-                f"       AS BIGINT), "
-                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) "
-                f"FROM m"
-            ).fetchone()
-            isp_rows = self.execute(
-                prefix + "SELECT asn, CAST(SUM(cnt) AS BIGINT) AS c FROM m "
-                "WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
-                "GROUP BY asn ORDER BY c DESC LIMIT 10"
-            ).fetchall()
-            client_rows = self.execute(
-                prefix + f"SELECT ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
-                f"  ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
-                f"  CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
-                f"  CASE WHEN {dist_flag} THEN 'High' "
-                f"       WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
-                f"       WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
-                f"       ELSE 'Low' END AS risk_level, country, city "
+                f"       AS BIGINT) AS c2, "
+                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) AS c3, "
+                f"  NULL::VARCHAR AS ip, NULL::BIGINT AS asn, NULL::DOUBLE AS rtt_min_ms, "
+                f"  NULL::DOUBLE AS tcp_rtt_ms, NULL::DOUBLE AS distance_km, NULL::VARCHAR AS pop, "
+                f"  NULL::DOUBLE AS client_lat, NULL::DOUBLE AS client_lon, NULL::DOUBLE AS pop_lat, "
+                f"  NULL::DOUBLE AS pop_lon, NULL::BOOLEAN AS impossible_distance, "
+                f"  NULL::VARCHAR AS risk_level, NULL::VARCHAR AS country, NULL::VARCHAR AS city "
                 f"FROM m "
-                f"WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
-                f"ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
-                f"LIMIT 100"
+                f"UNION ALL "
+                f"SELECT * FROM ("
+                f"  SELECT 'isp' AS _sec, NULL::BIGINT, CAST(SUM(cnt) AS BIGINT) AS c2, NULL::BIGINT, "
+                f"    NULL::VARCHAR, asn, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, "
+                f"    NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::BOOLEAN, "
+                f"    NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR "
+                f"  FROM m "
+                f"  WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
+                f"  GROUP BY asn ORDER BY c2 DESC LIMIT 10"
+                f") "
+                f"UNION ALL "
+                f"SELECT * FROM ("
+                f"  SELECT 'client' AS _sec, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, "
+                f"    ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
+                f"    ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
+                f"    CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
+                f"    CASE WHEN {dist_flag} THEN 'High' "
+                f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
+                f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
+                f"         ELSE 'Low' END AS risk_level, country, city "
+                f"  FROM m "
+                f"  WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
+                f"  ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
+                f"  LIMIT 100"
+                f")"
             ).fetchall()
+            stats_row = (0, 0, 0)
+            isp_rows = []
+            client_rows = []
+            for r in combined_rows:
+                sec = r[0]
+                if sec == "stats":
+                    stats_row = (r[1], r[2], r[3])
+                elif sec == "isp":
+                    isp_rows.append((r[5], r[2]))
+                elif sec == "client":
+                    client_rows.append(r[4:])
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:

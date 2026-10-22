@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from typing import Any
 
 import duckdb
@@ -29,6 +29,7 @@ from backend.repositories._base import (
     time_bucket_select,
 )
 from backend.repositories._sql import dashboard as SQL
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import bucket_time_to_minute
 
@@ -235,7 +236,7 @@ def peek_aggregates(
 
 
 def get_aggregates(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -304,6 +305,61 @@ def get_aggregates(
             # ``"_is_cached": false`` in JSON, masking every cache hit.
             cached_res["is_cached"] = True
             return cached_res
+
+    def _compute() -> dict:
+        if cache_key is not None:
+            cached_inner = _dashboard_cache.get(cache_key)
+            if cached_inner is not None:
+                _, cr = cached_inner
+                cr = cr.copy()
+                cr["is_cached"] = True
+                return cr
+        return _compute_dashboard_aggregates(
+            con=con,
+            src=src,
+            start_time=start_time,
+            end_time=end_time,
+            filters=filters,
+            chart_interval=chart_interval,
+            chart_metric=chart_metric,
+            fields=fields,
+            table_name=table_name,
+            cache_key=cache_key,
+            now=now,
+            include_time_series=include_time_series,
+            include_conn_requests=include_conn_requests,
+            include_map_data=include_map_data,
+            include_top_n=include_top_n,
+            _selected_aggregates=_selected_aggregates,
+            _dispatch_reason=_dispatch_reason,
+        )
+
+    if cache_key is not None and _query_table is None and _selected_aggregates is None:
+        coalesced, _ = single_flight.coalesce(f"dash_agg:{cache_key}", _compute)
+        return dict(coalesced)
+    return _compute()
+
+
+def _compute_dashboard_aggregates(
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    chart_interval: str,
+    chart_metric: str,
+    fields: list[str],
+    table_name: str,
+    cache_key: str | None,
+    now: float,
+    *,
+    include_time_series: bool,
+    include_conn_requests: bool,
+    include_map_data: bool,
+    include_top_n: bool,
+    _selected_aggregates: dict | None,
+    _dispatch_reason: str | None,
+) -> dict:
 
     # Per-phase wall-clock timing surfaces in the response under
     # _section_timings so we can attribute the cold dashboard wall
@@ -646,12 +702,12 @@ def get_aggregates(
             )
         ):
             _self_heal_attempted = True
-            timer.call("view_self_heal_rebuild", lambda: force_rebuild_view(con, src))
+            timer.call("view_self_heal_rebuild", lambda: force_rebuild_view(runner.con, src))
             # The temp table (if any) was built from the stale view — drop
             # it and rebuild from the now-fresh view.
             if temp_table is not None:
                 try:
-                    con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                    runner.con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
                 except Exception:
                     if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
                         logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
@@ -664,7 +720,9 @@ def get_aggregates(
                 else:
                     total_rows = _compute_count(table_name, where_clause, params)
 
-        schema_types = timer.call("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
+        schema_types = timer.call(
+            "schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(runner.con, src)}
+        )
 
         # When use_rollups=True, field_totals is empty here — populate it
         # below from the rollup query results. Use the full eligible field
@@ -1135,7 +1193,7 @@ def get_aggregates(
         # TABLE creation failed and `temp_table` is None, this is a no-op.
         if temp_table is not None:
             try:
-                con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                runner.con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
                 if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
                     logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
@@ -1198,7 +1256,7 @@ def get_raw_df(
 
 
 def get_field_values(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     field: str,
     search: str,

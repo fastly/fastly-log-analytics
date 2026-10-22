@@ -78,7 +78,9 @@ def dashboard_aggregates(
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
-    if not hasattr(repo.get_aggregates, "_mock_name"):
+    _is_real_repo = getattr(repo.get_aggregates, "__module__", "") == "backend.repositories.dashboard"
+    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
+    if _is_real_repo:
         cached = repo.peek_aggregates(
             src=ctx.source,
             start_time=start_time,
@@ -95,7 +97,7 @@ def dashboard_aggregates(
         if cached is not None:
             return cached
     return repo.get_aggregates(
-        con=ctx.con,
+        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
@@ -531,8 +533,10 @@ def dashboard_field_values(
         from backend.high_scale import dashboard as hs_dashboard
 
         return hs_dashboard.field_values(ctx.high_scale, req, start_time, end_time)
+    _is_real_repo = getattr(repo.get_field_values, "__module__", "") == "backend.repositories.dashboard"
+    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
     return repo.get_field_values(
-        con=ctx.con,
+        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
         src=ctx.source,
         field=req.field,
         search=req.search,

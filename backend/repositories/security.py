@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from typing import Any
 
 import duckdb
@@ -20,6 +21,7 @@ from backend.repositories._base import (
     time_bucket_select,
 )
 from backend.repositories._sql import security as SQL
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -181,7 +183,12 @@ def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time
 
 
 def _ipv6_per_hour_from_rollups(
-    runner: QueryRunner, src: dict, start_time: str | None, end_time: str | None
+    runner: QueryRunner,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    actual_cols: list[str] | None = None,
 ) -> list[dict] | None:
     """Compute the IPv6 adoption time series from per-hour count rollups.
 
@@ -248,22 +255,39 @@ def _ipv6_per_hour_from_rollups(
 
     # Active-hour slice (closed-hour rollups skip active by contract).
     # Run a focused base-table query for the in-window active-hour
-    # interval so the chart's right edge isn't blank.
+    # interval so the chart's right edge isn't blank. Reuse the shared
+    # direct active-hour temp when available so we don't scan the full
+    # bound view a second time.
     if et_dt > active_dt:
         live_start = max(active_dt, st_dt)
         live_end = min(active_end_dt, et_dt)
         if live_end > live_start:
             base_table = _safe_table_for(src)
             if base_table:
+                tmp = None
                 try:
-                    q_live = (
-                        f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS hour, "
-                        f"SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) AS true_c, "
-                        f'count(*) AS total_c FROM "{base_table}" '
-                        f"WHERE timestamp >= '{live_start.isoformat()}' "
-                        f"AND timestamp < '{live_end.isoformat()}' GROUP BY 1"
-                    )
-                    for hour, true_c, total_c in runner.execute(q_live).fetchall():
+                    if hasattr(runner, "_create_active_hour_temp_direct"):
+                        cols_for_tmp = actual_cols if actual_cols is not None else ["timestamp", "is_ipv6"]
+                        tmp = runner._create_active_hour_temp_direct(["is_ipv6"], cols_for_tmp, live_start, live_end)
+                    if tmp == "__empty__":
+                        rows_live = []
+                    elif tmp is not None:
+                        q_live = (
+                            f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS hour, "
+                            f"SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) AS true_c, "
+                            f'count(*) AS total_c FROM "{tmp}" GROUP BY 1'
+                        )
+                        rows_live = runner.execute(q_live).fetchall()
+                    else:
+                        q_live = (
+                            f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS hour, "
+                            f"SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) AS true_c, "
+                            f'count(*) AS total_c FROM "{base_table}" '
+                            f"WHERE timestamp >= '{live_start.isoformat()}' "
+                            f"AND timestamp < '{live_end.isoformat()}' GROUP BY 1"
+                        )
+                        rows_live = runner.execute(q_live).fetchall()
+                    for hour, true_c, total_c in rows_live:
                         b = per_hour.setdefault(hour, {"true": 0, "total": 0})
                         b["true"] += int(true_c) if true_c is not None else 0
                         b["total"] += int(total_c) if total_c is not None else 0
@@ -272,6 +296,9 @@ def _ipv6_per_hour_from_rollups(
                     # latest point will be missing but closed-hour data is
                     # still correct. Cheaper than failing the whole card.
                     _logger.debug("[security] ipv6 active-hour merge failed", exc_info=True)
+                finally:
+                    if tmp and tmp != "__empty__" and hasattr(runner, "release_active_direct_temp"):
+                        runner.release_active_direct_temp(tmp)
 
     # Match the live IPV6_ADOPTION_TS output format: tz-aware datetime
     # routed through safe_iso so the `time` field is `+00:00`-suffixed
@@ -286,7 +313,13 @@ def _ipv6_per_hour_from_rollups(
     return result
 
 
-def _proxy_dist_from_rollups(runner: QueryRunner, start_time: str | None, end_time: str | None) -> list[dict] | None:
+def _proxy_dist_from_rollups(
+    runner: QueryRunner,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    actual_cols: list[str] | None = None,
+) -> list[dict] | None:
     """Compute PROXY_TYPE_DIST totals from the per-hour count rollup.
 
     ``execute_top_n_rollups`` already merges across closed hours AND
@@ -296,11 +329,13 @@ def _proxy_dist_from_rollups(runner: QueryRunner, start_time: str | None, end_ti
     or all rows had empty / __other__ values).
     """
     try:
+        extra_kwargs: dict[str, Any] = {"actual_cols": actual_cols} if actual_cols is not None else {}
         rolled, _ = runner.execute_top_n_rollups(
             ["p_type"],
             start_time,
             end_time,
             limit=500,
+            **extra_kwargs,
         )
     except Exception:
         return None
@@ -787,7 +822,7 @@ def get_top_bots(
 
 
 def get_security_aggregates(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -805,66 +840,77 @@ def get_security_aggregates(
         if cached is not None:
             return dict(cached)
 
-    # Per-phase timings for /api/security/aggregates so the perf
-    # harness can attribute wall time across the ~14 sub-queries
-    # _build_security_response runs without ad-hoc instrumentation.
-    timer = SectionTimer()
-    section_timings = timer.entries
+    def _compute() -> dict:
+        if memo_key is not None:
+            cached_inner = _memo.get_with_telemetry(memo_key)
+            if cached_inner is not None:
+                return dict(cached_inner)
 
-    source_name = src["name"]
-    table_name = _safe_table(source_name)
-    runner = QueryRunner(con, src)
+        # Per-phase timings for /api/security/aggregates so the perf
+        # harness can attribute wall time across the ~14 sub-queries
+        # _build_security_response runs without ad-hoc instrumentation.
+        timer = SectionTimer()
+        section_timings = timer.entries
 
-    _t = _time.perf_counter()
-    actual_cols = runner.get_schema_cols()
-    timer.mark("get_schema_cols", _t)
-    if not actual_cols:
-        return {
-            "tls_fingerprints": [],
-            "req_size_dist": [],
-            "ipv6_adoption": [],
-            "proxy_dist": [],
-            "conn_reuse_dist": [],
-            "section_timings": section_timings,
-            **runner.telemetry(),
-        }
+        source_name = src["name"]
+        table_name = _safe_table(source_name)
+        runner = QueryRunner(con, src)
 
-    _t = _time.perf_counter()
-    params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
-    timer.mark("build_where_clause", _t)
+        _t = _time.perf_counter()
+        actual_cols = runner.get_schema_cols()
+        timer.mark("get_schema_cols", _t)
+        if not actual_cols:
+            return {
+                "tls_fingerprints": [],
+                "req_size_dist": [],
+                "ipv6_adoption": [],
+                "proxy_dist": [],
+                "conn_reuse_dist": [],
+                "section_timings": section_timings,
+                **runner.telemetry(),
+            }
 
-    # The catalog temp is built section-aware inside _build_security_response:
-    # every section that can serve from a parquet rollup is served WITHOUT
-    # the temp, and the temp is then materialized for ONLY the columns the
-    # remaining live sections touch (or skipped entirely). This is the
-    # per-column form of the all-or-nothing materialize the origin/aggregates
-    # fix removed — so a 30d unfiltered request collapses the shared
-    # ``temp_table_create`` to the tiny NGWAF-flagged subset (or nothing).
-    res = _build_security_response(
-        runner,
-        src,
-        con,
-        actual_cols,
-        table_name,
-        where_clause,
-        params,
-        bucket_seconds,
-        section_timings,
-        start_time=start_time,
-        end_time=end_time,
-        filters=filters,
-        sections=sections,
-        mask_ips=mask_ips,
-    )
+        _t = _time.perf_counter()
+        params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
+        timer.mark("build_where_clause", _t)
+
+        # The catalog temp is built section-aware inside _build_security_response:
+        # every section that can serve from a parquet rollup is served WITHOUT
+        # the temp, and the temp is then materialized for ONLY the columns the
+        # remaining live sections touch (or skipped entirely). This is the
+        # per-column form of the all-or-nothing materialize the origin/aggregates
+        # fix removed — so a 30d unfiltered request collapses the shared
+        # ``temp_table_create`` to the tiny NGWAF-flagged subset (or nothing).
+        res = _build_security_response(
+            runner,
+            src,
+            con,
+            actual_cols,
+            table_name,
+            where_clause,
+            params,
+            bucket_seconds,
+            section_timings,
+            start_time=start_time,
+            end_time=end_time,
+            filters=filters,
+            sections=sections,
+            mask_ips=mask_ips,
+        )
+        if memo_key is not None:
+            _memo.put(memo_key, dict(res))
+        return res
+
     if memo_key is not None:
-        _memo.put(memo_key, dict(res))
-    return res
+        coalesced, _ = single_flight.coalesce(f"security_agg:{memo_key}", _compute)
+        return dict(coalesced)
+    return _compute()
 
 
 def _build_security_response(
     runner: QueryRunner,
     src: dict,
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     actual_cols: list[str],
     table_name: str,
     where_clause: str,
@@ -906,6 +952,14 @@ def _build_security_response(
     use_proxy_rollup = (
         rollup_eligible and "p_type" in actual_cols and _has_rollup_coverage(src, "p_type", start_time, end_time)
     )
+    use_top_bots_rollup = (
+        rollup_eligible and "ua" in actual_cols and _has_rollup_coverage(src, "ua", start_time, end_time)
+    )
+
+    if not filters:
+        runner.begin_shared_active_hour_temps(
+            seed_fields=("tls_ciphers_sha", "p_type", "is_ipv6", "ua", "waf_req_id", "waf_sig")
+        )
 
     # ── Pass 1: serve everything that can come from a parquet rollup WITHOUT
     # the catalog temp, and record which sections still need a live scan plus
@@ -940,7 +994,7 @@ def _build_security_response(
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
-            _ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_cache")
+            _ngwaf_attached = ensure_ngwaf_bots_materialized(runner.con, "ngwaf_cache")
         except Exception:
             _logger.debug(
                 "_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
@@ -1005,6 +1059,7 @@ def _build_security_response(
                 end_time,
                 limit=20,
                 per_field_limits={c: 20 for c in schema_eligible_fp_cols},
+                actual_cols=actual_cols,
             )
             timer.mark("fingerprints_rollup_top_n", _t)
 
@@ -1162,7 +1217,7 @@ def _build_security_response(
     if _want("ipv6_adoption") and "is_ipv6" in actual_cols:
         if use_ipv6_rollup:
             _t = _time.perf_counter()
-            rolled = _ipv6_per_hour_from_rollups(runner, src, start_time, end_time)
+            rolled = _ipv6_per_hour_from_rollups(runner, src, start_time, end_time, actual_cols=actual_cols)
             timer.mark("ipv6_adoption_rollup", _t)
             if rolled is None:
                 _logger.warning(
@@ -1181,7 +1236,7 @@ def _build_security_response(
     if _want("proxy_dist") and "p_type" in actual_cols:
         if use_proxy_rollup:
             _t = _time.perf_counter()
-            rolled = _proxy_dist_from_rollups(runner, start_time, end_time)
+            rolled = _proxy_dist_from_rollups(runner, start_time, end_time, actual_cols=actual_cols)
             timer.mark("proxy_dist_rollup", _t)
             if rolled is None:
                 _logger.warning(
@@ -1235,7 +1290,17 @@ def _build_security_response(
         results["bot_efficiency"] = []
 
     if _want("top_bots"):
-        _need("top_bots", {"ua", "waf_req_id"})
+        if use_top_bots_rollup:
+            _t = _time.perf_counter()
+            try:
+                tb = get_top_bots(runner.con, src, start_time, end_time, filters or {}, parent_runner=runner)
+                results["bots"] = tb.get("bots", [])
+                results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
+            except Exception as e:
+                _logger.error("[security] get_top_bots failed in aggregate: %s", e)
+            timer.mark("top_bots", _t)
+        else:
+            _need("top_bots", {"ua", "waf_req_id"})
 
     if _want("proxies"):
         proxy_cols = {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"}
@@ -1269,9 +1334,12 @@ def _build_security_response(
         # empty, so it can't desync bind parameters.
         ngwaf_pair = {"ngwaf_verified_bots", "ngwaf_verified_bots_ts"}
         ngwaf_only = bool(live_sections) and live_sections <= ngwaf_pair and "waf_req_id" in actual_cols
+        vbts_only = live_sections == {"verified_bots_ts"} and "waf_sig" in actual_cols
         wc = where_clause
         if ngwaf_only and where_clause.strip():
             wc = f"{where_clause} AND waf_req_id IS NOT NULL"
+        elif vbts_only and where_clause.strip():
+            wc = f"{where_clause} AND waf_sig IS NOT NULL"
         cols = [c for c in _TEMP_COL_ORDER if c in needed_cols]
         _t = _time.perf_counter()
         temp_table = runner.create_filtered_temp_table(cols, actual_cols, table_name, wc, params)
@@ -1466,7 +1534,13 @@ def _build_security_response(
             _t = _time.perf_counter()
             try:
                 tb = get_top_bots(
-                    con, src, start_time, end_time, filters or {}, shared_temp_table=temp_table, parent_runner=runner
+                    runner.con,
+                    src,
+                    start_time,
+                    end_time,
+                    filters or {},
+                    shared_temp_table=temp_table,
+                    parent_runner=runner,
                 )
                 results["bots"] = tb.get("bots", [])
                 results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
@@ -1478,7 +1552,7 @@ def _build_security_response(
             _t = _time.perf_counter()
             try:
                 px = get_security_proxies(
-                    con,
+                    runner.con,
                     src,
                     start_time,
                     end_time,
@@ -1494,6 +1568,7 @@ def _build_security_response(
                 _logger.error("[security] get_security_proxies failed in aggregate: %s", e)
             timer.mark("proxies", _t)
     finally:
+        runner.end_shared_active_hour_temps()
         if temp_table:
             try:
                 runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
