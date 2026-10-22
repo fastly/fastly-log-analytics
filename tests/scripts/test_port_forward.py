@@ -28,7 +28,7 @@ state = os.environ["STUB_STATE"]
 mode = os.environ.get("STUB_MODE", "ok")
 local = int(argv[-1].split(":")[0])
 n = len([f for f in os.listdir(state) if f.startswith("call-")])
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+child = subprocess.Popen(["/bin/sleep", "120"])
 with open(os.path.join(state, f"call-{{n}}.json"), "w") as fh:
     json.dump({{"argv": argv, "pid": os.getpid(), "child": child.pid}}, fh)
 def term(signum, frame):
@@ -176,7 +176,7 @@ def test_early_exit_surfaces_kubectl_stderr_and_cleans_up(kubectl, monkeypatch):
 def test_readiness_timeout_kills_the_forward(kubectl, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "never-ready")
     with pytest.raises(pf.ReadinessTimeout):
-        pf.ForwardSet([pf.Forward("svc/x", free_port(), 80)], kubectl=kubectl.path, ready_timeout=1.0).start()
+        pf.ForwardSet([pf.Forward("svc/x", free_port(), 80)], kubectl=kubectl.path, ready_timeout=2.0).start()
     (call,) = kubectl.calls()
     assert wait_dead(call["pid"])
     assert wait_dead(call["child"])

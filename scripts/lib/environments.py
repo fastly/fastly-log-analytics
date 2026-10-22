@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,9 @@ def load_dotenv(path: str | Path | None = None) -> None:
     variables win, matching the previous hand-rolled ``k not in os.environ``
     behaviour so an explicit shell export always takes precedence.
     """
+    if path is None and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules):
+        return
+
     from dotenv import load_dotenv as _load_dotenv
 
     dotenv_path = Path(path) if path is not None else ROOT / ".env"
@@ -62,6 +66,13 @@ def load_persisted_deploy_env(path: str | Path | None = None) -> dict[str, str]:
     Matches the validation rules in ``scripts/dev/deploy_test_all.sh``:
     regular owner-only file (mode 0600), no interpolation, allow-listed keys only.
     """
+    if (
+        path is None
+        and "FLA_ADMIN_DEPLOY_ENV" not in os.environ
+        and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)
+    ):
+        return {}
+
     from dotenv import dotenv_values
 
     raw_path = (

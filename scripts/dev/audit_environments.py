@@ -741,9 +741,6 @@ def run_audit(
 
 
 def main() -> int:
-    load_persisted_deploy_env()
-    refresh_environment_origins()
-    validate_admin_tls_config()
     parser = argparse.ArgumentParser(
         description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -785,6 +782,9 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    load_persisted_deploy_env()
+    refresh_environment_origins()
+    validate_admin_tls_config()
 
     if not args.watch:
         results = run_audit(target_names=args.env, admin_token=args.admin_token, timeout=args.timeout)

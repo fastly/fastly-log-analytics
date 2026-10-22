@@ -364,13 +364,15 @@ def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing
 ) -> None:
     from scripts.lib import environments
 
-    for key in (
+    tracked_keys = (
         "FLA_ADMIN_DEPLOY_ENV",
         "LOCAL_STANDARD_ADMIN_MTLS",
         "GCE_ADMIN_MTLS",
         "ELEVATION_ADMIN_MTLS",
         "ADMIN_GATEWAY_ENDPOINTS",
-    ):
+    )
+    for key in tracked_keys:
+        monkeypatch.setenv(key, "")
         monkeypatch.delenv(key, raising=False)
 
     endpoint_files: dict[str, str] = {}
@@ -396,16 +398,21 @@ def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing
     monkeypatch.setenv("FLA_ADMIN_DEPLOY_ENV", str(deploy_env))
     monkeypatch.setenv("GCE_ADMIN_MTLS", "0")
 
-    loaded = environments.load_persisted_deploy_env()
-    assert loaded["LOCAL_STANDARD_ADMIN_MTLS"] == "1"
-    assert loaded["ELEVATION_ADMIN_MTLS"] == "1"
-    # Existing process env wins over persisted deploy.env
-    assert environments.os.environ["GCE_ADMIN_MTLS"] == "0"
+    try:
+        loaded = environments.load_persisted_deploy_env()
+        assert loaded["LOCAL_STANDARD_ADMIN_MTLS"] == "1"
+        assert loaded["ELEVATION_ADMIN_MTLS"] == "1"
+        # Existing process env wins over persisted deploy.env
+        assert environments.os.environ["GCE_ADMIN_MTLS"] == "0"
 
-    audit.refresh_environment_origins()
-    assert audit.ENVIRONMENTS["local-standard"].backend_url == "https://127.0.0.1:9443"
-    assert audit.ENVIRONMENTS["remote-standard"].backend_url == "https://203.0.113.10:9443"
-    assert audit.ENVIRONMENTS["remote-high-scale"].backend_url == "https://10.0.0.10:8443"
+        audit.refresh_environment_origins()
+        assert audit.ENVIRONMENTS["local-standard"].backend_url == "https://127.0.0.1:9443"
+        assert audit.ENVIRONMENTS["remote-standard"].backend_url == "https://203.0.113.10:9443"
+        assert audit.ENVIRONMENTS["remote-high-scale"].backend_url == "https://10.0.0.10:8443"
+    finally:
+        for key in tracked_keys:
+            monkeypatch.delenv(key, raising=False)
+        audit.refresh_environment_origins()
 
 
 def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.MonkeyPatch) -> None:
