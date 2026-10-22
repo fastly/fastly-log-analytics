@@ -102,6 +102,8 @@ What the breakdown says:
 - **One section was wasting time and is fixed.** `rebuffer_by_country` used `APPROX_QUANTILE` per (country, session) group; with many countries it took up to 4.4 s locally. It now uses `MEDIAN` (64 ms locally and 25 ms on Remote Standard in the same environments after the change; about 9x faster on a 3M-row benchmark).
 - High-Scale reports no section timings (the ClickHouse reader doesn't emit them), so its 2.8 s is not yet broken down.
 
+**Pool bulkhead (`f47cec84`, deployed 2026-10-22).** Aggregate routes now take a heavy slot (default `max_size - 1` of the pool) before checking out a connection, so cheap calls such as `/api/cron-runs` always have a connection. In that deploy the cheap calls took 55 to 413 ms while Security aggregates ran 13 s. The Streaming aggregates call itself is a heavy route, so it still queues behind other heavy queries: 1.9 s on High-Scale, 5.5 s on Local Standard and 11.3 s on Remote Standard (it ran right after the Security and Network pages' heavy queries). The bulkhead protects light requests; it doesn't make heavy ones faster.
+
 ---
 
 ## 9. Verification Checklist
