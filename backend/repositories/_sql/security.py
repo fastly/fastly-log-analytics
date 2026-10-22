@@ -546,6 +546,9 @@ GET_SECURITY_PROXIES_COMBINED = _DynamicPopSqlTemplate("""
             ON pop IS NOT DISTINCT FROM geo_dist.g_pop
            AND lat IS NOT DISTINCT FROM geo_dist.g_lat
            AND lon IS NOT DISTINCT FROM geo_dist.g_lon
+        -- Requests answered before the capture snippet ran (e.g. redirects) log no client IP;
+        -- they must not show up as anonymous "suspicious clients".
+        WHERE ip IS NOT NULL AND ip != ''
     ),
     stats_q AS (
         SELECT
