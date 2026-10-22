@@ -297,6 +297,7 @@ async function logPoolStats(context, name) {
     const pools = ((await res.json()).pool_wait || []).map(p => ({
       max: p.max_size, open: p.in_use, idle: p.idle, busy: Math.max(0, (p.in_use || 0) - (p.idle || 0)), created: p.created_total, reused: p.reused_total,
       discarded: p.discarded_total, saturated: p.saturated_rejects_total, wait: p.wait, rebindWait: p.rebind_wait,
+      heavy: p.heavy,
     }));
     console.log(`[POOL ${name}] ${JSON.stringify(pools)}`);
   } catch (err) {
