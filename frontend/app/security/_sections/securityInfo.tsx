@@ -5,6 +5,16 @@ export const FINGERPRINT_COLUMN_IDS = ['fingerprint', 'ip_count', 'request_count
 export const TOP_IP_COLUMN_IDS = ['ip', 'max_header']
 export const BOT_COLUMN_IDS = ['name', 'category', 'request_count', 'verified_count', 'impersonator_count', 'unverified_count', 'pending_count']
 export const NGWAF_BOT_COLUMN_IDS = ['bot_name', 'category', 'request_count']
+export const BOT_EFFICIENCY_COLUMN_IDS = [
+  'bot_name',
+  'category',
+  'request_count',
+  'resp_bytes',
+  'bandwidth_pct',
+  'referrals',
+  'requests_per_referral',
+  'bytes_per_referral',
+]
 
 export const SECURITY_INFO = {
   wellknown_bots: {
@@ -126,6 +136,30 @@ export const SECURITY_INFO = {
           <li className="flex gap-3">
             <Bot className="h-5 w-5 shrink-0 text-blue-500" />
             <span><strong>Bot Name:</strong> The verified bot name extracted from the NGWAF VERIFIED-BOT signal (e.g. &quot;OpenAI SearchBot&quot;).</span>
+          </li>
+        </ul>
+      </div>
+    )
+  },
+  bot_efficiency: {
+    title: 'Bot & Crawler Value vs. Cost',
+    body: (
+      <div className="space-y-4 text-sm text-muted-foreground">
+        <p>
+          Compares each bot or crawler&apos;s resource footprint (request count and egress bandwidth) against the organic human referral traffic it returns to your site.
+        </p>
+        <ul className="space-y-3 list-none pl-0">
+          <li className="flex gap-3">
+            <Scale className="h-5 w-5 shrink-0 text-blue-500" />
+            <span>
+              <strong>Cost-to-Value Ratio:</strong> Search and AI answer crawlers that drive human referrals should show a low <em>Requests / Referral</em> and <em>Bandwidth / Referral</em> ratio.
+            </span>
+          </li>
+          <li className="flex gap-3">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+            <span>
+              <strong>Zero-Referral Scrapers:</strong> AI training crawlers, SEO scrapers, and headless bots often consume significant bandwidth while returning <code>0</code> referred visitors — prime candidates for edge throttling or blocking.
+            </span>
           </li>
         </ul>
       </div>

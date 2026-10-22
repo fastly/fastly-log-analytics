@@ -757,11 +757,13 @@ def get_insights(
     # table. Filtered by actual_cols in the cols_sql line below so missing
     # columns don't break the projection.
     fp_support_col = "ja4" if "ja4" in actual_cols else "ja3"
-    needed_cols_set.update({fp_support_col, "region"})
+    needed_cols_set.update({fp_support_col, "region", "resp_bytes"})
     needed_cols = sorted(needed_cols_set)
     cols_sql = ", ".join(f'"{c}"' for c in needed_cols if c in actual_cols)
     if not cols_sql:
         cols_sql = "*"
+    elif "resp_bytes" not in actual_cols:
+        cols_sql += ', 0::BIGINT AS "resp_bytes"'
 
     # CREATE TABLE (not TEMP) inside the scratch :memory: DB — TEMP tables
     # are connection-scoped and invisible to ``con.cursor()`` shadow

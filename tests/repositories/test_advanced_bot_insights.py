@@ -13,15 +13,42 @@ from backend.repositories.insights import _insights_cache, get_insights
 
 
 @pytest.mark.parametrize(
-    ("ua", "referer", "referral_ua", "brand"),
+    ("ua", "referer", "referral_ua", "raw_tok", "display_name"),
     [
-        ("Claude-SearchBot GPTBot", "https://CLAUDE.AI/chatgpt.com", "Browser", "Anthropic (Claude)"),
-        ("AMZN-SEARCHBOT", "https://AMAZON.CO.uk", "Browser", "Amazon (Rufus/Alexa)"),
-        ("gPtBoT ChatGPT-User", "https://CHATGPT.COM", "Browser", "OpenAI"),
-        ("SemrushBOT", "https://SEMRUSH.COM", "Browser", "Semrush"),
-        ("AHREFSBOT", "https://AHREFS.COM", "Browser", "Ahrefs"),
-        ("Claude-SearchBot", None, "CLAUDE-USER", "Anthropic (Claude)"),
-        ("\u0130 Claude-SearchBot", "https://claude.ai/\u00df", "Browser", "Anthropic (Claude)"),
+        (
+            "Claude-SearchBot GPTBot",
+            "https://CLAUDE.AI/chatgpt.com",
+            "Browser",
+            "claude-searchbot",
+            "Anthropic Crawler Search",
+        ),
+        ("AMZN-SEARCHBOT", "https://AMAZON.CO.uk", "Browser", "amzn-searchbot", "Amazon Searchbot"),
+        ("gPtBoT ChatGPT-User", "https://CHATGPT.COM", "Browser", "gptbot", "Openai Crawler"),
+        ("PerplexityBot/1.0", "https://perplexity.ai/search", "Browser", "perplexitybot", "Perplexity Crawler"),
+        (
+            "Mozilla/5.0 (compatible; Googlebot/2.1)",
+            "https://www.google.com/search",
+            "Browser",
+            "googlebot",
+            "Google Crawler",
+        ),
+        (
+            "Mozilla/5.0 (compatible; Bytespider; +https://bytedance.com)",
+            "https://www.bytedance.com/",
+            "Browser",
+            "bytespider",
+            "Bytedance Crawler",
+        ),
+        ("SemrushBOT", "https://SEMRUSH.COM", "Browser", "semrushbot", "Semrush Crawler"),
+        ("AHREFSBOT", "https://AHREFS.COM", "Browser", "ahrefsbot", "Ahrefs Crawler"),
+        ("Claude-SearchBot", None, "CLAUDE-USER", "claude-searchbot", "Anthropic Crawler Search"),
+        (
+            "\u0130 Claude-SearchBot",
+            "https://claude.ai/\u00df",
+            "Browser",
+            "claude-searchbot",
+            "Anthropic Crawler Search",
+        ),
     ],
 )
 def test_crawler_matching_preserves_referrals(
@@ -29,16 +56,21 @@ def test_crawler_matching_preserves_referrals(
     ua: str,
     referer: str | None,
     referral_ua: str,
-    brand: str,
+    raw_tok: str,
+    display_name: str,
 ) -> None:
+    from backend.utils.bot_sources import resolve_bot_display_name
+
     con = in_memory_duckdb
     boundary = datetime(2026, 1, 2, tzinfo=UTC)
     before = boundary - timedelta(seconds=1)
-    con.execute("CREATE TABLE ua_logs (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, referer VARCHAR)")
-    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL FROM range(1000)", [boundary, ua])
-    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL FROM range(20)", [before, ua])
+    con.execute(
+        "CREATE TABLE ua_logs (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, referer VARCHAR, resp_bytes BIGINT)"
+    )
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL, 2048 FROM range(1000)", [boundary, ua])
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL, 1024 FROM range(20)", [before, ua])
     con.executemany(
-        "INSERT INTO ua_logs VALUES (?, ?, ?, ?)",
+        "INSERT INTO ua_logs VALUES (?, ?, ?, ?, 512)",
         [
             (boundary, "192.0.2.2", referral_ua, referer),
             (boundary, "192.0.2.2", referral_ua, referer),
@@ -52,7 +84,39 @@ def test_crawler_matching_preserves_referrals(
         ],
     )
     rows = con.execute(SQL.CRAWLER_DISPARITY.format(table_name="ua_logs"), [boundary] * 4).fetchall()
-    assert rows == [(brand, 1000, 1, 1000.0, 10.0)]
+    assert rows == [(raw_tok, 1000, 1, 2048000, 1000.0, 10.0, 2048000.0, 10240.0)]
+    assert resolve_bot_display_name(rows[0][0]) == display_name
+
+
+def test_bot_bandwidth_disparity_sql(
+    in_memory_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    from backend.utils.bot_sources import resolve_bot_display_name
+
+    con = in_memory_duckdb
+    boundary = datetime(2026, 1, 2, tzinfo=UTC)
+    con.execute(
+        "CREATE TABLE ua_logs (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, referer VARCHAR, resp_bytes BIGINT)"
+    )
+    con.execute(
+        "INSERT INTO ua_logs SELECT ?, '198.51.100.10', 'CCBot/2.0 (https://commoncrawl.org/faq/)', '-', 50000 FROM range(100)",
+        [boundary],
+    )
+    con.execute(
+        "INSERT INTO ua_logs SELECT ?, '203.0.113.10', 'Mozilla/5.0 Safari/537.36', 'https://example.com', 10000 FROM range(500)",
+        [boundary],
+    )
+    rows = con.execute(SQL.BOT_BANDWIDTH_DISPARITY.format(table_name="ua_logs"), [boundary] * 3).fetchall()
+    assert len(rows) == 1
+    bot_tok, w_requests, w_bytes, bw_share_pct, w_referrals, req_per_ref, bytes_per_ref = rows[0]
+    assert bot_tok == "ccbot"
+    assert resolve_bot_display_name(bot_tok) == "Commoncrawl Crawler"
+    assert w_requests == 100
+    assert w_bytes == 5_000_000
+    assert round(bw_share_pct, 1) == 50.0
+    assert w_referrals == 0
+    assert req_per_ref == 100.0
+    assert bytes_per_ref == 5_000_000.0
 
 
 def test_stale_browser_matching_preserves_exclusions_and_window(
@@ -86,7 +150,7 @@ def test_stale_browser_matching_preserves_exclusions_and_window(
 def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
     table_name = _safe_table(test_service_source["name"])
 
-    # Create a unified table schema containing all necessary fields for the 4 insights
+    # Create a unified table schema containing all necessary fields for the 5 insights
     in_memory_duckdb.execute(f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
             "timestamp" TIMESTAMPTZ,
@@ -96,7 +160,8 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
             "url" VARCHAR,
             "ja4" VARCHAR,
             "asn" INTEGER,
-            "p_type" VARCHAR
+            "p_type" VARCHAR,
+            "resp_bytes" BIGINT
         )
     """)
 
@@ -107,12 +172,12 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
         hours=24, minutes=30
     )  # Safe: >= 25h ago baseline_start, but < 24h ago to satisfy baseline hours count
 
-    def _insert_log(ts, ip, ua, referer, url, ja4=None, asn=None, p_type=None):
+    def _insert_log(ts, ip, ua, referer, url, ja4=None, asn=None, p_type=None, resp_bytes=1024):
         in_memory_duckdb.execute(
             f"""INSERT INTO {table_name}
-                (timestamp, ip, ua, referer, url, ja4, asn, p_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [ts.isoformat(), ip, ua, referer, url, ja4 or "", asn or 0, p_type or ""],
+                (timestamp, ip, ua, referer, url, ja4, asn, p_type, resp_bytes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [ts.isoformat(), ip, ua, referer, url, ja4 or "", asn or 0, p_type or "", resp_bytes],
         )
 
     # Insert a historical log to satisfy the check_baseline (available_history_hours >= baseline_hours) check
@@ -124,7 +189,7 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
         url="/index.html",
     )
 
-    # 1. Trigger crawler_disparity: Anthropic (Claude) has 150 crawls in window, 0 referrals
+    # 1. Trigger crawler_disparity & bot_bandwidth_disparity: Anthropic (Claude) has 150 crawls in window, 0 referrals
     # Insert some crawls in the baseline too so there is baseline data
     for i in range(10):
         _insert_log(
@@ -133,6 +198,7 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
             ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0; +http://www.anthropic.com/claudebot)",
             referer="-",
             url=f"/item/{i}",
+            resp_bytes=20000,
         )
     for i in range(150):
         _insert_log(
@@ -141,6 +207,18 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
             ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0; +http://www.anthropic.com/claudebot)",
             referer="-",
             url=f"/item/{i}",
+            resp_bytes=20000,
+        )
+
+    # Also insert a non-referring scraper (CCBot) with high bandwidth for bot_bandwidth_disparity
+    for i in range(60):
+        _insert_log(
+            ts=window_ts,
+            ip=f"198.18.0.{i % 5}",
+            ua="CCBot/2.0 (https://commoncrawl.org/faq/)",
+            referer="-",
+            url=f"/archive/{i}",
+            resp_bytes=50000,
         )
 
     # 2. Trigger stale_browser_version: Chrome 100 has 600 requests in window across 15 distinct IPs
@@ -215,8 +293,21 @@ def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
     cd = by_id["crawler_disparity"]
     assert cd["category"] == "security"
     assert len(cd["items"]) > 0
-    assert cd["items"][0]["label"] == "Anthropic (Claude)"
+    assert cd["items"][0]["label"] == "Anthropic Crawler Search"
     assert cd["items"][0]["meta"]["crawls"] == 150
+    assert cd["items"][0]["meta"]["w_bytes"] == 3_000_000
+    assert cd["items"][0]["meta"]["bytes_per_referral"] == 3_000_000.0
+
+    # Verify bot_bandwidth_disparity
+    assert "bot_bandwidth_disparity" in by_id
+    bbd = by_id["bot_bandwidth_disparity"]
+    assert bbd["category"] == "security"
+    assert len(bbd["items"]) >= 2
+    bbd_labels = {item["label"]: item for item in bbd["items"]}
+    assert "Commoncrawl Crawler" in bbd_labels
+    assert bbd_labels["Commoncrawl Crawler"]["meta"]["requests"] == 60
+    assert bbd_labels["Commoncrawl Crawler"]["meta"]["w_bytes"] == 3_000_000
+    assert bbd_labels["Commoncrawl Crawler"]["meta"]["referrals"] == 0
 
     # Verify stale_browser_version
     assert "stale_browser_version" in by_id

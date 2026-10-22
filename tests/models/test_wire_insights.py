@@ -102,7 +102,14 @@ _ROWS: dict[str, list[tuple]] = {
     "payload_compression_regression": [("/app.js", 0.95, 0.02, 120, 300)],
     "session_harvesting": [("1.2.3.4", 120, 600, 3)],
     "timeout_split": [(500.0, 5.0, 60.0, 50.0, 60), (5.0, 5.0, 560.0, 60.0, 60)],
-    "crawler_disparity": [("GPTBot", 5000, 2, 2500.0, 100.0), (None, 50, 0, 50.0, 1.0)],
+    "crawler_disparity": [
+        ("GPTBot", 5000, 2, 10_240_000, 2500.0, 100.0, 5_120_000.0, 200_000.0),
+        (None, 50, 0, 0, 50.0, 1.0, 0.0, 0.0),
+    ],
+    "bot_bandwidth_disparity": [
+        ("Common Crawl (CCBot)", 500, 25_000_000, 42.5, 0, 500.0, 25_000_000.0),
+        (None, 100, 5_000_000, 8.5, 2, 50.0, 2_500_000.0),
+    ],
     "stale_browser_version": [("Chrome/90", 300, 12, 6.5)],
     "orphaned_deep_crawl": [("1.2.3.4", 600, 20, 10, 30.0, 12.5)],
     "residential_fingerprint_dispersion": [("t13d1516h2_8daaf6152771", 40, 12, 900, 3, 4.5)],

@@ -71,6 +71,48 @@
       "summary": "1 anomalies detected",
       "title": "ASN/Metro Performance Regressions"
     },
+    "bot_bandwidth_disparity": {
+      "category": "security",
+      "items": [
+        {
+          "baseline_label": "referrals",
+          "baseline_val": 0,
+          "current_val": 1.02,
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
+          "label": "Monoscraper",
+          "meta": {
+            "bandwidth_share_pct": 20.7,
+            "bytes_per_referral": 1064960.0,
+            "referrals": 0,
+            "requests": 520,
+            "requests_per_referral": 520.0,
+            "w_bytes": 1064960
+          },
+          "severity": "critical",
+          "unit": "MB"
+        },
+        {
+          "baseline_label": "referrals",
+          "baseline_val": 0,
+          "current_val": 0.21,
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
+          "label": "Anthropic Crawler Search",
+          "meta": {
+            "bandwidth_share_pct": 4.18,
+            "bytes_per_referral": 215040.0,
+            "referrals": 0,
+            "requests": 105,
+            "requests_per_referral": 105.0,
+            "w_bytes": 215040
+          },
+          "severity": "warning",
+          "unit": "MB"
+        }
+      ],
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "title": "Bot Bandwidth & Referral Disparity"
+    },
     "botnet_grouping": {
       "category": "security",
       "items": [
@@ -430,12 +472,15 @@
           "baseline_val": 10.0,
           "current_val": 105.0,
           "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
-          "label": "Anthropic (Claude)",
+          "label": "Anthropic Crawler Search",
           "meta": {
+            "baseline_bytes_per_referral": 20480.0,
             "baseline_crawls_per_referral": 10.0,
+            "bytes_per_referral": 215040.0,
             "crawls": 105,
             "crawls_per_referral": 105.0,
-            "referrals": 0
+            "referrals": 0,
+            "w_bytes": 215040
           },
           "severity": "warning",
           "unit": "crawls/referral"
@@ -443,7 +488,7 @@
       ],
       "severity": "warning",
       "summary": "1 anomalies detected",
-      "title": "Crawler Referral Disparity"
+      "title": "Crawler Referral & Bandwidth Disparity"
     },
     "credential_enumeration": {
       "category": "security",
@@ -1507,6 +1552,48 @@
       "summary": "1 anomalies detected",
       "title": "ASN/Metro Performance Regressions"
     },
+    "bot_bandwidth_disparity": {
+      "category": "security",
+      "items": [
+        {
+          "baseline_label": "referrals",
+          "baseline_val": 0,
+          "current_val": 1.02,
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
+          "label": "Monoscraper",
+          "meta": {
+            "bandwidth_share_pct": 20.7,
+            "bytes_per_referral": 1064960.0,
+            "referrals": 0,
+            "requests": 520,
+            "requests_per_referral": 520.0,
+            "w_bytes": 1064960
+          },
+          "severity": "critical",
+          "unit": "MB"
+        },
+        {
+          "baseline_label": "referrals",
+          "baseline_val": 0,
+          "current_val": 0.21,
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
+          "label": "Anthropic Crawler Search",
+          "meta": {
+            "bandwidth_share_pct": 4.18,
+            "bytes_per_referral": 215040.0,
+            "referrals": 0,
+            "requests": 105,
+            "requests_per_referral": 105.0,
+            "w_bytes": 215040
+          },
+          "severity": "warning",
+          "unit": "MB"
+        }
+      ],
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "title": "Bot Bandwidth & Referral Disparity"
+    },
     "botnet_grouping": {
       "category": "security",
       "items": [
@@ -1866,12 +1953,15 @@
           "baseline_val": 10.0,
           "current_val": 105.0,
           "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00",
-          "label": "Anthropic (Claude)",
+          "label": "Anthropic Crawler Search",
           "meta": {
+            "baseline_bytes_per_referral": 20480.0,
             "baseline_crawls_per_referral": 10.0,
+            "bytes_per_referral": 215040.0,
             "crawls": 105,
             "crawls_per_referral": 105.0,
-            "referrals": 0
+            "referrals": 0,
+            "w_bytes": 215040
           },
           "severity": "warning",
           "unit": "crawls/referral"
@@ -1879,7 +1969,7 @@
       ],
       "severity": "warning",
       "summary": "1 anomalies detected",
-      "title": "Crawler Referral Disparity"
+      "title": "Crawler Referral & Bandwidth Disparity"
     },
     "credential_enumeration": {
       "category": "security",

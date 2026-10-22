@@ -937,49 +937,188 @@ DETECTIONS: dict[str, Detection] = {
         row_filter="ja4 != '' AND p_type != 'hosting'",
     ),
     "crawler_disparity": Detection(
-        ("ua", "referer", "ip"),
+        ("ua", "referer", "ip", "resp_bytes"),
         """
     , tagged AS (
-        SELECT ip, is_w, is_b,
-            (position(lower(ua), 'bot') > 0 OR position(lower(ua), 'crawler') > 0 OR position(lower(ua), 'spider') > 0
-             OR position(lower(ua), 'ahrefs') > 0 OR position(lower(ua), 'semrush') > 0) AS is_crawler,
-            (position(lower(ua), 'bot') = 0 AND position(lower(ua), 'crawler') = 0
-             AND position(lower(ua), 'spider') = 0) AS is_human,
-            position(lower(ua), 'claude-user') > 0 AS is_claude_user,
-            multiIf(
-                position(lower(ua), 'claude-searchbot') > 0, 'Anthropic (Claude)',
-                position(lower(ua), 'amzn-searchbot') > 0, 'Amazon (Rufus/Alexa)',
-                position(lower(ua), 'gptbot') > 0 OR position(lower(ua), 'chatgpt-user') > 0, 'OpenAI',
-                position(lower(ua), 'semrushbot') > 0, 'Semrush',
-                position(lower(ua), 'ahrefsbot') > 0, 'Ahrefs',
-                'Other Crawler') AS crawler_brand,
-            multiIf(
-                position(lower(referer), 'claude.ai') > 0, 'Anthropic (Claude)',
-                position(lower(referer), 'amazon.com') > 0 OR position(lower(referer), 'amazon.co') > 0,
-                    'Amazon (Rufus/Alexa)',
-                position(lower(referer), 'openai.com') > 0 OR position(lower(referer), 'chatgpt.com') > 0, 'OpenAI',
-                position(lower(referer), 'semrush.com') > 0, 'Semrush',
-                position(lower(referer), 'ahrefs.com') > 0, 'Ahrefs',
-                '') AS ref_brand
+        SELECT
+            ip,
+            is_w,
+            is_b,
+            coalesce(resp_bytes, 0) AS r_bytes,
+            extract(
+                lower(ua),
+                '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|externalagent|extended|other|preview)[a-z0-9_.-]*)'
+            ) AS raw_tok,
+            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom,
+            extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') AS user_fetcher_stem,
+            extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)') AS ref_dom
         FROM base
     ),
+    classified AS (
+        SELECT
+            ip,
+            is_w,
+            is_b,
+            r_bytes,
+            raw_tok,
+            ua_dom,
+            (raw_tok != '') AS is_crawler,
+            (raw_tok = '') AS is_human,
+            if(
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ) != '',
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ),
+                raw_tok
+            ) AS bot_stem,
+            if(user_fetcher_stem != '', user_fetcher_stem, ref_dom) AS ref_stem
+        FROM tagged
+    ),
     crawler_traffic AS (
-        SELECT crawler_brand AS bot_brand, countIf(is_w) AS w_crawls, countIf(is_b) AS b_crawls
-        FROM tagged WHERE is_crawler GROUP BY crawler_brand HAVING w_crawls >= 100
+        SELECT
+            bot_stem,
+            min(raw_tok) AS raw_tok,
+            max(ua_dom) AS ua_dom,
+            countIf(is_w) AS w_crawls,
+            countIf(is_b) AS b_crawls,
+            sumIf(r_bytes, is_w) AS w_bytes,
+            sumIf(r_bytes, is_b) AS b_bytes
+        FROM classified
+        WHERE is_crawler AND bot_stem != ''
+        GROUP BY bot_stem
+        HAVING w_crawls >= 100
+    ),
+    human_refs AS (
+        SELECT ip, is_w, is_b, ref_stem
+        FROM classified
+        WHERE is_human AND ip != '' AND ref_stem != ''
     ),
     referred AS (
-        SELECT if(is_claude_user, 'Anthropic (Claude)', if(ref_brand = '', 'Other Crawler', ref_brand)) AS bot_brand,
-               uniqExactIf(ip, is_w) AS w_referrals, uniqExactIf(ip, is_b) AS b_referrals
-        FROM tagged WHERE is_human
-        GROUP BY bot_brand HAVING bot_brand IN (SELECT bot_brand FROM crawler_traffic)
+        SELECT
+            c.bot_stem AS bot_stem,
+            uniqExactIf(h.ip, h.is_w) AS w_referrals,
+            uniqExactIf(h.ip, h.is_b) AS b_referrals
+        FROM crawler_traffic c
+        CROSS JOIN human_refs h
+        WHERE c.bot_stem = h.ref_stem
+           OR (
+               length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3
+               AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')
+           )
+           OR (
+               length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3
+               AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)
+           )
+           OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem)
+        GROUP BY c.bot_stem
     )
-    SELECT c.bot_brand AS label, c.w_crawls, ifNull(r.w_referrals, 0) AS w_referrals,
+    SELECT c.raw_tok AS label, c.w_crawls, ifNull(r.w_referrals, 0) AS w_referrals, c.w_bytes,
         c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS crawls_per_referral,
-        c.b_crawls * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_crawls_per_referral
-    FROM crawler_traffic c LEFT JOIN referred r ON c.bot_brand = r.bot_brand
+        c.b_crawls * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_crawls_per_referral,
+        c.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS bytes_per_referral,
+        c.b_bytes * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_bytes_per_referral
+    FROM crawler_traffic c LEFT JOIN referred r ON c.bot_stem = r.bot_stem
     WHERE c.w_crawls >= 100
-      AND (ifNull(r.bot_brand, '') = '' OR c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 1000.0)
+      AND (ifNull(r.bot_stem, '') = '' OR c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 1000.0)
     ORDER BY crawls_per_referral DESC LIMIT 10
+    """,
+        row_filter="ua != ''",
+    ),
+    "bot_bandwidth_disparity": Detection(
+        ("ua", "referer", "ip", "resp_bytes"),
+        """
+    , tagged AS (
+        SELECT
+            ip,
+            is_w,
+            coalesce(resp_bytes, 0) AS r_bytes,
+            extract(
+                lower(ua),
+                '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)'
+            ) AS raw_tok,
+            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom,
+            extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') AS user_fetcher_stem,
+            extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)') AS ref_dom
+        FROM base
+    ),
+    classified AS (
+        SELECT
+            ip,
+            is_w,
+            r_bytes,
+            raw_tok,
+            ua_dom,
+            (raw_tok != '') AS is_bot,
+            (raw_tok = '') AS is_human,
+            if(
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ) != '',
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ),
+                raw_tok
+            ) AS bot_stem,
+            if(user_fetcher_stem != '', user_fetcher_stem, ref_dom) AS ref_stem
+        FROM tagged
+    ),
+    site_win AS (
+        SELECT greatest(sumIf(r_bytes, is_w), 1) AS total_site_bytes FROM classified
+    ),
+    bot_win AS (
+        SELECT
+            bot_stem,
+            min(raw_tok) AS raw_tok,
+            max(ua_dom) AS ua_dom,
+            countIf(is_w) AS w_reqs,
+            sumIf(r_bytes, is_w) AS w_bytes
+        FROM classified
+        WHERE is_bot AND bot_stem != ''
+        GROUP BY bot_stem
+        HAVING w_reqs >= 50
+    ),
+    human_refs AS (
+        SELECT ip, ref_stem
+        FROM classified
+        WHERE is_human AND is_w AND ip != '' AND ref_stem != ''
+    ),
+    referred AS (
+        SELECT
+            b.bot_stem AS bot_stem,
+            uniqExact(h.ip) AS w_referrals
+        FROM bot_win b
+        CROSS JOIN human_refs h
+        WHERE b.bot_stem = h.ref_stem
+           OR (
+               length(replaceRegexpAll(b.bot_stem, '[aeiou]', '')) >= 3
+               AND replaceRegexpAll(b.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')
+           )
+           OR (
+               length(b.bot_stem) >= 3 AND length(h.ref_stem) >= 3
+               AND (position(h.ref_stem, b.bot_stem) > 0 OR position(b.bot_stem, h.ref_stem) > 0)
+           )
+           OR (b.ua_dom != '' AND b.ua_dom = h.ref_stem)
+        GROUP BY b.bot_stem
+    )
+    SELECT b.raw_tok AS label, b.w_reqs, b.w_bytes,
+        round(b.w_bytes * 100.0 / s.total_site_bytes, 2) AS bandwidth_share_pct,
+        ifNull(r.w_referrals, 0) AS w_referrals,
+        b.w_reqs * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS requests_per_referral,
+        b.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS bytes_per_referral
+    FROM bot_win b CROSS JOIN site_win s LEFT JOIN referred r ON b.bot_stem = r.bot_stem
+    WHERE b.w_reqs >= 50
+      AND (ifNull(r.w_referrals, 0) = 0 OR b.w_reqs * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 100.0 OR b.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 1048576.0)
+    ORDER BY b.w_bytes DESC, b.w_reqs DESC LIMIT 10
     """,
         row_filter="ua != ''",
     ),

@@ -55,6 +55,19 @@ class WellknownBotRow(WireSafeModel):
     verification_coverage: float
 
 
+class BotEfficiencyRow(WireSafeModel):
+    """Bot & crawler value vs. cost row (requests + bandwidth consumed vs. human referrals)."""
+
+    bot_name: str
+    category: str
+    request_count: int
+    resp_bytes: int = 0
+    bandwidth_pct: float = 0.0
+    referrals: int = 0
+    requests_per_referral: float = 0.0
+    bytes_per_referral: float = 0.0
+
+
 class TlsFingerprintRow(WireSafeModel):
     """Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;
     the high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``."""
@@ -143,6 +156,7 @@ class SecurityAggregatesResponse(BaseResponse):
     ngwaf_verified_bots: list[NgwafVerifiedBotRow] = []
     ngwaf_verified_bots_ts: list[NgwafVerifiedBotsTsRow] = []
     wellknown_bots: list[WellknownBotRow] = []
+    bot_efficiency: list[BotEfficiencyRow] = []
 
     # ── Merged /top-bots and /proxies endpoints ──
     bots: list[SecurityBotRow] = []

@@ -6,6 +6,7 @@ import { DeltaIndicator } from '@/components/DeltaIndicator'
 import { useServiceStore } from '@/stores/serviceStore'
 import { InsightCardData } from '@/types/api'
 import type {
+  BotFindingModalData,
   ImpossibleDistanceData,
   ImpossibleDistanceItem,
   RepeatedPatternsFpItem,
@@ -21,9 +22,10 @@ interface InsightItemRowProps {
   onMapClick?: (data: ImpossibleDistanceData) => void
   onCacheCollapseClick?: (url: string) => void
   onScriptedTrafficClick?: (data: ScriptedTrafficData) => void
+  onBotFindingClick?: (data: BotFindingModalData) => void
 }
 
-export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClick, onScriptedTrafficClick }: InsightItemRowProps) {
+export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClick, onScriptedTrafficClick, onBotFindingClick }: InsightItemRowProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const item = insight.items[index]
 
@@ -72,6 +74,41 @@ export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClic
               onScriptedTrafficClick={onScriptedTrafficClick}
             />
           )}
+          {(insight.id === 'crawler_disparity' ||
+            insight.id === 'bot_bandwidth_disparity' ||
+            insight.id === 'stale_browser_version' ||
+            insight.id === 'orphaned_deep_crawl' ||
+            insight.id === 'residential_fingerprint_dispersion') &&
+            onBotFindingClick && (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={`View finding details for ${item.label}`}
+                className="h-6 w-6 text-primary hover:text-primary/80 shrink-0"
+                onClick={() => {
+                  switch (insight.id) {
+                    case 'crawler_disparity':
+                      onBotFindingClick({ insightId: 'crawler_disparity', item: insight.items[index] })
+                      break
+                    case 'bot_bandwidth_disparity':
+                      onBotFindingClick({ insightId: 'bot_bandwidth_disparity', item: insight.items[index] })
+                      break
+                    case 'stale_browser_version':
+                      onBotFindingClick({ insightId: 'stale_browser_version', item: insight.items[index] })
+                      break
+                    case 'orphaned_deep_crawl':
+                      onBotFindingClick({ insightId: 'orphaned_deep_crawl', item: insight.items[index] })
+                      break
+                    case 'residential_fingerprint_dispersion':
+                      onBotFindingClick({ insightId: 'residential_fingerprint_dispersion', item: insight.items[index] })
+                      break
+                  }
+                }}
+                title="View Finding Details"
+              >
+                <ScanSearch className="h-3 w-3" aria-hidden="true" />
+              </Button>
+            )}
         </div>
         {item.tooltip && (
           <span className="text-[11px] sm:text-[10px] text-muted-foreground truncate">{item.tooltip}</span>

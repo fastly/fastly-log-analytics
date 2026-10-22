@@ -1,5 +1,5 @@
 import React from 'react'
-import { Bot, Fingerprint, CheckCircle2, AlertTriangle, Clock, HelpCircle, Info } from 'lucide-react'
+import { Bot, Fingerprint, CheckCircle2, AlertTriangle, Clock, HelpCircle, Info, Scale } from 'lucide-react'
 import type { Dispatch, SetStateAction } from 'react'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
@@ -7,11 +7,12 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { formatDate } from '@/lib/date'
-import { formatCount, formatCountMaybe } from '@/lib/format'
+import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
 import {
   SECURITY_INFO,
   NGWAF_BOT_COLUMN_IDS,
   BOT_COLUMN_IDS,
+  BOT_EFFICIENCY_COLUMN_IDS,
   FINGERPRINT_COLUMN_IDS,
 } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
@@ -20,6 +21,7 @@ import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
 type WellknownBot = components['schemas']['WellknownBotRow']
+type BotEfficiency = components['schemas']['BotEfficiencyRow']
 type NgwafVerifiedBot = components['schemas']['NgwafVerifiedBotRow']
 type TlsFingerprint = components['schemas']['TlsFingerprintRow']
 
@@ -39,6 +41,9 @@ type Props = {
   botVisibility: VisibilityState
   setBotVisibility: Dispatch<SetStateAction<VisibilityState>>
   onBotVisChange: (id: string, vis: boolean) => void
+  botEfficiencyVisibility?: VisibilityState
+  setBotEfficiencyVisibility?: Dispatch<SetStateAction<VisibilityState>>
+  onBotEfficiencyVisChange?: (id: string, vis: boolean) => void
   fingerprintVisibility: VisibilityState
   setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
   onFingerprintVisChange: (id: string, vis: boolean) => void
@@ -91,6 +96,9 @@ export function BotsSection({
   botVisibility,
   setBotVisibility,
   onBotVisChange,
+  botEfficiencyVisibility = {},
+  setBotEfficiencyVisibility,
+  onBotEfficiencyVisChange,
   fingerprintVisibility,
   setFingerprintVisibility,
   onFingerprintVisChange,
@@ -237,6 +245,73 @@ export function BotsSection({
     { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCountMaybe(row.original.request_count) ?? '—' },
   ]
 
+  const botEfficiencyColumns: ColumnDef<BotEfficiency>[] = [
+    {
+      accessorKey: 'bot_name',
+      header: 'Bot / Crawler',
+      cell: ({ row }) => <span className="font-medium">{row.original.bot_name}</span>,
+    },
+    {
+      accessorKey: 'category',
+      header: 'Category',
+      cell: ({ row }) => <span className="capitalize text-muted-foreground">{row.original.category.replace(/-/g, ' ')}</span>,
+    },
+    {
+      accessorKey: 'request_count',
+      header: 'Requests',
+      cell: ({ row }) => formatCount(row.original.request_count),
+    },
+    {
+      accessorKey: 'resp_bytes',
+      header: 'Bandwidth',
+      cell: ({ row }) => formatBytes(row.original.resp_bytes),
+    },
+    {
+      accessorKey: 'bandwidth_pct',
+      header: 'Site BW Share',
+      cell: ({ row }) => `${row.original.bandwidth_pct.toFixed(1)}%`,
+    },
+    {
+      accessorKey: 'referrals',
+      header: 'Referred Traffic',
+      cell: ({ row }) =>
+        row.original.referrals === 0 ? (
+          <span className="flex items-center gap-1 text-red-500 font-medium" title="Zero human visitors referred">
+            <AlertTriangle className="h-3 w-3" />0
+          </span>
+        ) : (
+          <span className="text-green-600 dark:text-green-400 font-medium">
+            {formatCount(row.original.referrals)}
+          </span>
+        ),
+    },
+    {
+      accessorKey: 'requests_per_referral',
+      header: 'Requests / Referral',
+      cell: ({ row }) => {
+        const val = row.original.requests_per_referral
+        const isHighCost = row.original.referrals === 0 || val >= 50
+        return (
+          <span className={isHighCost ? 'text-red-500 font-semibold' : undefined}>
+            {formatCount(val, { maximumFractionDigits: 1 })}
+          </span>
+        )
+      },
+    },
+    {
+      accessorKey: 'bytes_per_referral',
+      header: 'Bandwidth / Referral',
+      cell: ({ row }) => {
+        const isZeroRef = row.original.referrals === 0
+        return (
+          <span className={isZeroRef ? 'text-red-500 font-semibold' : undefined}>
+            {formatBytes(row.original.bytes_per_referral)}
+          </span>
+        )
+      },
+    },
+  ]
+
   return (
     <>
       {data?.ngwaf_configured !== false && (
@@ -353,6 +428,45 @@ export function BotsSection({
             hideToolbar
             columnVisibility={fingerprintVisibility}
             onColumnVisibilityChange={setFingerprintVisibility}
+          />
+        </AnalyticsCard>
+      </div>
+
+      <div className="mb-6">
+        <AnalyticsCard
+          title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)"
+          icon={<Scale className="h-4 w-4" />}
+          headerAction={
+            onBotEfficiencyVisChange ? (
+              <ColumnVisibilityDropdown
+                columns={labeledColumns(BOT_EFFICIENCY_COLUMN_IDS)}
+                visibility={botEfficiencyVisibility}
+                onChange={onBotEfficiencyVisChange}
+              />
+            ) : undefined
+          }
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading bot bandwidth & referral efficiency..."
+          error={error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+          contentClassName="p-0"
+          helpTitle={SECURITY_INFO.bot_efficiency.title}
+          helpContent={SECURITY_INFO.bot_efficiency.body}
+        >
+          <DataTable
+            columns={botEfficiencyColumns}
+            data={data?.bot_efficiency || []}
+            emptyMessage={
+              isLoading
+                ? ''
+                : isFieldActive('ua')
+                  ? 'No bot or crawler traffic detected in this time window.'
+                  : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
+            }
+            hideToolbar
+            columnVisibility={botEfficiencyVisibility}
+            onColumnVisibilityChange={setBotEfficiencyVisibility}
           />
         </AnalyticsCard>
       </div>

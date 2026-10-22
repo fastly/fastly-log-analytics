@@ -37,6 +37,7 @@ export const SECURITY_SSR_SECTIONS = [
   'ngwaf_verified_bots',
   'ngwaf_verified_bots_ts',
   'wellknown_bots',
+  'bot_efficiency',
   'tls_fingerprints',
   'fingerprint_coverage',
   'req_size_dist',

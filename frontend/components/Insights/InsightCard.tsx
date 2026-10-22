@@ -16,9 +16,10 @@ import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucid
 import { Button } from '@/components/ui/button'
 import { InsightDataModal } from './InsightDataModal'
 import { InsightItemRow } from './InsightItemRow'
-import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
+import { BotFindingModalData, ImpossibleDistanceData, ScriptedTrafficData } from './types'
 import { CacheCollapseModal } from './CacheCollapseModal'
 import { ScriptedTrafficModal } from './ScriptedTrafficModal'
+import { BotFindingModal } from './BotFindingModal'
 
 // Lazy-load the help modal: its index statically imports ~28KB of
 // per-insight help copy (InsightHelpModal/sections/*) that otherwise ships
@@ -83,6 +84,7 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
   const [selectedMapItem, setSelectedMapItem] = useState<ImpossibleDistanceData | null>(null)
   const [selectedCollapseUrl, setSelectedCollapseUrl] = useState<string | null>(null)
   const [selectedScriptedItem, setSelectedScriptedItem] = useState<ScriptedTrafficData | null>(null)
+  const [selectedBotFindingItem, setSelectedBotFindingItem] = useState<BotFindingModalData | null>(null)
 
   const Icon = SEVERITY_ICON[insight.severity as keyof typeof SEVERITY_ICON] || AlertCircle
   const iconColor = SEVERITY_ICON_COLOR[insight.severity as keyof typeof SEVERITY_ICON_COLOR] || 'text-muted-foreground'
@@ -134,6 +136,7 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
                   onMapClick={(data) => setSelectedMapItem(data)}
                   onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
                   onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}
+                  onBotFindingClick={(data) => setSelectedBotFindingItem(data)}
                 />
               ))}
               {insight.items.length > 5 && (
@@ -168,6 +171,7 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
         onMapClick={(data) => setSelectedMapItem(data)}
         onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
         onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}
+        onBotFindingClick={(data) => setSelectedBotFindingItem(data)}
       />
 
       <ImpossibleDistanceModal
@@ -188,6 +192,12 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
         isOpen={!!selectedScriptedItem}
         onOpenChange={(open) => !open && setSelectedScriptedItem(null)}
         data={selectedScriptedItem}
+      />
+
+      <BotFindingModal
+        isOpen={!!selectedBotFindingItem}
+        onOpenChange={(open) => !open && setSelectedBotFindingItem(null)}
+        data={selectedBotFindingItem}
       />
     </>
   )

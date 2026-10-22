@@ -48,6 +48,7 @@ const BOTS_SECTIONS: SecuritySections = [
   'ngwaf_verified_bots',
   'ngwaf_verified_bots_ts',
   'wellknown_bots',
+  'bot_efficiency',
   'tls_fingerprints',
   'fingerprint_coverage',
 ]
@@ -99,6 +100,9 @@ interface SecurityBodyProps {
   botVisibility: ReturnType<typeof useColumnVisibility>[0]
   setBotVisibility: ReturnType<typeof useColumnVisibility>[1]
   onBotVisChange: ReturnType<typeof useColumnVisibility>[2]
+  botEfficiencyVisibility: ReturnType<typeof useColumnVisibility>[0]
+  setBotEfficiencyVisibility: ReturnType<typeof useColumnVisibility>[1]
+  onBotEfficiencyVisChange: ReturnType<typeof useColumnVisibility>[2]
   ngwafBotVisibility: ReturnType<typeof useColumnVisibility>[0]
   setNgwafBotVisibility: ReturnType<typeof useColumnVisibility>[1]
   onNgwafBotVisChange: ReturnType<typeof useColumnVisibility>[2]
@@ -125,6 +129,9 @@ function SecurityBody({
   botVisibility,
   setBotVisibility,
   onBotVisChange,
+  botEfficiencyVisibility,
+  setBotEfficiencyVisibility,
+  onBotEfficiencyVisChange,
   ngwafBotVisibility,
   setNgwafBotVisibility,
   onNgwafBotVisChange,
@@ -192,6 +199,9 @@ function SecurityBody({
           botVisibility={botVisibility}
           setBotVisibility={setBotVisibility}
           onBotVisChange={onBotVisChange}
+          botEfficiencyVisibility={botEfficiencyVisibility}
+          setBotEfficiencyVisibility={setBotEfficiencyVisibility}
+          onBotEfficiencyVisChange={onBotEfficiencyVisChange}
           fingerprintVisibility={fingerprintVisibility}
           setFingerprintVisibility={setFingerprintVisibility}
           onFingerprintVisChange={onFingerprintVisChange}
@@ -268,6 +278,7 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
   const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()
   const [botVisibility, setBotVisibility, onBotVisChange] = useColumnVisibility()
+  const [botEfficiencyVisibility, setBotEfficiencyVisibility, onBotEfficiencyVisChange] = useColumnVisibility()
   const [ngwafBotVisibility, setNgwafBotVisibility, onNgwafBotVisChange] = useColumnVisibility()
 
   return (
@@ -298,6 +309,9 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
           botVisibility={botVisibility}
           setBotVisibility={setBotVisibility}
           onBotVisChange={onBotVisChange}
+          botEfficiencyVisibility={botEfficiencyVisibility}
+          setBotEfficiencyVisibility={setBotEfficiencyVisibility}
+          onBotEfficiencyVisChange={onBotEfficiencyVisChange}
           ngwafBotVisibility={ngwafBotVisibility}
           setNgwafBotVisibility={setNgwafBotVisibility}
           onNgwafBotVisChange={onNgwafBotVisChange}

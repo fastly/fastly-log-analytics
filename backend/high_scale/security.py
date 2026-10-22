@@ -380,6 +380,67 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
 
 
+def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    from backend.repositories.security import summarize_bot_efficiency_rows
+
+    rows = _run(
+        service,
+        scope,
+        "bot_efficiency",
+        """
+        WITH site_totals AS (
+            SELECT
+                'site' AS kind,
+                '' AS key,
+                count() AS cnt,
+                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes
+            FROM request_facts WHERE __WHERE__
+        ),
+        ua_agg AS (
+            SELECT
+                'ua' AS kind,
+                custom_fields['ua'] AS key,
+                count() AS cnt,
+                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes
+            FROM request_facts
+            WHERE __WHERE__ AND custom_fields['ua'] != ''
+            GROUP BY key
+        ),
+        ref_extracted AS (
+            SELECT
+                client_ip AS ip,
+                if(
+                    extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
+                    extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
+                    extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')
+                ) AS ref_stem
+            FROM request_facts
+            WHERE __WHERE__
+              AND client_ip != ''
+              AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
+        ),
+        ref_agg AS (
+            SELECT
+                'ref' AS kind,
+                ref_stem AS key,
+                uniqExact(ip) AS cnt,
+                toInt64(0) AS resp_bytes
+            FROM ref_extracted
+            WHERE ref_stem != ''
+            GROUP BY ref_stem
+        )
+        SELECT kind, key, cnt, resp_bytes FROM site_totals
+        UNION ALL
+        SELECT kind, key, cnt, resp_bytes FROM ua_agg
+        UNION ALL
+        SELECT kind, key, cnt, resp_bytes FROM ref_agg
+        """,
+    )
+    return summarize_bot_efficiency_rows(
+        [(str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)) for r in rows]
+    )
+
+
 def _maybe_mask(ip: Any, mask_ips: bool) -> Any:
     if not mask_ips or not ip:
         return ip
@@ -443,6 +504,8 @@ def security_aggregates(
         tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
     if want("wellknown_bots"):
         tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
+    if want("bot_efficiency"):
+        tasks.append(("bot_efficiency", lambda: _bot_efficiency(service, scope)))
     if want("top_bots"):
         tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
     if want("proxies"):

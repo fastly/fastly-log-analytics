@@ -745,6 +745,108 @@ def enrich_bot_metadata(df: Any) -> None:
                 df["_ngwaf_bot_name"] = None
 
 
+_BOT_TOKEN_SUFFIX_RE = re.compile(
+    r"(-searchbot|-assistbot|-externalagent|-externalfetcher|-extended|-user|"
+    r"searchbot|assistbot|externalagent|externalfetcher|extended|crawler|spider|"
+    r"slurp|archiver|scraper|preview|other|bot).*$",
+    re.IGNORECASE,
+)
+_DOMAIN_STEM_RE = re.compile(r"^(?:https?://)?(?:www\.)?([^/.:;\s]+)", re.IGNORECASE)
+
+
+def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot") -> str:
+    """Resolve an extracted bot UA token or full UA string to a human-readable display name.
+
+    Uses the well-known-bots catalog matcher first (`entry["id"]` title-cased, matching
+    `classify_ua_counts` and `summarize_wellknown_bot_rows`), falling back to a cleaned
+    title-cased form of the extracted token when the bot is not in the catalog.
+    """
+    raw = (token_or_ua or "").strip()
+    if not raw:
+        return default
+    matcher = build_matcher()
+    matches = (
+        matcher(raw)
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/2.0)")
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/1.0)")
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/0.1)")
+        or matcher(f"{raw}/1.0")
+    )
+    if matches:
+        bot_id = matches[0].get("id", "")
+        if bot_id:
+            return bot_id.replace("-", " ").title()
+    raw_low = raw.lower().strip("/._- ")
+    if raw_low:
+        for entry in load_source("well-known-bots"):
+            bot_id = entry.get("id", "")
+            if not bot_id:
+                continue
+            if raw_low == bot_id.lower() or any(raw_low == a.lower() for a in entry.get("aliases") or []):
+                return bot_id.replace("-", " ").title()
+            for pat in (entry.get("pattern") or {}).get("accepted") or []:
+                if raw_low in pat.lower():
+                    return bot_id.replace("-", " ").title()
+    cleaned = raw.strip("/._- ")
+    if not cleaned:
+        return default
+    return cleaned.replace("-", " ").replace("_", " ").title()
+
+
+def extract_entry_referral_stems(entry: dict[str, Any]) -> set[str]:
+    """Extract normalized domain/token stems for a well-known-bots catalog entry."""
+    stems: set[str] = set()
+    bot_id = (entry.get("id") or "").lower()
+    if bot_id:
+        vendor_prefix = bot_id.split("-")[0]
+        if len(vendor_prefix) >= 3:
+            stems.add(vendor_prefix)
+    url = entry.get("url") or ""
+    if url:
+        m = _DOMAIN_STEM_RE.search(url)
+        if m and len(m.group(1)) >= 3:
+            stems.add(m.group(1).lower())
+    for dom in (entry.get("verification") or {}).get("domains") or []:
+        parts = [
+            p
+            for p in dom.lower().strip(".").split(".")
+            if p
+            not in {
+                "com",
+                "org",
+                "net",
+                "io",
+                "ai",
+                "co",
+                "uk",
+                "ru",
+                "cn",
+                "de",
+                "jp",
+                "fr",
+                "crawl",
+                "search",
+                "bot",
+                "spider",
+            }
+        ]
+        for p in parts:
+            if len(p) >= 3:
+                stems.add(p)
+    for pat in (entry.get("pattern") or {}).get("accepted") or []:
+        lit = extract_literal_substring(pat) or pat
+        tok = lit.split("/")[0].split("\\")[0].strip("^$()[]{}+*?.,; ").lower()
+        stem = _BOT_TOKEN_SUFFIX_RE.sub("", tok).strip("-_.")
+        if len(stem) >= 3:
+            stems.add(stem)
+    for pat in (entry.get("instances") or {}).get("accepted") or []:
+        tok = pat.split("/")[0].split("\\")[0].strip("^$()[]{}+*?.,; ").lower()
+        stem = _BOT_TOKEN_SUFFIX_RE.sub("", tok).strip("-_.")
+        if len(stem) >= 3:
+            stems.add(stem)
+    return stems
+
+
 # R-1: drain the matcher + source caches between tests. Both are
 # mtime-revalidated in prod but tests use a sandboxed FS that doesn't
 # share inodes across runs — leaks would surface as cross-test

@@ -698,6 +698,56 @@ GET_SECURITY_PROXIES_COMBINED = """
     UNION ALL SELECT * FROM clients_q
 """
 
+BOT_EFFICIENCY = """
+WITH site_totals AS (
+    SELECT
+        'site' AS kind,
+        '' AS key,
+        COUNT(*) AS cnt,
+        CAST(COALESCE(SUM({resp_bytes_expr}), 0) AS BIGINT) AS resp_bytes
+    FROM {temp_table} t
+),
+ua_agg AS (
+    SELECT
+        'ua' AS kind,
+        t.ua AS key,
+        COUNT(*) AS cnt,
+        CAST(COALESCE(SUM({resp_bytes_expr}), 0) AS BIGINT) AS resp_bytes
+    FROM {temp_table} t
+    WHERE t.ua IS NOT NULL AND t.ua != ''
+    GROUP BY t.ua
+),
+ref_extracted AS (
+    SELECT
+        t.ip,
+        COALESCE(
+            NULLIF(regexp_extract(lower(COALESCE(t.ua, '')), '([a-z0-9]+)-(user|externalfetcher)', 1), ''),
+            NULLIF(regexp_extract(lower(COALESCE({referer_expr}, '')), 'http[s]*://(www\\.)*([^/.:;\\s]+)', 2), '')
+        ) AS ref_stem
+    FROM {temp_table} t
+    WHERE t.ip IS NOT NULL AND t.ip != ''
+      AND NOT regexp_matches(
+          lower(COALESCE(t.ua, '')),
+          '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)'
+      )
+),
+ref_agg AS (
+    SELECT
+        'ref' AS kind,
+        ref_stem AS key,
+        COUNT(DISTINCT ip) AS cnt,
+        CAST(0 AS BIGINT) AS resp_bytes
+    FROM ref_extracted
+    WHERE ref_stem IS NOT NULL AND ref_stem != ''
+    GROUP BY ref_stem
+)
+SELECT kind, key, cnt, resp_bytes FROM site_totals
+UNION ALL
+SELECT kind, key, cnt, resp_bytes FROM ua_agg
+UNION ALL
+SELECT kind, key, cnt, resp_bytes FROM ref_agg
+"""
+
 __all__ = [
     "threat_intel_sql",
     "TOP_UAS_BY_COUNT",
@@ -714,6 +764,7 @@ __all__ = [
     "PROXY_TYPE_DIST",
     "CONN_REUSE_DIST",
     "WELLKNOWN_BOTS_UA_IP",
+    "BOT_EFFICIENCY",
     "GET_PROXY_STATS",
     "GET_TRAFFIC_QUALITY",
     "GET_SUSPICIOUS_ISPS",

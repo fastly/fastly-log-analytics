@@ -9,6 +9,7 @@ from typing import Any
 import duckdb
 
 from backend import config as svcconfig
+from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -103,6 +104,8 @@ _TEMP_COL_ORDER = (
     "conn_requests",
     "waf_sig",
     "ua",
+    "referer",
+    "resp_bytes",
     "waf_req_id",
     "pop",
     "rtt_min",
@@ -122,6 +125,7 @@ _SECTION_DEFAULTS = (
     ("ngwaf_verified_bots", True),
     ("ngwaf_verified_bots_ts", True),
     ("wellknown_bots", True),
+    ("bot_efficiency", True),
     ("tls_fingerprints", True),
     ("fingerprint_coverage", False),
     ("req_size_dist", True),
@@ -548,6 +552,126 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
         b["verification_coverage"] = round(covered / total, 3) if total else 0.0
 
     return sorted_bots
+
+
+def _stems_match(bot_stem: str, ref_stem: str) -> bool:
+    if not bot_stem or not ref_stem:
+        return False
+    if bot_stem == ref_stem:
+        return True
+    b_cons = "".join(ch for ch in bot_stem if ch not in "aeiou")
+    r_cons = "".join(ch for ch in ref_stem if ch not in "aeiou")
+    if len(b_cons) >= 3 and b_cons == r_cons:
+        return True
+    return len(bot_stem) >= 3 and len(ref_stem) >= 3 and (bot_stem in ref_stem or ref_stem in bot_stem)
+
+
+def summarize_bot_efficiency_rows(
+    rows: list[tuple[str, str, int, int]],
+) -> list[dict[str, Any]]:
+    """Aggregate tagged `(kind, key, cnt, resp_bytes)` rows into BotEfficiencyItem dicts.
+
+    Uses `well-known-bots.json` via `build_matcher()` and `extract_entry_referral_stems()`
+    plus generic bot token extraction — zero hardcoded bot or vendor names.
+    """
+    import re
+
+    from backend.utils.bot_sources import (
+        _BOT_TOKEN_SUFFIX_RE,
+        build_matcher,
+        extract_entry_referral_stems,
+        load_source,
+        resolve_bot_display_name,
+    )
+
+    generic_bot_re = re.compile(
+        r"([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended)[a-z0-9_.-]*)",
+        re.IGNORECASE,
+    )
+
+    matcher = build_matcher()
+    catalog = load_source("well-known-bots") or []
+    vendor_stems: dict[str, set[str]] = {}
+    for entry in catalog:
+        if not isinstance(entry, dict):
+            continue
+        vid = (entry.get("id") or "").split("-")[0].lower()
+        if vid:
+            vendor_stems.setdefault(vid, set()).update(extract_entry_referral_stems(entry))
+
+    total_site_bytes = 0
+    ref_counts: dict[str, int] = {}
+    ua_rows: list[tuple[str, int, int]] = []
+
+    for kind, key, cnt, r_bytes in rows:
+        cnt_i = int(cnt or 0)
+        bytes_i = int(r_bytes or 0)
+        if kind == "site":
+            total_site_bytes += bytes_i
+        elif kind == "ref" and key:
+            ref_counts[key.lower()] = ref_counts.get(key.lower(), 0) + cnt_i
+        elif kind == "ua" and key:
+            ua_rows.append((key, cnt_i, bytes_i))
+
+    bot_agg: dict[str, dict[str, Any]] = {}
+    for ua, cnt_i, bytes_i in ua_rows:
+        matches = matcher(ua)
+        matched_entry = matches[0] if matches else None
+        if isinstance(matched_entry, dict):
+            bot_id = matched_entry.get("id", "unknown")
+            bot_name = bot_id.replace("-", " ").title()
+            cats = matched_entry.get("categories") or []
+            category = cats[0].replace("-", " ").title() if cats else "Uncategorized"
+            vid = bot_id.split("-")[0].lower()
+            stems = set(extract_entry_referral_stems(matched_entry)) | vendor_stems.get(vid, set())
+        else:
+            m = generic_bot_re.search(ua.lower())
+            if not m:
+                continue
+            raw_tok = m.group(1)
+            bot_id = raw_tok
+            bot_name = resolve_bot_display_name(raw_tok, default="Other Bot")
+            category = "General Bot"
+            stem = _BOT_TOKEN_SUFFIX_RE.sub("", raw_tok).strip("-_.")
+            stems = {stem} if len(stem) >= 3 else set()
+
+        bucket = bot_agg.get(bot_id)
+        if bucket is None:
+            bucket = {
+                "bot_name": bot_name,
+                "category": category,
+                "request_count": 0,
+                "resp_bytes": 0,
+                "stems": set(),
+            }
+            bot_agg[bot_id] = bucket
+        bucket["request_count"] += cnt_i
+        bucket["resp_bytes"] += bytes_i
+        bucket["stems"].update(stems)
+
+    denom_bytes = max(total_site_bytes, 1)
+    results: list[dict[str, Any]] = []
+    for b in bot_agg.values():
+        b_stems: set[str] = b["stems"]
+        referrals = sum(rcnt for rstem, rcnt in ref_counts.items() if any(_stems_match(bs, rstem) for bs in b_stems))
+        req_cnt = int(b["request_count"])
+        resp_b = int(b["resp_bytes"])
+        ref_denom = max(referrals, 1)
+        results.append(
+            {
+                "bot_name": b["bot_name"],
+                "category": b["category"],
+                "request_count": req_cnt,
+                "resp_bytes": resp_b,
+                "bandwidth_pct": round(resp_b * 100.0 / denom_bytes, 2),
+                "referrals": referrals,
+                "requests_per_referral": round(req_cnt * 1.0 / ref_denom, 1),
+                "bytes_per_referral": round(resp_b * 1.0 / ref_denom, 1),
+            }
+        )
+
+    results.sort(key=lambda x: (x["resp_bytes"], x["request_count"]), reverse=True)
+    return results[:25]
 
 
 def get_top_bots(
@@ -1209,6 +1333,16 @@ def _build_security_response(
     elif _want("wellknown_bots"):
         results["wellknown_bots"] = []
 
+    if _want("bot_efficiency") and "ua" in actual_cols and "ip" in actual_cols:
+        be_cols = {"ua", "ip"}
+        if "referer" in actual_cols:
+            be_cols.add("referer")
+        if "resp_bytes" in actual_cols:
+            be_cols.add("resp_bytes")
+        _need("bot_efficiency", be_cols)
+    elif _want("bot_efficiency"):
+        results["bot_efficiency"] = []
+
     if _want("top_bots"):
         _need("top_bots", {"ua", "waf_req_id"})
 
@@ -1399,6 +1533,25 @@ def _build_security_response(
             except Exception as e:
                 _logger.error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []
+
+        if "bot_efficiency" in live_sections and temp_table:
+            try:
+                _t = _time.perf_counter()
+                resp_bytes_expr = coalesce("t.resp_bytes", "0") if "resp_bytes" in actual_cols else "0"
+                referer_expr = "t.referer" if "referer" in actual_cols else "CAST(NULL AS VARCHAR)"
+                q = SQL.BOT_EFFICIENCY.format(
+                    temp_table=temp_table,
+                    resp_bytes_expr=resp_bytes_expr,
+                    referer_expr=referer_expr,
+                )
+                res = runner.execute(q).fetchall()
+                timer.mark("bot_efficiency", _t)
+                results["bot_efficiency"] = summarize_bot_efficiency_rows(
+                    [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0), int(r[3] or 0)) for r in res]
+                )
+            except Exception as e:
+                _logger.error("[security] bot_efficiency query failed: %s", e)
+                results["bot_efficiency"] = []
 
         if "top_bots" in live_sections and temp_table:
             _t = _time.perf_counter()

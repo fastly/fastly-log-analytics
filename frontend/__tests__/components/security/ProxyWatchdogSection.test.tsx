@@ -21,6 +21,7 @@ function securityData(): SecurityData {
     ngwaf_verified_bots: [],
     ngwaf_verified_bots_ts: [],
     wellknown_bots: [],
+    bot_efficiency: [],
     bots: [],
     ngwaf_bots: [],
     active_proxies_count: 10,

@@ -7592,6 +7592,82 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** BotBandwidthDisparityInsightCard */
+        BotBandwidthDisparityInsightCard: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            id: "bot_bandwidth_disparity";
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Severity */
+            severity: string;
+            /** Summary */
+            summary: string;
+            /** Items */
+            items: components["schemas"]["InsightItem_BotBandwidthDisparityMeta_"][];
+            /** Category */
+            category?: string | null;
+        };
+        /** BotBandwidthDisparityMeta */
+        BotBandwidthDisparityMeta: {
+            /** Requests */
+            requests: number;
+            /** W Bytes */
+            w_bytes: number;
+            /** Bandwidth Share Pct */
+            bandwidth_share_pct: number;
+            /** Referrals */
+            referrals: number;
+            /** Requests Per Referral */
+            requests_per_referral: number;
+            /** Bytes Per Referral */
+            bytes_per_referral: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BotEfficiencyRow
+         * @description Bot & crawler value vs. cost row (requests + bandwidth consumed vs. human referrals).
+         */
+        BotEfficiencyRow: {
+            /** Bot Name */
+            bot_name: string;
+            /** Category */
+            category: string;
+            /** Request Count */
+            request_count: number;
+            /**
+             * Resp Bytes
+             * @default 0
+             */
+            resp_bytes: number;
+            /**
+             * Bandwidth Pct
+             * @default 0
+             */
+            bandwidth_pct: number;
+            /**
+             * Referrals
+             * @default 0
+             */
+            referrals: number;
+            /**
+             * Requests Per Referral
+             * @default 0
+             */
+            requests_per_referral: number;
+            /**
+             * Bytes Per Referral
+             * @default 0
+             */
+            bytes_per_referral: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** BotMetrics */
         BotMetrics: {
             /** Bot Requests */
@@ -9124,10 +9200,25 @@ export interface components {
             crawls: number;
             /** Referrals */
             referrals: number;
+            /**
+             * W Bytes
+             * @default 0
+             */
+            w_bytes: number;
             /** Crawls Per Referral */
             crawls_per_referral: number;
             /** Baseline Crawls Per Referral */
             baseline_crawls_per_referral: number;
+            /**
+             * Bytes Per Referral
+             * @default 0
+             */
+            bytes_per_referral: number;
+            /**
+             * Baseline Bytes Per Referral
+             * @default 0
+             */
+            baseline_bytes_per_referral: number;
         } & {
             [key: string]: unknown;
         };
@@ -11260,6 +11351,32 @@ export interface components {
             /** Tooltip */
             tooltip?: string | null;
         };
+        /** InsightItem[BotBandwidthDisparityMeta] */
+        InsightItem_BotBandwidthDisparityMeta_: {
+            /** Label */
+            label: string;
+            /** Current Val */
+            current_val?: number | null;
+            /** Baseline Val */
+            baseline_val?: number | null;
+            /**
+             * Baseline Label
+             * @default baseline
+             */
+            baseline_label: string;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Severity
+             * @default clean
+             */
+            severity: string;
+            meta: components["schemas"]["BotBandwidthDisparityMeta"];
+            /** Investigate Url */
+            investigate_url?: string | null;
+            /** Tooltip */
+            tooltip?: string | null;
+        };
         /** InsightItem[BotnetGroupingMeta] */
         InsightItem_BotnetGroupingMeta_: {
             /** Label */
@@ -12599,7 +12716,7 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Insights */
-            insights: (components["schemas"]["ErrorSpikesInsightCard"] | components["schemas"]["BotnetGroupingInsightCard"] | components["schemas"]["NewCountryTrafficInsightCard"] | components["schemas"]["CitySurgesInsightCard"] | components["schemas"]["CityErrorSpikesInsightCard"] | components["schemas"]["CityLatencyRegressionsInsightCard"] | components["schemas"]["NewCityTrafficInsightCard"] | components["schemas"]["UaMonocultureInsightCard"] | components["schemas"]["NewProbeUrlsInsightCard"] | components["schemas"]["WafSignalSpikesInsightCard"] | components["schemas"]["ProxySurgeInsightCard"] | components["schemas"]["AsnConcentrationInsightCard"] | components["schemas"]["AsnMetroPerformanceInsightCard"] | components["schemas"]["CacheCollapseInsightCard"] | components["schemas"]["CacheabilityRegressionInsightCard"] | components["schemas"]["LatencyRegressionInsightCard"] | components["schemas"]["ImpossibleDistanceInsightCard"] | components["schemas"]["TailLatencyInsightCard"] | components["schemas"]["CipherSpreadInsightCard"] | components["schemas"]["RequestSizeAnomalyInsightCard"] | components["schemas"]["ConnectionAbuseInsightCard"] | components["schemas"]["RegionLatencyInsightCard"] | components["schemas"]["CacheTtlMismatchInsightCard"] | components["schemas"]["ImageOptimizationOpportunitiesInsightCard"] | components["schemas"]["OriginLatencySpikeInsightCard"] | components["schemas"]["OriginErrorRateInsightCard"] | components["schemas"]["OriginRetriesInsightCard"] | components["schemas"]["OriginIpFailureInsightCard"] | components["schemas"]["ShieldPathDegradationInsightCard"] | components["schemas"]["RepeatedPatternsInsightCard"] | components["schemas"]["RepeatedPatternsFpInsightCard"] | components["schemas"]["LowAndSlowInsightCard"] | components["schemas"]["CredentialEnumerationInsightCard"] | components["schemas"]["NetworkAsnHealthInsightCard"] | components["schemas"]["ContentDiscoveryInsightCard"] | components["schemas"]["RefererMonocultureInsightCard"] | components["schemas"]["MethodDriftInsightCard"] | components["schemas"]["NewAsnTrafficInsightCard"] | components["schemas"]["AsnHostingShiftInsightCard"] | components["schemas"]["MetroDeliveryDegradationInsightCard"] | components["schemas"]["ConnectionTypeMixInsightCard"] | components["schemas"]["PopLatencyRegressionInsightCard"] | components["schemas"]["Http3FallbackInsightCard"] | components["schemas"]["CacheHitCliffInsightCard"] | components["schemas"]["PayloadCompressionRegressionInsightCard"] | components["schemas"]["SessionHarvestingInsightCard"] | components["schemas"]["TimeoutSplitInsightCard"] | components["schemas"]["CrawlerDisparityInsightCard"] | components["schemas"]["StaleBrowserVersionInsightCard"] | components["schemas"]["OrphanedDeepCrawlInsightCard"] | components["schemas"]["ResidentialFingerprintDispersionInsightCard"] | components["schemas"]["HighScale5xxInsightCard"])[];
+            insights: (components["schemas"]["ErrorSpikesInsightCard"] | components["schemas"]["BotnetGroupingInsightCard"] | components["schemas"]["NewCountryTrafficInsightCard"] | components["schemas"]["CitySurgesInsightCard"] | components["schemas"]["CityErrorSpikesInsightCard"] | components["schemas"]["CityLatencyRegressionsInsightCard"] | components["schemas"]["NewCityTrafficInsightCard"] | components["schemas"]["UaMonocultureInsightCard"] | components["schemas"]["NewProbeUrlsInsightCard"] | components["schemas"]["WafSignalSpikesInsightCard"] | components["schemas"]["ProxySurgeInsightCard"] | components["schemas"]["AsnConcentrationInsightCard"] | components["schemas"]["AsnMetroPerformanceInsightCard"] | components["schemas"]["CacheCollapseInsightCard"] | components["schemas"]["CacheabilityRegressionInsightCard"] | components["schemas"]["LatencyRegressionInsightCard"] | components["schemas"]["ImpossibleDistanceInsightCard"] | components["schemas"]["TailLatencyInsightCard"] | components["schemas"]["CipherSpreadInsightCard"] | components["schemas"]["RequestSizeAnomalyInsightCard"] | components["schemas"]["ConnectionAbuseInsightCard"] | components["schemas"]["RegionLatencyInsightCard"] | components["schemas"]["CacheTtlMismatchInsightCard"] | components["schemas"]["ImageOptimizationOpportunitiesInsightCard"] | components["schemas"]["OriginLatencySpikeInsightCard"] | components["schemas"]["OriginErrorRateInsightCard"] | components["schemas"]["OriginRetriesInsightCard"] | components["schemas"]["OriginIpFailureInsightCard"] | components["schemas"]["ShieldPathDegradationInsightCard"] | components["schemas"]["RepeatedPatternsInsightCard"] | components["schemas"]["RepeatedPatternsFpInsightCard"] | components["schemas"]["LowAndSlowInsightCard"] | components["schemas"]["CredentialEnumerationInsightCard"] | components["schemas"]["NetworkAsnHealthInsightCard"] | components["schemas"]["ContentDiscoveryInsightCard"] | components["schemas"]["RefererMonocultureInsightCard"] | components["schemas"]["MethodDriftInsightCard"] | components["schemas"]["NewAsnTrafficInsightCard"] | components["schemas"]["AsnHostingShiftInsightCard"] | components["schemas"]["MetroDeliveryDegradationInsightCard"] | components["schemas"]["ConnectionTypeMixInsightCard"] | components["schemas"]["PopLatencyRegressionInsightCard"] | components["schemas"]["Http3FallbackInsightCard"] | components["schemas"]["CacheHitCliffInsightCard"] | components["schemas"]["PayloadCompressionRegressionInsightCard"] | components["schemas"]["SessionHarvestingInsightCard"] | components["schemas"]["TimeoutSplitInsightCard"] | components["schemas"]["CrawlerDisparityInsightCard"] | components["schemas"]["BotBandwidthDisparityInsightCard"] | components["schemas"]["StaleBrowserVersionInsightCard"] | components["schemas"]["OrphanedDeepCrawlInsightCard"] | components["schemas"]["ResidentialFingerprintDispersionInsightCard"] | components["schemas"]["HighScale5xxInsightCard"])[];
             /** Window Start */
             window_start: string;
             /** Window End */
@@ -18668,7 +18785,7 @@ export interface components {
              */
             bucket_seconds: number;
             /** Sections */
-            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
+            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "bot_efficiency" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
         };
         /** SecurityAggregatesResponse */
         SecurityAggregatesResponse: {
@@ -18755,6 +18872,11 @@ export interface components {
              * @default []
              */
             wellknown_bots: components["schemas"]["WellknownBotRow"][];
+            /**
+             * Bot Efficiency
+             * @default []
+             */
+            bot_efficiency: components["schemas"]["BotEfficiencyRow"][];
             /**
              * Bots
              * @default []

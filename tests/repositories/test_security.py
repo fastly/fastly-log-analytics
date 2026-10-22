@@ -1535,3 +1535,54 @@ def test_security_aggregates_coverage_rollup_drops_tls_and_skips_temp(
     assert catalog_creates == [], f"a catalog temp was materialized: {catalog_creates}"
     assert result["tls_fingerprints"] == [{"fingerprint": "abc123", "ip_count": 4, "request_count": 10}]
     assert result["fingerprint_coverage"] == {"tls_ciphers_sha": 0.6}
+
+
+def test_security_aggregates_bot_efficiency(in_memory_duckdb, test_service_source):
+    """bot_efficiency section aggregates bot requests, resp_bytes, bandwidth share,
+    and referred human unique IPs dynamically via well-known-bots catalog."""
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f'CREATE TABLE "{table_name}" (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, referer VARCHAR, resp_bytes BIGINT)'
+    )
+    # 10 Googlebot crawls + 2 human Google referrals
+    for i in range(10):
+        in_memory_duckdb.execute(
+            f"INSERT INTO {table_name} VALUES ('2026-01-02T01:00:00Z', '66.249.66.{i}', "
+            "'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)', '', 10000)"
+        )
+    for i in range(2):
+        in_memory_duckdb.execute(
+            f"INSERT INTO {table_name} VALUES ('2026-01-02T01:05:00Z', '198.51.100.{i + 1}', "
+            "'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15', 'https://www.google.com/search?q=x', 5000)"
+        )
+    # 5 CCBot crawls with 0 referrals
+    for i in range(5):
+        in_memory_duckdb.execute(
+            f"INSERT INTO {table_name} VALUES ('2026-01-02T01:10:00Z', '203.0.113.{i + 1}', "
+            "'CCBot/2.0 (https://commoncrawl.org/faq/)', '', 20000)"
+        )
+
+    result = get_security_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-03T00:00:00Z",
+        filters={},
+        sections={"bot_efficiency"},
+    )
+    by_name = {item["bot_name"]: item for item in result["bot_efficiency"]}
+    assert "Google Crawler" in by_name
+    google = by_name["Google Crawler"]
+    assert google["request_count"] == 10
+    assert google["resp_bytes"] == 100000
+    assert google["referrals"] == 2
+    assert google["requests_per_referral"] == 5.0
+    assert google["bytes_per_referral"] == 50000.0
+
+    assert "Commoncrawl Crawler" in by_name
+    ccbot = by_name["Commoncrawl Crawler"]
+    assert ccbot["request_count"] == 5
+    assert ccbot["resp_bytes"] == 100000
+    assert ccbot["referrals"] == 0
+    assert ccbot["requests_per_referral"] == 5.0
+    assert ccbot["bytes_per_referral"] == 100000.0
