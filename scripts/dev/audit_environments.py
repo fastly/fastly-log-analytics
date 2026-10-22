@@ -416,9 +416,9 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.rum_total_rows = rum_sec.get("total_rows")
         res.rum_last_sync_at = rum_sec.get("last_sync_at")
 
-        res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes", 0)
-        res.iceberg_bytes = status_sec.get("iceberg_bytes", 0)
-        res.iceberg_files = status_sec.get("iceberg_files", 0)
+        res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes") or 0
+        res.iceberg_bytes = status_sec.get("iceberg_bytes") or 0
+        res.iceberg_files = status_sec.get("iceberg_files") or 0
 
     if hs_status == 200 and isinstance(hs_data, dict):
         # CPU
@@ -508,11 +508,11 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         # Compaction stats
         comp = hs_data.get("compaction") or {}
         svc_comp = comp.get(env.service_id) or {}
-        res.compaction_total_files = svc_comp.get("total_files", 0)
-        res.compaction_daily_files = svc_comp.get("daily_files", 0)
-        res.compaction_weekly_files = svc_comp.get("weekly_files", 0)
-        res.compaction_partitions_above_3 = svc_comp.get("partitions_above_3", 0)
-        res.compaction_partitions_above_10 = svc_comp.get("partitions_above_10", 0)
+        res.compaction_total_files = svc_comp.get("total_files") or 0
+        res.compaction_daily_files = svc_comp.get("daily_files") or 0
+        res.compaction_weekly_files = svc_comp.get("weekly_files") or 0
+        res.compaction_partitions_above_3 = svc_comp.get("partitions_above_3") or 0
+        res.compaction_partitions_above_10 = svc_comp.get("partitions_above_10") or 0
         if res.compaction_partitions_above_10 > 0:
             res.warnings.append(
                 f"Uncompacted partitions: {res.compaction_partitions_above_10} partitions have >10 files"
@@ -630,20 +630,20 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
 
         # Scheduler & Storage / Compaction Line
         sched_color = RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN
-        comp_color = YELLOW if r.compaction_partitions_above_10 > 0 else GREEN
+        comp_color = YELLOW if (r.compaction_partitions_above_10 or 0) > 0 else GREEN
 
         sched_str = f"{r.scheduler_tick_age_s:.0f}s ago" if r.scheduler_tick_age_s is not None else "—"
         storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
-        if r.duckdb_size_bytes > 0:
+        if (r.duckdb_size_bytes or 0) > 0:
             storage_parts.append(f"DuckDB: {format_bytes(r.duckdb_size_bytes)}")
-        if r.iceberg_files > 0 or r.iceberg_bytes > 0:
+        if (r.iceberg_files or 0) > 0 or (r.iceberg_bytes or 0) > 0:
             storage_parts.append(f"DuckLake: {format_bytes(r.iceberg_bytes)} ({r.iceberg_files} files)")
         storage_parts.append(
-            f"Compaction: {comp_color}{r.compaction_total_files} files ({r.compaction_daily_files} daily, {r.compaction_weekly_files} weekly){RESET}"
+            f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}"
         )
 
         storage_line = f"  {BOLD}Pipeline:{RESET}  {' │ '.join(storage_parts)}"
-        if r.compaction_partitions_above_10 > 0:
+        if (r.compaction_partitions_above_10 or 0) > 0:
             storage_line += f" {YELLOW}[sprawl: {r.compaction_partitions_above_10} dirs >10 files]{RESET}"
         print(storage_line)
 
