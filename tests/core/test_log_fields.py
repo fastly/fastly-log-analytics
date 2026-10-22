@@ -456,3 +456,13 @@ def test_validate_custom_field_warns_on_suspiciously_low_bytes_estimate():
     # Should yield a WARN: line (not a hard error blocking save)
     warnings = [e for e in errors if e.startswith("WARN:")]
     assert len(warnings) >= 1
+
+
+def test_client_ip_falls_back_to_socket_ip_when_capture_did_not_run():
+    """Requests answered before the capture snippet runs (redirects) set neither the edge-data ip
+    nor Fastly-Client-IP; the log line must still carry the socket IP instead of an empty string."""
+    fmt = generate_log_format({"schema_version": 2, "groups": []})
+    assert (
+        'if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, '
+        'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip))' in fmt
+    )
