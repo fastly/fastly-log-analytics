@@ -1,5 +1,7 @@
 # High-Scale Capacity and Recovery Contract
 
+**Qualification status (2026-10-22):** the current initial sustained qualification goal is **1M request events/sec**, with 30 days of full request-level history, two active dashboard users and a five-user stress case. Higher burst rates remain qualification proposals. The 2M/5M rates and topology/replay figures below are earlier design objectives and mixed measurement/model inputs, not demonstrated production capacity. Small stage tests and passing correctness tests do not qualify target-scale ingest, query latency, availability or recovery. See [Section-sweep measurement evidence](section-sweep-measurements.md) for the separate latency and evidence contract. No target-scale traffic run or infrastructure change is authorized by these goals.
+
 The high-scale data plane must sustain 2M request events/sec, absorb 5M/sec
 bursts for five and thirty minutes, sustain 500k RUM events/sec, and absorb
 1M/sec RUM bursts without dropping data. Overload increases lag and backlog;

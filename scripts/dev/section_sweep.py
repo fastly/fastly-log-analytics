@@ -1,25 +1,10 @@
-"""Per-section latency sweep over every aggregate endpoint.
+"""Attributed repeated-sample reporting for aggregate endpoints.
 
-Phase 4 benchmarked whole requests on 24h / 30d windows, which hid two things:
-which *section* of a bundle is slow, and whether it was served by a rollup or by
-the live scan. This sweep calls each aggregate endpoint across windows that can
-and cannot be rollup-served, twice per window (cold, then warm), and reads the
-``_section_timings`` the server returns. Output is a JSON record plus a ranked
-table of live sections over the budget.
-
-Windows: rollup readers need an unfiltered window of at least 48 h and at least
-50 % closed-hour coverage, so ``24h`` always runs live, ``3d`` is the smallest
-window that can hit a rollup, and ``30d`` only does once a service has enough
-history. A section that stays live on a window that should be eligible is the
-finding this sweep exists to surface.
-
-Usage (never run from CI; it queries a deployed environment):
-
-    uv run python scripts/dev/section_sweep.py --env remote-standard \
-        --service-id "$FASTLY_SERVICE_ID" --output performance-report/section-sweep.json
-
-Authentication reuses the admin-gateway client certificates configured in
-``ADMIN_GATEWAY_ENDPOINTS`` (loaded from the persisted deploy env when unset).
+Live requests are blocked unless a matching prerequisite-evidence artifact is
+supplied. Evidence must be reviewed before use; this gate checks its presence,
+not the truth of arbitrary claims in a JSON file. Samples never infer cache state
+from request order, infer engine compute from wall time, or certify a page from
+an API response. Response-cache, history, coverage and browser gaps stay explicit.
 """
 
 from __future__ import annotations
@@ -27,26 +12,45 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 from urllib.request import Request
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_WINDOWS = ("24h", "3d", "7d", "30d")
-DEFAULT_BUDGET_MS = 500.0
-PERSISTED_DEPLOY_ENV = Path("~/.config/fastly-log-analytics/admin/deploy.env").expanduser()
+from scripts.lib.section_measurements import (
+    BUDGETS,
+    active_filter_count,
+    describe_response,
+    distribution,
+    rank_sections,
+    visible_results_budget_ms,
+)
 
-# Sections that only describe the request, not data work.
-_OVERHEAD_SECTIONS = frozenset({"get_schema_cols", "build_where_clause", "request_setup", "connection_acquire"})
-# Time spent queued rather than computing (pool / heavy-slot wait).
-_QUEUE_SECTIONS = frozenset({"connection_acquire"})
+DEFAULT_WINDOWS = ("24h", "3d", "7d", "30d")
+DEFAULT_BUDGET_MS = float(BUDGETS["live_section_triage_ms"])
+PERSISTED_DEPLOY_ENV = Path("~/.config/fastly-log-analytics/admin/deploy.env").expanduser()
+PREREQUISITES = (
+    "cache_reporting",
+    "controlled_miss",
+    "filter_scenarios",
+    "history_coverage",
+    "query_io_attribution",
+    "browser_budgets",
+    "analyst_lifecycle",
+    "live_traffic",
+)
 
 SECURITY_SECTIONS = [
     "ngwaf_verified_bots",
@@ -68,8 +72,6 @@ def _body(window: str, **extra: Any) -> dict[str, Any]:
     return {"range_token": window, "filters": {}, **extra}
 
 
-# (label, path, body builder). Bodies carry no ``sections`` unless the page sends a fixed list,
-# so the server computes the page's default section set.
 ENDPOINTS: tuple[tuple[str, str, Callable[[str], dict[str, Any]]], ...] = (
     ("security", "/api/security/aggregates", lambda w: _body(w, bucket_seconds=3600, sections=SECURITY_SECTIONS)),
     ("origin", "/api/origin/aggregates", lambda w: _body(w)),
@@ -81,80 +83,89 @@ ENDPOINTS: tuple[tuple[str, str, Callable[[str], dict[str, Any]]], ...] = (
 
 
 def classify_section(name: str) -> str:
-    """``rollup`` | ``skipped`` | ``queue`` | ``overhead`` | ``live`` for one ``_section_timings`` name."""
-    if name in _QUEUE_SECTIONS:
-        return "queue"
-    if name in _OVERHEAD_SECTIONS:
-        return "overhead"
-    if "temp_skipped" in name or name.endswith("_skipped"):
-        return "skipped"
-    if "rollup" in name or name.endswith("_cache_hit"):
-        return "rollup"
-    return "live"
+    section = summarize_sections([{"section": name}])["sections"][0]
+    return section["activity"] if section["activity"] != "unknown" else section["source"]
 
 
 def summarize_sections(timings: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Collapse one response's section timings into totals per class plus the raw rows."""
-    rows: list[dict[str, Any]] = []
-    for t in timings:
-        if not isinstance(t, dict) or t.get("section") is None:
-            continue
-        name = str(t["section"])
-        rows.append({"section": name, "ms": float(t.get("time_ms") or 0.0), "kind": classify_section(name)})
-    totals = {"rollup": 0.0, "live": 0.0, "queue": 0.0, "skipped": 0.0, "overhead": 0.0}
-    counts = {"rollup": 0, "live": 0, "skipped": 0}
-    for row in rows:
-        totals[row["kind"]] += row["ms"]
-        if row["kind"] in counts:
-            counts[row["kind"]] += 1
+    component = describe_response({"_section_timings": list(timings)})["components"][0]
     return {
-        "sections": rows,
-        "totals_ms": {k: round(v, 1) for k, v in totals.items()},
-        "counts": counts,
-        "temp_built": any(r["section"] == "temp_table_create" for r in rows),
+        "sections": component["sections"],
+        "temp_built": any(row["section"] == "temp_table_create" for row in component["sections"]),
+        "gaps": component["gaps"],
     }
 
 
 def find_offenders(records: Iterable[dict[str, Any]], budget_ms: float = DEFAULT_BUDGET_MS) -> list[dict[str, Any]]:
-    """Live sections over ``budget_ms`` on the cold run, slowest first.
-
-    A record is ``{"endpoint", "window", "cold": {...summary}, "warm": {...}}``; error records
-    (no ``cold`` summary) are skipped.
-    """
-    offenders: list[dict[str, Any]] = []
-    for rec in records:
-        cold = rec.get("cold") or {}
-        for row in cold.get("sections", []):
-            if row["kind"] == "live" and row["ms"] >= budget_ms:
-                offenders.append(
-                    {"endpoint": rec["endpoint"], "window": rec["window"], "section": row["section"], "ms": row["ms"]}
-                )
-    return sorted(offenders, key=lambda o: o["ms"], reverse=True)
+    return rank_sections((sample for record in records for sample in record.get("samples", [])), budget_ms)
 
 
 def render_report(records: list[dict[str, Any]], budget_ms: float = DEFAULT_BUDGET_MS) -> str:
-    lines = ["| endpoint | window | cold ms | warm ms | rollup / live / skipped | live ms | queue ms | temp built |"]
-    lines.append("|---|---|---:|---:|---|---:|---:|---|")
-    for rec in records:
-        if "error" in rec:
-            lines.append(f"| {rec['endpoint']} | {rec['window']} | error: {rec['error']} | | | | | |")
-            continue
-        cold = rec["cold"]
-        counts = cold["counts"]
-        lines.append(
-            f"| {rec['endpoint']} | {rec['window']} | {rec['cold_wall_ms']:.0f} | {rec['warm_wall_ms']:.0f} | "
-            f"{counts['rollup']} / {counts['live']} / {counts['skipped']} | {cold['totals_ms']['live']:.0f} | "
-            f"{cold['totals_ms']['queue']:.0f} | {'yes' if cold['temp_built'] else 'no'} |"
+    lines = [
+        "Discovery evidence only; qualification incomplete. API timing is not visible-results completion.",
+        "",
+        "| endpoint | window | samples | request p50 ms | request p95 ms | component cache observations | evidence gaps |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    for record in records:
+        samples = record.get("samples", [])
+        times = [sample["wall_ms"] for sample in samples if sample.get("wall_ms") is not None]
+        stats = distribution(times)
+        states = Counter(
+            component["cache_state"]
+            for sample in samples
+            for component in sample.get("response", {}).get("components", [])
         )
-    offenders = find_offenders(records, budget_ms)
-    lines.append("")
-    lines.append(f"Live sections >= {budget_ms:.0f} ms on the cold run ({len(offenders)}):")
-    lines.append("")
-    lines.append("| endpoint | window | section | ms |")
-    lines.append("|---|---|---|---:|")
-    for o in offenders:
-        lines.append(f"| {o['endpoint']} | {o['window']} | {o['section']} | {o['ms']:.0f} |")
+        gaps = set(record.get("gaps", []))
+        for sample in samples:
+            gaps.update(sample.get("gaps", []))
+        if record.get("error"):
+            gaps.add(record["error"])
+        lines.append(
+            f"| {record['endpoint']} | {record['window']} | {len(samples)} | "
+            f"{stats['p50'] if times else 'unknown'} | {stats['p95'] if times else 'unknown'} | "
+            f"{dict(states)} | {', '.join(sorted(gaps)) or 'unverified'} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"Sections at or above {budget_ms:.0f} ms (triage, not acceptance):",
+            "",
+            "| environment | role | endpoint | window | component | cache | source | section | n | p95 ms | repeated offender |",
+            "|---|---|---|---|---|---|---|---|---:|---:|---|",
+        ]
+    )
+    for offender in find_offenders(records, budget_ms):
+        stats = offender["distribution_ms"]
+        lines.append(
+            f"| {offender['environment']} | {offender['role']} | {offender['endpoint']} | {offender['window']} | "
+            f"{offender['component']} | {offender['cache_state']} | {offender['source']} | "
+            f"{offender['section']} | {stats['count']} | {stats['p95']} | {offender['repeatable']} |"
+        )
     return "\n".join(lines)
+
+
+def prerequisite_gaps(report: Any, environment: str, evidence_root: Path | None = None) -> list[str]:
+    if not isinstance(report, dict):
+        return ["invalid_prerequisite_report"]
+    gaps = []
+    if report.get("environment") != environment:
+        gaps.append("environment_mismatch")
+    checks = report.get("checks")
+    checks = checks if isinstance(checks, dict) else {}
+    for name in PREREQUISITES:
+        check = checks.get(name)
+        if not isinstance(check, dict) or check.get("status") != "verified":
+            gaps.append(name)
+            continue
+        evidence = check.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            gaps.append(name)
+        elif evidence_root is not None:
+            path = evidence_root / evidence
+            if not path.is_file() or path.stat().st_size == 0:
+                gaps.append(name)
+    return gaps
 
 
 def _load_persisted_gateway_env() -> None:
@@ -166,43 +177,102 @@ def _load_persisted_gateway_env() -> None:
 
 
 def _post(
-    origin: str, path: str, service_id: str, body: dict[str, Any], timeout: float
-) -> tuple[dict[str, Any], float]:
-    from scripts.lib.admin_tls import admin_urlopen
+    origin: str,
+    path: str,
+    service_id: str,
+    body: dict[str, Any],
+    timeout: float,
+    *,
+    page_load_id: str,
+) -> tuple[Any, float]:
+    from scripts.lib.admin_tls import admin_urlopen, is_admin_url
 
-    req = Request(
-        f"{origin}{path}?service_id={service_id}",
+    if not is_admin_url(origin):
+        raise ValueError("No exact-origin administrator TLS identity configured")
+    request = Request(
+        f"{origin}{path}?{urlencode({'service_id': service_id})}",
         data=json.dumps(body).encode(),
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Page-Load-ID": page_load_id, "X-Debug-Responses": "1"},
     )
-    t0 = time.perf_counter()
-    with admin_urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read())
-    return payload, (time.perf_counter() - t0) * 1000.0
-
-
-def _timings(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    return payload.get("_section_timings") or payload.get("section_timings") or []
+    started = time.perf_counter()
+    with admin_urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read())
+    return payload, (time.perf_counter() - started) * 1000.0
 
 
 def sweep_one(
-    origin: str, service_id: str, label: str, path: str, body: dict[str, Any], window: str, timeout: float
+    origin: str,
+    service_id: str,
+    label: str,
+    path: str,
+    body: dict[str, Any],
+    window: str,
+    timeout: float,
+    *,
+    sample_count: int = 30,
+    environment: str = "unknown",
 ) -> dict[str, Any]:
-    rec: dict[str, Any] = {"endpoint": label, "path": path, "window": window}
-    try:
-        cold_payload, cold_ms = _post(origin, path, service_id, body, timeout)
-        warm_payload, warm_ms = _post(origin, path, service_id, body, timeout)
-    except Exception as exc:  # noqa: BLE001 — record any transport/HTTP failure per cell and keep sweeping
-        rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
-        return rec
-    rec.update(
-        cold_wall_ms=round(cold_ms, 1),
-        warm_wall_ms=round(warm_ms, 1),
-        cold=summarize_sections(_timings(cold_payload)),
-        warm=summarize_sections(_timings(warm_payload)),
+    if not 1 <= sample_count <= 1000:
+        raise ValueError("sample_count must be between 1 and 1000")
+    budget = visible_results_budget_ms(window, body.get("filters", {}))
+    record: dict[str, Any] = {
+        "endpoint": label,
+        "path": path,
+        "window": window,
+        "payload": deepcopy(body),
+        "samples": [],
+        "visible_results_budget_ms": budget,
+        "whole_request_budget_ms": BUDGETS["whole_request_p95_ms"],
+        "qualification": "incomplete",
+        "gaps": [
+            "history_unverified",
+            "reader_coverage_unverified",
+            "filters_unverified",
+            "query_io_attribution_unverified",
+            "page_ready_unmeasured",
+            "interaction_completion_unmeasured",
+            "controlled_miss_unverified",
+            "database_cache_state_unknown",
+        ],
+    }
+    for index in range(sample_count):
+        sample_id = uuid4().hex
+        sample: dict[str, Any] = {
+            "sample_id": sample_id,
+            "page_load_id": sample_id,
+            "sample_order": index + 1,
+            "environment": environment,
+            "role": "admin",
+            "endpoint": label,
+            "window": window,
+            "payload": deepcopy(body),
+            "response": {"components": [], "gaps": ["response_unavailable"]},
+            "wall_ms": None,
+        }
+        try:
+            payload, wall = _post(origin, path, service_id, deepcopy(body), timeout, page_load_id=sample_id)
+            sample["wall_ms"] = wall
+            sample["response"] = describe_response(payload)
+            sample["gaps"] = sample["response"]["gaps"]
+        except Exception as exc:  # noqa: BLE001 — retain the failed sample without recording credential-bearing error text
+            sample["error"] = type(exc).__name__
+            sample["gaps"] = ["request_failed"]
+        states = {component["cache_state"] for component in sample["response"]["components"]}
+        sample["cache_population"] = next(iter(states)) if len(states) == 1 else "mixed" if states else "unknown"
+        record["samples"].append(sample)
+    record["request_distribution_ms"] = distribution(
+        sample["wall_ms"] for sample in record["samples"] if sample["wall_ms"] is not None
     )
-    return rec
+    record["request_distribution_by_cache_state_ms"] = {
+        state: distribution(
+            sample["wall_ms"]
+            for sample in record["samples"]
+            if sample["wall_ms"] is not None and sample["cache_population"] == state
+        )
+        for state in ("hit", "miss", "bypass", "unknown", "mixed")
+    }
+    return record
 
 
 def run_sweep(
@@ -211,81 +281,154 @@ def run_sweep(
     windows: Iterable[str],
     endpoints: Iterable[str] | None,
     timeout: float,
+    *,
+    sample_count: int = 30,
+    environment: str = "unknown",
+    filters: dict[str, Any] | None = None,
+    anchor: str | None = None,
 ) -> list[dict[str, Any]]:
-    wanted = set(endpoints) if endpoints else None
-    records: list[dict[str, Any]] = []
+    wanted = set(endpoints) if endpoints else {item[0] for item in ENDPOINTS}
+    unknown = wanted - {item[0] for item in ENDPOINTS}
+    if unknown:
+        raise ValueError("Unsupported endpoint selection")
+    records = []
     for label, path, build in ENDPOINTS:
-        if wanted is not None and label not in wanted:
+        if label not in wanted:
             continue
         for window in windows:
-            print(f"[sweep] {label} {window} ...", file=sys.stderr)
-            records.append(sweep_one(origin, service_id, label, path, build(window), window, timeout))
+            shapes = [{}, filters] if filters else [{}]
+            for shape in shapes:
+                body = build(window)
+                body["filters"] = deepcopy(shape)
+                if anchor:
+                    body["anchor"] = anchor
+                records.append(
+                    sweep_one(
+                        origin,
+                        service_id,
+                        label,
+                        path,
+                        body,
+                        window,
+                        timeout,
+                        sample_count=sample_count,
+                        environment=environment,
+                    )
+                )
     return records
 
 
 def run_concurrency_probe(
-    origin: str, service_id: str, window: str, parallel: int, timeout: float
+    origin: str, service_id: str, window: str, parallel: int, timeout: float, *, environment: str = "unknown"
 ) -> list[dict[str, Any]]:
-    """Fire every aggregate endpoint at once and report wall time vs queue wait, which is what a
-    user sees when pages are opened in quick succession (the pool's heavy-slot queue)."""
-
     def one(item: tuple[str, str, Callable[[str], dict[str, Any]]]) -> dict[str, Any]:
         label, path, build = item
-        try:
-            payload, wall = _post(origin, path, service_id, build(window), timeout)
-        except Exception as exc:  # noqa: BLE001
-            return {"endpoint": label, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
-        summary = summarize_sections(_timings(payload))
-        return {
-            "endpoint": label,
-            "wall_ms": round(wall, 1),
-            "queue_ms": summary["totals_ms"]["queue"],
-            "compute_ms": round(summary["totals_ms"]["live"] + summary["totals_ms"]["rollup"], 1),
-        }
+        return sweep_one(
+            origin, service_id, label, path, build(window), window, timeout, sample_count=1, environment=environment
+        )
 
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
         return list(pool.map(one, ENDPOINTS))
 
 
+def write_report(path: Path, report: dict[str, Any]) -> None:
+    data = json.dumps(report, indent=2, allow_nan=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError("Report output must be an owned regular file")
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "w") as output:
+            fd = -1
+            output.write(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", required=True, choices=["local-standard", "remote-standard", "remote-high-scale"])
     parser.add_argument("--service-id", default=os.environ.get("FASTLY_SERVICE_ID", ""))
     parser.add_argument("--windows", default=",".join(DEFAULT_WINDOWS))
-    parser.add_argument(
-        "--endpoints", default="", help="comma-separated subset of: " + ",".join(e[0] for e in ENDPOINTS)
-    )
+    parser.add_argument("--endpoints", default="")
     parser.add_argument("--budget-ms", type=float, default=DEFAULT_BUDGET_MS)
     parser.add_argument("--timeout", type=float, default=180.0)
-    parser.add_argument("--parallel", type=int, default=0, help="also fire all endpoints concurrently on --windows[0]")
-    parser.add_argument("--output", default="", help="write the full JSON record here")
+    parser.add_argument("--parallel", type=int, default=0)
+    parser.add_argument("--samples", type=int, default=BUDGETS["minimum_samples_per_state"])
+    parser.add_argument("--filters-json", default="{}")
+    parser.add_argument("--anchor", default="")
+    parser.add_argument("--prerequisites", type=Path)
+    parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
 
-    if not args.service_id:
-        parser.error("--service-id (or FASTLY_SERVICE_ID) is required")
+    if args.prerequisites is None:
+        print("BLOCKED: reviewed prerequisite evidence is required before live requests.", file=sys.stderr)
+        return 2
+    try:
+        evidence = json.loads(args.prerequisites.read_text())
+        gaps = prerequisite_gaps(evidence, args.env, args.prerequisites.parent)
+    except (OSError, ValueError):
+        print("BLOCKED: prerequisite evidence is unreadable or invalid.", file=sys.stderr)
+        return 2
+    if gaps:
+        print("BLOCKED: " + ", ".join(gaps), file=sys.stderr)
+        return 2
+    if not args.service_id or evidence.get("service_id") != args.service_id:
+        parser.error("prerequisite evidence must match the explicit target service")
+    windows = [window for window in args.windows.split(",") if window]
+    if not windows or any(window not in DEFAULT_WINDOWS for window in windows):
+        parser.error("unsupported or empty window selection")
+    if not args.anchor:
+        parser.error("--anchor is required to keep repeated request bounds equivalent")
+    if not 1 <= args.samples <= 1000 or not 0 <= args.parallel <= 5:
+        parser.error("--samples must be 1–1000 and --parallel must be 0–5")
+    try:
+        filters = json.loads(args.filters_json)
+    except ValueError:
+        parser.error("--filters-json must be a compound-filter object")
+    try:
+        if active_filter_count(filters) < 2:
+            raise ValueError("Compound filters require at least two active dimensions")
+    except ValueError:
+        parser.error("--filters-json requires at least two supported active filter dimensions")
     _load_persisted_gateway_env()
     from scripts.lib.admin_tls import admin_origin
 
     origin = admin_origin(args.env)
     if not origin:
-        print(f"no admin gateway configured for {args.env}", file=sys.stderr)
+        print("BLOCKED: no configured administrator gateway for the selected environment.", file=sys.stderr)
         return 2
-
-    windows = [w for w in args.windows.split(",") if w]
-    endpoints = [e for e in args.endpoints.split(",") if e] or None
-    records = run_sweep(origin, args.service_id, windows, endpoints, args.timeout)
-    result: dict[str, Any] = {"env": args.env, "windows": windows, "budget_ms": args.budget_ms, "records": records}
+    records = run_sweep(
+        origin,
+        args.service_id,
+        windows,
+        [item for item in args.endpoints.split(",") if item] or None,
+        args.timeout,
+        sample_count=args.samples,
+        environment=args.env,
+        filters=filters,
+        anchor=args.anchor,
+    )
+    result = {
+        "env": args.env,
+        "windows": windows,
+        "budgets": BUDGETS,
+        "records": records,
+        "offenders": find_offenders(records, args.budget_ms),
+        "qualification": "incomplete",
+    }
     if args.parallel:
         result["concurrency_probe"] = run_concurrency_probe(
-            origin, args.service_id, windows[0], args.parallel, args.timeout
+            origin, args.service_id, windows[0], args.parallel, args.timeout, environment=args.env
         )
-
     print(render_report(records, args.budget_ms))
     if args.output:
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(result, indent=1) + "\n")
-    return 0
+        write_report(Path(args.output), result)
+    return 2
 
 
 if __name__ == "__main__":

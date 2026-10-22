@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
+const { collectResponseMeasurements, budgets } = require('./lib/section_measurements.cjs');
 const { execSync } = require('child_process');
 const baseUrl = process.argv[2];
 const expectedCommit = process.argv[3];
@@ -214,18 +215,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
 
-  // Keep the per-section timings the aggregate endpoints return so the PERF
-  // line can say which section is slow, not just that the request was.
-  const sectionTimings = {};
-  page.on('response', async response => {
-    const url = response.url();
-    if (!url.includes('/aggregates') || response.status() !== 200) return;
-    try {
-      const body = await response.json();
-      const timings = body && (body._section_timings || body.section_timings);
-      if (timings && timings.length) sectionTimings[new URL(url).pathname] = timings;
-    } catch (e) { /* non-JSON or already disposed */ }
-  });
+  const measurements = collectResponseMeasurements(page);
 
   let bodyText = "";
   let hasMarker = false;
@@ -265,7 +255,8 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     console.warn(`⚠️ [${name}] ${emptyPanels} panel(s) show an empty state; page has populated charts so proceeding.`);
   }
   console.log(`[${name} Verification] Verified: panels present and charts populated with real data. 🟢`);
-  await logPagePerf(page, name, sectionTimings);
+  await logPagePerf(page, name, await measurements.snapshot(), measurements.gaps());
+  measurements.close();
   if (name === 'Streaming') await logPoolStats(context, name);
   await page.close();
   await context.close();
@@ -307,8 +298,8 @@ async function logPoolStats(context, name) {
 
 // One-line, non-fatal page-performance record for the Phase 4 audit workbooks:
 // navigation timings, paint/LCP/CLS, and per-endpoint API timings with duplicate
-// counts, as the page was loaded for the data check above (cold first load).
-async function logPagePerf(page, name, sectionTimings = {}) {
+// counts. Navigation order does not establish response-cache or database state.
+async function logPagePerf(page, name, responseMeasurements = [], measurementGaps = []) {
   try {
     const perf = await page.evaluate(() => new Promise(resolve => {
       const nav = performance.getEntriesByType('navigation')[0];
@@ -353,7 +344,20 @@ async function logPagePerf(page, name, sectionTimings = {}) {
         });
       }, 500);
     }));
-    perf.sectionTimings = sectionTimings;
+    perf.responseMeasurements = responseMeasurements;
+    perf.budgets = budgets;
+    perf.qualification = 'incomplete';
+    perf.unknowns = [...new Set([
+      ...measurementGaps,
+      ...responseMeasurements.flatMap(row => row.gaps),
+      ...(responseMeasurements.length ? [] : ['aggregate_responses_unobserved']),
+      'database_cache_state_unknown',
+      'history_unverified',
+      'reader_coverage_unverified',
+      'query_io_attribution_unverified',
+      'page_ready_unmeasured',
+      'interaction_completion_unmeasured',
+    ])];
     console.log(`[PERF ${name}] ${JSON.stringify(perf)}`);
   } catch (err) {
     console.log(`[PERF ${name}] unavailable: ${err.message}`);

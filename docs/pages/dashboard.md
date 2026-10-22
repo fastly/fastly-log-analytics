@@ -353,6 +353,8 @@ To achieve best-in-class responsiveness and eliminate visual jarring, the dashbo
 
 ## 8. Performance & Quality Budgets
 
+For Phase 4b, use the approved visible-results completion limits and evidence rules in [Section-sweep measurement evidence](../runbooks/section-sweep-measurements.md). Those limits include transport and rendering and supersede conflicting completion limits below. The table below retains earlier design targets, not measured capability or current certification. Browser paint/layout properties remain separate from result completion; first/repeat request order does not establish cache state.
+
 | Metric | Target (Standard) | Target (High-Scale) | Measurement Method |
 |---|---|---|---|
 | **SSR / First Contentful Paint (FCP)** | < 400 ms | < 400 ms | Lighthouse / Playwright performance metrics |

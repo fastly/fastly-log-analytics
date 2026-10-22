@@ -680,6 +680,10 @@ uv run pytest tests/perf/test_benchmarks_micro.py \
     -o 'addopts=-q' --benchmark-only
 ```
 
+### Section-level performance evidence
+
+[`docs/runbooks/section-sweep-measurements.md`](docs/runbooks/section-sweep-measurements.md) defines the Phase 4b reporting contract. Shared visible-results budgets live in `scripts/lib/performance_budgets.json`. `section_sweep.py` requires reviewed prerequisite evidence before any live request; its HTTP-only reports remain incomplete rather than certifying a page. First/repeat request order is not cache state, cached enclosing payloads cannot supply current child timings, and overlapping spans must not be summed into request compute. The browser verifier reports both aggregate and bundle observations with explicit unknowns. Do not run profiling while backend instrumentation, history/coverage, real filter verification, analyst lifecycle or browser evidence is missing.
+
 ### Perf gate scales
 
 Three tiers in [tests/perf/baseline.json](tests/perf/baseline.json), driven by `PERF_NUM_ROWS`:

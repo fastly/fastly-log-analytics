@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "approved_on": "2026-10-22",
+  "visible_results_p95_ms": {
+    "24h": { "unfiltered": 2000, "filtered": 5000 },
+    "3d": { "unfiltered": 5000, "filtered": 10000 },
+    "7d": { "unfiltered": 5000, "filtered": 10000 },
+    "30d": { "unfiltered": 10000, "filtered": 30000 }
+  },
+  "live_section_triage_ms": 500,
+  "whole_request_p95_ms": null,
+  "interaction_feedback_p95_ms": null,
+  "minimum_samples_per_state": 30,
+  "normal_active_users": 2,
+  "stress_active_users": 5,
+  "peak_freshness_p95_ms": 20000,
+  "logging_period_seconds": 10
+}
