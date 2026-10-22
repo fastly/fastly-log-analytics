@@ -210,6 +210,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     ]);
     await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
   }
+  await waitForPoolIdle(context, name);
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
 
@@ -268,6 +269,27 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   if (name === 'Streaming') await logPoolStats(context, name);
   await page.close();
   await context.close();
+}
+
+// Pages abandoned by the previous check can leave their queries running server-side,
+// holding pooled DuckDB connections. Wait (bounded) for the pool to drain before timing
+// the next page so its numbers reflect the page, and log how long the drain took.
+async function waitForPoolIdle(context, name, maxMs = 45000) {
+  const started = Date.now();
+  let inUse = null;
+  try {
+    while (Date.now() - started < maxMs) {
+      const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 15000 });
+      if (!res.ok()) return;
+      const pools = (await res.json()).pool_wait || [];
+      inUse = pools.reduce((n, p) => n + (p.in_use || 0), 0);
+      if (inUse === 0) break;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    console.log(`[POOL-DRAIN ${name}] in_use=${inUse} after ${Date.now() - started} ms`);
+  } catch (err) {
+    console.log(`[POOL-DRAIN ${name}] unavailable: ${err.message}`);
+  }
 }
 
 // DuckDB connection-pool state right after the page load (admin health snapshot):
