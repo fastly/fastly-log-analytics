@@ -115,7 +115,7 @@ instead of starting it and letting validate_deployment_mode() CrashLoop it.
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: METADATA_DSN
-      optional: {{ not $highScale }}
+      optional: {{ not (or $highScale .Values.secrets.metadataDsn) }}
 {{- end }}
 {{- if .Values.config.ducklakeCatalog }}
 - name: DUCKLAKE_CATALOG

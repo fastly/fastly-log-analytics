@@ -7494,9 +7494,7 @@ export interface components {
             /** Services */
             services: components["schemas"]["BootstrapService"][];
             /** Schema */
-            schema?: {
-                [key: string]: unknown;
-            }[] | null;
+            schema?: components["schemas"]["SchemaColumn"][] | null;
             /** Table Name */
             table_name?: string | null;
             /** Countries */
@@ -7519,9 +7517,7 @@ export interface components {
                 [key: string]: string | boolean | null;
             } | null;
             /** Custom Dashboard Cards */
-            custom_dashboard_cards?: {
-                [key: string]: unknown;
-            }[];
+            custom_dashboard_cards?: components["schemas"]["CustomCard"][];
             /** Active Log Field Ids */
             active_log_field_ids?: string[];
             /**
@@ -7530,43 +7526,17 @@ export interface components {
              */
             ngwaf_configured: boolean;
             /** Views */
-            views?: {
-                [key: string]: unknown;
-            }[];
+            views?: components["schemas"]["SavedView"][];
             log_fields_catalog?: components["schemas"]["LogFieldsCatalogResponse"] | null;
-            /** Sync Status */
-            sync_status?: {
-                [key: string]: unknown;
-            } | null;
-            /** Share Banner */
-            share_banner?: {
-                [key: string]: unknown;
-            } | null;
-            /** Header Badge */
-            header_badge?: {
-                [key: string]: unknown;
-            } | null;
-            /** Log Extents */
-            log_extents?: {
-                [key: string]: unknown;
-            } | null;
+            sync_status?: components["schemas"]["SyncStatusResponse"] | null;
+            share_banner?: components["schemas"]["ShareBannerResponse"] | null;
+            header_badge?: components["schemas"]["ShareHeaderBadgeResponse"] | null;
+            log_extents?: components["schemas"]["LogExtentsResponse"] | null;
             debug_state?: components["schemas"]["BootstrapDebugState"] | null;
-            /** Ops Overview */
-            ops_overview?: {
-                [key: string]: unknown;
-            } | null;
-            /** Cron Runs First Page */
-            cron_runs_first_page?: {
-                [key: string]: unknown;
-            } | null;
-            /** Last Sync */
-            last_sync?: {
-                [key: string]: unknown;
-            } | null;
-            /** Scoring Labels */
-            scoring_labels?: {
-                [key: string]: unknown;
-            } | null;
+            ops_overview?: components["schemas"]["OpsOverviewResponse"] | null;
+            cron_runs_first_page?: components["schemas"]["CronRunsResponse"] | null;
+            last_sync?: components["schemas"]["LastSyncInfo"] | null;
+            scoring_labels?: components["schemas"]["ScoringLabelsListResponse"] | null;
         };
         /** BootstrapService */
         BootstrapService: {
@@ -9082,6 +9052,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ControlRoomActionResponse */
+        ControlRoomActionResponse: {
+            /** Status */
+            status?: string | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ControlRoomTabResponse
          * @description Canned per-tab payload (``TAB_STUBS``); the metric keys differ per tab.
@@ -9436,6 +9415,18 @@ export interface components {
              * @default 0
              */
             regular_log_bytes: number;
+        };
+        /**
+         * CustomCard
+         * @description Custom dashboard card entry in BootstrapResponse.
+         */
+        CustomCard: {
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+        } & {
+            [key: string]: unknown;
         };
         /** CustomField */
         CustomField: {
@@ -12844,6 +12835,20 @@ export interface components {
             /** Status */
             status: number;
         };
+        /**
+         * LastSyncInfo
+         * @description Latest non-running sync cron run summary in BootstrapResponse.
+         */
+        LastSyncInfo: {
+            /** Started At */
+            started_at?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Duration S */
+            duration_s?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** LatencyRegressionInsightCard */
         LatencyRegressionInsightCard: {
             /**
@@ -13333,6 +13338,17 @@ export interface components {
         /** MetadataRetentionResponse */
         MetadataRetentionResponse: {
             retention?: components["schemas"]["MetadataRetentionValues"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MetadataRetentionUpdate */
+        MetadataRetentionUpdate: {
+            /** Usage Log Days */
+            usage_log_days?: number | string | null;
+            /** Ingested Files Days */
+            ingested_files_days?: number | string | null;
+            /** Cron Runs Days */
+            cron_runs_days?: number | string | null;
         } & {
             [key: string]: unknown;
         };
@@ -14215,6 +14231,13 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** NgwafWorkspaceCreateRequest */
+        NgwafWorkspaceCreateRequest: {
+            /** Ngwaf Workspace Id */
+            ngwaf_workspace_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** NgwafWorkspaceSetResponse */
         NgwafWorkspaceSetResponse: {
             /** Ok */
@@ -14288,6 +14311,17 @@ export interface components {
              * @default true
              */
             ok: boolean;
+        };
+        /**
+         * OpsOverviewResponse
+         * @description Seed for OperationsOverview admin cards in BootstrapResponse.
+         */
+        OpsOverviewResponse: {
+            queries_summary?: components["schemas"]["SummaryResponse"] | null;
+            slow_queries_count?: components["schemas"]["SlowQueriesCountResponse"] | null;
+            log_accounting?: components["schemas"]["LogAccountingResponse"] | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * OptimizeNowResponse
@@ -16580,6 +16614,13 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** QuarantineDeleteResponse */
+        QuarantineDeleteResponse: {
+            /** Purged */
+            purged: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** QuarantineEvidenceItem */
         QuarantineEvidenceItem: {
             /** Id */
@@ -17439,6 +17480,30 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** RumLiveEventItem */
+        RumLiveEventItem: {
+            /** Time */
+            time: string;
+            /** Type */
+            type: string;
+            /** Path */
+            path: string;
+            /** Desc */
+            desc: string;
+            /** Browser */
+            browser: string;
+            /** Os */
+            os: string;
+            /**
+             * Raw Log
+             * @default {}
+             */
+            raw_log: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * RumSettingsPartial
          * @description Partial-update for RUM-specific config (sync interval + retention).
@@ -17643,6 +17708,8 @@ export interface components {
             page?: string | null;
             /** Created At */
             created_at?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * SavedViewRecord
@@ -17678,7 +17745,7 @@ export interface components {
         /** SchemaColumn */
         SchemaColumn: {
             /** Column */
-            column: string;
+            column?: string | null;
             /**
              * Name
              * @default
@@ -17696,6 +17763,8 @@ export interface components {
             null_percentage?: number | null;
             /** Count */
             count?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * SchemaColumnRow
@@ -19446,6 +19515,17 @@ export interface components {
              */
             service_ids: string[];
         };
+        /** ShareHeaderBadgeResponse */
+        ShareHeaderBadgeResponse: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Local Rows */
+            local_rows?: number | null;
+            rum?: components["schemas"]["StreamMetrics"] | null;
+            request?: components["schemas"]["StreamMetrics"] | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ShareHeartbeatResponse */
         ShareHeartbeatResponse: {
             /**
@@ -20051,6 +20131,8 @@ export interface components {
             total_rows?: number | null;
             /** Last Sync At */
             last_sync_at?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * SummaryResponse
@@ -20245,6 +20327,10 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** TerraformPreviewResponse */
+        TerraformPreviewResponse: {
+            [key: string]: string;
+        };
         /** ThreatIntelItem */
         ThreatIntelItem: {
             /** Tls Fingerprint */
@@ -20259,6 +20345,8 @@ export interface components {
             bot_percentage: number;
             /** Is Anonymized Proxy */
             is_anonymized_proxy: boolean;
+        } & {
+            [key: string]: unknown;
         };
         /** ThreatIntelListResponse */
         ThreatIntelListResponse: {
@@ -21085,10 +21173,6 @@ export interface components {
         /**
          * WebVitalsPayload
          * @description Mirrors the web-vitals SDK metric shape (v5 API).
-         *
-         *     Field names match the JS Metric object so the frontend can pass it
-         *     through without reshape. ``rating`` is computed by the SDK against
-         *     Google's good/needs-improvement/poor thresholds.
          */
         WebVitalsPayload: {
             /** Id */
@@ -27597,7 +27681,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomActionResponse"];
                 };
             };
             /** @description Bad request */
@@ -27710,7 +27794,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomActionResponse"];
                 };
             };
             /** @description Bad request */
@@ -27823,7 +27907,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomActionResponse"];
                 };
             };
             /** @description Bad request */
@@ -27936,7 +28020,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomActionResponse"];
                 };
             };
             /** @description Bad request */
@@ -28049,7 +28133,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomActionResponse"];
                 };
             };
             /** @description Bad request */
@@ -30109,9 +30193,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["RumLiveEventItem"][];
                 };
             };
             /** @description Bad request */
@@ -38012,9 +38094,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
+                "application/json": components["schemas"]["MetadataRetentionUpdate"];
             };
         };
         responses: {
@@ -43178,9 +43258,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: number;
-                    };
+                    "application/json": components["schemas"]["QuarantineDeleteResponse"];
                 };
             };
             /** @description Bad request */
@@ -46035,9 +46113,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["TerraformPreviewResponse"];
                 };
             };
             /** @description Bad request */
@@ -46560,9 +46636,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
+                "application/json": components["schemas"]["NgwafWorkspaceCreateRequest"];
             };
         };
         responses: {

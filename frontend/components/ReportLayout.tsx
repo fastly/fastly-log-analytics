@@ -16,6 +16,8 @@ import type { FiltersPayload } from '@/types/filters'
 
 export interface ReportLayoutRenderProps {
   config: ReportConfiguration
+  metric: string
+  setMetric: (metric: string) => void
   setChartInterval: (interval: ChartInterval) => void
   trend: string
   setTrend: (trend: string) => void
@@ -53,7 +55,7 @@ export function ReportLayout({
   const effectiveServiceId = useEffectiveServiceId()
   const activeServiceId = (serviceId !== undefined ? serviceId : effectiveServiceId) ?? null
   const timezone = useTimezone()
-  const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
+  const { config, metric, setMetric, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
   // Pass `true` so the FilterBar's "Edge only" toggle injects
   // `edge=include[true]` into every report query. Without it the toggle
   // was visible in the UI but discarded before reaching the backend.
@@ -67,7 +69,7 @@ export function ReportLayout({
     }
   }, [queryClient, queryKey])
 
-  useViewMetricUrlSync()
+  useViewMetricUrlSync({ setMetric })
 
   const bucketSeconds = INTERVAL_SECONDS[config.effectiveInterval as keyof typeof INTERVAL_SECONDS] ?? 3600
 
@@ -88,6 +90,8 @@ export function ReportLayout({
     >
       {children({
         config,
+        metric,
+        setMetric,
         setChartInterval,
         trend,
         setTrend,

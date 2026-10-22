@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from '@/lib/fetchWithTimeout'
+import { getPageLoadId } from '@/lib/pageLoadId'
 import { isUserActive } from '@/lib/userActivity'
 
 /**
@@ -16,21 +17,8 @@ import { isUserActive } from '@/lib/userActivity'
  * an explicit 10s since those fire frequently and must not back up. A caller's
  * own `headers` are merged on top (none currently override `X-Remote-Analyst`).
  */
-let analystPageLoadId: string | null = null
-
-function getAnalystPageLoadId(): string | null {
-  if (typeof window === 'undefined') return null
-  if (!analystPageLoadId) {
-    analystPageLoadId =
-      typeof crypto?.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-  }
-  return analystPageLoadId
-}
-
 export function analystFetch(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<Response> {
-  const loadId = getAnalystPageLoadId()
+  const loadId = getPageLoadId()
   return fetchWithTimeout(
     path,
     {

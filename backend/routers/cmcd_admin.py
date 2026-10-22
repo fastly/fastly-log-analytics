@@ -9,28 +9,16 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Path
-from pydantic import BaseModel
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.status_reads import CmcdStatusResponse
+from backend.models.status_reads import CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
 from backend.utils.router_utils import resolve_fastly_token as _resolve_token
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["cmcd-admin"], responses=DEFAULT_ERROR_RESPONSES)
-
-
-class CmcdEnableBody(BaseModel):
-    token: str = ""
-    mode: Literal["query_string", "headers"] = "query_string"
-    version: int = 1
-
-
-class CmcdDisableBody(BaseModel):
-    token: str = ""
 
 
 @router.get("/{service_id}/cmcd/status", response_model=CmcdStatusResponse, response_model_exclude_unset=True)

@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Query
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import SyncStartResponse
+from backend.routers.admin._helpers import run_admin_cron_trigger
 from backend.utils.router_utils import make_error
 
 from ._router import router
@@ -24,23 +25,17 @@ def sync_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run log discovery.")
-
     from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "log_discovery",
         _run_service_cron,
         target_kwargs={"force": force, "start_time": start_time, "end_time": end_time},
         success_msg="Ingestion started.",
         in_progress_msg="Ingestion already running.",
+        readonly_detail="Read-only services cannot run log discovery.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -54,23 +49,17 @@ def full_sweep_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run full sweep.")
-
     from backend.cron.jobs.sync import _run_full_sweep
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "full_sync",
         _run_full_sweep,
         target_kwargs={"force": force},
         success_msg="Full sweep started.",
         in_progress_msg="Full sweep already running.",
+        readonly_detail="Read-only services cannot run full sweep.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -84,23 +73,17 @@ def gap_heal_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run gap heal.")
-
     from backend.cron.jobs.sync import _run_gap_heal
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "gap_heal",
         _run_gap_heal,
         target_kwargs={"force": force},
         success_msg="Gap heal evaluation started.",
         in_progress_msg="Gap heal already running.",
+        readonly_detail="Read-only services cannot run gap heal.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -113,30 +96,18 @@ def ledger_sweep_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run ledger sweep.")
-
-    from backend import config as svcconfig
-
-    if not svcconfig.is_high_scale_mode(source):
-        raise HTTPException(
-            status_code=400,
-            detail="Ledger sweep is only supported under high-scale mode.",
-        )
-
     from backend.cron.jobs.ledger import _run_ledger_sweep
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "ledger_sweep",
         _run_ledger_sweep,
         success_msg="Ledger sweep started.",
         in_progress_msg="Ledger sweep already running.",
+        readonly_detail="Read-only services cannot run ledger sweep.",
+        require_high_scale=True,
+        high_scale_detail="Ledger sweep is only supported under high-scale mode.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -149,22 +120,16 @@ def rum_sync_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM sync.")
-
     from backend.cron.jobs.rum_sync import _run_rum_sync
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "rum_sync",
         _run_rum_sync,
         success_msg="RUM sync started.",
         in_progress_msg="RUM sync already running.",
+        readonly_detail="Read-only services cannot run RUM sync.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -177,30 +142,18 @@ def rum_discovery_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM discovery.")
-
-    from backend import config as svcconfig
-
-    if not svcconfig.is_high_scale_mode(source):
-        raise HTTPException(
-            status_code=400,
-            detail="RUM discovery is only supported under high-scale mode.",
-        )
-
     from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "rum_discovery",
         _run_rum_discovery_cron,
         success_msg="RUM discovery started.",
         in_progress_msg="RUM discovery already running.",
+        readonly_detail="Read-only services cannot run RUM discovery.",
+        require_high_scale=True,
+        high_scale_detail="RUM discovery is only supported under high-scale mode.",
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -241,18 +194,15 @@ def rum_ledger_sweep_service(
         )
 
     from backend.cron.jobs.rum_ledger import _run_rum_ledger_sweep
-    from backend.repositories.dashboard import invalidate_service
-    from backend.utils.router_utils import start_or_resume_cron
 
-    invalidate_service(source["name"])
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "ledger_rum_sweep",
         _run_rum_ledger_sweep,
         success_msg="RUM ledger sweep started.",
         in_progress_msg="RUM ledger sweep already running.",
+        readonly_detail=make_error("admin_only", "Read-only services cannot run RUM ledger sweep."),
     )
-    return SyncStartResponse(**res)
 
 
 @router.post("/admin/ingest-logs", response_model=SyncStartResponse, response_model_exclude_unset=True)

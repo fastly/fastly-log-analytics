@@ -11068,7 +11068,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomActionResponse"
+                }
               }
             }
           },
@@ -11264,7 +11266,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomActionResponse"
+                }
               }
             }
           },
@@ -11460,7 +11464,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomActionResponse"
+                }
               }
             }
           },
@@ -11656,7 +11662,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomActionResponse"
+                }
               }
             }
           },
@@ -11852,7 +11860,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomActionResponse"
+                }
               }
             }
           },
@@ -15140,8 +15150,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": true
+                    "$ref": "#/components/schemas/RumLiveEventItem"
                   },
                   "title": "Response Rum Live Events Api Services  Service Id  Rum Live Events Get"
                 }
@@ -27481,9 +27490,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Body"
+                "$ref": "#/components/schemas/MetadataRetentionUpdate"
               }
             }
           }
@@ -35812,11 +35819,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "integer"
-                  },
-                  "title": "Response Purge Quarantine Evidence Api Admin Quarantine Purge Post"
+                  "$ref": "#/components/schemas/QuarantineDeleteResponse"
                 }
               }
             }
@@ -39926,11 +39929,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object",
-                  "title": "Response Provision Terraform Preview Api Provision Terraform Preview Post"
+                  "$ref": "#/components/schemas/TerraformPreviewResponse"
                 }
               }
             }
@@ -40634,9 +40633,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Body"
+                "$ref": "#/components/schemas/NgwafWorkspaceCreateRequest"
               }
             }
           }
@@ -55038,8 +55035,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/SchemaColumn"
                 },
                 "type": "array"
               },
@@ -55152,8 +55148,7 @@
           },
           "custom_dashboard_cards": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/CustomCard"
             },
             "type": "array",
             "title": "Custom Dashboard Cards"
@@ -55172,8 +55167,7 @@
           },
           "views": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SavedView"
             },
             "type": "array",
             "title": "Views"
@@ -55191,50 +55185,42 @@
           "sync_status": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/SyncStatusResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Sync Status"
+            ]
           },
           "share_banner": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareBannerResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Share Banner"
+            ]
           },
           "header_badge": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ShareHeaderBadgeResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Header Badge"
+            ]
           },
           "log_extents": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/LogExtentsResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Log Extents"
+            ]
           },
           "debug_state": {
             "anyOf": [
@@ -55249,50 +55235,42 @@
           "ops_overview": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/OpsOverviewResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Ops Overview"
+            ]
           },
           "cron_runs_first_page": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/CronRunsResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Cron Runs First Page"
+            ]
           },
           "last_sync": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/LastSyncInfo"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Last Sync"
+            ]
           },
           "scoring_labels": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ScoringLabelsListResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Scoring Labels"
+            ]
           }
         },
         "type": "object",
@@ -59318,6 +59296,35 @@
         ],
         "title": "ContentDiscoveryMeta"
       },
+      "ControlRoomActionResponse": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ControlRoomActionResponse"
+      },
       "ControlRoomTabResponse": {
         "properties": {
           "tab": {
@@ -60275,6 +60282,26 @@
           "end"
         ],
         "title": "CurrentStorageResponse"
+      },
+      "CustomCard": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "CustomCard",
+        "description": "Custom dashboard card entry in BootstrapResponse."
       },
       "CustomField": {
         "properties": {
@@ -70326,6 +70353,47 @@
         ],
         "title": "LargeUncompressedAssetRow"
       },
+      "LastSyncInfo": {
+        "properties": {
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LastSyncInfo",
+        "description": "Latest non-running sync cron run summary in BootstrapResponse."
+      },
       "LatencyRegressionInsightCard": {
         "properties": {
           "id": {
@@ -71828,6 +71896,55 @@
         "additionalProperties": true,
         "type": "object",
         "title": "MetadataRetentionResponse"
+      },
+      "MetadataRetentionUpdate": {
+        "properties": {
+          "usage_log_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Log Days"
+          },
+          "ingested_files_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingested Files Days"
+          },
+          "cron_runs_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron Runs Days"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MetadataRetentionUpdate"
       },
       "MetadataRetentionValues": {
         "properties": {
@@ -74224,6 +74341,24 @@
         "type": "object",
         "title": "NgwafWorkspace"
       },
+      "NgwafWorkspaceCreateRequest": {
+        "properties": {
+          "ngwaf_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Workspace Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "NgwafWorkspaceCreateRequest"
+      },
       "NgwafWorkspaceSetResponse": {
         "properties": {
           "ok": {
@@ -74408,6 +74543,44 @@
         "type": "object",
         "title": "OkResponse",
         "description": "Mixin for \"ack\" endpoints that only return ``{\"ok\": True}``.\n\nSix share-auth response models all carry ``ok: bool = True`` as\ntheir first field \u2014 promoted here so the field's default + name\ncan't drift across the set."
+      },
+      "OpsOverviewResponse": {
+        "properties": {
+          "queries_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SummaryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slow_queries_count": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SlowQueriesCountResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log_accounting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogAccountingResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "OpsOverviewResponse",
+        "description": "Seed for OperationsOverview admin cards in BootstrapResponse."
       },
       "OptimizeNowResponse": {
         "properties": {
@@ -80310,6 +80483,20 @@
         ],
         "title": "ProxySurgeMeta"
       },
+      "QuarantineDeleteResponse": {
+        "properties": {
+          "purged": {
+            "type": "integer",
+            "title": "Purged"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "purged"
+        ],
+        "title": "QuarantineDeleteResponse"
+      },
       "QuarantineEvidenceItem": {
         "properties": {
           "id": {
@@ -82645,6 +82832,51 @@
         ],
         "title": "RumJsError"
       },
+      "RumLiveEventItem": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "desc": {
+            "type": "string",
+            "title": "Desc"
+          },
+          "browser": {
+            "type": "string",
+            "title": "Browser"
+          },
+          "os": {
+            "type": "string",
+            "title": "Os"
+          },
+          "raw_log": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Raw Log",
+            "default": {}
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "time",
+          "type",
+          "path",
+          "desc",
+          "browser",
+          "os"
+        ],
+        "title": "RumLiveEventItem"
+      },
       "RumSettingsPartial": {
         "properties": {
           "enabled": {
@@ -83258,6 +83490,7 @@
             "title": "Created At"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "service_id",
@@ -83354,7 +83587,14 @@
       "SchemaColumn": {
         "properties": {
           "column": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Column"
           },
           "name": {
@@ -83422,9 +83662,9 @@
             "title": "Count"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
-          "column",
           "type"
         ],
         "title": "SchemaColumn"
@@ -88960,6 +89200,55 @@
         "type": "object",
         "title": "ShareClaimResponse"
       },
+      "ShareHeaderBadgeResponse": {
+        "properties": {
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "local_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Rows"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ShareHeaderBadgeResponse"
+      },
       "ShareHeartbeatResponse": {
         "properties": {
           "ok": {
@@ -90608,6 +90897,7 @@
             "title": "Last Sync At"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "title": "StreamMetrics"
       },
@@ -91177,6 +91467,13 @@
         ],
         "title": "TailLatencyMeta"
       },
+      "TerraformPreviewResponse": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object",
+        "title": "TerraformPreviewResponse"
+      },
       "ThreatIntelItem": {
         "properties": {
           "tls_fingerprint": {
@@ -91204,6 +91501,7 @@
             "title": "Is Anonymized Proxy"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "tls_fingerprint",
@@ -93567,7 +93865,7 @@
           "rating"
         ],
         "title": "WebVitalsPayload",
-        "description": "Mirrors the web-vitals SDK metric shape (v5 API).\n\nField names match the JS Metric object so the frontend can pass it\nthrough without reshape. ``rating`` is computed by the SDK against\nGoogle's good/needs-improvement/poor thresholds."
+        "description": "Mirrors the web-vitals SDK metric shape (v5 API)."
       },
       "WellknownBotRow": {
         "properties": {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any
 
 import duckdb
@@ -121,12 +120,7 @@ def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) ->
 SHIELDING_ANOMALY_MIN_REQUESTS = 30
 
 
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-    return 2.0 * R * math.asin(math.sqrt(a))
+from backend.utils.pop_utils import haversine_km as _haversine_km
 
 
 def _enrich_with_distance(row: dict) -> dict:

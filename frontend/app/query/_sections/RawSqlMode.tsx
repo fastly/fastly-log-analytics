@@ -5,11 +5,12 @@ import dynamic from 'next/dynamic'
 import { ChevronRight, Columns3 } from 'lucide-react'
 import type { CodeEditorHandle } from '@/components/CodeEditor/CodeEditor'
 import { cn } from '@/lib/utils'
+import type { Schema } from '@/types/api'
 
-interface SchemaColumn {
-  name?: string
+type SchemaColumn = {
+  name?: Schema<'SchemaColumn'>['name']
   column?: string
-  type: string
+  type: Schema<'SchemaColumn'>['type']
 }
 
 interface RawSqlModeProps {

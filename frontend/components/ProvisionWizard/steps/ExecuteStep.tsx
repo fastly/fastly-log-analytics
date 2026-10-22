@@ -20,6 +20,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format"
+import {
+  evaluateLogFieldPresetSummary,
+  resolveEnabledGroupsWithDeps,
+} from "@/lib/log-field-config-ops";
 import type { WizardState } from "../useWizardState";
 import { REGION_LABELS, SHIELD_LABELS } from "../types";
 
@@ -243,35 +247,14 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   </div>
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     {(() => {
-                      const enabledGroupsSet = new Set(
-                        config.log_fields?.groups || [],
+                      const {
+                        enabledGroupsSet,
+                        bestPresetName,
+                        disabledCount,
+                      } = evaluateLogFieldPresetSummary(
+                        config.log_fields,
+                        catalog,
                       );
-                      const overrides = config.log_fields?.field_overrides || {};
-                      const hasOverrides = Object.keys(overrides).length > 0;
-
-                      let bestPresetName = null;
-                      if (catalog?.presets && !hasOverrides) {
-                        for (const [key, preset] of Object.entries(
-                          catalog.presets,
-                        )) {
-                          const presetGroups = preset.groups;
-                          if (
-                            presetGroups.length === enabledGroupsSet.size &&
-                            presetGroups.every((g) =>
-                              enabledGroupsSet.has(g),
-                            )
-                          ) {
-                            bestPresetName = preset.label || key;
-                            break;
-                          }
-                        }
-                      }
-
-                      const disabledCount =
-                        catalog?.groups?.filter(
-                          (g) =>
-                            !(g.locked || (g.id != null && enabledGroupsSet.has(g.id))),
-                        ).length || 0;
 
                       if (bestPresetName) {
                         return (
@@ -331,26 +314,10 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   </div>
                   <div className="grid grid-cols-2 gap-3 pt-1">
                     {catalog?.insights?.map((insight) => {
-                      const enabledGroups = new Set<string | null>([
-                        null,
-                        ...(config.log_fields?.groups || []),
-                      ]);
-                      // Also include dependencies
-                      const catalogGroups = catalog.groups || [];
-                      let changed = true;
-                      while (changed) {
-                        changed = false;
-                        catalogGroups.forEach((g) => {
-                          if (
-                            enabledGroups.has(g.id) &&
-                            g.requires &&
-                            !enabledGroups.has(g.requires)
-                          ) {
-                            enabledGroups.add(g.requires);
-                            changed = true;
-                          }
-                        });
-                      }
+                      const enabledGroups = resolveEnabledGroupsWithDeps(
+                        config.log_fields?.groups,
+                        catalog,
+                      );
 
                       const isEnabled = insight.required_groups.every(
                         (rg) => enabledGroups.has(rg),

@@ -24,6 +24,14 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
+import {
+  estimateLogFieldBytesPerLine,
+  isLogFieldPresetActive,
+  toggleLogFieldGroup,
+  toggleLogFieldOverride,
+  toggleLogFieldPreset,
+  updateLogFieldLimit,
+} from '@/lib/log-field-config-ops'
 import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
@@ -137,104 +145,21 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   }, [open])
 
   const toggleGroup = (groupId: string, checked: boolean) => {
-    setConfig(prev => {
-      const nextGroups = new Set(prev.groups)
-      if (checked) {
-        nextGroups.add(groupId)
-        // Auto-enable required dependencies
-        let changed = true
-        while (changed) {
-           changed = false;
-           (catalog?.groups || []).forEach((g) => {
-             if (g.id != null && nextGroups.has(g.id) && g.requires && !nextGroups.has(g.requires)) {
-               nextGroups.add(g.requires)
-               changed = true
-             }
-           })
-        }
-      } else {
-        nextGroups.delete(groupId)
-      }
-      return { ...prev, groups: Array.from(nextGroups) }
-    })
+    setConfig(prev => toggleLogFieldGroup(prev, catalog, groupId, checked))
   }
 
   const toggleField = (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => {
-    setConfig(prev => {
-      const overrides = { ...prev.field_overrides }
-      if (checked === defaultEnabledByGroup) {
-        delete overrides[fieldId]
-      } else {
-        overrides[fieldId] = checked
-      }
-      return { ...prev, field_overrides: overrides }
-    })
+    setConfig(prev => toggleLogFieldOverride(prev, fieldId, checked, defaultEnabledByGroup))
   }
 
   const updateFieldLimit = (fieldId: string, limit?: number) => {
-    setConfig(prev => {
-      const field_limits = { ...(prev.field_limits || {}) }
-      if (limit === undefined) {
-        delete field_limits[fieldId]
-      } else {
-        field_limits[fieldId] = limit
-      }
-      return { ...prev, field_limits }
-    })
+    setConfig(prev => updateLogFieldLimit(prev, fieldId, limit))
   }
+
+  const isPresetActive = (groups: string[]) => isLogFieldPresetActive(config, groups)
 
   const togglePreset = (presetGroups: string[]) => {
-    setConfig(prev => {
-      const currentGroups = new Set(prev.groups || [])
-      const allActive = presetGroups.every(g => currentGroups.has(g))
-
-      const nextGroups = new Set(prev.groups || [])
-
-      if (allActive) {
-        const otherActivePresetsGroups = new Set<string>()
-        if (catalog?.presets) {
-          Object.entries(catalog.presets).forEach(([key, preset]) => {
-             if (preset.groups.length !== presetGroups.length || !preset.groups.every((g: string) => presetGroups.includes(g))) {
-               if (isPresetActive(preset.groups)) {
-                 preset.groups.forEach((g: string) => otherActivePresetsGroups.add(g))
-               }
-             }
-          })
-        }
-
-        presetGroups.forEach(g => {
-          if (!otherActivePresetsGroups.has(g)) {
-            nextGroups.delete(g);
-            (catalog?.groups || []).forEach((cg) => {
-               if (cg.id != null && cg.requires === g && !otherActivePresetsGroups.has(cg.id)) {
-                 nextGroups.delete(cg.id)
-               }
-            })
-          }
-        })
-      } else {
-        presetGroups.forEach(g => nextGroups.add(g))
-
-        let changed = true
-        while (changed) {
-           changed = false;
-           (catalog?.groups || []).forEach((cg) => {
-             if (cg.id != null && nextGroups.has(cg.id) && cg.requires && !nextGroups.has(cg.requires)) {
-               nextGroups.add(cg.requires)
-               changed = true
-             }
-           })
-        }
-      }
-
-      return { ...prev, groups: Array.from(nextGroups) }
-    })
-  }
-
-  const isPresetActive = (groups: string[]) => {
-    if (!groups.length) return false
-    const currentGroups = new Set(config.groups || [])
-    return groups.every(g => currentGroups.has(g))
+    setConfig(prev => toggleLogFieldPreset(prev, catalog, presetGroups, isPresetActive))
   }
 
   const handleSave = () => {
@@ -247,21 +172,10 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   }
 
   // Calculate estimated bytes based on current selections
-  const estimatedBytes = useMemo(() => {
-    if (!catalog?.fields) return 0
-    let total = 0
-    const enabledGroups = new Set(config.groups)
-    const overrides = config.field_overrides || {}
-
-    for (const field of catalog.fields) {
-      const inGroup = field.group === null || enabledGroups.has(field.group)
-      const override = overrides[field.id]
-      if (override === true) { total += (field.typical_bytes || 0); continue; }
-      if (override === false) continue;
-      if (inGroup) total += (field.typical_bytes || 0);
-    }
-    return total
-  }, [catalog, config])
+  const estimatedBytes = useMemo(
+    () => estimateLogFieldBytesPerLine(config, catalog),
+    [catalog, config],
+  )
 
   if (!service) return null
 

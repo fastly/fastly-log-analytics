@@ -3748,12 +3748,15 @@ def _mark_ledger_published(service_id: str, *, rum: bool = False) -> int:
     from backend.core.metadata.base import get_con
 
     con = get_con(service_id)
-    prefix_clause = "object_key LIKE ?" if rum else "object_key NOT LIKE ?"
+    if rum:
+        prefix_clause = "(object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)"
+    else:
+        prefix_clause = "(object_key NOT LIKE ? AND object_key NOT LIKE ? AND object_key NOT LIKE ?)"
     cur = con.cursor()
     cur.execute(
         "UPDATE ingest_ledger SET published_at=? "
         "WHERE service_id=? AND status='committed' AND published_at IS NULL AND " + prefix_clause,
-        (time.time(), service_id, "rum/%"),
+        (time.time(), service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
     )
     con.commit()
     return cur.rowcount

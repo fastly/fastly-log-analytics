@@ -8,14 +8,17 @@ rebuild-scoped batch ids. A rebuild ADDS rows -- run it over a window whose exis
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from datetime import datetime, timedelta
 
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.ingest_controller import _enrich_high_scale_ngwaf_bots
 from backend.high_scale.publication import ClickHousePublication
-from backend.high_scale.recovery import ArchiveManifestCatalog, RecoveryReport, _evaluate_capacity_gate, _sorted
+from backend.high_scale.recovery import (
+    ArchiveManifestCatalog,
+    RecoveryReport,
+    _rebuild_request_projections_from_fos,
+)
 from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.replay import ProjectionReplayResult, _batch_from_rows, _read_manifest_rows
 from backend.high_scale.security_projection import build_security_projection_rows
@@ -59,36 +62,15 @@ def rebuild_security_projections_from_fos(
     rebuild_id: str | None = None,
     capacity: RecoveryCapacityMeasurement | None = None,
 ) -> RecoveryReport:
-    if window <= timedelta(0):
-        raise ValueError("window must be positive")
-    observed = (now or datetime.now(UTC)).astimezone(UTC)
-    resolved_rebuild_id = rebuild_id or uuid4().hex
-    capacity_report = _evaluate_capacity_gate(
-        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
-    )
-    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
-    rows = 0
-    replayed = 0
-    errors: list[str] = []
-    for manifest in manifests:
-        try:
-            result = replay_security_projections(manifest, archive, publication, rebuild_id=resolved_rebuild_id)
-        except Exception as exc:
-            errors.append(f"manifest {manifest.manifest_id} failed to rebuild Security projections: {exc}")
-            continue
-        rows += result.rows_published
-        replayed += 1
-    available = not errors
-    return RecoveryReport(
-        ingest_accepted=True,
-        triage_available=available,
-        raw_query_available=True,
-        warm_history_available=available,
-        full_rebuild_complete=available,
-        manifests_replayed=replayed,
-        rows_replayed=rows,
-        errors=tuple(errors),
-        rebuild_id=resolved_rebuild_id,
-        capacity=capacity_report,
-        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Security",
+        replay_fn=replay_security_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
     )

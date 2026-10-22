@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from backend.models._base import PassthroughModel
+from backend.models._base import PassthroughModel, WireSafeModel
 
 
-class SavedView(BaseModel):
+class SavedView(WireSafeModel):
     id: str | None = None
     service_id: str
     name: str

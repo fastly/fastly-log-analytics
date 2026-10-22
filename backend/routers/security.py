@@ -3,20 +3,20 @@ from __future__ import annotations
 import csv
 import io
 from datetime import UTC, datetime, timedelta
-from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
-from backend.core.share_db.validation import mask_ip
-from backend.models.common import BaseResponse, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
+    SecurityAggregatesRequest,
     SecurityAggregatesResponse,
     SecurityBundleResponse,
+    SecuritySectionName,
+    ThreatIntelItem,
+    ThreatIntelListResponse,
 )
 from backend.repositories import security as repo
 from backend.utils.auth import mask_ips_for
@@ -28,22 +28,7 @@ router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_
 # only what they render. ngwaf_configured is a tiny bool derived from svc
 # config (no SQL), bundled into the verified_bots_ts/ngwaf_* gate so any bot
 # section request gets the badge.
-SectionName = Literal[
-    "verified_bots_ts",
-    "ngwaf_verified_bots",
-    "ngwaf_verified_bots_ts",
-    "wellknown_bots",
-    "bot_efficiency",
-    "tls_fingerprints",
-    "fingerprint_coverage",
-    "req_size_dist",
-    "top_ips_header",
-    "ipv6_adoption",
-    "proxy_dist",
-    "conn_reuse_dist",
-    "proxies",
-    "top_bots",
-]
+SectionName = SecuritySectionName
 
 # Fingerprint cards share a single full-temp coverage scan
 # (_build_security_response's FINGERPRINT_COVERAGE_BULK) — any one of them
@@ -66,11 +51,6 @@ _expand_sections = make_section_expander(
     union_groups=(_NGWAF_BOT_PAIR,),
     implies=((_FINGERPRINT_CARDS, "fingerprint_coverage"),),
 )
-
-
-class SecurityAggregatesRequest(RangeKeyedRequest):
-    bucket_seconds: int = 300
-    sections: list[SectionName] | None = None
 
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
@@ -191,7 +171,7 @@ def export_proxies_csv(
         raw_ip = c.get("ip")
         if not raw_ip:
             continue
-        ip = mask_ip(str(raw_ip)) if mask_ips else str(raw_ip)
+        ip = str(raw_ip)
         if ip not in seen_ips:
             seen_ips.add(ip)
             item = dict(c)
@@ -227,19 +207,6 @@ def export_proxies_csv(
         media_type=media_type,
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
-
-
-class ThreatIntelItem(BaseModel):
-    tls_fingerprint: str  # ja3 or ja4
-    requests: int
-    top_country: str
-    matched_waf_rules_count: int
-    bot_percentage: float
-    is_anonymized_proxy: bool
-
-
-class ThreatIntelListResponse(BaseResponse):
-    data: list[ThreatIntelItem]
 
 
 @router.get("/threat-intel", response_model=ThreatIntelListResponse)

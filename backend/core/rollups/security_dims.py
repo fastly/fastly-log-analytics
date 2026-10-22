@@ -63,7 +63,9 @@ from ._common import (
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_TOP_K,
-    backfill_missing_bundles,
+    MultiBundleSpec,
+    backfill_multi_spec_bundles,
+    build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
@@ -169,7 +171,7 @@ def _build_cov_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: 
 # (label, output filename, required column(s), build_copy_sql). One COPY each.
 # The required column gates which bundle a service can produce — e.g. a service
 # with no ``conn_requests`` skips conn_reuse but still writes req_size etc.
-_SECURITY_DIMS = (
+_SECURITY_DIMS: tuple[MultiBundleSpec, ...] = (
     ("req_size", SECURITY_REQ_SIZE_BUNDLE_FILENAME, ("req_header_bytes",), _build_req_size_copy_sql),
     ("conn_reuse", SECURITY_CONN_REUSE_BUNDLE_FILENAME, ("conn_requests",), _build_conn_reuse_copy_sql),
     ("topips", SECURITY_TOPIPS_BUNDLE_FILENAME, ("ip", "req_header_bytes"), _build_topips_copy_sql),
@@ -179,94 +181,28 @@ _SECURITY_DIMS = (
 
 def build_security_dims_bundles(service_id: str, source: dict, hours: list[str]) -> int:
     """Write the security_req_size + security_conn_reuse + security_topips +
-    security_cov rollups for each closed hour in ``hours``.
-
-    Skips:
-      - The active UTC hour (still being written).
-      - A bundle whose required column is absent (e.g. no ``conn_requests`` →
-        skip security_conn_reuse but still write the others when their columns
-        exist).
-
-    Idempotent — atomic tmp+rename per file under the per-service iceberg lock.
-    Returns the number of parquet files written this call (a fully built hour
-    with all four bundles counts as 4). Each bundle drives the shared
-    :func:`build_per_hour_bundles` once; the per-bundle eligibility callback
-    skips the service for that bundle when a needed column is absent.
-    """
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _SECURITY_DIMS:
-
-        def eligibility(cols, table_ident, req_cols=req_cols):
-            for c in req_cols:
-                if c not in cols:
-                    return None
-            return True
-
-        written += build_per_hour_bundles(
-            service_id,
-            source,
-            hours,
-            bundle_filename=filename,
-            tmp_prefix=".tmp_sd_",
-            label=f"security_dims({label})",
-            describe_label="security_dims",
-            eligibility=eligibility,
-            build_copy_sql=build_copy_sql,
-            logger=logger,
-        )
-    return written
+    security_cov rollups for each closed hour in ``hours``."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_SECURITY_DIMS,
+        group_label="security_dims",
+        tmp_prefix=".tmp_sd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
 
 
 def backfill_security_dims_bundles(service_id: str, source: dict) -> int:
     """Self-heal pass: build the security_dims rollups for every closed hour
-    that has ``all_fields.parquet`` but is missing a security_dims file.
-
-    Each of the four bundles self-heals INDEPENDENTLY (one
-    :func:`backfill_missing_bundles` walk per filename). A single-sentinel
-    backfill (keyed only on req_size) would mask a partial state: if a prior
-    run is interrupted after writing req_size for every hour but before
-    finishing topips/cov, a req_size-keyed resume sees "nothing missing" and
-    never completes the other three. Walking per bundle makes the resume
-    correct regardless of where the previous run stopped. Idempotent.
-    Returns files written across all four bundles.
-    """
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _SECURITY_DIMS:
-
-        def _one_bundle_builder(
-            sid: str,
-            src: dict,
-            hours: list[str],
-            _filename: str = filename,
-            _label: str = label,
-            _req_cols: tuple[str, ...] = req_cols,
-            _build_copy_sql=build_copy_sql,
-        ) -> int:
-            def eligibility(cols, table_ident, req_cols=_req_cols):
-                for c in req_cols:
-                    if c not in cols:
-                        return None
-                return True
-
-            return build_per_hour_bundles(
-                sid,
-                src,
-                hours,
-                bundle_filename=_filename,
-                tmp_prefix=".tmp_sd_",
-                label=f"security_dims({_label})",
-                describe_label="security_dims",
-                eligibility=eligibility,
-                build_copy_sql=_build_copy_sql,
-                logger=logger,
-            )
-
-        written += backfill_missing_bundles(
-            service_id,
-            source,
-            bundle_filename=filename,
-            label=f"security_dims({label})",
-            builder=_one_bundle_builder,
-            logger=logger,
-        )
-    return written
+    that has ``all_fields.parquet`` but is missing a security_dims file."""
+    return backfill_multi_spec_bundles(
+        service_id,
+        source,
+        specs=_SECURITY_DIMS,
+        group_label="security_dims",
+        tmp_prefix=".tmp_sd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )

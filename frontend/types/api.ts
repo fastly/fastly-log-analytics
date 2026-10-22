@@ -1,6 +1,8 @@
 import type { components } from '@/types/api.generated'
 import type { Service } from '@/stores/serviceStore'
 
+export type Schema<K extends keyof components['schemas']> = components['schemas'][K]
+
 /** Map a raw BootstrapService (snake_case from backend) to the internal Service shape. */
 export function toService(s: components['schemas']['BootstrapService']): Service {
   return {

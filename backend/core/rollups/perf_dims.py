@@ -39,7 +39,9 @@ import logging
 
 from ._common import (
     PERF_TTL_DIST_BUNDLE_FILENAME,
-    backfill_missing_bundles,
+    MultiBundleSpec,
+    backfill_multi_spec_bundles,
+    build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
@@ -90,91 +92,34 @@ def _build_ttl_dist_copy_sql(ctx: object, table_ident: str, start_iso: str, end_
 # (label, output filename, required column(s), build_copy_sql). One COPY.
 # The required column gates whether a service can produce the bundle — a
 # service with no ``ttl`` column skips it.
-_PERF_DIMS = (("ttl_dist", PERF_TTL_DIST_BUNDLE_FILENAME, ("ttl",), _build_ttl_dist_copy_sql),)
+_PERF_DIMS: tuple[MultiBundleSpec, ...] = (
+    ("ttl_dist", PERF_TTL_DIST_BUNDLE_FILENAME, ("ttl",), _build_ttl_dist_copy_sql),
+)
 
 
 def build_perf_dims_bundles(service_id: str, source: dict, hours: list[str]) -> int:
-    """Write the perf_ttl_dist rollup for each closed hour in ``hours``.
-
-    Skips:
-      - The active UTC hour (still being written).
-      - The bundle when the required ``ttl`` column is absent.
-
-    Idempotent — atomic tmp+rename per file under the per-service iceberg lock.
-    Returns the number of parquet files written this call. The bundle drives the
-    shared :func:`build_per_hour_bundles` once; the per-bundle eligibility
-    callback skips the service when the needed column is absent.
-    """
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _PERF_DIMS:
-
-        def eligibility(cols, table_ident, req_cols=req_cols):
-            for c in req_cols:
-                if c not in cols:
-                    return None
-            return True
-
-        written += build_per_hour_bundles(
-            service_id,
-            source,
-            hours,
-            bundle_filename=filename,
-            tmp_prefix=".tmp_pd_",
-            label=f"perf_dims({label})",
-            describe_label="perf_dims",
-            eligibility=eligibility,
-            build_copy_sql=build_copy_sql,
-            logger=logger,
-        )
-    return written
+    """Write the perf_ttl_dist rollup for each closed hour in ``hours``."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_PERF_DIMS,
+        group_label="perf_dims",
+        tmp_prefix=".tmp_pd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
 
 
 def backfill_perf_dims_bundles(service_id: str, source: dict) -> int:
     """Self-heal pass: build the perf_dims rollup for every closed hour that
-    has ``all_fields.parquet`` but is missing the perf_ttl_dist file.
-
-    Walks per bundle (one :func:`backfill_missing_bundles` walk per filename),
-    mirroring :func:`backend.core.rollups.security_dims.backfill_security_dims_bundles`
-    so a future multi-bundle expansion self-heals each bundle independently.
-    Idempotent. Returns files written.
-    """
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _PERF_DIMS:
-
-        def _one_bundle_builder(
-            sid: str,
-            src: dict,
-            hours: list[str],
-            _filename: str = filename,
-            _label: str = label,
-            _req_cols: tuple[str, ...] = req_cols,
-            _build_copy_sql=build_copy_sql,
-        ) -> int:
-            def eligibility(cols, table_ident, req_cols=_req_cols):
-                for c in req_cols:
-                    if c not in cols:
-                        return None
-                return True
-
-            return build_per_hour_bundles(
-                sid,
-                src,
-                hours,
-                bundle_filename=_filename,
-                tmp_prefix=".tmp_pd_",
-                label=f"perf_dims({_label})",
-                describe_label="perf_dims",
-                eligibility=eligibility,
-                build_copy_sql=_build_copy_sql,
-                logger=logger,
-            )
-
-        written += backfill_missing_bundles(
-            service_id,
-            source,
-            bundle_filename=filename,
-            label=f"perf_dims({label})",
-            builder=_one_bundle_builder,
-            logger=logger,
-        )
-    return written
+    has ``all_fields.parquet`` but is missing the perf_ttl_dist file."""
+    return backfill_multi_spec_bundles(
+        service_id,
+        source,
+        specs=_PERF_DIMS,
+        group_label="perf_dims",
+        tmp_prefix=".tmp_pd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )

@@ -108,37 +108,36 @@ export default async function RootLayout({
     // Mirror the dependent-cache seeds from useBootstrap.queryFn so
     // hooks gated on the bootstrap status flip find their slice in
     // cache too. Key shapes live at frontend/hooks/useBootstrap.ts.
-    sid = (bootstrap as { active_service_id?: string | null })?.active_service_id ?? null;
+    sid = bootstrap.active_service_id ?? null;
     if (sid) {
-      const b = bootstrap as Record<string, unknown>;
-      if (Array.isArray(b.views)) {
-        client.setQueryData(["views", sid], b.views);
+      if (Array.isArray(bootstrap.views)) {
+        client.setQueryData(["views", sid], bootstrap.views);
       }
-      if (b.log_fields_catalog) {
-        client.setQueryData(["log-fields-catalog", sid], b.log_fields_catalog);
+      if (bootstrap.log_fields_catalog) {
+        client.setQueryData(["log-fields-catalog", sid], bootstrap.log_fields_catalog);
       }
-      client.setQueryData(queryKeys.syncStatus(sid), b.sync_status ?? null);
-      if (b.log_extents) {
-        client.setQueryData(["log-extents", sid], b.log_extents);
+      client.setQueryData(queryKeys.syncStatus(sid), bootstrap.sync_status ?? null);
+      if (bootstrap.log_extents) {
+        client.setQueryData(["log-extents", sid], bootstrap.log_extents);
       }
-      client.setQueryData(queryKeys.lastSync(sid), b.last_sync ?? null);
-      const schemaList = b.schema as unknown[] | undefined;
-      const tableName = b.table_name as string | undefined;
+      client.setQueryData(queryKeys.lastSync(sid), bootstrap.last_sync ?? null);
+      const schemaList = bootstrap.schema;
+      const tableName = bootstrap.table_name;
       if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {
         client.setQueryData(queryKeys.admin.schema(sid), { schema: schemaList, table_name: tableName });
       }
-      if (b.cron_runs_first_page) {
-        client.setQueryData(queryKeys.admin.cronLogsRecent(sid), b.cron_runs_first_page);
+      if (bootstrap.cron_runs_first_page) {
+        client.setQueryData(queryKeys.admin.cronLogsRecent(sid), bootstrap.cron_runs_first_page);
       }
-      if (b.scoring_labels) {
-        client.setQueryData(["scoring-labels", sid], b.scoring_labels);
+      if (bootstrap.scoring_labels) {
+        client.setQueryData(["scoring-labels", sid], bootstrap.scoring_labels);
       }
     }
-    const services = (bootstrap as Record<string, unknown>)?.services;
+    const services = bootstrap.services;
     if (Array.isArray(services)) {
       client.setQueryData(["services"], { services, _section_timings: [] });
       if (sid) {
-        const activeSvc = services.find((s) => (s as Record<string, unknown>).service_id === sid) as Record<string, unknown> | undefined;
+        const activeSvc = services.find((s) => s.service_id === sid);
         isRumEnabled = !!activeSvc?.rum_enabled;
       }
     }
@@ -150,10 +149,7 @@ export default async function RootLayout({
     // round-trip — only the share page pays it, and only on direct load.
     // The small global share_banner stays on the bootstrap response for the
     // header.
-    const shareBanner = (bootstrap as Record<string, unknown>)?.share_banner as
-      | { sharing_active?: boolean; public_url?: string | null }
-      | null
-      | undefined;
+    const shareBanner = bootstrap.share_banner;
     if (shareBanner && typeof shareBanner === "object") {
       client.setQueryData(queryKeys.shareBanner(), {
         sharing_active: !!shareBanner.sharing_active,
@@ -217,7 +213,7 @@ export default async function RootLayout({
                 SSR-pre-hydrated bootstrap cache short-circuits the
                 queryFn that would otherwise call setToken, leaving the
                 store empty on the very first render. */}
-            <HydrateAdminToken token={(bootstrap as { settings?: { admin_token?: string | null } } | null)?.settings?.admin_token ?? null} />
+            <HydrateAdminToken token={typeof bootstrap?.settings?.admin_token === 'string' ? bootstrap.settings.admin_token : null} />
             {/* Rehydrate the persisted Zustand stores (service / timezone /
                 debug) AFTER mount. They use persist({ skipHydration:true })
                 so the first client render matches the server's default

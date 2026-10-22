@@ -38,9 +38,12 @@
 // response shape the client would request. range_token/anchor drive the scan
 // window; start_time/end_time are omitted (the keyed path ignores them).
 
-import { quantizeAnchor } from '@/lib/time-window'
-
-import { parseSsrJson, ssrUpstreamGet } from './_transport'
+import {
+  parseSsrJson,
+  resolveDefaultSsrRangeKey,
+  type SsrRangeSeed,
+  ssrUpstreamGet,
+} from './upstream'
 
 // Default first-paint section set — mirrors ORIGIN_SECTIONS in
 // app/origin/_sections/OriginClient.tsx (the page renders every section). Kept
@@ -79,31 +82,14 @@ export const ORIGIN_SSR_DEFAULTS = {
   ipHealthLimit: 30,
 } as const
 
-export interface OriginSsrSeed {
-  /** The /api/origin/aggregates response body to seed into the cache. */
-  data: unknown
-  /** Relative-range token (e.g. '24h') — must equal the client key element. */
-  rangeToken: string
-  /** Quantized anchor (ISO-Z, 60s grid) — must equal the client key element. */
-  anchor: string
-}
+export type OriginSsrSeed = SsrRangeSeed
 
 /**
  * Resolve the default (rangeToken, anchor) pair the client computes on first
  * paint. Exported so the unit test can pin the key-match without a network
  * round-trip. `now` is injectable for deterministic tests.
  */
-export function resolveOriginDefaultKey(
-  now: Date = new Date(),
-): {
-  rangeToken: string
-  anchor: string
-} {
-  // Cold load → no ?range= → client filterStore.relativeRange is null →
-  // rangeToken defaults to "24h", matching the 24h store-default display window
-  // so the chart x-axis range and the scan window agree. The anchor floors to the 60s quantum.
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
-}
+export const resolveOriginDefaultKey = resolveDefaultSsrRangeKey
 
 /**
  * SSR-prefetch the default origin aggregates selection for the active service.

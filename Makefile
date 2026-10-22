@@ -253,7 +253,7 @@ perf-ci:
 fast-ci:
 	$(MAKE) openapi-drift
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
-	cd frontend && npx vitest run hooks/ lib/ stores/ tests/backend-contract.test.ts
+	cd frontend && npx vitest run hooks/ lib/ stores/ __tests__/contract/backend-contract.test.ts
 	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
 
 # Playwright E2E — runs fast Chromium smoke suite by default (2 workers, retries: 0).
@@ -328,20 +328,6 @@ coalesce-guard:
 # The local stack is BOTH compose files; omitting the observability one drops
 # Grafana/Prometheus/Tempo and their exporters.
 COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
-
-CLICKHOUSE_COMPOSE := $(COMPOSE_STACK) -f docker-compose.clickhouse-prototype.yml
-.PHONY: clickhouse-prototype-up clickhouse-prototype-down clickhouse-prototype-schema
-clickhouse-prototype-up:
-	docker compose $(CLICKHOUSE_COMPOSE) up -d --wait --no-deps clickhouse
-
-# The CLI is baked into a separate init image; do not restart the serving backend.
-clickhouse-prototype-schema:
-	docker compose $(CLICKHOUSE_COMPOSE) build clickhouse-schema-init
-	docker compose $(CLICKHOUSE_COMPOSE) run --rm clickhouse-schema-init
-
-# Stop only the serving index; preserve its volume and the DuckLake baseline.
-clickhouse-prototype-down:
-	docker compose $(CLICKHOUSE_COMPOSE) stop clickhouse
 
 # Explicit loopback/configuration/consent arguments are required by the driver.
 .PHONY: clickhouse-prototype-benchmark

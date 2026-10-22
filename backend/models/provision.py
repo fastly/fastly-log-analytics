@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 from backend.models._base import PassthroughModel
 
@@ -340,9 +340,20 @@ class NgwafWorkspacesResponse(_ProvisionRead):
     debug_raw: str | None = Field(default=None, alias="_debug_raw")
 
 
+class NgwafWorkspaceCreateRequest(_ProvisionRead):
+    ngwaf_workspace_id: str | None = None
+
+
 class NgwafWorkspaceSetResponse(_ProvisionRead):
     ok: bool | None = None
     ngwaf_workspace_id: str | None = None
+
+
+NgwafWorkspaceCreateResponse = NgwafWorkspaceSetResponse
+
+
+class TerraformPreviewResponse(RootModel[dict[str, str]]):
+    pass
 
 
 class RumVersionsResponse(_ProvisionRead):

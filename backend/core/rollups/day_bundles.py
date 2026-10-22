@@ -45,6 +45,7 @@ from ._common import (
     _hour_bundled_root,
     _is_safe_ident,
     _rollups_root,
+    cleanup_per_field_after_bundle,
     compact_closed_days,
     parquet_zstd_target,
     quote_path_list,
@@ -295,72 +296,15 @@ def _cleanup_per_field_day_after_bundle(
     """Sweep per-field day parquet directories for ``day`` after
     the day bundle has been published.
     """
-    if not os.path.exists(bundle_path):
-        return
-    try:
-        bundle_mtime = os.path.getmtime(bundle_path)
-    except OSError:
-        return
-
-    dry_run = os.environ.get("ROLLUP_CLEANUP_DRY_RUN") == "1"
-    candidate_dirs: list[str] = []
-    file_count = 0
-    try:
-        for field_entry in os.listdir(day_per_field_root):
-            if not field_entry.startswith("field="):
-                continue
-            day_dir = os.path.join(day_per_field_root, field_entry, f"day={day}")
-            if not os.path.isdir(day_dir):
-                continue
-            ok = True
-            count_here = 0
-            try:
-                for fname in os.listdir(day_dir):
-                    if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
-                        continue
-                    p = os.path.join(day_dir, fname)
-                    try:
-                        if os.path.getmtime(p) > bundle_mtime:
-                            ok = False
-                            break
-                        count_here += 1
-                    except OSError:
-                        ok = False
-                        break
-            except OSError:
-                ok = False
-            if ok and count_here > 0:
-                candidate_dirs.append(day_dir)
-                file_count += count_here
-    except OSError:
-        return
-
-    if not candidate_dirs:
-        return
-
-    if dry_run:
-        logger.info(
-            "[rollups] %s: ROLLUP_CLEANUP_DRY_RUN — would delete %d per-field day parquets across %d field dirs for day=%s",
-            service_id,
-            file_count,
-            len(candidate_dirs),
-            day,
-        )
-        return
-
-    deleted_dirs = 0
-    for day_dir in candidate_dirs:
-        try:
-            shutil.rmtree(day_dir)
-            deleted_dirs += 1
-        except OSError as e:
-            logger.warning("[rollups] %s: cleanup failed for %s: %s", service_id, day_dir, e)
-    logger.debug(
-        "[rollups] %s: cleaned %d per-field day dirs (~%d parquets) for bundled day=%s",
+    cleanup_per_field_after_bundle(
+        day_per_field_root,
+        f"day={day}",
+        bundle_path,
         service_id,
-        deleted_dirs,
-        file_count,
-        day,
+        file_kind_label="per-field day",
+        dir_kind_label="per-field day",
+        cleanup_label="cleanup",
+        logger=logger,
     )
 
 

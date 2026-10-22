@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { server } from '@/tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { AcknowledgeButton } from '@/app/share-login/acknowledge/AcknowledgeButton'
 import { AcknowledgeFallback } from '@/app/share-login/acknowledge/AcknowledgeFallback'
 

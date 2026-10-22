@@ -343,20 +343,50 @@ Output rows: ``(ua: str, ip: str, cnt: int)``.
 
 # ── VPN & Proxy Watchdog Templates ───────────────────────────────────────────
 
-GET_PROXY_STATS = """
+
+class _DynamicPopSqlTemplate(str):
+    """String template that re-evaluates dynamic POP coordinate CASE blocks on `.format()`."""
+
+    _raw_template: str
+
+    def __new__(cls, raw_template: str) -> _DynamicPopSqlTemplate:
+        from backend.utils.pop_utils import (
+            build_pop_haversine_case_sql,
+            build_pop_lat_case_sql,
+            build_pop_lon_case_sql,
+        )
+
+        rendered = (
+            raw_template.replace("__POP_DISTANCE_CASE__", build_pop_haversine_case_sql())
+            .replace("__POP_LAT_CASE__", build_pop_lat_case_sql())
+            .replace("__POP_LON_CASE__", build_pop_lon_case_sql())
+        )
+        obj = super().__new__(cls, rendered)
+        obj._raw_template = raw_template
+        return obj
+
+    def format(self, *args: object, **kwargs: object) -> str:
+        from backend.utils.pop_utils import (
+            build_pop_haversine_case_sql,
+            build_pop_lat_case_sql,
+            build_pop_lon_case_sql,
+        )
+
+        rendered = (
+            self._raw_template.replace("__POP_DISTANCE_CASE__", build_pop_haversine_case_sql())
+            .replace("__POP_LAT_CASE__", build_pop_lat_case_sql())
+            .replace("__POP_LON_CASE__", build_pop_lon_case_sql())
+        )
+        return rendered.format(*args, **kwargs)
+
+
+GET_PROXY_STATS = _DynamicPopSqlTemplate("""
     WITH geo_dist AS (
         SELECT
             pop AS g_pop,
             lat AS g_lat,
             lon AS g_lon,
-            -- Haversine formula distance calculation using a default coordinate for POP
-            -- If pop is SJC, use SJC coords, else a reasonable US default or central pop fallback
-            CASE
-                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
-                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
-                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
-                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-            END AS distance_km
+            __POP_DISTANCE_CASE__ AS distance_km
         FROM (
             SELECT DISTINCT pop, lat, lon
             FROM {temp_table}
@@ -391,7 +421,7 @@ GET_PROXY_STATS = """
         END) AS total_requests_count,
         COUNT(DISTINCT CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip ELSE NULL END) AS distance_mismatches_count
     FROM metrics
-"""
+""")
 
 GET_TRAFFIC_QUALITY = """
     SELECT
@@ -420,19 +450,13 @@ GET_SUSPICIOUS_ISPS = """
     LIMIT 10
 """
 
-GET_ACTIVE_PROXY_CLIENTS = """
+GET_ACTIVE_PROXY_CLIENTS = _DynamicPopSqlTemplate("""
     WITH geo_dist AS (
         SELECT
             pop AS g_pop,
             lat AS g_lat,
             lon AS g_lon,
-            -- Haversine distance formula matching GET_PROXY_STATS
-            CASE
-                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
-                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
-                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
-                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-            END AS distance_km
+            __POP_DISTANCE_CASE__ AS distance_km
         FROM (
             SELECT DISTINCT pop, lat, lon
             FROM {temp_table}
@@ -448,18 +472,8 @@ GET_ACTIVE_PROXY_CLIENTS = """
             lat AS client_lat,
             lon AS client_lon,
             asn,
-            CASE
-                WHEN pop = 'SJC' THEN 37.3382
-                WHEN pop = 'IAD' THEN 38.9531
-                WHEN pop = 'NRT' THEN 35.7720
-                ELSE 38.0
-            END AS pop_lat,
-            CASE
-                WHEN pop = 'SJC' THEN -121.8863
-                WHEN pop = 'IAD' THEN -77.4565
-                WHEN pop = 'NRT' THEN 140.3929
-                ELSE -97.0
-            END AS pop_lon,
+            __POP_LAT_CASE__ AS pop_lat,
+            __POP_LON_CASE__ AS pop_lon,
             geo_dist.distance_km AS distance_km
             {select_country_city_inner}
         FROM {temp_table}
@@ -497,20 +511,15 @@ GET_ACTIVE_PROXY_CLIENTS = """
         (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)
     ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC
     LIMIT 100
-"""
+""")
 
-GET_SECURITY_PROXIES_COMBINED = """
+GET_SECURITY_PROXIES_COMBINED = _DynamicPopSqlTemplate("""
     WITH geo_dist AS (
         SELECT
             pop AS g_pop,
             lat AS g_lat,
             lon AS g_lon,
-            CASE
-                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
-                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
-                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
-                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-            END AS distance_km
+            __POP_DISTANCE_CASE__ AS distance_km
         FROM (
             SELECT DISTINCT pop, lat, lon
             FROM {temp_table}
@@ -528,18 +537,8 @@ GET_SECURITY_PROXIES_COMBINED = """
             lat AS client_lat,
             lon AS client_lon,
             asn,
-            CASE
-                WHEN pop = 'SJC' THEN 37.3382
-                WHEN pop = 'IAD' THEN 38.9531
-                WHEN pop = 'NRT' THEN 35.7720
-                ELSE 38.0
-            END AS pop_lat,
-            CASE
-                WHEN pop = 'SJC' THEN -121.8863
-                WHEN pop = 'IAD' THEN -77.4565
-                WHEN pop = 'NRT' THEN 140.3929
-                ELSE -97.0
-            END AS pop_lon,
+            __POP_LAT_CASE__ AS pop_lat,
+            __POP_LON_CASE__ AS pop_lon,
             geo_dist.distance_km AS distance_km
             {select_country_city_inner}
         FROM {temp_table}
@@ -696,7 +695,7 @@ GET_SECURITY_PROXIES_COMBINED = """
     UNION ALL SELECT * FROM quality_q
     UNION ALL SELECT * FROM isps_q
     UNION ALL SELECT * FROM clients_q
-"""
+""")
 
 BOT_EFFICIENCY = """
 WITH site_totals AS (

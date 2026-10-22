@@ -3,7 +3,7 @@ import { afterAll, afterEach, expect } from 'vitest'
 import { act } from 'react'
 import { cleanup, configure } from '@testing-library/react'
 import * as matchers from 'vitest-axe/matchers'
-import { server } from './tests/msw/server'
+import { server } from './__tests__/helpers/msw/server'
 
 // waitFor/findBy poll observable state and only use this as a failure bound; the
 // 1s default is shorter than a cold render of a large page under worker

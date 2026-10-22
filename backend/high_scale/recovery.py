@@ -11,6 +11,7 @@ purely additive to serving state.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -27,6 +28,7 @@ from backend.high_scale.recovery_capacity import (
     evaluate_recovery_capacity,
 )
 from backend.high_scale.replay import (
+    ProjectionReplayResult,
     replay_cmcd_projections,
     replay_manifest,
     replay_origin_projections,
@@ -253,12 +255,14 @@ def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: dateti
     )
 
 
-def rebuild_cmcd_projections_from_fos(
+def _rebuild_request_projections_from_fos(
     catalog: ArchiveManifestCatalog,
     archive: ArchivePublication,
     publication: ClickHousePublication,
     *,
     service_id: str,
+    projection_label: str,
+    replay_fn: Callable[..., ProjectionReplayResult],
     now: datetime | None = None,
     window: timedelta = timedelta(days=30),
     rebuild_id: str | None = None,
@@ -277,9 +281,9 @@ def rebuild_cmcd_projections_from_fos(
     errors: list[str] = []
     for manifest in manifests:
         try:
-            result = replay_cmcd_projections(manifest, archive, publication, rebuild_id=resolved_rebuild_id)
+            result = replay_fn(manifest, archive, publication, rebuild_id=resolved_rebuild_id)
         except Exception as exc:
-            errors.append(f"manifest {manifest.manifest_id} failed to rebuild CMCD projections: {exc}")
+            errors.append(f"manifest {manifest.manifest_id} failed to rebuild {projection_label} projections: {exc}")
             continue
         rows += result.rows_published
         replayed += 1
@@ -296,6 +300,31 @@ def rebuild_cmcd_projections_from_fos(
         rebuild_id=resolved_rebuild_id,
         capacity=capacity_report,
         recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    )
+
+
+def rebuild_cmcd_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="CMCD",
+        replay_fn=replay_cmcd_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
     )
 
 
@@ -310,43 +339,17 @@ def rebuild_origin_projections_from_fos(
     rebuild_id: str | None = None,
     capacity: RecoveryCapacityMeasurement | None = None,
 ) -> RecoveryReport:
-    if window <= timedelta(0):
-        raise ValueError("window must be positive")
-    observed = (now or datetime.now(UTC)).astimezone(UTC)
-    resolved_rebuild_id = rebuild_id or uuid4().hex
-    capacity_report = _evaluate_capacity_gate(
-        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
-    )
-    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
-    rows = 0
-    replayed = 0
-    errors: list[str] = []
-    for manifest in manifests:
-        try:
-            result = replay_origin_projections(
-                manifest,
-                archive,
-                publication,
-                rebuild_id=resolved_rebuild_id,
-            )
-        except Exception as exc:
-            errors.append(f"manifest {manifest.manifest_id} failed to rebuild Origin projections: {exc}")
-            continue
-        rows += result.rows_published
-        replayed += 1
-    available = not errors
-    return RecoveryReport(
-        ingest_accepted=True,
-        triage_available=available,
-        raw_query_available=True,
-        warm_history_available=available,
-        full_rebuild_complete=available,
-        manifests_replayed=replayed,
-        rows_replayed=rows,
-        errors=tuple(errors),
-        rebuild_id=resolved_rebuild_id,
-        capacity=capacity_report,
-        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Origin",
+        replay_fn=replay_origin_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
     )
 
 
@@ -367,43 +370,17 @@ def rebuild_performance_projections_from_fos(
     ingested after that already published these projections live, and replaying them
     here would double-count the waterfall sums.
     """
-    if window <= timedelta(0):
-        raise ValueError("window must be positive")
-    observed = (now or datetime.now(UTC)).astimezone(UTC)
-    resolved_rebuild_id = rebuild_id or uuid4().hex
-    capacity_report = _evaluate_capacity_gate(
-        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
-    )
-    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
-    rows = 0
-    replayed = 0
-    errors: list[str] = []
-    for manifest in manifests:
-        try:
-            result = replay_performance_projections(
-                manifest,
-                archive,
-                publication,
-                rebuild_id=resolved_rebuild_id,
-            )
-        except Exception as exc:
-            errors.append(f"manifest {manifest.manifest_id} failed to rebuild Performance projections: {exc}")
-            continue
-        rows += result.rows_published
-        replayed += 1
-    available = not errors
-    return RecoveryReport(
-        ingest_accepted=True,
-        triage_available=available,
-        raw_query_available=True,
-        warm_history_available=available,
-        full_rebuild_complete=available,
-        manifests_replayed=replayed,
-        rows_replayed=rows,
-        errors=tuple(errors),
-        rebuild_id=resolved_rebuild_id,
-        capacity=capacity_report,
-        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Performance",
+        replay_fn=replay_performance_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
     )
 
 

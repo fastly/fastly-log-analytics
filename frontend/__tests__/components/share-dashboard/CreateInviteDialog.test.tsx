@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 
-import { server } from '@/tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
 import type { ShareStatus } from '@/components/share-dashboard/utils'

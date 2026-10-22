@@ -6,12 +6,16 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
 from backend.config import list_configs
 from backend.deps import require_admin
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.services import OkMessageResponse
+from backend.models.share_admin import (
+    SharingDeployRequest,
+    SharingDeployResponse,
+    SharingTeardownRequest,
+)
 from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
 
 logger = logging.getLogger(__name__)
@@ -21,29 +25,6 @@ router = APIRouter(
     dependencies=[Depends(require_admin)],
     responses=DEFAULT_ERROR_RESPONSES,
 )
-
-
-class SharingDeployRequest(BaseModel):
-    service_name: str
-    domain_name: str
-    origin_host: str
-    origin_port: int = 80
-    use_ssl: bool = False
-    token_override: str | None = None
-    override_host: str | None = None
-    service_id: str | None = None
-
-
-class SharingDeployResponse(BaseModel):
-    service_id: str
-    version: int
-    domain_name: str
-    origin_host: str
-
-
-class SharingTeardownRequest(BaseModel):
-    service_id: str
-    token_override: str | None = None
 
 
 @router.post("/deploy-frontend", response_model=SharingDeployResponse)

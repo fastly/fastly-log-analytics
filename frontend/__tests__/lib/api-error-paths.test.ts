@@ -42,7 +42,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi } from 'vitest'
 
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { invalidInput } from '@/__tests__/helpers/invalid-input'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'

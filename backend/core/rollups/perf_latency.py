@@ -48,91 +48,73 @@ from ._common import (
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_URLS_MIN_REQUESTS_PER_HOUR,
+    MultiBundleSpec,
     backfill_missing_bundles,
+    build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
 
 logger = logging.getLogger(__name__)
 
-# (dimension column, output filename, per-hour min requests). One COPY each.
-_PERF_DIMS = (
-    ("url", PERF_TOP_URLS_BUNDLE_FILENAME, PERF_URLS_MIN_REQUESTS_PER_HOUR),
-    ("asn", PERF_TOP_ASNS_BUNDLE_FILENAME, PERF_ASNS_MIN_REQUESTS_PER_HOUR),
+
+def _make_perf_latency_copy_sql(col: str, min_req: int):
+    def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT value, "
+            f"    CAST(COUNT(*) AS BIGINT) AS requests, "
+            f"    CAST(COUNT(*) FILTER (WHERE elapsed IS NOT NULL) AS BIGINT) AS elapsed_count, "
+            f"    CAST(COALESCE(SUM(elapsed), 0.0) AS DOUBLE) AS elapsed_sum, "
+            f"    CAST(MEDIAN(elapsed) AS DOUBLE) AS p50_us, "
+            f"    CAST(APPROX_QUANTILE(elapsed, 0.95) AS DOUBLE) AS p95_us, "
+            f"    CAST(APPROX_QUANTILE(elapsed, 0.99) AS DOUBLE) AS p99_us "
+            f"  FROM ("
+            f'    SELECT CAST("{col}" AS VARCHAR) AS value, CAST(elapsed AS DOUBLE) AS elapsed '
+            f"    FROM {table_ident} "
+            f"    WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"      AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f'      AND "{col}" IS NOT NULL'
+            f"  ) "
+            f"  WHERE elapsed IS NOT NULL "
+            f"  GROUP BY value "
+            f"  HAVING COUNT(*) >= {min_req} "
+            f"  ORDER BY APPROX_QUANTILE(elapsed, 0.99) DESC "
+            f"  LIMIT {PERF_LATENCY_BUNDLE_TOP_K}"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_copy_sql
+
+
+_PERF_DIMS: tuple[MultiBundleSpec, ...] = (
+    (
+        "url",
+        PERF_TOP_URLS_BUNDLE_FILENAME,
+        ("elapsed", "url"),
+        _make_perf_latency_copy_sql("url", PERF_URLS_MIN_REQUESTS_PER_HOUR),
+    ),
+    (
+        "asn",
+        PERF_TOP_ASNS_BUNDLE_FILENAME,
+        ("elapsed", "asn"),
+        _make_perf_latency_copy_sql("asn", PERF_ASNS_MIN_REQUESTS_PER_HOUR),
+    ),
 )
 
 
 def build_perf_latency_bundles(service_id: str, source: dict, hours: list[str]) -> int:
-    """Write the perf_top_urls + perf_top_asns rollups for each closed hour.
-
-    Skips:
-      - The active UTC hour (still being written)
-      - Services whose schema lacks ``elapsed`` (no latency to rank on)
-      - A dimension whose column is absent (e.g. no ``asn``) — that file is
-        simply not written; the other dimension still is.
-
-    Idempotent — atomic tmp+rename per file under the per-service iceberg
-    lock. Returns the number of parquet files written this call (so a fully
-    built hour with both dims counts as 2).
-
-    Unlike the single-file writers this drives the shared
-    :func:`build_per_hour_bundles` once per dimension and sums the file
-    counts — each dimension is an independent single-file rollup that just
-    happens to share a source table. The two driver passes each describe the
-    view (cheap, on a cron writer path), so ``describe_label`` keeps the
-    un-suffixed ``perf_latency`` describe log while the COPY/publish warnings
-    carry the per-dimension ``perf_latency(col)`` label as before.
-    """
-    written = 0
-    for col, filename, min_req in _PERF_DIMS:
-
-        def eligibility(cols, table_ident, col=col):
-            if "elapsed" not in cols or col not in cols:
-                return None
-            return True
-
-        def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path, col=col, min_req=min_req):
-            # Same COPY shape as slow_urls, but on `elapsed` and grouped by
-            # the dimension column; top-K cut by p99 DESC (the default sort
-            # + the "slowest" intent). avg is reconstructed from
-            # (elapsed_sum / elapsed_count) at read time.
-            return (
-                f"COPY ("
-                f"  SELECT value, "
-                f"    CAST(COUNT(*) AS BIGINT) AS requests, "
-                f"    CAST(COUNT(*) FILTER (WHERE elapsed IS NOT NULL) AS BIGINT) AS elapsed_count, "
-                f"    CAST(COALESCE(SUM(elapsed), 0.0) AS DOUBLE) AS elapsed_sum, "
-                f"    CAST(MEDIAN(elapsed) AS DOUBLE) AS p50_us, "
-                f"    CAST(APPROX_QUANTILE(elapsed, 0.95) AS DOUBLE) AS p95_us, "
-                f"    CAST(APPROX_QUANTILE(elapsed, 0.99) AS DOUBLE) AS p99_us "
-                f"  FROM ("
-                f'    SELECT CAST("{col}" AS VARCHAR) AS value, CAST(elapsed AS DOUBLE) AS elapsed '
-                f"    FROM {table_ident} "
-                f"    WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
-                f"      AND timestamp <  TIMESTAMPTZ '{end_iso}' "
-                f'      AND "{col}" IS NOT NULL'
-                f"  ) "
-                f"  WHERE elapsed IS NOT NULL "
-                f"  GROUP BY value "
-                f"  HAVING COUNT(*) >= {min_req} "
-                f"  ORDER BY APPROX_QUANTILE(elapsed, 0.99) DESC "
-                f"  LIMIT {PERF_LATENCY_BUNDLE_TOP_K}"
-                f") {parquet_zstd_target(tmp_path)}"
-            )
-
-        written += build_per_hour_bundles(
-            service_id,
-            source,
-            hours,
-            bundle_filename=filename,
-            tmp_prefix=".tmp_pl_",
-            label=f"perf_latency({col})",
-            describe_label="perf_latency",
-            eligibility=eligibility,
-            build_copy_sql=build_copy_sql,
-            logger=logger,
-        )
-    return written
+    """Write the perf_top_urls + perf_top_asns rollups for each closed hour."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_PERF_DIMS,
+        group_label="perf_latency",
+        tmp_prefix=".tmp_pl_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
 
 
 def backfill_perf_latency_bundles(service_id: str, source: dict) -> int:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os as _os
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, model_serializer
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_serializer
 
 from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
@@ -286,10 +286,50 @@ class BootstrapDebugState(WireSafeModel):
     api_call_debug_visibility: str
 
 
+class CustomCard(WireSafeModel):
+    """Custom dashboard card entry in BootstrapResponse."""
+
+    id: str
+    label: str
+
+
+class LastSyncInfo(WireSafeModel):
+    """Latest non-running sync cron run summary in BootstrapResponse."""
+
+    started_at: str | None = None
+    status: str | None = None
+    duration_s: float | None = None
+
+
+from backend.models.admin import (  # noqa: E402
+    LogAccountingResponse,
+    LogExtentsResponse,
+    ShareHeaderBadgeResponse,
+    SyncStatusResponse,
+)
+from backend.models.admin_queries import (  # noqa: E402
+    SlowQueriesCountResponse,
+    SummaryResponse,
+)
+from backend.models.query import SchemaColumn  # noqa: E402
+from backend.models.services import CronRunsPageResponse  # noqa: E402
+from backend.models.session_scoring import ScoringLabelsResponse  # noqa: E402
+from backend.models.share_admin import ShareStatusBannerResponse  # noqa: E402
+from backend.models.views import SavedView  # noqa: E402
+
+
+class OpsOverviewResponse(WireSafeModel):
+    """Seed for OperationsOverview admin cards in BootstrapResponse."""
+
+    queries_summary: SummaryResponse | None = None
+    slow_queries_count: SlowQueriesCountResponse | None = None
+    log_accounting: LogAccountingResponse | None = None
+
+
 class BootstrapResponse(BaseResponse):
     active_service_id: str | None
     services: list[BootstrapService]
-    schema_: list[dict] | None = Field(default=None, alias="schema")
+    schema_: list[SchemaColumn] | None = Field(default=None, alias="schema")
     # _safe_table_name(active_source.name) — the same value /api/schema
     # returns alongside its schema list. Folded in so the frontend can
     # seed its ['admin', 'schema', service_id] React Query cache with the
@@ -304,13 +344,13 @@ class BootstrapResponse(BaseResponse):
     # from `pops` (lat/lon) so the world-map consumer is untouched.
     pop_geo: dict[str, BootstrapPopGeo] | None = None
     settings: dict[str, str | bool | None] | None = None
-    custom_dashboard_cards: list[dict] = Field(default_factory=list)
+    custom_dashboard_cards: list[CustomCard] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
     ngwaf_configured: bool = False
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.
-    views: list[dict] = Field(default_factory=list)
+    views: list[SavedView] = Field(default_factory=list)
     # Full log-fields catalog (same payload as /api/log-fields/catalog)
     # for the active service. Folded in so the frontend can seed its
     # ['log-fields-catalog', service_id] React Query cache and skip the
@@ -321,24 +361,24 @@ class BootstrapResponse(BaseResponse):
     # returns). Folded in so SyncStatusBadge / logs page hit cache on
     # first mount. ADMIN ONLY — None for analyst sessions (matches the
     # dedicated endpoint's 403 for analysts).
-    sync_status: dict | None = None
+    sync_status: SyncStatusResponse | None = None
     # Lean share-status banner ({sharing_active, public_url}). Folded
     # in so the global share banner has its initial state on first
     # render and skips the first /api/admin/share/banner poll.
     # ADMIN ONLY — analysts don't manage sharing.
-    share_banner: dict | None = None
+    share_banner: ShareStatusBannerResponse | None = None
     # Analyst-safe sibling of sync_status, projected down to the two
     # fields the global SyncStatusBadge renders (latest_log_at,
     # local_rows). Available to BOTH admin AND analyst sessions so the
     # badge shows on prod for analyst-shared instances too.
-    header_badge: dict | None = None
+    header_badge: ShareHeaderBadgeResponse | None = None
     # Analyst-safe log extents (same shape as /api/log-extents): the
     # earliest + latest log timestamps the FilterBar uses for its
     # auto-range snap-to-extents. Folded in so the FilterBar's first
     # render skips the dedicated round-trip; the existing 3-s
     # not-yet-populated poll continues from useFilterBar for new
     # services where extents land later.
-    log_extents: dict | None = None
+    log_extents: LogExtentsResponse | None = None
     # Whether the backend will populate ``_debug_queries`` /
     # ``_debug_calls`` envelopes on responses (gated by the
     # ``DEBUG_RESPONSES`` env var). Folded in so the admin
@@ -352,7 +392,7 @@ class BootstrapResponse(BaseResponse):
     # The card-level useQueries (10-s poll, same queryKeys) hit cache
     # on first paint so the cards render with real values instead of
     # "—" placeholders. ADMIN ONLY.
-    ops_overview: dict | None = None
+    ops_overview: OpsOverviewResponse | None = None
     # Seed for the /logs cron tab: mirrors the lean delta-poll shape of
     # /api/cron-runs?per_page=10 with ``with_total=False`` so the
     # count(*) precount stays off the cold-path WAL writer. The heavy
@@ -361,19 +401,69 @@ class BootstrapResponse(BaseResponse):
     # expensive payloads dominates the bootstrap hot path. The cron
     # schedule itself is a lazy-load on the cron tab (P1#5).
     # ADMIN ONLY — analysts don't reach /logs.
-    cron_runs_first_page: dict | None = None
+    cron_runs_first_page: CronRunsPageResponse | None = None
     # Seed for useLastSync (the "Last Sync: Xs ago" header badge).
     # Shape: ``{started_at, status, duration_s}`` of the latest non-running
     # sync cron run, derived from ``latest_cron_per_task("sync")``. Without
     # this seed every admin page-load fired one mandatory
     # /api/cron-runs?task=sync request + 1-2 SSE-invalidation-driven
     # refetches before the 5-min poll TTL kicked in. ADMIN ONLY.
-    last_sync: dict | None = None
+    last_sync: LastSyncInfo | None = None
     # Seed for useScoringLabels — TopFlaggedTable + admin Labels tab +
     # dashboard Flag column all read from ``['scoring-labels', sid]``.
     # Without this seed every cold load fires
     # GET /api/services/{sid}/scoring/labels (p95 311 ms admin / 702 ms
     # analyst). Shape mirrors the endpoint: ``{labels: [...], counts: {...}}``.
     # ADMIN ONLY.
-    scoring_labels: dict | None = None
+    scoring_labels: ScoringLabelsResponse | None = None
     # section_timings is inherited from BaseResponse.
+
+
+class UxEventPayload(BaseModel):
+    """Generic UX-event envelope. Specific event types live as
+    ``event`` discriminator strings; the ``details`` bag carries
+    event-specific fields without forcing a per-event schema."""
+
+    event: str = Field(..., max_length=80)
+    pathname: str | None = Field(default=None, max_length=300)
+    component_id: str | None = Field(default=None, max_length=120)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("details")
+    @classmethod
+    def validate_details(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if len(str(v)) > 4096:
+            raise ValueError("Details payload too large")
+
+        def _check(obj: Any, depth: int = 0) -> None:
+            if depth > 5:
+                raise ValueError("Details too deep")
+            if isinstance(obj, dict):
+                if len(obj) > 50:
+                    raise ValueError("Too many items")
+                for val in obj.values():
+                    _check(val, depth + 1)
+            elif isinstance(obj, list):
+                if len(obj) > 50:
+                    raise ValueError("Too many items")
+                for item in obj:
+                    _check(item, depth + 1)
+
+        _check(v)
+        return v
+
+    model_config = {
+        "extra": "forbid",
+    }
+
+
+class WebVitalsPayload(BaseModel):
+    """Mirrors the web-vitals SDK metric shape (v5 API)."""
+
+    id: str = Field(..., max_length=120)
+    name: Literal["CLS", "FCP", "FID", "INP", "LCP", "TTFB"]
+    value: float
+    rating: Literal["good", "needs-improvement", "poor"]
+    pathname: str | None = Field(default=None, max_length=300)
+    navigation_type: str | None = Field(default=None, max_length=40)
+    delta: float | None = None

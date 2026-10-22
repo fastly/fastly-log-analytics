@@ -3,12 +3,13 @@ import type { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Service } from "@/stores/serviceStore";
 import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { components } from "@/types/api.generated";
+import type { Schema } from "@/types/api";
 
-export type ProvisionService = components["schemas"]["ProvisionService"];
-export type LakeInfo = components["schemas"]["ProvisionLakeInfoResponse"];
-export type LogFieldsCatalog = components["schemas"]["LogFieldsCatalogResponse"];
-type LogFieldsConfig = components["schemas"]["LogFieldsConfig"];
-type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
+export type ProvisionService = Schema<"ProvisionService">;
+export type LakeInfo = Schema<"ProvisionLakeInfoResponse">;
+export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">;
+type LogFieldsConfig = Schema<"LogFieldsConfig">;
+type ValidateResponse = Schema<"ProvisionValidateResponse">;
 
 export const WIZARD_DRAFT_VERSION = 1;
 
@@ -269,10 +270,7 @@ export interface WizardState {
   selectedTfFile: string;
   setSelectedTfFile: (f: string) => void;
   isFetchingTerraform: boolean;
-  configStatus: {
-    logging_service: { ok: boolean; details: string };
-    cdn_service: { ok: boolean; details: string };
-  } | null;
+  configStatus: Schema<"ProvisionCheckConfigResponse"> | null;
   isCheckingConfig: boolean;
   handleCheckConfig: () => Promise<void>;
 

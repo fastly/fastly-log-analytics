@@ -25,39 +25,17 @@ token-bucket per ``analyst_session_id``.
 from __future__ import annotations
 
 import logging
-from typing import Literal
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
 
 from backend.core import web_vitals_store
-from backend.models.common import OkResponse
+from backend.models.common import OkResponse, WebVitalsPayload
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.date_utils import iso_z_now
 
 logger = logging.getLogger("backend.web_vitals")
 
 router = APIRouter(prefix="/api/web-vitals", tags=["web-vitals"], responses=DEFAULT_ERROR_RESPONSES)
-
-
-class WebVitalsPayload(BaseModel):
-    """Mirrors the web-vitals SDK metric shape (v5 API).
-
-    Field names match the JS Metric object so the frontend can pass it
-    through without reshape. ``rating`` is computed by the SDK against
-    Google's good/needs-improvement/poor thresholds.
-    """
-
-    # ``id`` is a stable per-page-load id the SDK uses for delta updates
-    # (CLS / INP keep updating the same metric throughout a page's life).
-    id: str = Field(..., max_length=120)
-    name: Literal["CLS", "FCP", "FID", "INP", "LCP", "TTFB"]
-    value: float
-    rating: Literal["good", "needs-improvement", "poor"]
-    # Optional context.
-    pathname: str | None = Field(default=None, max_length=300)
-    navigation_type: str | None = Field(default=None, max_length=40)
-    delta: float | None = None
 
 
 @router.post("", response_model=OkResponse, response_model_exclude_unset=True)

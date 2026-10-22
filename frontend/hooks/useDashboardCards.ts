@@ -118,7 +118,7 @@ export function useDashboardCards(): DashboardCard[] {
         }
       })
 
-    const customCards: DashboardCard[] = ((bootstrap.custom_dashboard_cards || []) as { id: string, label: string }[])
+    const customCards: DashboardCard[] = (bootstrap.custom_dashboard_cards ?? [])
       .filter(c => {
         // Exclude system fields from bootstrap custom cards too
         const isSystemField =

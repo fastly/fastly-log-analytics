@@ -6,7 +6,7 @@ import { DeleteDataDialog } from '@/components/DeleteDataDialog/DeleteDataDialog
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 

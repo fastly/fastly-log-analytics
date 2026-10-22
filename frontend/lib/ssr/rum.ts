@@ -4,15 +4,11 @@
 //
 // Trust topology + Caddy-drift defense live in ./_transport.ts.
 
+import type { Schema } from '@/types/api'
+
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export interface RumStatusResponse {
-  enabled: boolean
-  enabled_at: string | null
-  deployed_vcl_sha: string | null
-  current_vcl_sha: string | null
-  vcl_drift: boolean
-}
+export type RumStatusResponse = Schema<'RumStatusResponse'>
 
 export async function fetchRumStatusServerSide(
   serviceId: string | undefined,

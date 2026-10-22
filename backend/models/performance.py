@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import ConfigDict, Field
 
 from backend.models._base import WireSafeModel
-from backend.models.common import BaseResponse
+from backend.models.common import BaseResponse, RangeKeyedRequest
+
+PerformanceSectionName = Literal[
+    "waterfall",
+    "top_urls",
+    "top_asns",
+    "ttl_dist",
+    "scatter",
+]
+
+
+class PerformanceRequest(RangeKeyedRequest):
+    sort_by: Literal["avg", "p50", "p95", "p99"] = "p99"
+    sections: list[PerformanceSectionName] | None = None
 
 
 class PerformanceUrlRow(WireSafeModel):

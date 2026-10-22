@@ -10,7 +10,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 
 ### Key Tenets:
 - **Zero Dark Cloud Ops:** Every S3/FOS and Fastly CDN API call executed by any API route, background scheduler job, or Celery worker is logged with `process_context`, `function_name`, `operation_class`, and `operation_type` attribution.
-- **Two-Stage Query Pattern (Fast First Paint):** Pre-fetches the initial 50-row `head` slice + aggregate KPI totals server-side (`fetchUsageLogServerSide` in [`frontend/lib/ssr/usage_log.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/lib/ssr/usage_log.ts)) and hydrates via `HydrationBoundary`, then loads the full 500-row table slice in the background with `include_aggregate=false` to skip redundant SQL `SUM()` scans.
+- **Two-Stage Query Pattern (Fast First Paint):** Pre-fetches the initial 50-row `head` slice + aggregate KPI totals server-side (`fetchUsageLogServerSide` in [`frontend/lib/ssr/usage_log.ts`](../../../frontend/lib/ssr/usage_log.ts)) and hydrates via `HydrationBoundary`, then loads the full 500-row table slice in the background with `include_aggregate=false` to skip redundant SQL `SUM()` scans.
 - **Durable Hourly Rollup Summaries:** Backed by PostgreSQL 16 `usage_log` (detailed call records) and `usage_log_hourly_summary` (compact hourly rollups preserved across detailed-row purges) per [ADR-22](../../adr/22-postgres-only-metadata.md).
 - **Strict Admin-Only RBAC:** Accessible **exclusively** to Admin (`read_write`) operators. Analyst Path B remote-share sessions receive `403 Forbidden` with `{"error": "admin_only"}`.
 
@@ -22,13 +22,13 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 - **Supported URL Query Parameters:**
   - `service`: Optional Fastly Service ID (falls back to `useServiceStore.activeServiceId`).
 - **Frontend Entrypoints:**
-  - [`frontend/app/admin/usage-log/page.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/page.tsx) — Force-dynamic RSC shell that computes the minute-floored 24h window (`[now - 24h, now]`), pre-fetches the 50-row head slice via `fetchUsageLogServerSide()`, and seeds `['usage-log', 'head', serviceId ?? null, start, end, '', '', '']` into `HydrationBoundary`.
-  - [`frontend/app/admin/usage-log/loading.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/loading.tsx) — Geometry-matched route-level loading skeleton with pre-allocated zero-CLS reservation containers.
-  - [`frontend/app/admin/usage-log/_sections/UsageLogClient.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/_sections/UsageLogClient.tsx) — Interactive client view managing two-stage `headQuery` (50 rows + aggregate) and `fullQuery` (500 rows, `include_aggregate=false`), 4-card KPI grid, `LogAccountingPanel`, `UsageLogFilters`, virtualized `DataTable`, CSV export link, and purge confirmation dialog.
-  - [`frontend/app/admin/usage-log/_sections/Filters.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/_sections/Filters.tsx) — Time preset selector (`1h`, `24h`, `7d`, `30d`), usage type selector (`All`, `FOS Only`, `CDN Only`), `operation_type` filter input, and `process_context` filter input.
-  - [`frontend/app/admin/usage-log/_sections/UsageChart.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/_sections/UsageChart.tsx) — `LogAccountingPanel` comparing Fastly Stats API authoritative request counts against locally ingested rows (`GET /api/admin/log-accounting`).
-  - [`frontend/app/admin/usage-log/_sections/UsageTable.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/_sections/UsageTable.tsx) — Column definitions for timestamp, service ID, operation class (`A`/`B`/`CDN` badges), operation type, URL/path, bytes, function name, process context, HTTP status, and estimated cost.
-  - [`frontend/lib/ssr/usage_log.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/lib/ssr/usage_log.ts) — Server-side SSR helper for `/api/admin/usage-log`.
+  - [`frontend/app/admin/usage-log/page.tsx`](../../../frontend/app/admin/usage-log/page.tsx) — Force-dynamic RSC shell that computes the minute-floored 24h window (`[now - 24h, now]`), pre-fetches the 50-row head slice via `fetchUsageLogServerSide()`, and seeds `['usage-log', 'head', serviceId ?? null, start, end, '', '', '']` into `HydrationBoundary`.
+  - [`frontend/app/admin/usage-log/loading.tsx`](../../../frontend/app/admin/usage-log/loading.tsx) — Geometry-matched route-level loading skeleton with pre-allocated zero-CLS reservation containers.
+  - [`frontend/app/admin/usage-log/_sections/UsageLogClient.tsx`](../../../frontend/app/admin/usage-log/_sections/UsageLogClient.tsx) — Interactive client view managing two-stage `headQuery` (50 rows + aggregate) and `fullQuery` (500 rows, `include_aggregate=false`), 4-card KPI grid, `LogAccountingPanel`, `UsageLogFilters`, virtualized `DataTable`, CSV export link, and purge confirmation dialog.
+  - [`frontend/app/admin/usage-log/_sections/Filters.tsx`](../../../frontend/app/admin/usage-log/_sections/Filters.tsx) — Time preset selector (`1h`, `24h`, `7d`, `30d`), usage type selector (`All`, `FOS Only`, `CDN Only`), `operation_type` filter input, and `process_context` filter input.
+  - [`frontend/app/admin/usage-log/_sections/UsageChart.tsx`](../../../frontend/app/admin/usage-log/_sections/UsageChart.tsx) — `LogAccountingPanel` comparing Fastly Stats API authoritative request counts against locally ingested rows (`GET /api/admin/log-accounting`).
+  - [`frontend/app/admin/usage-log/_sections/UsageTable.tsx`](../../../frontend/app/admin/usage-log/_sections/UsageTable.tsx) — Column definitions for timestamp, service ID, operation class (`A`/`B`/`CDN` badges), operation type, URL/path, bytes, function name, process context, HTTP status, and estimated cost.
+  - [`frontend/lib/ssr/usage_log.ts`](../../../frontend/lib/ssr/usage_log.ts) — Server-side SSR helper for `/api/admin/usage-log`.
 
 ---
 
@@ -37,7 +37,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write` / mTLS Admin Gateway)** | Full Control | `200 OK` across `/admin/usage-log`, `GET /api/admin/usage-log`, `GET /api/admin/usage-log/export`, `DELETE /api/admin/usage-log`, `GET/PATCH /api/admin/usage-logging`, `GET /api/admin/system-jobs`, and `GET /api/admin/log-accounting`. |
-| **Analyst Path B (Remote Share)** | **Blocked (`403 Forbidden`)** | Enforced at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `dependencies=[Depends(require_admin)]` across all 6 endpoints in [`backend/routers/admin_usage.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/routers/admin_usage.py). Any request carrying `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. `fetchUsageLogServerSide()` refuses to inject the admin bearer token when `x-fla-role: analyst` is present. |
+| **Analyst Path B (Remote Share)** | **Blocked (`403 Forbidden`)** | Enforced at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `dependencies=[Depends(require_admin)]` across all 6 endpoints in [`backend/routers/admin_usage.py`](../../../backend/routers/admin_usage.py). Any request carrying `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. `fetchUsageLogServerSide()` refuses to inject the admin bearer token when `x-fla-role: analyst` is present. |
 | **Analyst Path A (Standalone Read-Only FOS Instance)** | Local Instance Admin UI | Can inspect local FOS usage ledger for their own standalone process (`200 OK`). |
 
 ---
@@ -47,7 +47,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Ledger Storage ([ADR-22](../../adr/22-postgres-only-metadata.md))** | Unified PostgreSQL 16 (`METADATA_DSN`) tables: `usage_log` (detailed call records) and `usage_log_hourly_summary` (hourly rollups by `(hour_bucket, service_id, usage_type, operation_class, process_context)`). | Unified PostgreSQL 16 (`METADATA_DSN`) tables: `usage_log` and `usage_log_hourly_summary`, shared across the serving pod and Celery ingest/maintenance workers. |
-| **Write Buffering & Flush** | Thread-safe in-memory buffer in [`backend/core/metadata/usage_log.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/core/metadata/usage_log.py) flushed in batches via [`backend/core/metadata/usage_log_db.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/core/metadata/usage_log_db.py), updating both `usage_log` and `usage_log_hourly_summary` atomically (`ON CONFLICT DO UPDATE`). | Identical PostgreSQL upsert pipeline from both serving pod and Celery workers, with MVCC isolation ensuring writers never block dashboard or admin readers. |
+| **Write Buffering & Flush** | Thread-safe in-memory buffer in [`backend/core/metadata/usage_log.py`](../../../backend/core/metadata/usage_log.py) flushed in batches via [`backend/core/metadata/usage_log_db.py`](../../../backend/core/metadata/usage_log_db.py), updating both `usage_log` and `usage_log_hourly_summary` atomically (`ON CONFLICT DO UPDATE`). | Identical PostgreSQL upsert pipeline from both serving pod and Celery workers, with MVCC isolation ensuring writers never block dashboard or admin readers. |
 | **Retention & Purge** | Detailed rows in `usage_log` are pruned in 5,000-row chunks by `metadata_cleanup` after `retention_days` (default 30d) or manually via `DELETE /api/admin/usage-log`; `usage_log_hourly_summary` is preserved for historical trend continuity. | Identical. |
 | **Ingest Accounting (`LogAccountingPanel`)** | Compares Fastly Historical Stats API against `ingested_files` / DuckLake row counts via `GET /api/admin/log-accounting`. | Compares Fastly Historical Stats API against High-Scale ClickHouse / Postgres `ingest_ledger` row counts via `GET /api/admin/log-accounting`. |
 
@@ -55,7 +55,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 
 ## 5. Backend APIs, Contracts & Telemetry Attribution
 
-### Endpoints Implemented in [`backend/routers/admin_usage.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/routers/admin_usage.py) & [`backend/routers/admin/log_accounting.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/routers/admin/log_accounting.py):
+### Endpoints Implemented in [`backend/routers/admin_usage.py`](../../../backend/routers/admin_usage.py) & [`backend/routers/admin/log_accounting.py`](../../../backend/routers/admin/log_accounting.py):
 
 1. **`GET /api/admin/usage-log`** (`response_model=UsageLogResponse`, `Depends(require_admin)`):
    - **Query Parameters:**
@@ -66,7 +66,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
      - `operation_type` (`str | None`): Operation filter (`GET_OBJECT`, `LIST_OBJECTS_V2`, `PUT_OBJECT`, etc.).
      - `page` (`int`, default `1`, `ge=1`), `page_size` (`int`, default `100`, `ge=1`, `le=500`).
      - `include_aggregate` (`bool`, default `True`): When `False` (used by the client's 500-row background `fullQuery`), skips the `SUM()` aggregate scan and returns a zeroed `UsageLogAggregate` placeholder.
-   - **Response Schema (`UsageLogResponse` in [`backend/models/admin.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/models/admin.py)):**
+   - **Response Schema (`UsageLogResponse` in [`backend/models/admin.py`](../../../backend/models/admin.py)):**
      - `entries`: `list[UsageLogEntry]` (`id`, `timestamp`, `service_id`, `usage_type`, `operation_class`, `operation_type`, `url`, `bytes`, `function_name`, `process_context`, `status`, `estimated_cost`).
      - `total`: `int`, `page`: `int`, `page_size`: `int`.
      - `aggregate`: `UsageLogAggregate` (`total_class_a`, `total_class_b`, `total_fos_bytes`, `total_cdn_requests`, `total_cdn_bytes`, `estimated_cost_class_a`, `estimated_cost_class_b`, `estimated_cost_cdn_bandwidth`, `estimated_cost_cdn_requests`, `estimated_cost_total`, `by_process`, `rates`).
@@ -101,7 +101,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
    - **Ingest Accounting Panel (`data-testid="admin-usage-log-chart-reservation"`):** `min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]` wrapping `LogAccountingPanel` (`data-testid="admin-usage-log-accounting-panel"`).
    - **Filters & Ledger Table Card (`data-testid="admin-usage-log-table-reservation"`):** `min-h-[520px] [contain-intrinsic-size:auto_520px] [content-visibility:auto]` wrapping `UsageLogFilters` (`data-testid="admin-usage-log-filters"`) and the virtualized `DataTable`.
 2. **In-Place Skeletons & Non-Destructive Dimming:**
-   - [`frontend/app/admin/usage-log/loading.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/admin/usage-log/loading.tsx) and unseeded initial loads display geometry-matched skeletons (`Loading FOS usage ledger...`).
+   - [`frontend/app/admin/usage-log/loading.tsx`](../../../frontend/app/admin/usage-log/loading.tsx) and unseeded initial loads display geometry-matched skeletons (`Loading FOS usage ledger...`).
    - Both `headQuery` and `fullQuery` use `placeholderData: keepPreviousData`; background refetches dim the active KPI grid and table (`opacity-40 pointer-events-none`) without collapsing layout (`CLS <= 0.05`).
 
 ---
@@ -148,7 +148,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 
 ## 10. Automated Test Suite
 
-- **Backend Unit Tests:** [`tests/routers/test_admin_usage_log.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/tests/routers/test_admin_usage_log.py) (19 tests covering raw entries, aggregates, `include_aggregate=False`, filtering by `service_id`/`usage_type`/`process_context`/`operation_type`, CSV export, purge, `GET/PATCH /api/admin/usage-logging` validation, `GET /api/admin/system-jobs`, and Analyst Path B `403` rejection across all 6 endpoints).
-- **Route Tripwire & OpenAPI Snapshot Tests:** [`tests/remote_access/test_route_table_tripwire.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/tests/remote_access/test_route_table_tripwire.py) and [`tests/test_openapi_snapshot.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/tests/test_openapi_snapshot.py).
-- **Frontend Unit Tests:** [`frontend/__tests__/app/admin/usage-log.test.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/__tests__/app/admin/usage-log.test.tsx) (4 tests covering `loading.tsx` geometry, pending skeleton state, KPI/accounting/table rendering, and preset/filter/refresh/purge interactions).
-- **Playwright E2E Suite:** [`frontend/e2e/pages/admin-usage-log.spec.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/e2e/pages/admin-usage-log.spec.ts) (5 end-to-end contract tests verified locally and across all 3 live deployment tiers).
+- **Backend Unit Tests:** [`tests/routers/test_admin_usage_log.py`](../../../tests/routers/test_admin_usage_log.py) (19 tests covering raw entries, aggregates, `include_aggregate=False`, filtering by `service_id`/`usage_type`/`process_context`/`operation_type`, CSV export, purge, `GET/PATCH /api/admin/usage-logging` validation, `GET /api/admin/system-jobs`, and Analyst Path B `403` rejection across all 6 endpoints).
+- **Route Tripwire & OpenAPI Snapshot Tests:** [`tests/remote_access/test_route_table_tripwire.py`](../../../tests/remote_access/test_route_table_tripwire.py) and [`tests/test_openapi_snapshot.py`](../../../tests/test_openapi_snapshot.py).
+- **Frontend Unit Tests:** [`frontend/__tests__/app/admin/usage-log.test.tsx`](../../../frontend/__tests__/app/admin/usage-log.test.tsx) (4 tests covering `loading.tsx` geometry, pending skeleton state, KPI/accounting/table rendering, and preset/filter/refresh/purge interactions).
+- **Playwright E2E Suite:** [`frontend/e2e/pages/admin-usage-log.spec.ts`](../../../frontend/e2e/pages/admin-usage-log.spec.ts) (5 end-to-end contract tests verified locally and across all 3 live deployment tiers).

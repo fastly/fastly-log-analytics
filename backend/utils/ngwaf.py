@@ -163,7 +163,8 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
     ngwaf_db = svcconfig.ngwaf_db_path()
     table_name = _safe_table(src["name"])
 
-    if not os.path.exists(ngwaf_db):
+    default_ngwaf_db = str(svcconfig.DATA_DIR / "ngwaf_bot_cache.db")
+    if ngwaf_db and ngwaf_db != default_ngwaf_db and not os.path.exists(ngwaf_db):
         return None
 
     try:

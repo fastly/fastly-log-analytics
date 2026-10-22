@@ -49,7 +49,7 @@ async function poll(url: string, timeoutMs = 30_000): Promise<void> {
 
 export async function startBackend(): Promise<void> {
   if (proc) return
-  const repoRoot = join(__dirname, '..', '..')
+  const repoRoot = join(__dirname, '..', '..', '..')
   sandbox = mkdtempSync(join(tmpdir(), 'fla-contract-'))
 
   proc = spawn(

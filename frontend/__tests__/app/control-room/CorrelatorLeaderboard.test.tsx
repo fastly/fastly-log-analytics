@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 
 import { CorrelatorLeaderboard } from '@/app/control-room/_sections/ControlRoomClient'
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 describe('CorrelatorLeaderboard', () => {
   it('posts the dimension/limit and renders the leaderboard', async () => {

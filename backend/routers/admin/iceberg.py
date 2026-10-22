@@ -17,7 +17,6 @@ from backend.utils.router_utils import (
     raise_internal,
     require_json_content_type,
 )
-from backend.utils.sse import sse_response
 
 from ._router import router
 
@@ -74,24 +73,19 @@ def iceberg_commit_endpoint(
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
-    if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
-        )
-
     from backend.cron.jobs.commit import _run_commit
-    from backend.utils.router_utils import start_or_resume_cron
+    from backend.routers.admin._helpers import run_admin_cron_trigger
 
-    res = start_or_resume_cron(
+    return run_admin_cron_trigger(
         source,
         "commit",
         _run_commit,
         target_kwargs={"force": True},
         success_msg="Commit started.",
         in_progress_msg="Commit already running.",
+        readonly_detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
+        invalidate_cache=False,
     )
-    return SyncStartResponse(**res)
 
 
 @router.post(
@@ -206,11 +200,8 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
     ``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't
     match the resolved service id.
     """
-    import json as _json
-    import queue as _queue
-    import threading
-
     from backend.core.reset import reset_service_logs
+    from backend.routers.admin._helpers import stream_sse_from_worker
 
     service_id = source["name"]
 
@@ -222,9 +213,7 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
             detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
         )
 
-    events: _queue.Queue = _queue.Queue()
-
-    def worker():
+    def worker(events):
         from backend.cron.scheduler import get_scheduler
 
         try:
@@ -238,24 +227,8 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
         except Exception as e:
             logger.exception("reset_logs_endpoint(%s) failed", service_id)
             events.put({"type": "error", "message": f"Log deletion failed: {e}"})
-        finally:
-            events.put(None)
 
-    threading.Thread(target=worker, daemon=True, name=f"reset-logs-{service_id}").start()
-
-    async def stream():
-        import asyncio
-
-        while True:
-            try:
-                event = await asyncio.to_thread(events.get, timeout=1)
-                if event is None:
-                    break
-                yield _json.dumps(event)
-            except _queue.Empty:
-                pass
-
-    return sse_response(stream())
+    return stream_sse_from_worker(worker)
 
 
 @router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
@@ -265,11 +238,8 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
     Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
     while leaving logs data completely untouched.
     """
-    import json as _json
-    import queue as _queue
-    import threading
-
     from backend.core.reset import reset_service_rum
+    from backend.routers.admin._helpers import stream_sse_from_worker
 
     service_id = source["name"]
 
@@ -281,9 +251,7 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
             detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
         )
 
-    events: _queue.Queue = _queue.Queue()
-
-    def worker():
+    def worker(events):
         from backend.cron.scheduler import get_scheduler
 
         try:
@@ -296,21 +264,5 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
         except Exception as e:
             logger.exception("reset_rum_endpoint(%s) failed", service_id)
             events.put({"type": "error", "message": f"RUM deletion failed: {e}"})
-        finally:
-            events.put(None)
 
-    threading.Thread(target=worker, daemon=True, name=f"reset-rum-{service_id}").start()
-
-    async def stream():
-        import asyncio
-
-        while True:
-            try:
-                event = await asyncio.to_thread(events.get, timeout=1)
-                if event is None:
-                    break
-                yield _json.dumps(event)
-            except _queue.Empty:
-                pass
-
-    return sse_response(stream())
+    return stream_sse_from_worker(worker)

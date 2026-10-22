@@ -45,9 +45,9 @@ export default async function InsightsPage({
   const bootstrap = await fetchBootstrapServerSide()
   const serviceId =
     firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+    bootstrap?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
+  const logExtents = bootstrap?.log_extents
 
   const initialTab = firstParam(params.tab)
   const initialWindow = firstParam(params.window)

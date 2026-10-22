@@ -761,14 +761,11 @@ def test_contract_progress_events_and_duration_finalization():
 
 
 def test_contract_alerts_job_module_exports():
-    """backend.cron.jobs.alerts exports all required alert evaluation entrypoints."""
-    from backend.cron.jobs import alerts as alerts_job
-
-    assert hasattr(alerts_job, "_run_service_alerts_evaluation")
-    assert hasattr(alerts_job, "_post_alert_webhook")
-    assert hasattr(alerts_job, "_post_slack_notification")
-    assert hasattr(alerts_job, "_post_pagerduty_notification")
-    assert alerts_job._run_service_alerts_evaluation is metadata_job._run_service_alerts_evaluation
+    """backend.cron.jobs.metadata exports all required alert evaluation entrypoints."""
+    assert hasattr(metadata_job, "_run_service_alerts_evaluation")
+    assert hasattr(metadata_job, "_post_alert_webhook")
+    assert hasattr(metadata_job, "_post_slack_notification")
+    assert hasattr(metadata_job, "_post_pagerduty_notification")
 
 
 def test_lease_held_skips_without_opening_duckdb_or_recording_a_row():

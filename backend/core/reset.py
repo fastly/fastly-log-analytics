@@ -207,9 +207,10 @@ def reset_service_logs(
         # `get_connection` block on the barrier IT raised).
         yield {"type": "status", "message": "Draining local database connections..."}
         _db.set_recycle_barrier(db_path, True)
+        retired_pools = {}
         try:
-            _pool.begin_drain_pools([service_key])
-            _pool.wait_pools_drained([service_key], _DRAIN_TIMEOUT_S)
+            retired_pools = _pool.begin_drain_pools([service_key])
+            _pool.wait_pools_drained(retired_pools, _DRAIN_TIMEOUT_S)
             gc.collect()
             deadline = time.monotonic() + _DRAIN_GRACE_S
             while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
@@ -232,8 +233,18 @@ def reset_service_logs(
                     # implementation's tolerance for the same race.
                     shutil.rmtree(cache_dir, ignore_errors=True)
                 yield {"type": "status", "message": f"Removed {removed:,} local cache file(s)."}
+
+            from backend.core.iceberg._ducklake import _default_data_path, _ducklake_attach, ducklake_table_name
+
+            tbl = ducklake_table_name(source, "logs")
+            ducklake_root = svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source)
+            if not ducklake_root.startswith(("s3://", "http://", "https://")):
+                for sub in (os.path.join(ducklake_root, "main", tbl), os.path.join(ducklake_root, tbl)):
+                    if os.path.exists(sub):
+                        yield from _remove_tree_with_progress(sub)
+                        shutil.rmtree(sub, ignore_errors=True)
         finally:
-            _pool.end_drain_pools([service_key])
+            _pool.end_drain_pools(retired_pools or [service_key])
             _db.set_recycle_barrier(db_path, False)
 
         yield {"type": "status", "message": "Purging cloud Iceberg log table..."}
@@ -288,6 +299,10 @@ def reset_service_logs(
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
         con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
+        con.execute(
+            "DELETE FROM ingest_ledger WHERE service_id = ? AND object_key NOT LIKE ? AND object_key NOT LIKE ? AND object_key NOT LIKE ?",
+            (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
+        )
         con.commit()
 
         if not preserve_usage_history:
@@ -301,6 +316,11 @@ def reset_service_logs(
         iceberg_core.init_iceberg_table(source, create=True)
         con2 = _db.get_connection(source)
         try:
+            try:
+                if _ducklake_attach(con2, source, read_only=False):
+                    con2.execute(f'DROP TABLE IF EXISTS lake."{tbl}"')
+            except Exception as e:
+                logger.debug("reset_service_logs(%s): DuckLake table drop skipped: %s", service_id, e)
             update_iceberg_view(con2, source, force=True)
         finally:
             con2.close()
@@ -445,9 +465,10 @@ def reset_service_rum(
         # Drain the RUM DuckDB connection pool and barrier connections
         yield {"type": "status", "message": "Draining local RUM database connections..."}
         _db.set_recycle_barrier(rum_db_path, True)
+        retired_rum_pools = {}
         try:
-            _pool.begin_drain_pools([rum_service_key])
-            _pool.wait_pools_drained([rum_service_key], _DRAIN_TIMEOUT_S)
+            retired_rum_pools = _pool.begin_drain_pools([rum_service_key])
+            _pool.wait_pools_drained(retired_rum_pools, _DRAIN_TIMEOUT_S)
             gc.collect()
             deadline = time.monotonic() + _DRAIN_GRACE_S
             while _db.live_connection_count(rum_db_path) > 0 and time.monotonic() < deadline:
@@ -461,7 +482,10 @@ def reset_service_rum(
             _db.clear_initialization_state(rum_db_path)
 
             yield {"type": "status", "message": "Wiping local RUM cache & buffer..."}
+            from backend.core.iceberg._ducklake import _default_data_path, _ducklake_attach, ducklake_table_name
+
             rum_cache_dir = _db._cache_dir(source)
+            ducklake_root = svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source)
             for t_name in ("client_vitals", "client_errors"):
                 # Clean up local cache directory
                 data_dir = os.path.join(rum_cache_dir, f"data_{t_name}")
@@ -474,8 +498,16 @@ def reset_service_rum(
                 buf_dir = os.path.join(rum_cache_dir, "buffer", t_name)
                 if os.path.exists(buf_dir):
                     shutil.rmtree(buf_dir, ignore_errors=True)
+
+                # Clean up local DuckLake RUM data directory
+                if not ducklake_root.startswith(("s3://", "http://", "https://")):
+                    rum_tbl = ducklake_table_name(source, t_name)
+                    for sub in (os.path.join(ducklake_root, "main", rum_tbl), os.path.join(ducklake_root, rum_tbl)):
+                        if os.path.exists(sub):
+                            yield from _remove_tree_with_progress(sub)
+                            shutil.rmtree(sub, ignore_errors=True)
         finally:
-            _pool.end_drain_pools([rum_service_key])
+            _pool.end_drain_pools(retired_rum_pools or [rum_service_key])
             _db.set_recycle_barrier(rum_db_path, False)
 
         yield {"type": "status", "message": "Purging cloud Iceberg RUM tables..."}
@@ -514,6 +546,10 @@ def reset_service_rum(
         con.execute(
             "DELETE FROM local_compacted_files WHERE file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%'"
         )
+        con.execute(
+            "DELETE FROM ingest_ledger WHERE service_id = ? AND (object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)",
+            (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
+        )
         con.commit()
 
         metadata_db.recompute_ingested_files_summary(con, service_id)
@@ -526,6 +562,13 @@ def reset_service_rum(
         # Pre-warm/initialize views on a standard connection
         con2 = _db.get_connection(rum_source)
         try:
+            try:
+                if _ducklake_attach(con2, source, read_only=False):
+                    for t_name in ("client_vitals", "client_errors"):
+                        rum_tbl = ducklake_table_name(source, t_name)
+                        con2.execute(f'DROP TABLE IF EXISTS lake."{rum_tbl}"')
+            except Exception as e:
+                logger.debug("reset_service_rum(%s): DuckLake table drop skipped: %s", service_id, e)
             update_iceberg_view(con2, source, force=True, target_table="client_vitals")
             update_iceberg_view(con2, source, force=True, target_table="client_errors")
         finally:

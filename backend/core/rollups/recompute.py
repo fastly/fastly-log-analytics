@@ -38,8 +38,9 @@ from ._common import (
     _rollups_root,
     _safe_table_for,
     _save_markers,
-    describe_columns,
+    acquire_rollup_connection_and_cols,
     parse_hour_token,
+    shared_rollup_session,
 )
 from .hour_bundles import bundle_hours, bundle_hours_ip_spread
 
@@ -109,60 +110,61 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
         f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hour_list_sql})"
     )
     fields_to_rollup = _get_fields(source)
-    _run_per_field_copy(service_id, source, table_ident, where_sql, fields_to_rollup)
-
-    # IP-spread rollup runs alongside the count rollup so the security
-    # fingerprint cards can serve cross-hour distinct-IP estimates from
-    # rollups without an ip column in the per-request temp scan.
-    # Best-effort: a failure here doesn't block the count rollup or
-    # the bundles below; the reader falls back to the live temp scan
-    # when ip_spread.parquet is missing.
-    try:
-        _run_ip_spread_per_field(service_id, source, table_ident, where_sql, fields_to_rollup)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ip_spread per-field write failed (count rollup unaffected): %s",
-            service_id,
-            e,
-        )
-
-    # Bundle the touched hours so the dashboard reader can open one
-    # file per hour instead of N per-field files. Best-effort: if
-    # bundling fails, the per-field files still serve correctly via
-    # the reader's fallback path.
     touched_hours = [h for h, _ in parsed]
-    try:
-        bundle_hours(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning("[rollups] %s: hour bundling failed (per-field still serves): %s", service_id, e)
+    with shared_rollup_session(source):
+        _run_per_field_copy(service_id, source, table_ident, where_sql, fields_to_rollup)
 
-    # IP-spread bundle runs alongside the count bundle. Best-effort:
-    # a failure here leaves per-field ip_spread parquets intact and
-    # the reader's per-field path serves until the next bundling tick.
-    try:
-        bundle_hours_ip_spread(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ip_spread hour bundling failed (per-field ip_spread still serves): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour feature rollups (see spec.HOUR_WRITERS). Same best-effort
-    # contract for every writer: a failure is logged and leaves the affected
-    # hours on the spec's fallback path (raw scan / direct join) without
-    # blocking the writers after it.
-    for spec in HOUR_WRITERS:
+        # IP-spread rollup runs alongside the count rollup so the security
+        # fingerprint cards can serve cross-hour distinct-IP estimates from
+        # rollups without an ip column in the per-request temp scan.
+        # Best-effort: a failure here doesn't block the count rollup or
+        # the bundles below; the reader falls back to the live temp scan
+        # when ip_spread.parquet is missing.
         try:
-            getattr(sys.modules[__name__], spec.builder)(service_id, source, touched_hours)
+            _run_ip_spread_per_field(service_id, source, table_ident, where_sql, fields_to_rollup)
         except Exception as e:
             logger.warning(
-                "[rollups] %s: %s bundle failed (%s will serve): %s",
+                "[rollups] %s: ip_spread per-field write failed (count rollup unaffected): %s",
                 service_id,
-                spec.label,
-                spec.fallback,
                 e,
             )
+
+        # Bundle the touched hours so the dashboard reader can open one
+        # file per hour instead of N per-field files. Best-effort: if
+        # bundling fails, the per-field files still serve correctly via
+        # the reader's fallback path.
+        try:
+            bundle_hours(service_id, source, touched_hours)
+        except Exception as e:
+            logger.warning("[rollups] %s: hour bundling failed (per-field still serves): %s", service_id, e)
+
+        # IP-spread bundle runs alongside the count bundle. Best-effort:
+        # a failure here leaves per-field ip_spread parquets intact and
+        # the reader's per-field path serves until the next bundling tick.
+        try:
+            bundle_hours_ip_spread(service_id, source, touched_hours)
+        except Exception as e:
+            logger.warning(
+                "[rollups] %s: ip_spread hour bundling failed (per-field ip_spread still serves): %s",
+                service_id,
+                e,
+            )
+
+        # Per-hour feature rollups (see spec.HOUR_WRITERS). Same best-effort
+        # contract for every writer: a failure is logged and leaves the affected
+        # hours on the spec's fallback path (raw scan / direct join) without
+        # blocking the writers after it.
+        for spec in HOUR_WRITERS:
+            try:
+                getattr(sys.modules[__name__], spec.builder)(service_id, source, touched_hours)
+            except Exception as e:
+                logger.warning(
+                    "[rollups] %s: %s bundle failed (%s will serve): %s",
+                    service_id,
+                    spec.label,
+                    spec.fallback,
+                    e,
+                )
 
 
 def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = None) -> None:
@@ -661,7 +663,7 @@ def _run_per_field_copy(
     PARTITION_BY (field, hour), then publishing each hour-dir under the
     per-service iceberg lock.
     """
-    from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.duckdb import _cache_dir
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
 
@@ -670,9 +672,13 @@ def _run_per_field_copy(
     os.makedirs(rollups_dir, exist_ok=True)
     lock_key = source.get("name", "default")
 
-    con = get_connection(source=source, read_only=True)
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source,
+        table_ident,
+        logger=logger,
+        log_label="could not describe",
+    )
     try:
-        cols = describe_columns(con, source, table_ident, logger=logger, log_label="could not describe")
         if cols is None:
             return
 
@@ -715,7 +721,8 @@ def _run_per_field_copy(
                 _publish_field_partitions(tmp_field_dir, rollups_dir, field)
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
     finally:
-        con.close()
+        if owns_con:
+            con.close()
 
 
 def _run_ip_spread_per_field(
@@ -749,7 +756,7 @@ def _run_ip_spread_per_field(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.duckdb import _cache_dir
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
     from backend.utils.hll import HyperLogLog
@@ -759,9 +766,13 @@ def _run_ip_spread_per_field(
     os.makedirs(ip_spread_dir, exist_ok=True)
     lock_key = source.get("name", "default")
 
-    con = get_connection(source=source, read_only=True)
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source,
+        table_ident,
+        logger=logger,
+        log_label="ip_spread describe",
+    )
     try:
-        cols = describe_columns(con, source, table_ident, logger=logger, log_label="ip_spread describe")
         if cols is None:
             return
         if "ip" not in cols:
@@ -870,4 +881,5 @@ def _run_ip_spread_per_field(
                 _publish_field_partitions(tmp_field_dir, ip_spread_dir, field)
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
     finally:
-        con.close()
+        if owns_con:
+            con.close()

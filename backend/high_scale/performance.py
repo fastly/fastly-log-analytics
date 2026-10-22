@@ -4,9 +4,11 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
-from backend.high_scale._projection_utils import (
-    range_value as _range_value,
+from backend.high_scale._filters import (
+    build_published_facts_where as _facts_where,
+)
+from backend.high_scale._filters import (
+    build_published_projection_where as _where,
 )
 from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
@@ -66,60 +68,6 @@ _ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"
 _TTFB_MS = "toFloat64OrNull(custom_fields['ttfb']) * 1000.0"
 _OTTFB_MS = "coalesce(toFloat64OrNull(custom_fields['ottfb']), 0) / 1000.0"
 _OTTLB_MS = "coalesce(toFloat64OrNull(custom_fields['ottlb']), 0) / 1000.0"
-
-
-def _where(
-    service_id: str,
-    domain: str,
-    start_time: str | None,
-    end_time: str | None,
-    *,
-    dimension: str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    clauses = [
-        "service_id={service_id:String}",
-        "publication_state='visible'",
-        "batch_id IN ("
-        "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
-        "AND publication_state='visible')",
-    ]
-    params: dict[str, Any] = {
-        "service_id": service_id,
-        "publication_domain": domain,
-    }
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    if start is not None:
-        clauses.append("bucket_start >= {start:DateTime64(3)}")
-        params["start"] = start
-    if end is not None:
-        clauses.append("bucket_start <= {end:DateTime64(3)}")
-        params["end"] = end
-    if dimension is not None:
-        clauses.append("dimension={dimension:String}")
-        params["dimension"] = dimension
-    return " AND ".join(clauses), params
-
-
-def _facts_where(
-    service_id: str,
-    start_time: str | None,
-    end_time: str | None,
-    filters: Mapping[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    filter_sql, filter_params = _build_clickhouse_filters(dict(filters))
-    clauses = ["service_id={service_id:String}", "publication_state='visible'", filter_sql]
-    params: dict[str, Any] = {"service_id": service_id, **filter_params}
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    if start is not None:
-        clauses.append("event_timestamp >= {start:DateTime64(3)}")
-        params["start"] = start
-    if end is not None:
-        clauses.append("event_timestamp <= {end:DateTime64(3)}")
-        params["end"] = end
-    return " AND ".join(clauses), params
 
 
 def _active_filters(req: Any) -> dict[str, Any]:

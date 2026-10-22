@@ -116,4 +116,37 @@ describe('useCardVisibility', () => {
     expect(result.current.visibleCards.has('a')).toBe(true)
     expect(result.current.visibleCards.has('b')).toBe(true)
   })
+
+  it('migration applies both removeIds and addIds in one pass and re-runs on version bump', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(['method', 'status', 'bw', 'rid', 'prid', 'waf_sig', 'waf_req_id']),
+    )
+    renderHook(() =>
+      useCardVisibility(
+        STORAGE_KEY,
+        ['method', 'status', 'bw', 'rid', 'prid', 'waf_sig', 'waf_req_id', '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind'],
+        undefined,
+        {
+          version: 2,
+          removeIds: ['bw', 'rid', 'prid', 'waf_sig', 'waf_req_id'],
+          addIds: ['_bot_name', '_ngwaf_bot_name', 'waf_sig_ind'],
+        },
+      ),
+    )
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!).sort()
+    expect(saved).toEqual(['_bot_name', '_ngwaf_bot_name', 'method', 'status', 'waf_sig_ind'])
+    expect(localStorage.getItem(MIGRATION_KEY)).toBe('2')
+  })
+
+  it('does not run migration when localStorage has no saved set yet (fresh browser)', () => {
+    renderHook(() =>
+      useCardVisibility(STORAGE_KEY, ['a', 'b'], ['a'], {
+        version: 1,
+        addIds: ['b'],
+      }),
+    )
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(localStorage.getItem(MIGRATION_KEY)).toBeNull()
+  })
 })

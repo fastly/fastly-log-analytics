@@ -130,7 +130,8 @@ def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) ->
         from backend import config as svcconfig
 
         db_path = svcconfig.ngwaf_db_path()
-        if db_path and not os.path.exists(db_path):
+        default_ngwaf_db = str(svcconfig.DATA_DIR / "ngwaf_bot_cache.db")
+        if db_path and db_path != default_ngwaf_db and not os.path.exists(db_path):
             return None
         values_sql = _read_ngwaf_bots_as_values_sql(db_path)
         if values_sql is None:

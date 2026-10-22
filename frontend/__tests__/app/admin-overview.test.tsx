@@ -12,7 +12,7 @@ import { OperationsOverview } from '@/app/admin/_sections/OperationsOverview'
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { useServiceStore } from '@/stores/serviceStore'
 import { getApiBase } from '@/lib/api'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 const API_BASE = getApiBase()
 

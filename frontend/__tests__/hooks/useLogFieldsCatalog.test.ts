@@ -11,7 +11,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 vi.mock('@/stores/serviceStore', () => {
   const state = {

@@ -33,6 +33,7 @@ import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { client, extractApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
+import type { Schema } from '@/types/api'
 import { useSearchParams } from 'next/navigation'
 
 export function DeployRemoteFrontendDialog() {
@@ -46,11 +47,7 @@ export function DeployRemoteFrontendDialog() {
   const [isCustom, setIsCustom] = React.useState(false)
   const [prefix, setPrefix] = React.useState('')
   const [checkingDomain, setCheckingDomain] = React.useState(false)
-  const [domainCheckResult, setDomainCheckResult] = React.useState<{
-    available: boolean
-    reason?: string | null
-    note?: string | null
-  } | null>(null)
+  const [domainCheckResult, setDomainCheckResult] = React.useState<Schema<'ProvisionCheckDomainResponse'> | null>(null)
 
   // Step 2: Origin Configuration State
   const [originHost, setOriginHost] = React.useState(
@@ -66,12 +63,7 @@ export function DeployRemoteFrontendDialog() {
   const [tokenOverride, setTokenOverride] = React.useState('')
   const [deploying, setDeploying] = React.useState(false)
   const [deployError, setDeployError] = React.useState('')
-  const [deployResult, setDeployResult] = React.useState<{
-    service_id: string
-    version: number
-    domain_name: string
-    origin_host: string
-  } | null>(null)
+  const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
 
   // Clipboard hook for copying live link
   const { copied, copy } = useCopyToClipboard()
@@ -79,13 +71,14 @@ export function DeployRemoteFrontendDialog() {
   // Reset all form state when the dialog opens.
   const handleOpenChange = (next: boolean) => {
     if (next) {
+      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
       setStep(1)
       setPrefix('')
       setIsCustom(false)
       setDomainCheckResult(null)
       setOriginHost(window.location.hostname)
-      setOriginPort(80)
-      setUseSsl(false)
+      setOriginPort(isHttps ? 443 : 80)
+      setUseSsl(isHttps)
       setOverrideHost('')
       setTokenOverride('')
       setServiceName('')

@@ -18,7 +18,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import RumPageClient from '@/app/rum/_sections/RumPageClient'

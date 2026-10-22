@@ -90,7 +90,6 @@ def test_clickhouse_schema_separates_domains_and_fences_visibility() -> None:
     request_sql = (root / "request_schema.sql").read_text()
     rum_sql = (root / "rum_schema.sql").read_text()
     cmcd_sql = (root / "cmcd_schema.sql").read_text()
-    archive_sql = (root / "archive_manifest_schema.sql").read_text()
     publication_sql = (root / "publication_schema.sql").read_text()
     assert "ReplicatedMergeTree" in request_sql
     assert "publication_state" in request_sql
@@ -113,7 +112,6 @@ def test_clickhouse_schema_separates_domains_and_fences_visibility() -> None:
     assert "country LowCardinality(String)" in cmcd_sql
     assert "ALTER TABLE cmcd_projection_facts ADD COLUMN IF NOT EXISTS country LowCardinality(String)" in cmcd_sql
     assert "ALTER TABLE cmcd_projection_facts ADD COLUMN IF NOT EXISTS asn Nullable(UInt32)" in cmcd_sql
-    assert "manifest_committed" in archive_sql
     assert "ReplicatedReplacingMergeTree" in publication_sql
     assert "publication_state" in publication_sql
     assert "quorum_acked" in publication_sql

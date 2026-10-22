@@ -4,7 +4,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
-import { server } from '@/tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import Loading from '@/app/admin/clickhouse/loading'
 import ClickHouseAdminPage from '@/app/admin/clickhouse/page'

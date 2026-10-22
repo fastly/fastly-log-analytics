@@ -23,7 +23,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api/custom-fields'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 const API_BASE = 'http://127.0.0.1:8000'
 const SVC = 'svc-test'

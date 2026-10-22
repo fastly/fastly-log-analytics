@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_serializer
 
-from backend.models._base import PassthroughModel
+from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import BaseResponse, LogExtentsMixin
 
 # ── Metric snapshots history ───────────────────────────────────────────────
@@ -276,10 +276,17 @@ class QuarantineListResponse(BaseResponse):
     total: int = 0
 
 
-class StreamMetrics(BaseModel):
+class StreamMetrics(WireSafeModel):
     latest_log_at: str | None = None
     total_rows: int | None = None
     last_sync_at: str | None = None
+
+
+class ShareHeaderBadgeResponse(WireSafeModel):
+    latest_log_at: str | None = None
+    local_rows: int | None = None
+    rum: StreamMetrics | None = None
+    request: StreamMetrics | None = None
 
 
 class SyncStatus(LogExtentsMixin):
@@ -722,6 +729,16 @@ class MetadataStorageResponse(_AdminMaintRead):
     db_path: str | None = None
     retention: MetadataRetentionValues | None = None
     ingested_files_locked: bool | None = None
+
+
+class MetadataRetentionUpdate(PassthroughModel):
+    usage_log_days: int | str | None = None
+    ingested_files_days: int | str | None = None
+    cron_runs_days: int | str | None = None
+
+
+class QuarantineDeleteResponse(_AdminMaintRead):
+    purged: int
 
 
 class DebugSettingsResponse(_AdminMaintRead):

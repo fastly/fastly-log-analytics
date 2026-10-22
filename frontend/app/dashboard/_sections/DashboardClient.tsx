@@ -60,6 +60,8 @@ function DashboardBody({
   activeServiceId,
   filterPayload,
   config,
+  metric: metricProp,
+  setMetric: setMetricProp,
   trend,
   setTrend,
   intervalButtons,
@@ -85,7 +87,9 @@ function DashboardBody({
     compareEndTime: state.compareEndTime,
   })))
 
-  const [metric, setMetric] = React.useState("requests")
+  const [localMetric, setLocalMetric] = React.useState("requests")
+  const metric = metricProp ?? localMetric
+  const setMetric = setMetricProp ?? setLocalMetric
   const router = useRouter()
 
   // Hidden legend categories are scoped to the metric they were hidden under: switching metric
@@ -531,6 +535,8 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
           activeServiceId={ctx.activeServiceId}
           filterPayload={ctx.filterPayload}
           config={ctx.config}
+          metric={ctx.metric}
+          setMetric={ctx.setMetric}
           trend={ctx.trend}
           setTrend={ctx.setTrend}
           intervalButtons={ctx.intervalButtons}

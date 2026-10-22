@@ -15,7 +15,12 @@ from backend.core.metadata.quarantine import (
     list_quarantine_evidence,
 )
 from backend.deps import get_source, require_admin
-from backend.models.admin import QuarantineEvidenceItem, QuarantineListResponse, QuarantineSummary
+from backend.models.admin import (
+    QuarantineDeleteResponse,
+    QuarantineEvidenceItem,
+    QuarantineListResponse,
+    QuarantineSummary,
+)
 from backend.utils.router_utils import make_error, require_service_id
 
 from ._router import router
@@ -160,7 +165,7 @@ def download_quarantine_evidence(
     )
 
 
-@router.post("/admin/quarantine/purge")
+@router.post("/admin/quarantine/purge", response_model=QuarantineDeleteResponse)
 def purge_quarantine_evidence(
     item_id: int | None = Query(default=None, gt=0),
     source: dict = Depends(get_source),

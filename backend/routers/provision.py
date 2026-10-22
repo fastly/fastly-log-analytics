@@ -18,6 +18,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
     LakeInfoRequest,
+    NgwafWorkspaceCreateRequest,
     NgwafWorkspaceSetResponse,
     NgwafWorkspacesResponse,
     ProvisionCheckConfigResponse,
@@ -31,6 +32,7 @@ from backend.models.provision import (
     ProvisionTeardownRequest,
     ProvisionValidateRequest,
     ProvisionValidateResponse,
+    TerraformPreviewResponse,
 )
 from backend.provision.fos_setup import _get_fos_s3_client
 from backend.utils.router_utils import make_error, raise_internal, require_service_id
@@ -818,9 +820,6 @@ def provision_reconcile(body: ProvisionReconcileRequest):
     Returns:
         SSE stream with reconciliation status events.
     """
-    import queue
-    import threading
-
     service_id = body.service_id
     token = body.token
     if not service_id or not token:
@@ -830,10 +829,9 @@ def provision_reconcile(body: ProvisionReconcileRequest):
         )
 
     from backend.provision.declarative.reconciler import reconcile_vcl_state
+    from backend.utils.sse import stream_sse_from_worker
 
-    events: queue.Queue = queue.Queue()
-
-    def worker():
+    def worker(events):
         try:
 
             def status_cb(msg: str) -> None:
@@ -862,27 +860,11 @@ def provision_reconcile(body: ProvisionReconcileRequest):
             events.put({"type": "done", "success": result.error is None})
         except Exception as e:
             events.put({"type": "error", "message": str(e)})
-        finally:
-            events.put(None)
 
-    threading.Thread(target=worker, daemon=True, name=f"reconcile-{service_id}").start()
-
-    async def stream():
-        import asyncio
-
-        while True:
-            try:
-                event = await asyncio.to_thread(events.get, timeout=1)
-                if event is None:
-                    break
-                yield json.dumps(event)
-            except queue.Empty:
-                pass
-
-    return sse_response(stream())
+    return stream_sse_from_worker(worker)
 
 
-@router.post("/terraform/preview", response_model=dict[str, str])
+@router.post("/terraform/preview", response_model=TerraformPreviewResponse)
 def provision_terraform_preview(body: ProvisionConfigRequest):
     from backend.utils.terraform_gen import generate_terraform
 
@@ -1426,7 +1408,7 @@ def provision_ngwaf_workspaces(
 )
 def provision_set_ngwaf_workspace(
     service_id: str,
-    body: dict,
+    body: NgwafWorkspaceCreateRequest,
     token: str = Query(default=""),
     authorization: str | None = Header(default=None),
 ):
@@ -1468,7 +1450,7 @@ def provision_set_ngwaf_workspace(
     # bypasses, even if the token matches the server-stored fastly_api_key.
     validate_destructive_token(token, service_id=service_id)
 
-    workspace_id = (body.get("ngwaf_workspace_id") or "").strip() or None
+    workspace_id = (body.ngwaf_workspace_id or "").strip() or None
     mutate_service_config(service_id, lambda c: c.__setitem__("ngwaf_workspace_id", workspace_id))
 
     try:

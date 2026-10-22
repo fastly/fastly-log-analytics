@@ -49,6 +49,15 @@ export function WizardFooter({ s }: { s: WizardState }) {
               if (mode === "join") {
                 return ["mode", "join", "analyze", "settings", "confirm"];
               }
+              if (
+                mode === "ingest" &&
+                (step === "join" ||
+                  step === "analyze" ||
+                  step === "settings" ||
+                  step === "confirm")
+              ) {
+                return ["mode", "token", "service", "join", "analyze", "settings", "confirm"];
+              }
               const steps: Step[] = ["mode", "token", "service", "features", "storage"];
               if (config.logging_enabled) {
                 steps.push("ngwaf", "fields");
@@ -97,7 +106,11 @@ export function WizardFooter({ s }: { s: WizardState }) {
           {step === "service" && (
             <Button
               disabled={!selectedService || validateMutation.isPending}
-              onClick={() => {}}
+              onClick={() => {
+                if (selectedService) {
+                  validateMutation.mutate(selectedService.id);
+                }
+              }}
               className="h-9 text-xs"
             >
               {validateMutation.isPending && (

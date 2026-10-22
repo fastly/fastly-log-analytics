@@ -65,13 +65,13 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
   // regex (never empty). Fall back to `data.effective` for legacy services
   // enabled before that change landed (their cfg still has null). Don't
   // reset on re-renders — the operator may have been typing.
-  const initialisedRef = React.useRef(false)
+  const initialisedServiceRef = React.useRef<string | null>(null)
   React.useEffect(() => {
-    if (data && !initialisedRef.current) {
+    if (data && initialisedServiceRef.current !== serviceId) {
       setDraft(data.current || data.effective || '')
-      initialisedRef.current = true
+      initialisedServiceRef.current = serviceId
     }
-  }, [data])
+  }, [data, serviceId])
 
   const isDirty = data ? draft !== (data.current || data.effective) : false
 

@@ -1,4 +1,5 @@
 .env
+.env.deploy.local
 setup-state.json
 *.duckdb
 *.duckdb.wal
@@ -85,11 +86,7 @@ compute/scorer/matrix_*.json
 # Rust build artifacts.
 compute/scorer/target/
 compute/scorer/bin/
-# Ignore the pkg build dir EXCEPT the committed, matrix-less Wasm package the
-# backend ships in its image and deploys via the Fastly API (no toolchain on
-# the VM). Rebuild with `make scorer-package` and recommit on scorer changes.
-compute/scorer/pkg/*
-!compute/scorer/pkg/session-scorer.tar.gz
+compute/scorer/pkg/
 
 # Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
 # might reference. NEVER commit.

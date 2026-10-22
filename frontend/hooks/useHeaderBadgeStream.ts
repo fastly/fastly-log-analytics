@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useServiceStream } from '@/hooks/useServiceStream'
 import { queryKeys } from '@/lib/query-keys'
-import type { StreamMetrics } from '@/types/api'
+import type { Schema } from '@/types/api'
 
 /**
  * Analyst-safe sibling of ``useAdminEventStream``.
@@ -20,24 +20,14 @@ import type { StreamMetrics } from '@/types/api'
  * "Latest Log: Xs ago" / "Total Logs" updates via
  * ``useAdminEventStream``; this hook brings analysts to parity.
  */
-interface BootstrapHeaderBadge {
-  rum?: StreamMetrics | null
-  request?: StreamMetrics | null
-  latest_log_at?: string | null
-  local_rows?: number | null
-}
+type BootstrapHeaderBadge = Schema<'ShareHeaderBadgeResponse'>
 
 interface BootstrapShape {
-  header_badge?: BootstrapHeaderBadge
+  header_badge?: BootstrapHeaderBadge | null
   [key: string]: unknown
 }
 
-interface BadgeStreamEvent {
-  rum?: StreamMetrics | null
-  request?: StreamMetrics | null
-  latest_log_at?: string | null
-  local_rows?: number | null
-}
+type BadgeStreamEvent = Schema<'ShareHeaderBadgeResponse'>
 
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
@@ -54,7 +44,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
   // (zero setQueryData writes in 75s of waiting). Subscribing here
   // forces a re-render the moment bootstrap data lands.
   const { data: bootstrap } = useBootstrap()
-  const isRemoteAnalyst = (bootstrap as { settings?: { is_remote_analyst?: boolean } } | undefined)?.settings?.is_remote_analyst === true
+  const isRemoteAnalyst = bootstrap?.settings?.is_remote_analyst === true
   const effectiveEnabled = enabled && isRemoteAnalyst
 
   return useServiceStream(

@@ -29,7 +29,7 @@ import {
 } from '@/components/ProvisionWizard/wizard-api'
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
 import { useServiceStore } from '@/stores/serviceStore'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 const API_BASE = 'http://127.0.0.1:8000'
 

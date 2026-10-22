@@ -26,7 +26,7 @@ import {
   runJoin,
 } from '@/components/ProvisionWizard/wizard-deploy'
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 const API_BASE = 'http://127.0.0.1:8000'
 

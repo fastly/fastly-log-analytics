@@ -6,7 +6,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createTestQueryClient } from '../helpers/query';
 import { http, HttpResponse } from 'msw';
-import { server } from '../../tests/msw/server';
+import { server } from '@/__tests__/helpers/msw/server';
 import RumAdminPage from '@/app/admin/rum/page';
 import Loading from '@/app/admin/rum/loading';
 import { useServiceStore } from '@/stores/serviceStore';

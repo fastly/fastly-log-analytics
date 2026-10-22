@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from backend.models._base import WireSafeModel
+
+
+class CmcdEnableBody(BaseModel):
+    token: str = ""
+    mode: Literal["query_string", "headers"] = "query_string"
+    version: int = 1
+
+
+class CmcdDisableBody(BaseModel):
+    token: str = ""
 
 
 class DebugStateResponse(WireSafeModel):

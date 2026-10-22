@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.core.metadata.state import list_audit, record_audit
@@ -25,11 +24,15 @@ from backend.high_scale.aggregate_query import query_clickhouse_aggregate
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.control_room import (
+    ControlRoomActionResponse,
     ControlRoomTabResponse,
+    CorrelateRequest,
     CorrelateResponse,
     LogFieldAuditResponse,
+    MutationStub,
     RealtimeSeedResponse,
     WizardStateResponse,
+    WizardStepRequest,
     WizardStepResponse,
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -108,14 +111,7 @@ TAB_STUBS: dict[str, dict] = {
 # ── Mutation endpoints (admin-only, 501 stubs) ───────────────────────────────
 
 
-class MutationStub(BaseModel):
-    """Generic request body for Phase 0 mutation stubs."""
-
-    action: str = ""
-    payload: dict = {}
-
-
-@router.post("/services/{service_id}/control-room/mitigations")
+@router.post("/services/{service_id}/control-room/mitigations", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_mitigations(
     body: MutationStub,
@@ -131,7 +127,7 @@ def control_room_mitigations(
     )
 
 
-@router.post("/services/{service_id}/control-room/rules")
+@router.post("/services/{service_id}/control-room/rules", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_rules(
     body: MutationStub,
@@ -145,7 +141,7 @@ def control_room_rules(
     raise HTTPException(status_code=501, detail={"error": "not_implemented", "message": "Rules not yet implemented."})
 
 
-@router.post("/services/{service_id}/control-room/allowlist")
+@router.post("/services/{service_id}/control-room/allowlist", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_allowlist(
     body: MutationStub,
@@ -161,7 +157,7 @@ def control_room_allowlist(
     )
 
 
-@router.post("/services/{service_id}/control-room/big-red-button")
+@router.post("/services/{service_id}/control-room/big-red-button", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_big_red_button(
     body: MutationStub,
@@ -177,7 +173,7 @@ def control_room_big_red_button(
     )
 
 
-@router.post("/services/{service_id}/control-room/cost-governor")
+@router.post("/services/{service_id}/control-room/cost-governor", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_cost_governor(
     body: MutationStub,
@@ -411,12 +407,6 @@ def log_field_audit(
 # ── Correlator endpoint ─────────────────────────────────────────────────────
 
 
-class CorrelateRequest(BaseModel):
-    dimension: str
-    window_minutes: int = Field(default=5, ge=1, le=60)
-    limit: int = Field(default=10, ge=1, le=100)
-
-
 @router.post(
     "/services/{service_id}/control-room/correlate", response_model=CorrelateResponse, response_model_exclude_unset=True
 )
@@ -523,13 +513,6 @@ async def control_room_correlate(
 
 
 # ── Onboarding wizard ────────────────────────────────────────────────────────
-
-
-class WizardStepRequest(BaseModel):
-    """Request body for recording a wizard step completion."""
-
-    step: str
-    details: dict = {}
 
 
 @router.get(

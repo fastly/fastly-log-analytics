@@ -1,8 +1,6 @@
-"""Tests for the SQLite query profiler."""
+"""Tests for the metadata query profiler."""
 
 from __future__ import annotations
-
-import sqlite3
 
 import pytest
 
@@ -17,16 +15,11 @@ def _clear_buffer():
     sqlite_profiler.clear()
 
 
-def _open_instrumented(path: str) -> sqlite3.Connection:
-    return sqlite3.connect(path, factory=sqlite_profiler.InstrumentedConnection)
+# ── Statement recording ──────────────────────────────────────────────────────
 
 
-# ── InstrumentedConnection / InstrumentedCursor ──────────────────────────────
-
-
-def test_execute_captures_a_statement(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("CREATE TABLE t (x INTEGER)")
+def test_execute_captures_a_statement():
+    sqlite_profiler._record("CREATE TABLE t (x INTEGER)", None, 0.5, 0, "execute")
     snap = sqlite_profiler.get_recent()
     assert snap["buffer_size"] == 1
     assert snap["queries"][0]["sql"] == "CREATE TABLE t (x INTEGER)"
@@ -35,46 +28,19 @@ def test_execute_captures_a_statement(tmp_path):
     assert snap["queries"][0]["seq"] >= 1
 
 
-def test_executemany_captures_one_entry_with_seq_length(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("CREATE TABLE t (x INTEGER)")
-    sqlite_profiler.clear()
-    con.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
+def test_executemany_captures_one_entry_with_seq_length():
+    sqlite_profiler._record("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)], 1.2, 3, "executemany")
     snap = sqlite_profiler.get_recent()
     assert len(snap["queries"]) == 1
     assert snap["queries"][0]["op"] == "executemany"
     assert snap["queries"][0]["params_kind"] == "seq[3]"
 
 
-def test_cursor_execute_path_captured(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("CREATE TABLE t (x INTEGER)")
-    sqlite_profiler.clear()
-    cur = con.cursor()
-    cur.execute("INSERT INTO t VALUES (1)")
-    cur.execute("INSERT INTO t VALUES (2)")
-    snap = sqlite_profiler.get_recent()
-    assert len(snap["queries"]) == 2
-    assert all(q["op"] == "execute" for q in snap["queries"])
-
-
-def test_failing_statement_is_still_recorded(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    with pytest.raises(sqlite3.OperationalError):
-        con.execute("SELECT * FROM nonexistent_table")
-    snap = sqlite_profiler.get_recent()
-    assert len(snap["queries"]) == 1
-    assert "nonexistent_table" in snap["queries"][0]["sql"]
-
-
-def test_params_are_not_captured_as_values(tmp_path):
+def test_params_are_not_captured_as_values():
     """PII safety: params must never appear in the captured SQL or anywhere
     in the entry body. Only shape metadata."""
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("CREATE TABLE t (x TEXT)")
-    sqlite_profiler.clear()
     secret = "user-pii-do-not-capture@example.com"
-    con.execute("INSERT INTO t VALUES (?)", (secret,))
+    sqlite_profiler._record("INSERT INTO t VALUES (?)", (secret,), 0.4, 1, "execute")
     snap = sqlite_profiler.get_recent()
     entry = snap["queries"][0]
     assert secret not in entry["sql"]
@@ -84,28 +50,23 @@ def test_params_are_not_captured_as_values(tmp_path):
 # ── Ring buffer mechanics ────────────────────────────────────────────────────
 
 
-def test_ring_buffer_caps_at_max(tmp_path, monkeypatch):
+def test_ring_buffer_caps_at_max(monkeypatch):
     """Push past cap, verify buffer_size never exceeds cap and dropped grows."""
-    # Reduce cap to keep the test fast/deterministic.
     monkeypatch.setattr(sqlite_profiler, "_buffer", type(sqlite_profiler._buffer)(maxlen=10))
     monkeypatch.setattr(sqlite_profiler, "_dropped", 0)
-    con = _open_instrumented(str(tmp_path / "t.db"))
     for _ in range(25):
-        con.execute("SELECT 1")
+        sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
     snap = sqlite_profiler.get_recent()
     assert snap["buffer_size"] == 10
-    # 25 issued, 10 retained, so >= 15 dropped (first call to CREATE/PRAGMA
-    # may have happened depending on factory init; just enforce the floor).
     assert snap["dropped"] >= 15
 
 
-def test_since_seq_filters(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("SELECT 1")
-    con.execute("SELECT 2")
+def test_since_seq_filters():
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
+    sqlite_profiler._record("SELECT 2", None, 0.1, 1, "execute")
     midpoint = sqlite_profiler.get_recent()["last_seq"]
-    con.execute("SELECT 3")
-    con.execute("SELECT 4")
+    sqlite_profiler._record("SELECT 3", None, 0.1, 1, "execute")
+    sqlite_profiler._record("SELECT 4", None, 0.1, 1, "execute")
     snap = sqlite_profiler.get_recent(since_seq=midpoint)
     sqls = [q["sql"] for q in snap["queries"]]
     assert "SELECT 3" in sqls
@@ -114,28 +75,25 @@ def test_since_seq_filters(tmp_path):
     assert "SELECT 2" not in sqls
 
 
-def test_limit_returns_most_recent(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
+def test_limit_returns_most_recent():
     for i in range(20):
-        con.execute(f"SELECT {i}")
+        sqlite_profiler._record(f"SELECT {i}", None, 0.1, 1, "execute")
     snap = sqlite_profiler.get_recent(limit=5)
     assert len(snap["queries"]) == 5
-    # Most recent statements — values 15..19.
     sqls = [q["sql"] for q in snap["queries"]]
     assert sqls == [f"SELECT {i}" for i in range(15, 20)]
 
 
-def test_clear_resets_buffer_but_not_seq(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("SELECT 1")
+def test_clear_resets_buffer_but_not_seq():
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
     last_seq_before = sqlite_profiler.get_recent()["last_seq"]
     sqlite_profiler.clear()
     snap_after_clear = sqlite_profiler.get_recent()
     assert snap_after_clear["buffer_size"] == 0
-    assert snap_after_clear["last_seq"] == 0  # empty buffer
-    con.execute("SELECT 2")
+    assert snap_after_clear["last_seq"] == 0
+    sqlite_profiler._record("SELECT 2", None, 0.1, 1, "execute")
     snap = sqlite_profiler.get_recent()
-    assert snap["last_seq"] > last_seq_before  # seq counter is monotonic
+    assert snap["last_seq"] > last_seq_before
 
 
 # ── End-to-end via get_con() ─────────────────────────────────────────────────
@@ -172,8 +130,6 @@ def test_summarize_sql_truncates_long_strings():
 
 def test_summarize_sql_coerces_non_strings():
     """Some callers pass bytes / int; the profiler must not raise."""
-    # bytes → str(bytes) gives "b'...'" which is acceptable; just verify
-    # no exception and the result is a string.
     out = sqlite_profiler._summarize_sql(b"SELECT 1")
     assert isinstance(out, str)
     assert "SELECT 1" in out
@@ -185,7 +141,6 @@ def test_describe_params_covers_each_shape():
     assert sqlite_profiler._describe_params([1, 2, 3]) == "seq[3]"
     assert sqlite_profiler._describe_params((1,)) == "seq[1]"
     assert sqlite_profiler._describe_params({"a": 1, "b": 2}) == "map[2]"
-    # Other types fall through to the type-name branch.
     assert sqlite_profiler._describe_params(42) == "int"
 
 
@@ -197,7 +152,6 @@ def test_record_swallows_internal_exceptions(monkeypatch):
     bad = MagicMock()
     bad.append.side_effect = RuntimeError("buffer borked")
     monkeypatch.setattr(sqlite_profiler, "_buffer", bad)
-    # Must not raise — exception is logged at DEBUG and swallowed.
     sqlite_profiler._record("SELECT 1", None, 0.5, 1, "execute")
 
 
@@ -216,7 +170,6 @@ def test_live_register_returns_sentinel_on_registry_failure(monkeypatch):
 
 
 def test_live_deregister_is_noop_for_negative_qid():
-    # Must not raise even though we never registered.
     sqlite_profiler._live_deregister(-1, error=None)
 
 
@@ -230,30 +183,7 @@ def test_live_deregister_swallows_registry_errors(monkeypatch):
         "deregister",
         MagicMock(side_effect=RuntimeError("dereg failed")),
     )
-    # Must not raise even though deregister blew up.
     sqlite_profiler._live_deregister(42, error=None)
-
-
-def test_connection_cursor_returns_instrumented_by_default():
-    con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
-    cur = con.cursor()
-    assert isinstance(cur, sqlite_profiler.InstrumentedCursor)
-
-
-def test_connection_cursor_respects_explicit_factory():
-    """Callers can opt out by passing factory=sqlite3.Cursor; the
-    instrumentation shouldn't force its subclass on them."""
-    con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
-    cur = con.cursor(factory=sqlite3.Cursor)
-    assert type(cur) is sqlite3.Cursor
-
-
-def test_executescript_failure_is_still_recorded(tmp_path):
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    with pytest.raises(sqlite3.OperationalError):
-        con.executescript("CREATE TABLE BAD SQL BLAH;")
-    snap = sqlite_profiler.get_recent()
-    assert any("BAD SQL" in q["sql"] for q in snap["queries"])
 
 
 # ── Per-request collector (Debug Panel "This page" scoping) ──────────────────
@@ -271,39 +201,35 @@ def _request_collector():
     _SQLITE_QUERIES.reset(token)
 
 
-def test_statement_lands_in_request_collector_when_tracking_active(tmp_path, _request_collector):
+def test_statement_lands_in_request_collector_when_tracking_active(_request_collector):
     """The page-scoped Debug Panel view: a statement executed while a
     request is being tracked must land in BOTH the process-global ring
     buffer AND the request's contextvar collector."""
     from backend.utils import telemetry
 
     telemetry.start_call_tracking()
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("CREATE TABLE t (x INTEGER)")
+    sqlite_profiler._record("CREATE TABLE t (x INTEGER)", None, 0.2, 0, "execute")
 
     entries = telemetry.get_sqlite_queries()
     assert len(entries) == 1
     assert entries[0]["sql"] == "CREATE TABLE t (x INTEGER)"
-    # Identical entry object also sits in the ring buffer (cron view).
     snap = sqlite_profiler.get_recent()
     assert snap["buffer_size"] == 1
     assert snap["queries"][0]["seq"] == entries[0]["seq"]
 
 
-def test_statement_skips_request_collector_outside_tracking(tmp_path, _request_collector):
+def test_statement_skips_request_collector_outside_tracking(_request_collector):
     """Cron/startup statements (no start_call_tracking) must NOT create or
-    populate a request collector — only the ring buffer sees them. This is
-    what keeps the Debug Panel's 'This page' view free of background noise."""
+    populate a request collector — only the ring buffer sees them."""
     from backend.utils.telemetry import _SQLITE_QUERIES
 
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("SELECT 1")
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
 
-    assert _SQLITE_QUERIES.get() is None  # record path never initialises it
+    assert _SQLITE_QUERIES.get() is None
     assert sqlite_profiler.get_recent()["buffer_size"] == 1
 
 
-def test_request_collector_failure_does_not_break_sql_path(tmp_path, _request_collector, monkeypatch):
+def test_request_collector_failure_does_not_break_sql_path(_request_collector, monkeypatch):
     """The profiler contract: observability failures never propagate into
     the calling SQL path. A broken record_sqlite_query must not raise."""
     from backend.utils import telemetry
@@ -313,5 +239,4 @@ def test_request_collector_failure_does_not_break_sql_path(tmp_path, _request_co
         "record_sqlite_query",
         lambda entry: (_ for _ in ()).throw(RuntimeError("collector broken")),
     )
-    con = _open_instrumented(str(tmp_path / "t.db"))
-    con.execute("SELECT 1")  # must not raise
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")

@@ -100,18 +100,8 @@ function SyncStatusBadgeInner() {
   // renders so analysts see Latest Log / Total Logs the same way
   // admins do. Refreshes at bootstrap's 5-min staleTime — fine for an
   // at-a-glance header.
-  interface HeaderBadgeData {
-    latest_log_at?: string | null
-    local_rows?: number | null
-    rum?: StreamMetrics | null
-    request?: StreamMetrics | null
-  }
-
   const { data: bootstrap } = useBootstrap()
-  const headerBadge = (bootstrap as Record<string, unknown>)?.header_badge as
-    | HeaderBadgeData
-    | null
-    | undefined
+  const headerBadge = bootstrap?.header_badge
 
   // a11y (WCAG 4.1.2): announce sync state transitions to screen readers
   // via an sr-only role="status" live region. We only fire on actual

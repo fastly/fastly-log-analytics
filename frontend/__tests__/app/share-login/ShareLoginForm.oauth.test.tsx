@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { server } from '@/tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { ShareLoginForm } from '@/app/share-login/ShareLoginForm'
 
 // Mutable search params so each test can set ?oauth_error / ?return.

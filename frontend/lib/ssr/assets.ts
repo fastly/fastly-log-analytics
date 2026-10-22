@@ -1,27 +1,12 @@
-import { quantizeAnchor } from '@/lib/time-window'
-import { parseSsrJson, ssrUpstreamGet } from './_transport'
+import {
+  parseSsrJson,
+  resolveDefaultSsrRangeKey,
+  type SsrRangeSeed,
+  ssrUpstreamGet,
+} from './upstream'
 
-export interface AssetsSsrSeed {
-  /** The /api/assets/aggregates response body to seed into the cache. */
-  data: unknown
-  /** Relative-range token (e.g. '24h') — must equal the client key element. */
-  rangeToken: string
-  /** Quantized anchor (ISO-Z, 60s grid) — must equal the client key element. */
-  anchor: string
-}
-
-/**
- * Resolve the default (rangeToken, anchor) pair the client computes on first paint.
- */
-export function resolveAssetsDefaultKey(
-  now: Date = new Date(),
-  _logExtents?: unknown,
-): {
-  rangeToken: string
-  anchor: string
-} {
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
-}
+export type AssetsSsrSeed = SsrRangeSeed
+export const resolveAssetsDefaultKey = resolveDefaultSsrRangeKey
 
 /**
  * SSR-prefetch the default assets aggregates selection for the active service.
@@ -46,6 +31,7 @@ export async function fetchAssetsServerSide(
         range_token: rangeToken,
         anchor: anchor,
       },
+      extraHeaders: { 'x-service-id': serviceId },
     }),
     'ssr/assets',
   )

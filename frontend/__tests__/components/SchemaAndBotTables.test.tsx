@@ -13,7 +13,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient } from '../helpers/query'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { SchemaTab } from '@/app/logs/_sections/SchemaTab'

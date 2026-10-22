@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 import { adminJson, adminJsonResult } from '@/lib/api'
 import { arrayOrEmpty, recordOrNull } from '@/lib/narrow'
 import type { components } from '@/types/api'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 describe('adminJson', () => {
   it('returns the parsed body on 2xx', async () => {

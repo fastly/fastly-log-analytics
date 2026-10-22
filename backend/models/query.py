@@ -48,8 +48,8 @@ class PresetQuery(WireSafeModel):
     sql: str
 
 
-class SchemaColumn(BaseModel):
-    column: str
+class SchemaColumn(WireSafeModel):
+    column: str | None = None
     name: str = ""
     type: str
     min: str | None = None
@@ -57,14 +57,6 @@ class SchemaColumn(BaseModel):
     approx_unique: int | None = None
     null_percentage: float | None = None
     count: int | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _sync_column_and_name(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            col = data.get("column") or data.get("name") or ""
-            return {**data, "column": col, "name": data.get("name") or col}
-        return data
 
 
 class QuerySchemaResponse(BaseResponse):
@@ -80,7 +72,23 @@ class QuerySchemaResponse(BaseResponse):
     @classmethod
     def _sync_schema_and_columns(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            cols = data.get("schema") if "schema" in data else data.get("columns", [])
+            raw_cols = data.get("schema") if "schema" in data else data.get("columns", [])
+            cols = [
+                {
+                    **c,
+                    "column": c.get("column") or c.get("name") or "",
+                    "name": c.get("name") or c.get("column") or "",
+                    "type": c.get("type", ""),
+                    "min": c.get("min"),
+                    "max": c.get("max"),
+                    "approx_unique": c.get("approx_unique"),
+                    "null_percentage": c.get("null_percentage"),
+                    "count": c.get("count"),
+                }
+                if isinstance(c, dict)
+                else c
+                for c in (raw_cols or [])
+            ]
             return {
                 **data,
                 "schema": cols,

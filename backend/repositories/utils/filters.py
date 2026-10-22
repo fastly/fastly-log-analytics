@@ -354,14 +354,9 @@ def build_where_clause(
                 else:
                     parts.append("FALSE")
             else:
-                pop_distance_case = """
-                    CASE
-                        WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
-                        WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
-                        WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
-                        ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
-                    END
-                """
+                from backend.utils.pop_utils import build_pop_haversine_case_sql
+
+                pop_distance_case = build_pop_haversine_case_sql()
                 cond = f"""
                 (
                     ({pop_distance_case} > ((rtt_min / 1000.0) * 100.0 + 150.0))

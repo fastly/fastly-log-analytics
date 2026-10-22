@@ -16,6 +16,7 @@ from backend.models.admin import (
     ExpireSnapshotsResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
+    MetadataRetentionUpdate,
     MetadataStorageResponse,
     OptimizeNowResponse,
     PartialHourMergeResponse,
@@ -24,7 +25,6 @@ from backend.models.admin import (
     RollupHealResponse,
     RollupStatusResponse,
 )
-from backend.utils.sse import sse_response
 
 from ._router import router
 
@@ -504,7 +504,7 @@ def partial_hour_status(
     response_model=MetadataRetentionResponse,
     response_model_exclude_unset=True,
 )
-def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
+def update_metadata_retention(body: MetadataRetentionUpdate, source: dict = Depends(get_source)):
     """Update the per-service ``metadata_retention`` config block.
 
     Body shape: any subset of ``{usage_log_days, ingested_files_days,
@@ -523,11 +523,12 @@ def update_metadata_retention(body: dict, source: dict = Depends(get_source)):
 
     from backend.core.metadata import is_ingested_files_dedup_active
 
+    raw_body = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else dict(body)
     updates: dict[str, int] = {}
     for key in ("usage_log_days", "ingested_files_days", "cron_runs_days"):
-        if key in body:
+        if key in raw_body:
             try:
-                v = int(body[key])
+                v = int(raw_body[key])
             except (TypeError, ValueError):
                 v = 0
             updates[key] = max(0, v)
@@ -618,27 +619,18 @@ def metadata_cleanup_now(
     manual run shows up on the Data Management schedule + history grid
     alongside the scheduled cron's runs.
     """
-    import json as _json
-    import queue as _queue
-    import threading
     import time as _t
 
     from backend import config as svcconfig
     from backend.core.duckdb import log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
+    from backend.routers.admin._helpers import stream_sse_from_worker
 
     service_id = service_id or source.get("name") or source.get("service_id", "")
     cfg = svcconfig.load_config(service_id) or {}
     retention = cfg.get("metadata_retention") or {}
 
-    # Bridge cleanup_metadata's on_event callback to the SSE generator via
-    # a thread-safe queue. The worker thread runs the cleanup synchronously
-    # (DELETE then VACUUM — both block the SQLite writer) and pushes events
-    # as they happen; the streaming generator consumes them and yields SSE
-    # frames. Sentinel ``None`` marks end-of-stream.
-    events: _queue.Queue = _queue.Queue()
-
-    def worker():
+    def worker(events):
         started = _t.time()
         run_id = None
         try:
@@ -647,18 +639,15 @@ def metadata_cleanup_now(
         except Exception as e:
             err = str(e)
             events.put({"type": "error", "message": f"Cleanup failed: {err}"})
-            try:
-                log_cron_run(
-                    source,
-                    "metadata_cleanup",
-                    _t.time() - started,
-                    "error",
-                    error_message=err,
-                    summary=f"cleanup failed: {err}",
-                    run_id=run_id,
-                )
-            finally:
-                events.put(None)
+            log_cron_run(
+                source,
+                "metadata_cleanup",
+                _t.time() - started,
+                "error",
+                error_message=err,
+                summary=f"cleanup failed: {err}",
+                run_id=run_id,
+            )
             return
 
         total_deleted = sum(result["deleted"].values())
@@ -682,20 +671,5 @@ def metadata_cleanup_now(
             )
         finally:
             events.put({"type": "done", "message": summary, "result": result})
-            events.put(None)
 
-    threading.Thread(target=worker, daemon=True, name=f"metadata-cleanup-{service_id}").start()
-
-    async def stream():
-        import asyncio
-
-        while True:
-            try:
-                event = await asyncio.to_thread(events.get, timeout=1)
-                if event is None:
-                    break
-                yield _json.dumps(event)
-            except _queue.Empty:
-                pass
-
-    return sse_response(stream())
+    return stream_sse_from_worker(worker)

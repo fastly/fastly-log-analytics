@@ -305,9 +305,9 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
             cur = con.execute(
                 "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
                 "FROM usage_log "
-                "WHERE process_context = ? AND timestamp >= ? "
+                "WHERE service_id = ? AND process_context = ? AND timestamp >= ? "
                 "ORDER BY timestamp ASC LIMIT 25",
-                (ctx, start_iso),
+                (sid, ctx, start_iso),
             )
             rows = cur.fetchall()
         finally:

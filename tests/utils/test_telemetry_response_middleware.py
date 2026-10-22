@@ -63,15 +63,12 @@ def _build_app(*, with_gzip: bool = False) -> FastAPI:
         # collector → BaseResponse.with_telemetry. start_call_tracking is
         # called in-handler (same context) standing in for main.py's
         # tracking middleware, whose collector the handler context inherits.
-        import sqlite3
-
         from backend.models.common import BaseResponse
         from backend.utils import sqlite_profiler
         from backend.utils.telemetry import start_call_tracking
 
         start_call_tracking()
-        con = sqlite3.connect(":memory:", factory=sqlite_profiler.InstrumentedConnection)
-        con.execute("CREATE TABLE page_scoped (x INTEGER)")
+        sqlite_profiler._record("CREATE TABLE page_scoped (x INTEGER)", None, 0.2, 0, "execute")
         return BaseResponse.with_telemetry()
 
     @app.get("/list-response")

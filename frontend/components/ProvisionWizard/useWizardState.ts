@@ -56,6 +56,10 @@ import {
   buildToggleGroup,
   buildTogglePreset,
 } from "./wizard-config-helpers";
+import {
+  estimateLogFieldBytesPerLine,
+  isLogFieldPresetActive,
+} from "@/lib/log-field-config-ops";
 
 // Re-export so consumers (step components) can import WizardState from this hook module
 export type { WizardState } from "./types";
@@ -251,11 +255,8 @@ export function useWizardState(
     setConfig((prev) => applyUpdateFieldLimit(prev, fieldId, limit));
   };
 
-  const isPresetActive = (groups: string[]) => {
-    if (!groups.length) return false;
-    const currentGroups = new Set(config.log_fields.groups || []);
-    return groups.every((g) => currentGroups.has(g));
-  };
+  const isPresetActive = (groups: string[]) =>
+    isLogFieldPresetActive(config.log_fields, groups);
 
   const togglePreset = (presetGroups: string[]) => {
     setConfig((prev) =>
@@ -263,23 +264,10 @@ export function useWizardState(
     );
   };
 
-  const estimatedBytes = React.useMemo(() => {
-    if (!catalog?.fields) return 0;
-    let total = 0;
-    const enabledGroups = new Set(config.log_fields.groups || []);
-    const overrides = config.log_fields.field_overrides || {};
-    for (const field of catalog.fields) {
-      const inGroup = field.group === null || enabledGroups.has(field.group);
-      const override = overrides[field.id];
-      if (override === true) {
-        total += field.typical_bytes || 0;
-        continue;
-      }
-      if (override === false) continue;
-      if (inGroup) total += field.typical_bytes || 0;
-    }
-    return total;
-  }, [catalog, config.log_fields]);
+  const estimatedBytes = React.useMemo(
+    () => estimateLogFieldBytesPerLine(config.log_fields, catalog),
+    [catalog, config.log_fields],
+  );
 
   const handleTokenSubmit = async () => {
     if (token) {

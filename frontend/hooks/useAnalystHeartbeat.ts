@@ -48,6 +48,8 @@ export function useAnalystHeartbeat({
         // setInterval queueing more, so a tight bound is load-bearing.
         const res = await analystFetch('/api/share/heartbeat', {}, 10_000)
         if (res.status === 401 || res.status === 403) {
+          cancelled = true
+          if (timer) clearInterval(timer)
           setIsTerminated(true)
           router.replace('/share-login')
           return
@@ -72,7 +74,7 @@ export function useAnalystHeartbeat({
       cancelled = true
       if (timer) clearInterval(timer)
     }
-  }, [enabled, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
+  }, [enabled, isTerminated, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
 
   return { disconnected }
 }

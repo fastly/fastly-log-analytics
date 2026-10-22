@@ -86,7 +86,9 @@ from ._common import (
     ORIGIN_IP_MIN_REQUESTS_PER_HOUR,
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
-    backfill_missing_bundles,
+    MultiBundleSpec,
+    backfill_multi_spec_bundles,
+    build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
@@ -183,78 +185,51 @@ def _build_path_copy_sql(lat_us_expr: object, table_ident: str, start_iso: str, 
     )
 
 
-# (output filename, required key column, build_copy_sql). One COPY each. The
-# latency column is required for all three; the key column gates which bundle
-# a service can produce (e.g. no ``pop`` → skip the pop bundle but still write
-# ip/path). The ``ost`` requirement for ip is enforced inside its eligibility.
-_ORIGIN_DIMS = (
-    ("pop", ORIGIN_POP_BUNDLE_FILENAME, _build_pop_copy_sql, ()),
-    ("oip", ORIGIN_IP_BUNDLE_FILENAME, _build_ip_copy_sql, ("ost",)),
-    ("edge", ORIGIN_PATH_BUNDLE_FILENAME, _build_path_copy_sql, ()),
+# (sub_label, output filename, required columns, build_copy_sql). One COPY each.
+# The latency column is required for all three; the required columns gate which
+# bundle a service can produce (e.g. no ``pop`` → skip the pop bundle but still
+# write ip/path).
+_ORIGIN_DIMS: tuple[MultiBundleSpec, ...] = (
+    ("pop", ORIGIN_POP_BUNDLE_FILENAME, ("pop",), _build_pop_copy_sql),
+    ("oip", ORIGIN_IP_BUNDLE_FILENAME, ("oip", "ost"), _build_ip_copy_sql),
+    ("edge", ORIGIN_PATH_BUNDLE_FILENAME, ("edge",), _build_path_copy_sql),
 )
+
+
+def _origin_context(cols: set[str], table_ident: str) -> str | None:
+    return _lat_us_expr(set(cols))
+
+
+_common_build_per_hour_bundles = build_per_hour_bundles
 
 
 def build_origin_dims_bundles(service_id: str, source: dict, hours: list[str]) -> int:
     """Write the origin_pop + origin_ip + origin_path rollups for each closed
-    hour in ``hours``.
-
-    Skips:
-      - The active UTC hour (still being written).
-      - Services whose schema lacks any latency column (ottfb/ttfb) — no
-        percentile to compute, so none of the three bundles are written.
-      - A bundle whose required key column is absent (e.g. no ``oip`` or no
-        ``ost`` → skip origin_ip but still write origin_pop / origin_path when
-        their columns exist).
-
-    Idempotent — atomic tmp+rename per file under the per-service iceberg lock.
-    Returns the number of parquet files written this call (a fully built hour
-    with all three bundles counts as 3). Each bundle drives the shared
-    :func:`build_per_hour_bundles` once; the per-bundle eligibility callback
-    skips the service for that bundle when a needed column is absent.
-    """
-    written = 0
-    for key_col, filename, build_copy_sql, extra_cols in _ORIGIN_DIMS:
-
-        def eligibility(cols, table_ident, key_col=key_col, extra_cols=extra_cols):
-            lat_us_expr = _lat_us_expr(set(cols))
-            if lat_us_expr is None:
-                return None
-            if key_col not in cols:
-                return None
-            for c in extra_cols:
-                if c not in cols:
-                    return None
-            return lat_us_expr
-
-        written += build_per_hour_bundles(
-            service_id,
-            source,
-            hours,
-            bundle_filename=filename,
-            tmp_prefix=".tmp_od_",
-            label=f"origin_dims({key_col})",
-            describe_label="origin_dims",
-            eligibility=eligibility,
-            build_copy_sql=build_copy_sql,
-            logger=logger,
-        )
-    return written
+    hour in ``hours``."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_ORIGIN_DIMS,
+        group_label="origin_dims",
+        tmp_prefix=".tmp_od_",
+        logger=logger,
+        context_fn=_origin_context,
+        driver=build_per_hour_bundles if build_per_hour_bundles is not _common_build_per_hour_bundles else None,
+    )
 
 
 def backfill_origin_dims_bundles(service_id: str, source: dict) -> int:
     """Self-heal pass: build the origin_dims rollups for every closed hour that
-    has ``all_fields.parquet`` but is missing one of the origin_dims files.
-
-    Mirrors :func:`backfill_perf_latency_bundles`. Uses the pop file as the
-    sentinel (the dominant panel); ``build_origin_dims_bundles`` writes all
-    three present bundles when their columns exist. Idempotent. Returns files
-    written.
+    has ``all_fields.parquet`` but is missing any of the three origin_dims files.
     """
-    return backfill_missing_bundles(
+    return backfill_multi_spec_bundles(
         service_id,
         source,
-        bundle_filename=ORIGIN_POP_BUNDLE_FILENAME,
-        label="origin_dims",
-        builder=build_origin_dims_bundles,
+        specs=_ORIGIN_DIMS,
+        group_label="origin_dims",
+        tmp_prefix=".tmp_od_",
         logger=logger,
+        context_fn=_origin_context,
+        driver=build_per_hour_bundles if build_per_hour_bundles is not _common_build_per_hour_bundles else None,
     )

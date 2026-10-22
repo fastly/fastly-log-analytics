@@ -80,7 +80,7 @@ afterEach(() => {
 
 describe('backend harness child isolation', () => {
   it.each(['contract', 'e2e'])('%s rejects deployment env before spawning uv', async (harness) => {
-    const contract = await import('../../tests/setup-backend')
+    const contract = await import('../helpers/setup-backend')
     try {
       if (harness === 'contract') {
         await contract.startBackend()

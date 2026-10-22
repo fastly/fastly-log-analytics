@@ -144,16 +144,20 @@ def create_remote_invite(
     return created
 
 
+def _row_to_invite_dict(row: Any, service_ids: list[str]) -> dict:
+    rec = dict(row)
+    rec["pii_policy"] = json.loads(rec.get("pii_policy") or '{"mask_ips": false}')
+    rec["service_ids"] = service_ids
+    rec["allow_concurrent_sessions"] = bool(rec.get("allow_concurrent_sessions"))
+    return rec
+
+
 def get_remote_invite(invite_id: str, *, con: Any = None) -> dict | None:
     con = con or get_global_share_con()
     row = con.execute("SELECT * FROM remote_invites WHERE id=?", (invite_id,)).fetchone()
     if row is None:
         return None
-    out = dict(row)
-    out["pii_policy"] = json.loads(out.get("pii_policy") or '{"mask_ips": false}')
-    out["service_ids"] = get_remote_invite_services(invite_id, con=con)
-    out["allow_concurrent_sessions"] = bool(out.get("allow_concurrent_sessions"))
-    return out
+    return _row_to_invite_dict(row, get_remote_invite_services(invite_id, con=con))
 
 
 def get_remote_invite_services(invite_id: str, *, con: Any = None) -> list[str]:
@@ -183,14 +187,7 @@ def get_remote_invites(*, con: Any = None) -> list[dict]:
         ).fetchall()
         for r in svc_rows:
             services_by_invite.setdefault(r["invite_id"], []).append(r["service_id"])
-    out: list[dict] = []
-    for row in rows:
-        rec = dict(row)
-        rec["pii_policy"] = json.loads(rec.get("pii_policy") or '{"mask_ips": false}')
-        rec["service_ids"] = services_by_invite.get(rec["id"], [])
-        rec["allow_concurrent_sessions"] = bool(rec.get("allow_concurrent_sessions"))
-        out.append(rec)
-    return out
+    return [_row_to_invite_dict(row, services_by_invite.get(row["id"], [])) for row in rows]
 
 
 def get_remote_invite_by_email_passcode(email: str, passcode: str, *, con: Any = None) -> dict | None:
@@ -265,9 +262,7 @@ def get_remote_invite_by_email_passcode(email: str, passcode: str, *, con: Any =
             # next successful login will retry the upgrade.
             logger.exception("[share_db] rehash-on-login failed for invite_id=%s", matched_row_id)
 
-    match["pii_policy"] = json.loads(match.get("pii_policy") or '{"mask_ips": false}')
-    match["service_ids"] = get_remote_invite_services(match["id"], con=con)
-    return match
+    return _row_to_invite_dict(match, get_remote_invite_services(match["id"], con=con))
 
 
 def get_remote_invite_oauth(email: str, provider: str, *, con: Any = None) -> dict | None:
@@ -300,11 +295,7 @@ def get_remote_invite_oauth(email: str, provider: str, *, con: Any = None) -> di
     for row in rows:
         if row["expires_at"] and row["expires_at"] < now:
             continue
-        match = dict(row)
-        match["pii_policy"] = json.loads(match.get("pii_policy") or '{"mask_ips": false}')
-        match["service_ids"] = get_remote_invite_services(match["id"], con=con)
-        match["allow_concurrent_sessions"] = bool(match.get("allow_concurrent_sessions"))
-        return match
+        return _row_to_invite_dict(row, get_remote_invite_services(row["id"], con=con))
     return None
 
 

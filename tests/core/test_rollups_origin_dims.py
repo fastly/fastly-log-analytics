@@ -232,8 +232,8 @@ def test_build_origin_dims_no_latency_writes_nothing(tmp_path):
 
 
 def test_backfill_origin_dims_walks_existing_bundle_hours(tmp_path):
-    """The self-heal driver picks up closed hours that have all_fields.parquet
-    but no origin_pop.parquet (the sentinel) and builds the missing bundles."""
+    """The self-heal driver checks each of the 3 bundles (origin_pop,
+    origin_ip, origin_path) independently and builds only the missing ones."""
     from backend.core.rollups import origin_dims
 
     cache_root = tmp_path / "cache"
@@ -247,21 +247,26 @@ def test_backfill_origin_dims_walks_existing_bundle_hours(tmp_path):
     (bundled_root / f"hour={h1_token}" / "all_fields.parquet").write_bytes(b"x")
     (bundled_root / f"hour={h2_token}").mkdir(parents=True)
     (bundled_root / f"hour={h2_token}" / "all_fields.parquet").write_bytes(b"x")
-    # h2 already has the pop sentinel — backfill should target h1 only.
+    # h2 already has origin_pop.parquet — backfill should skip pop for h2
+    # while still healing ip and path for both h1 and h2.
     (bundled_root / f"hour={h2_token}" / "origin_pop.parquet").write_bytes(b"x")
 
-    written_hours: list[list[str]] = []
+    written_by_bundle: dict[str, list[str]] = {}
 
-    def _spy_build(_sid, _src, hours):
-        written_hours.append(list(hours))
+    def _spy_per_hour(_sid, _src, hours, *, bundle_filename, **_kw):
+        written_by_bundle[bundle_filename] = list(hours)
         return len(hours)
 
-    with patch("backend.core.rollups.origin_dims.build_origin_dims_bundles", side_effect=_spy_build):
+    with patch("backend.core.rollups._common.build_per_hour_bundles", side_effect=_spy_per_hour):
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
             n = origin_dims.backfill_origin_dims_bundles("svc-od-5", src)
 
-    assert n == 1
-    assert written_hours == [[h1_token]]
+    assert written_by_bundle == {
+        "origin_pop.parquet": [h1_token],
+        "origin_ip.parquet": sorted([h1_token, h2_token]),
+        "origin_path.parquet": sorted([h1_token, h2_token]),
+    }
+    assert n == 5
 
 
 # ── Reader eligibility gates ────────────────────────────────────────────────

@@ -26,9 +26,12 @@
 // divergence is the rare minute-boundary straddle, which self-heals via one
 // client refetch, never a leak/crash (identical risk class to origin/insights).
 
-import { quantizeAnchor } from '@/lib/time-window'
-
-import { parseSsrJson, ssrUpstreamGet } from './_transport'
+import {
+  parseSsrJson,
+  resolveDefaultSsrRangeKey,
+  type SsrRangeSeed,
+  ssrUpstreamGet,
+} from './upstream'
 
 // Default first-paint section set — mirrors SECURITY_SECTIONS in
 // app/security/_sections/SecurityClient.tsx (BOTS ∪ HEADER_ANOMALIES ∪
@@ -58,28 +61,14 @@ export const SECURITY_SSR_DEFAULTS = {
   bucketSeconds: 3600,
 } as const
 
-export interface SecuritySsrSeed {
-  /** The /api/security/aggregates response body to seed into the cache. */
-  data: unknown
-  /** Relative-range token (e.g. '24h') — must equal the client key element. */
-  rangeToken: string
-  /** Quantized anchor (ISO-Z, 60s grid) — must equal the client key element. */
-  anchor: string
-}
+export type SecuritySsrSeed = SsrRangeSeed
 
 /**
  * Resolve the default (rangeToken, anchor) pair the client computes on first
  * paint. Exported so the unit test can pin the key-match without a network
  * round-trip. `now` injectable for deterministic tests.
  */
-export function resolveSecurityDefaultKey(
-  now: Date = new Date(),
-): {
-  rangeToken: string
-  anchor: string
-} {
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
-}
+export const resolveSecurityDefaultKey = resolveDefaultSsrRangeKey
 
 /**
  * SSR-prefetch the default security aggregates selection for the active service.
@@ -101,6 +90,7 @@ export async function fetchSecurityServerSide(
       path: '/api/security/aggregates',
       logPrefix: 'ssr/security',
       method: 'POST',
+      injectAdminToken: true,
       // Mirror SecurityBody's client request body EXACTLY. range_token + anchor
       // drive the scan window (the keyed path ignores start_time/end_time, so
       // they are omitted).

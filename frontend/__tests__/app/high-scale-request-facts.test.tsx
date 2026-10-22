@@ -184,4 +184,61 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(screen.getByTestId('high-scale-table-wrapper').className).toContain('opacity-40')
     expect(screen.getByTestId('high-scale-table-wrapper').className).toContain('pointer-events-none')
   })
+
+  it('renders error alert and server metadata with column headers', () => {
+    useFactsMock.mockReturnValue({
+      isLoading: false,
+      isError: true,
+      data: undefined,
+      error: new Error('high-scale unavailable'),
+      isFetching: false,
+      pageIndex: 0,
+      canNextPage: false,
+      canPreviousPage: false,
+      nextPage: vi.fn(),
+      previousPage: vi.fn(),
+    })
+    const errView = render(<HighScaleRequestFactsPage />)
+    expect(screen.getByRole('alert')).toHaveTextContent('high-scale unavailable')
+    errView.unmount()
+
+    useFactsMock.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: {
+        rows: [
+          {
+            event_id: 'event-1',
+            timestamp: '2026-09-11T00:00:01Z',
+            service_id: 'service-1',
+            country: 'US',
+            client_ip: '1.2.3.xxx',
+            url: '/first',
+          },
+        ],
+        metadata: {
+          ...baseMetadata,
+          freshness_lag_seconds: 42,
+        },
+        next_cursor: 'cursor-1',
+        _is_cached: false,
+      },
+      error: null,
+      isFetching: false,
+      pageIndex: 0,
+      canNextPage: true,
+      canPreviousPage: false,
+      nextPage: vi.fn(),
+      previousPage: vi.fn(),
+    })
+    render(<HighScaleRequestFactsPage />)
+    expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('complete')
+    expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('42s lag')
+    expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('100%')
+    expect(screen.getByText('1.2.3.xxx')).toBeInTheDocument()
+    expect(screen.queryByText('1.2.3.4')).not.toBeInTheDocument()
+    for (const name of ['Timestamp', 'Status', 'Host', 'POP', 'Country', 'Client IP', 'URL']) {
+      expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+    }
+  })
 })

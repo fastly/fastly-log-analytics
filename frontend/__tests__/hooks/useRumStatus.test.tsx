@@ -5,7 +5,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { useRumStatus } from '@/hooks/useRumStatus'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 
 describe('useRumStatus', () => {

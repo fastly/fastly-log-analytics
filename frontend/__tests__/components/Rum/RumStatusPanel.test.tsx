@@ -15,7 +15,7 @@ import { render, screen } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel'
 

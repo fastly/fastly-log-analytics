@@ -36,6 +36,8 @@ export interface DashboardBodyProps {
   activeServiceId: string | null
   filterPayload: FiltersPayload
   config: ReportConfiguration
+  metric?: string
+  setMetric?: (metric: string) => void
   trend: string
   setTrend: (trend: string) => void
   intervalButtons: React.ReactNode

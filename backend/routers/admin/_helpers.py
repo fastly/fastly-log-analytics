@@ -15,6 +15,16 @@ import queue
 import zipfile
 from typing import Any
 
+from fastapi import HTTPException
+
+from backend.models.admin import SyncStartResponse
+from backend.utils.sse import (  # noqa: F401
+    ClientDisconnected,
+    _AbortableQueue,
+    _stream_from_worker,
+    stream_sse_from_worker,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,49 +48,48 @@ class _QueueFile:
         return self.offset
 
 
-class ClientDisconnected(Exception):
-    """Raised when the client disconnects during a streaming response."""
+def run_admin_cron_trigger(
+    source: dict[str, Any],
+    task_name: str,
+    target_fn: Any,
+    *,
+    target_kwargs: dict[str, Any] | None = None,
+    success_msg: str,
+    in_progress_msg: str,
+    readonly_detail: Any,
+    invalidate_cache: bool = True,
+    require_high_scale: bool = False,
+    high_scale_detail: Any = None,
+) -> SyncStartResponse:
+    """Shared execution wrapper for manual admin cron trigger routes."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail=readonly_detail)
 
-    pass
+    if require_high_scale:
+        from backend import config as svcconfig
 
+        if not svcconfig.is_high_scale_mode(source):
+            raise HTTPException(
+                status_code=400,
+                detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
+            )
 
-class _AbortableQueue(queue.Queue):
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize)
-        self.aborted = False
+    if invalidate_cache:
+        from backend.repositories.dashboard import invalidate_service
 
-    def put(self, item, block=True, timeout=None):
-        if self.aborted:
-            if item is None:
-                return
-            raise ClientDisconnected("Client disconnected during streaming")
-        super().put(item, block, timeout)
+        invalidate_service(source["name"])
 
+    from backend.utils.router_utils import start_or_resume_cron
 
-def _stream_from_worker(worker: Any) -> Any:
-    """Run *worker(q)* in a daemon thread and yield the bytes it puts into the queue."""
-    import contextvars
-    import threading
-
-    q: _AbortableQueue = _AbortableQueue(maxsize=10)
-    # Copy the request's context (process_context, _CALLS list) so any
-    # record_call() inside the worker thread lands in the same _usage_log batch.
-    ctx = contextvars.copy_context()
-    thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
-    thread.start()
-    try:
-        while True:
-            chunk = q.get()
-            if chunk is None:
-                break
-            yield chunk
-    finally:
-        q.aborted = True
-        while True:
-            try:
-                q.get_nowait()
-            except queue.Empty:
-                break
+    res = start_or_resume_cron(
+        source,
+        task_name,
+        target_fn,
+        target_kwargs=target_kwargs,
+        success_msg=success_msg,
+        in_progress_msg=in_progress_msg,
+    )
+    return SyncStartResponse(**res)
 
 
 def stream_zip(

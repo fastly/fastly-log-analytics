@@ -10,7 +10,12 @@ from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.archive_models import (
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchiveSourceEntry,
+    ArchiveSourceObject,
+)
 
 
 class ObjectStore(Protocol):
@@ -205,15 +210,35 @@ def _artifact_key(uri: str) -> str:
 
 def _manifest_from_json(payload: bytes) -> ArchiveManifest:
     raw = json.loads(payload)
+    raw_sources = raw.get("sources")
+    sources = (
+        [
+            ArchiveSourceEntry(
+                key=s["key"],
+                checksum=s["checksum"],
+                size_bytes=s["size_bytes"],
+                row_start=s["row_start"],
+                row_count=s["row_count"],
+                deletion_deadline=_parse_datetime(s["deletion_deadline"]),
+                version=s.get("version"),
+            )
+            for s in raw_sources
+        ]
+        if raw_sources
+        else None
+    )
     return ArchiveManifest(
         manifest_id=raw["manifest_id"],
-        source=ArchiveSourceObject(**raw["source"]),
+        source=ArchiveSourceObject(**raw["source"]) if raw.get("source") else None,
         artifact=ArchiveArtifact(**raw["artifact"]),
         coverage_start=_parse_datetime(raw["coverage_start"]),
         coverage_end=_parse_datetime(raw["coverage_end"]),
         retention_deadline=_parse_datetime(raw["retention_deadline"]),
         deletion_authorization_deadline=_parse_datetime(raw["deletion_authorization_deadline"]),
         archive_epoch=raw["archive_epoch"],
+        service_id=raw.get("service_id"),
+        domain=raw.get("domain"),
+        sources=sources,
     )
 
 

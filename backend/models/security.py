@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
 
@@ -185,6 +187,42 @@ class SecurityProxiesResponse(BaseResponse):
     traffic_quality: list[TrafficQualityRow] = []
     suspicious_isps: list[SuspiciousIspRow] = []
     active_clients: list[ActiveClientItem] = []
+
+
+SecuritySectionName = Literal[
+    "verified_bots_ts",
+    "ngwaf_verified_bots",
+    "ngwaf_verified_bots_ts",
+    "wellknown_bots",
+    "bot_efficiency",
+    "tls_fingerprints",
+    "fingerprint_coverage",
+    "req_size_dist",
+    "top_ips_header",
+    "ipv6_adoption",
+    "proxy_dist",
+    "conn_reuse_dist",
+    "proxies",
+    "top_bots",
+]
+
+
+class SecurityAggregatesRequest(RangeKeyedRequest):
+    bucket_seconds: int = 300
+    sections: list[SecuritySectionName] | None = None
+
+
+class ThreatIntelItem(WireSafeModel):
+    tls_fingerprint: str  # ja3 or ja4
+    requests: int
+    top_country: str
+    matched_waf_rules_count: int
+    bot_percentage: float
+    is_anonymized_proxy: bool
+
+
+class ThreatIntelListResponse(BaseResponse):
+    data: list[ThreatIntelItem]
 
 
 # Alias for bundle endpoint contract

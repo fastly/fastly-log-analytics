@@ -384,7 +384,7 @@ def test_postgres_retention_casts_text_timestamps():
     assert reconciliation._retention_timestamp_expr("ingested_at") == "CAST(ingested_at AS TIMESTAMPTZ)"
     assert reconciliation._retention_timestamp_expr("started_at") == "CAST(started_at AS TIMESTAMPTZ)"
     assert reconciliation._table_uses_postgres("cron_runs") is True
-    assert reconciliation._table_uses_postgres("usage_log") is False
+    assert reconciliation._table_uses_postgres("usage_log") is True
 
 
 def test_cleanup_rollups_skipped_when_rollups_days_zero():

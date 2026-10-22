@@ -25,7 +25,6 @@ from backend.core.query_instrumentation import (
     _probe_duckdb_memory,
 )
 from backend.core.query_registry import QueryRegistry, _conn_to_query, query_registry
-from backend.utils.sqlite_profiler import InstrumentedConnection
 
 
 class _RecordingConn:
@@ -492,9 +491,10 @@ class TestPeakMemory:
         """SQLite never has a meaningful memory value; the field exists but
         stays None so the frontend renders consistently."""
         from backend.core.query_registry import query_registry as singleton
+        from backend.utils import sqlite_profiler
 
-        con = sqlite3.connect(":memory:", factory=InstrumentedConnection)
-        con.execute("CREATE TABLE x (i INT)").fetchall()
+        qid = sqlite_profiler._live_register("SQLite", "CREATE TABLE x (i INT)", con=None)
+        sqlite_profiler._live_deregister(qid, error=None)
         hist = singleton.snapshot(include_completed=True)["completed"]
         sqlite_rows = [c for c in hist if c["db_type"] == "SQLite"]
         assert sqlite_rows
@@ -576,24 +576,6 @@ class TestRecordBatchReader:
         names = [f.name for f in reader.schema]
         assert names == ["a", "b"]
         reader.close()
-
-
-# ── SQLite InstrumentedCursor integration ──────────────────────────────────
-
-
-class TestSQLiteInstrumentation:
-    def test_execute_appears_in_registry_then_history(self):
-        from backend.core.query_registry import query_registry as singleton
-
-        con = sqlite3.connect(":memory:", factory=InstrumentedConnection)
-        con.execute("CREATE TABLE t (i INT)")
-        con.execute("INSERT INTO t VALUES (42)")
-        rows = con.execute("SELECT count(*) FROM t").fetchall()
-        assert rows == [(1,)]
-        # All three should have moved through the registry to history.
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        recent = [c for c in hist if c["db_type"] == "SQLite"]
-        assert len(recent) >= 3
 
 
 # ── cancel on client disconnect ─────────────────────────────────────────────────────────────────────────

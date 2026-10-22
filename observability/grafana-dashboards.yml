@@ -1,8 +1,0 @@
-apiVersion: 1
-providers:
-  - name: fla
-    folder: ""
-    type: file
-    allowUiUpdates: false
-    options:
-      path: /var/lib/grafana/dashboards

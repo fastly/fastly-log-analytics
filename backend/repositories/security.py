@@ -8,7 +8,6 @@ from typing import Any
 
 import duckdb
 
-from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
@@ -175,65 +174,10 @@ def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time
     ``_build_security_response`` would BinderException — so we MUST
     only drop the column when the rollup serve is virtually guaranteed.
     """
-    if svcconfig.is_durable_serving_mode(src):
-        return False
+    from backend.repositories._rollup_planner import enumerate_closed_hour_field_rollups
 
-    from datetime import UTC, datetime, timedelta
-
-    from backend.core.duckdb import _cache_dir
-    from backend.core.rollups._common import _is_safe_ident
-
-    if not _is_safe_ident(field):
-        return False
-    if not start_time or not end_time:
-        return False
-    try:
-        window = parse_window(start_time, end_time)
-    except Exception:
-        return False
-    if window is None:
-        return False
-    st_dt, et_dt = window
-
-    active_str = datetime.now(UTC).replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d-%H")
-    st_str = st_dt.strftime("%Y-%m-%d-%H")
-    et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
-
-    cache_dir = _cache_dir(src)
-    bundled_root = os.path.join(cache_dir, "rollups", "hour_bundled")
-    per_field_root = os.path.join(cache_dir, "rollups", "hour", f"field={field}")
-
-    def _in_window(hour: str) -> bool:
-        return st_str <= hour <= et_inclusive and hour < active_str
-
-    # Bundled-hour tree: one all_fields.parquet per closed hour.
-    if os.path.isdir(bundled_root):
-        try:
-            for entry in os.listdir(bundled_root):
-                if not entry.startswith("hour=") or not _in_window(entry[5:]):
-                    continue
-                if os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet")):
-                    return True
-        except OSError:
-            pass
-
-    # Per-field tree: any closed-hour parquet (skip tmp_ artifacts).
-    if os.path.isdir(per_field_root):
-        try:
-            for entry in os.listdir(per_field_root):
-                if not entry.startswith("hour=") or not _in_window(entry[5:]):
-                    continue
-                hour_dir = os.path.join(per_field_root, entry)
-                try:
-                    for fname in os.listdir(hour_dir):
-                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                            return True
-                except OSError:
-                    continue
-        except OSError:
-            pass
-
-    return False
+    w = enumerate_closed_hour_field_rollups(src, field, start_time, end_time, stop_on_first=True)
+    return bool(w and (w.bundled_paths or w.per_field_paths))
 
 
 def _ipv6_per_hour_from_rollups(
@@ -249,77 +193,18 @@ def _ipv6_per_hour_from_rollups(
     Returns ``None`` when start/end is missing, no in-window closed-
     hour rollups exist, or a read raises (caller falls back to live SQL).
     """
-    if svcconfig.is_durable_serving_mode(src):
+    from datetime import UTC, datetime
+
+    from backend.core.rollups._common import _safe_table_for
+    from backend.repositories._rollup_planner import enumerate_closed_hour_field_rollups
+
+    w = enumerate_closed_hour_field_rollups(src, "is_ipv6", start_time, end_time)
+    if w is None or (not w.bundled_paths and not w.per_field_paths):
         return None
-    if not start_time or not end_time:
-        return None
-
-    from datetime import UTC, datetime, timedelta
-
-    from backend.core.duckdb import _cache_dir
-    from backend.core.rollups._common import _is_safe_ident, _safe_table_for
-
-    if not _is_safe_ident("is_ipv6"):
-        return None
-    try:
-        window = parse_window(start_time, end_time)
-    except Exception:
-        return None
-    if window is None:
-        return None
-    st_dt, et_dt = window
-
-    cache_dir = _cache_dir(src)
-    bundled_root = os.path.join(cache_dir, "rollups", "hour_bundled")
-    per_field_root = os.path.join(cache_dir, "rollups", "hour", "field=is_ipv6")
-
-    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    active_end_dt = active_dt + timedelta(hours=1)
-    active_str = active_dt.strftime("%Y-%m-%d-%H")
-    st_str = st_dt.strftime("%Y-%m-%d-%H")
-    et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
-
-    def _in_window(hour: str) -> bool:
-        return st_str <= hour <= et_inclusive and hour < active_str
-
-    bundled_paths: list[str] = []
-    bundled_hours: set[str] = set()
-    if os.path.isdir(bundled_root):
-        try:
-            for entry in os.listdir(bundled_root):
-                if not entry.startswith("hour="):
-                    continue
-                hour = entry[5:]
-                if not _in_window(hour):
-                    continue
-                p = os.path.join(bundled_root, entry, "all_fields.parquet")
-                if os.path.isfile(p):
-                    bundled_paths.append(p)
-                    bundled_hours.add(hour)
-        except OSError:
-            pass
-
-    per_field_paths: list[str] = []
-    if os.path.isdir(per_field_root):
-        try:
-            for entry in os.listdir(per_field_root):
-                if not entry.startswith("hour="):
-                    continue
-                hour = entry[5:]
-                if not _in_window(hour) or hour in bundled_hours:
-                    continue
-                hour_dir = os.path.join(per_field_root, entry)
-                try:
-                    for fname in os.listdir(hour_dir):
-                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                            per_field_paths.append(os.path.join(hour_dir, fname))
-                except OSError:
-                    continue
-        except OSError:
-            pass
-
-    if not bundled_paths and not per_field_paths:
-        return None
+    bundled_paths = w.bundled_paths
+    per_field_paths = w.per_field_paths
+    st_dt, et_dt = w.st_dt, w.et_dt
+    active_dt, active_end_dt = w.active_dt, w.active_end_dt
 
     branches: list[str] = []
     if bundled_paths:

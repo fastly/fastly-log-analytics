@@ -22,9 +22,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-import sqlite3
 import sys
-import time
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
@@ -139,87 +137,6 @@ def _live_deregister(qid: int, error: BaseException | None) -> None:
             structlog.contextvars.unbind_contextvars("query_id")
         except Exception:
             logger.debug("_live_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)
-
-
-class InstrumentedCursor(sqlite3.Cursor):
-    """Cursor subclass that times every execute/executemany/executescript.
-
-    Inline timing (rather than a helper) so we can read ``self.rowcount``
-    directly after the call. The cursor's rowcount is only meaningful for
-    DML (INSERT/UPDATE/DELETE) — SELECT returns -1 until rows are fetched,
-    which we accept rather than triggering an implicit fetchall().
-    """
-
-    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:  # type: ignore[override]
-        t0 = time.perf_counter()
-        qid = _live_register("SQLite", sql, self.connection)
-        err: BaseException | None = None
-        try:
-            return super().execute(sql, parameters)
-        except BaseException as e:
-            err = e
-            raise
-        finally:
-            _live_deregister(qid, err)
-            _record(sql, parameters, (time.perf_counter() - t0) * 1000.0, self.rowcount, "execute")
-
-    def executemany(self, sql: str, seq_of_parameters: Any, /) -> sqlite3.Cursor:  # type: ignore[override]
-        t0 = time.perf_counter()
-        qid = _live_register("SQLite", sql, self.connection)
-        err: BaseException | None = None
-        try:
-            return super().executemany(sql, seq_of_parameters)
-        except BaseException as e:
-            err = e
-            raise
-        finally:
-            _live_deregister(qid, err)
-            _record(
-                sql,
-                seq_of_parameters,
-                (time.perf_counter() - t0) * 1000.0,
-                self.rowcount,
-                "executemany",
-            )
-
-    def executescript(self, sql_script: str, /) -> sqlite3.Cursor:  # type: ignore[override]
-        t0 = time.perf_counter()
-        qid = _live_register("SQLite", sql_script, self.connection)
-        err: BaseException | None = None
-        try:
-            return super().executescript(sql_script)
-        except BaseException as e:
-            err = e
-            raise
-        finally:
-            _live_deregister(qid, err)
-            _record(sql_script, None, (time.perf_counter() - t0) * 1000.0, self.rowcount, "executescript")
-
-
-class InstrumentedConnection(sqlite3.Connection):
-    """Connection subclass that hands out InstrumentedCursor and also
-    intercepts Connection.execute / executemany (shorthand calls that bypass
-    the explicit cursor() path)."""
-
-    def cursor(self, factory=InstrumentedCursor):  # type: ignore[override]
-        # Always return InstrumentedCursor unless caller asks for another
-        # explicit factory.
-        return super().cursor(factory)
-
-    def execute(self, sql, parameters=(), /):  # type: ignore[override]
-        # Connection.execute() implicitly creates a cursor. We can't reuse
-        # super().execute() because that uses the default Cursor, not our
-        # subclass. Materialise a cursor explicitly so we get instrumentation.
-        cur = self.cursor()
-        return cur.execute(sql, parameters)
-
-    def executemany(self, sql, parameters, /):  # type: ignore[override]
-        cur = self.cursor()
-        return cur.executemany(sql, parameters)
-
-    def executescript(self, sql_script, /):  # type: ignore[override]
-        cur = self.cursor()
-        return cur.executescript(sql_script)
 
 
 # ── Public read API (used by the /api/debug/recent-sqlite endpoint) ────────────

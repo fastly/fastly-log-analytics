@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from backend.high_scale._projection_utils import range_value as _range_value
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
 
 # Real columns on request_facts; every other key lives in the ``custom_fields`` map.
@@ -84,3 +85,62 @@ def build_clickhouse_filters(
     """Return ``(sql, params)`` where ``sql`` is ``1=1`` when no filter is active."""
     clauses, params = request_filter_clauses(filters, prefix=prefix)
     return (" AND ".join(clauses) if clauses else "1=1"), params
+
+
+def build_published_projection_where(
+    service_id: str,
+    domain: str,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    dimension: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build ClickHouse WHERE predicate and params for published minute projections."""
+    clauses = [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
+        "AND publication_state='visible')",
+    ]
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "publication_domain": domain,
+    }
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None:
+        clauses.append("bucket_start >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        clauses.append("bucket_start <= {end:DateTime64(3)}")
+        params["end"] = end
+    if dimension is not None:
+        clauses.append("dimension={dimension:String}")
+        params["dimension"] = dimension
+    return " AND ".join(clauses), params
+
+
+def build_published_facts_where(
+    service_id: str,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any] | None = None,
+    *,
+    end_inclusive: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    """Build ClickHouse WHERE predicate and params for published fact rows."""
+    filter_sql, filter_params = build_clickhouse_filters(dict(filters or {}))
+    clauses = ["service_id={service_id:String}", "publication_state='visible'", filter_sql]
+    params: dict[str, Any] = {"service_id": service_id, **filter_params}
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None:
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        op = "<=" if end_inclusive else "<"
+        clauses.append(f"event_timestamp {op} {{end:DateTime64(3)}}")
+        params["end"] = end
+    return " AND ".join(clauses), params

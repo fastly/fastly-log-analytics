@@ -18,7 +18,7 @@ import { createTestQueryClient } from '../../helpers/query'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import SessionScoringPage from '@/app/admin/session-scoring/page'

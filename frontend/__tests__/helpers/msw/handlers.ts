@@ -854,7 +854,7 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/quarantine/download/:item_id`, () =>
     new HttpResponse(new Uint8Array(), { headers: { 'Content-Type': 'application/octet-stream' } }),
   ),
-  http.post(`${API_BASE}/api/admin/quarantine/purge`, okFor('/api/admin/quarantine/purge', 'post', { deleted: 0 })),
+  http.post(`${API_BASE}/api/admin/quarantine/purge`, okFor('/api/admin/quarantine/purge', 'post', { purged: 0 })),
 
   // ── Share-login (analyst auth) ────────────────────────────────────
   // Default auth-config: passcode-only (the OAuth feature is off unless a test

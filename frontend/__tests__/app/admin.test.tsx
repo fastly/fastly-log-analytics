@@ -22,7 +22,7 @@ import React from 'react'
 
 import { useServiceStore } from '@/stores/serviceStore'
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin'))
 

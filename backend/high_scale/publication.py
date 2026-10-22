@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -16,8 +15,8 @@ from uuid import UUID, uuid5
 from backend.core.clickhouse_client import (
     CLICKHOUSE_HIGH_SCALE_TABLES,
 )
-from backend.core.clickhouse_client import (
-    ClickHouseClient as HttpClickHouseClient,
+from backend.high_scale._batch_adapter_base import (
+    BaseClickHouseBatchAdapter,
 )
 from backend.high_scale._projection_utils import range_value
 from backend.high_scale._rum_fields import rum_environment, rum_error_position
@@ -25,20 +24,6 @@ from backend.high_scale.schema import build_cmcd_projection_key
 
 _BATCH_NAMESPACE = UUID("f3e6bd14-9df9-5f8a-9d92-7a4f1fd36d9a")
 _EVENT_NAMESPACE = UUID("8e5d1e37-4e66-5b66-9f4c-73d7c4a3f0d8")
-_PUBLICATION_TABLE = "high_scale_batch_publications"
-_PUBLICATION_COLUMNS = (
-    "batch_id",
-    "service_id",
-    "domain",
-    "generation",
-    "batch_digest",
-    "expected_rows",
-    "visible_rows",
-    "quorum_acked",
-    "publication_state",
-    "manifest_version",
-    "updated_at",
-)
 _DOMAIN_TABLES = {
     "request": "request_facts",
     "rum_vitals": "rum_vitals_facts",
@@ -204,7 +189,7 @@ class ClickHouseClient(Protocol):
     def delete_batch_rows(self, table: str, batch_id: str) -> None: ...
 
 
-class ClickHouseBatchAdapter:
+class ClickHouseBatchAdapter(BaseClickHouseBatchAdapter):
     """Adapt high-scale batches to the allowlisted ClickHouse HTTP client.
 
     Fact rows are written with a visible row state only behind a pending
@@ -213,18 +198,10 @@ class ClickHouseBatchAdapter:
     makes retries after a lost HTTP acknowledgement safe.
     """
 
-    def __init__(self, client: HttpClickHouseClient) -> None:
-        self._client = client
-        self._batch_locks: dict[str, threading.Lock] = {}
-        self._batch_locks_guard = threading.Lock()
-
     def insert(self, batch: HighScaleBatch) -> InsertReceipt:
         batch_uuid = _batch_uuid(batch)
         with self._batch_lock(batch_uuid):
             return self._insert_locked(batch, batch_uuid)
-
-    def delete_batch_rows(self, table: str, batch_id: str) -> None:
-        self._client.delete_batch_rows(table, batch_id)
 
     def _insert_locked(self, batch: HighScaleBatch, batch_uuid: str) -> InsertReceipt:
         table = _DOMAIN_TABLES.get(batch.domain)
@@ -233,114 +210,13 @@ class ClickHouseBatchAdapter:
         if not batch.rows:
             raise ValueError("high-scale batch must contain at least one row")
         mapped_rows = _rows_for_domain(batch, batch_uuid)
-        existing = self._existing_publication(batch, batch_uuid)
-        if existing is not None:
-            self._validate_publication(existing, batch)
-            if existing["publication_state"] == "visible":
-                return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
-            version = int(existing["manifest_version"])
-        else:
-            version = 0
-            self._insert_publication(batch, batch_uuid, version=1, state="pending", visible_rows=0)
-            version = 1
-
-        expected = len(batch.rows)
-        existing_rows = self._count_rows(table, batch, batch_uuid)
-        if existing_rows not in (0, expected):
-            self._client.delete_batch_rows(table, batch_uuid)
-            raise PartialInsert(existing_rows)
-        if existing_rows == 0:
-            self._client.insert_rows(table, list(_DOMAIN_COLUMNS[batch.domain]), mapped_rows)
-            existing_rows = self._count_rows(table, batch, batch_uuid)
-        if existing_rows != expected:
-            self._client.delete_batch_rows(table, batch_uuid)
-            raise PartialInsert(existing_rows)
-
-        self._insert_publication(
-            batch,
-            batch_uuid,
-            version=version + 1,
-            state="visible",
-            visible_rows=expected,
+        return self._publish_table_rows(
+            table=table,
+            columns=list(_DOMAIN_COLUMNS[batch.domain]),
+            mapped_rows=mapped_rows,
+            batch=batch,
+            batch_uuid=batch_uuid,
         )
-        return InsertReceipt(batch.batch_id, expected, batch.digest)
-
-    def _batch_lock(self, batch_uuid: str):
-        with self._batch_locks_guard:
-            lock = self._batch_locks.setdefault(batch_uuid, threading.Lock())
-        return lock
-
-    def _existing_publication(self, batch: HighScaleBatch, batch_uuid: str) -> dict[str, Any] | None:
-        rows = self._client.execute(
-            "SELECT batch_id, service_id, domain, generation, batch_digest, expected_rows, "
-            "visible_rows, publication_state, manifest_version "
-            "FROM high_scale_batch_publications FINAL "
-            "WHERE service_id={service_id:String} AND domain={domain:String} "
-            "AND generation={generation:String} AND batch_id={batch_id:String}",
-            {
-                "service_id": batch.service_id,
-                "domain": batch.domain,
-                "generation": batch.generation,
-                "batch_id": batch_uuid,
-            },
-        )
-        if not rows:
-            return None
-        if len(rows) != 1:
-            raise ValueError("ClickHouse publication receipt is ambiguous")
-        return rows[0]
-
-    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
-        rows = self._client.execute(
-            f"SELECT count() AS row_count FROM `{table}` "
-            "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}",
-            {"service_id": batch.service_id, "batch_id": batch_uuid},
-        )
-        if len(rows) != 1 or not isinstance(rows[0].get("row_count"), int):
-            raise ValueError("ClickHouse insert receipt is invalid")
-        return rows[0]["row_count"]
-
-    def _insert_publication(
-        self,
-        batch: HighScaleBatch,
-        batch_uuid: str,
-        *,
-        version: int,
-        state: str,
-        visible_rows: int,
-    ) -> None:
-        self._client.insert_rows(
-            _PUBLICATION_TABLE,
-            list(_PUBLICATION_COLUMNS),
-            [
-                (
-                    batch_uuid,
-                    batch.service_id,
-                    batch.domain,
-                    batch.generation,
-                    batch.digest,
-                    len(batch.rows),
-                    visible_rows,
-                    1 if state == "visible" else 0,
-                    state,
-                    version,
-                    datetime.now(UTC),
-                )
-            ],
-        )
-
-    @staticmethod
-    def _validate_publication(existing: dict[str, Any], batch: HighScaleBatch) -> None:
-        if (
-            existing.get("service_id") != batch.service_id
-            or existing.get("domain") != batch.domain
-            or existing.get("generation") != batch.generation
-            or existing.get("batch_digest") != batch.digest
-            or existing.get("expected_rows") != len(batch.rows)
-        ):
-            raise ValueError("ClickHouse publication identity or digest mismatch")
-        if existing.get("publication_state") not in {"pending", "visible"}:
-            raise ValueError("ClickHouse publication state is invalid")
 
 
 def _batch_uuid(batch: HighScaleBatch) -> str:

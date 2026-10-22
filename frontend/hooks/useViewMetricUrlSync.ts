@@ -25,7 +25,7 @@ const viewMetricParsers = { view: parseAsString, metric: parseAsString }
 // Hoisted so nuqs hands back a stable setter and the effect below doesn't re-fire per render.
 const viewMetricOptions = { history: 'replace', shallow: true } as const
 
-export function useViewMetricUrlSync() {
+export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void }) {
   // Consume-and-strip params: read once, apply, then clear from the URL.
   const [{ view: viewId, metric: urlMetric }, setUrlParams] = useQueryStates(viewMetricParsers, viewMetricOptions)
   const addFilter = useFilterStore(s => s.addFilter)
@@ -41,11 +41,12 @@ export function useViewMetricUrlSync() {
   const currentCompareMode = useFilterStore(s => s.compareMode)
   const { activeServiceId } = useActiveService()
   const queryClient = useQueryClient()
-  const { setMetric } = useReportConfig({
+  const { setMetric: fallbackSetMetric } = useReportConfig({
     defaultMetric: 'requests',
     defaultInterval: '1 minute',
     defaultTrend: 'off'
   })
+  const setMetric = options?.setMetric ?? fallbackSetMetric
 
   useEffect(() => {
     if (!activeServiceId) return

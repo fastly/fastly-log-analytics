@@ -799,14 +799,8 @@ fn update_state(
             // protects against clock skew where last_ts > now_secs.
             let dt_secs: u32 = idle.min(3600);
             let dt64 = u64::from(dt_secs);
-            let mut new_sum_dt = s.sum_dt;
-            let mut new_sum_dt_sq = s.sum_dt_sq;
-            if s.seq >= 20 {
-                new_sum_dt -= new_sum_dt / 20;
-                new_sum_dt_sq -= new_sum_dt_sq / 20;
-            }
-            let new_sum_dt = new_sum_dt.saturating_add(dt_secs);
-            let new_sum_dt_sq = new_sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
+            let new_sum_dt = s.sum_dt.saturating_add(dt_secs);
+            let new_sum_dt_sq = s.sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
             cookie::SessionState {
                 v: cookie::SCHEMA_VERSION,
                 sid: s.sid,

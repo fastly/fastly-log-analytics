@@ -1211,10 +1211,17 @@ def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
 def end_drain_pools(pools_or_keys) -> None:
     """Take every existing pool out of draining mode (no-op for swapped pools)."""
     if isinstance(pools_or_keys, dict):
+        with _pools_lock:
+            for k in pools_or_keys:
+                _retired_pools.pop(k, None)
         for pool in pools_or_keys.values():
             pool.end_drain()
         return
     if isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        with _pools_lock:
+            for k, p in list(_retired_pools.items()):
+                if p in pools_or_keys:
+                    _retired_pools.pop(k, None)
         for pool in pools_or_keys:
             pool.end_drain()
         return

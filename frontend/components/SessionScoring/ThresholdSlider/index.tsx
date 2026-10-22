@@ -102,12 +102,13 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     staleTime: 30_000,
   })
 
-  // One-shot: when the committed threshold loads, jump the slider to it so
-  // the operator isn't staring at a misleading default of 75. Guarded so
-  // subsequent edits don't get clobbered by the query refetching.
-  const [syncedFromCommitted, setSyncedFromCommitted] = React.useState(false)
-  if (!syncedFromCommitted && committed?.threshold != null && thresholdRaw === 75) {
-    setSyncedFromCommitted(true)
+  // One-shot per service: when the committed threshold loads, jump the slider
+  // to it so the operator isn't staring at a misleading default of 75. Guarded
+  // by serviceId so subsequent edits don't get clobbered by query refetches,
+  // while switching services re-syncs to the new service's committed threshold.
+  const [syncedServiceId, setSyncedServiceId] = React.useState<string | null>(null)
+  if (syncedServiceId !== serviceId && committed?.threshold != null) {
+    setSyncedServiceId(serviceId)
     setThresholdRaw(committed.threshold)
     setThreshold(committed.threshold)
   }

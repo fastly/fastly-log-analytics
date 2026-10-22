@@ -14,12 +14,86 @@ generator and returns the response without reaching back into route code.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, Iterator
+import asyncio
+import contextvars
+import json
+import queue
+import threading
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Generator, Iterator
 from typing import Any
 
 from sse_starlette.sse import EventSourceResponse
 
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+
+
+class ClientDisconnected(Exception):
+    """Raised when the client disconnects during a streaming response."""
+
+
+class _AbortableQueue(queue.Queue):
+    def __init__(self, maxsize: int = 0):
+        super().__init__(maxsize)
+        self.aborted = False
+
+    def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
+        if self.aborted:
+            if item is None:
+                return
+            raise ClientDisconnected("Client disconnected during streaming")
+        super().put(item, block, timeout)
+
+
+def _stream_from_worker(worker: Callable[[_AbortableQueue], Any], *, maxsize: int = 10) -> Generator[Any]:
+    """Run *worker(q)* in a daemon thread and yield items it puts into the queue until ``None``."""
+    q: _AbortableQueue = _AbortableQueue(maxsize=maxsize)
+    # Copy the request's context (process_context, _CALLS list) so any
+    # record_call() inside the worker thread lands in the same _usage_log batch.
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
+    thread.start()
+    try:
+        while True:
+            chunk = q.get()
+            if chunk is None:
+                break
+            yield chunk
+    finally:
+        q.aborted = True
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+
+def stream_sse_from_worker(
+    worker: Callable[[_AbortableQueue], Any],
+    *,
+    ping: int = 5,
+    maxsize: int = 0,
+) -> EventSourceResponse:
+    """Run *worker(q)* in a background daemon thread via ``_stream_from_worker`` and stream JSON SSE frames."""
+
+    def _safe_worker(q: _AbortableQueue) -> None:
+        try:
+            worker(q)
+        finally:
+            q.put(None)
+
+    async def _stream() -> AsyncIterator[str]:
+        gen = _stream_from_worker(_safe_worker, maxsize=maxsize)
+        sentinel = object()
+        try:
+            while True:
+                event = await asyncio.to_thread(next, gen, sentinel)
+                if event is sentinel:
+                    break
+                yield event if isinstance(event, str) else json.dumps(event)
+        finally:
+            gen.close()
+
+    return sse_response(_stream(), ping=ping)
 
 
 def sse_response(stream: AsyncIterable[Any] | Iterator[Any], *, ping: int = 5) -> EventSourceResponse:

@@ -21,7 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard'
 

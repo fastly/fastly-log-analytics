@@ -439,7 +439,7 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
         return
     con = _ul(service_id)
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
-    con.execute("DELETE FROM usage_log WHERE timestamp < ?", (cutoff,))
+    con.execute("DELETE FROM usage_log WHERE service_id = ? AND timestamp < ?", (service_id, cutoff))
     con.execute("DELETE FROM telemetry_queries WHERE timestamp < ?", (cutoff,))
     con.execute("DELETE FROM telemetry_sections WHERE timestamp < ?", (cutoff,))
     con.commit()

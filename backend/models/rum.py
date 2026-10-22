@@ -7,6 +7,8 @@ omits whatever a given branch did not set. Telemetry keys injected by
 
 from __future__ import annotations
 
+from typing import Any
+
 from backend.models._base import WireSafeModel
 
 
@@ -124,3 +126,16 @@ class RumAnalyticsResponse(WireSafeModel):
     errors: list[RumJsError] | None = None
     trends: RumTrends | None = None
     environments: RumEnvironments | None = None
+
+
+class RumLiveEventItem(WireSafeModel):
+    time: str
+    type: str
+    path: str
+    desc: str
+    browser: str
+    os: str
+    raw_log: dict[str, Any] = {}
+
+
+RumLiveResponse = list[RumLiveEventItem]

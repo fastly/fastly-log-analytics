@@ -22,7 +22,7 @@ import { http, HttpResponse } from 'msw'
 import React from 'react'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
-import { server } from '../../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import ShareDashboardPage from '@/app/admin/share/page'
 

@@ -1,11 +1,20 @@
 import json
 import logging
+import math
 import os
+import re
 import threading
 
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = "cache/pop_locations.json"
+
+_DEFAULT_POP_COORDS: dict[str, tuple[float, float]] = {
+    "SJC": (37.3382, -121.8863),
+    "IAD": (38.9531, -77.4565),
+    "NRT": (35.7720, 140.3929),
+}
+_SAFE_POP_CODE_RE = re.compile(r"^[A-Z0-9_]+$")
 
 # mtime-revalidated cache for the parsed lat/lon map. Bootstrap calls
 # get_pop_lat_lon_map() on every dashboard refresh; the POPs file rarely
@@ -130,3 +139,63 @@ def get_pop_location_map() -> dict[str, dict]:
     with _loc_cache_lock:
         _loc_cache = (mtime_ns, result)
     return result
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometers between two (lat, lon) points."""
+    r_km = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return 2.0 * r_km * math.asin(math.sqrt(a))
+
+
+def _effective_pop_lat_lon_map() -> dict[str, tuple[float, float]]:
+    merged = dict(_DEFAULT_POP_COORDS)
+    for code, coords in get_pop_lat_lon_map().items():
+        norm = str(code).upper()
+        if _SAFE_POP_CODE_RE.match(norm) and isinstance(coords, (tuple, list)) and len(coords) == 2:
+            try:
+                merged[norm] = (float(coords[0]), float(coords[1]))
+            except (TypeError, ValueError):
+                continue
+    return merged
+
+
+def _haversine_sql_expr(lat_col: str, lon_col: str, pop_lat: float, pop_lon: float) -> str:
+    return (
+        f"6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS({lat_col} - {pop_lat}) / 2), 2) "
+        f"+ COS(RADIANS({pop_lat})) * COS(RADIANS({lat_col})) "
+        f"* POWER(SIN(RADIANS({lon_col} - {pop_lon}) / 2), 2)))"
+    )
+
+
+def build_pop_haversine_case_sql(
+    pop_col: str = "pop",
+    lat_col: str = "lat",
+    lon_col: str = "lon",
+    default_lat: float = 38.0,
+    default_lon: float = -97.0,
+) -> str:
+    """Build a SQL CASE expression computing Haversine distance (km) from POP to client (lat, lon)."""
+    coords = _effective_pop_lat_lon_map()
+    whens = [
+        f"WHEN {pop_col} = '{code}' THEN {_haversine_sql_expr(lat_col, lon_col, plat, plon)}"
+        for code, (plat, plon) in coords.items()
+    ]
+    else_expr = _haversine_sql_expr(lat_col, lon_col, float(default_lat), float(default_lon))
+    return "CASE " + " ".join(whens) + f" ELSE {else_expr} END"
+
+
+def build_pop_lat_case_sql(pop_col: str = "pop", default_lat: float = 38.0) -> str:
+    """Build a SQL CASE expression mapping POP code to latitude."""
+    coords = _effective_pop_lat_lon_map()
+    whens = [f"WHEN {pop_col} = '{code}' THEN {plat}" for code, (plat, _plon) in coords.items()]
+    return "CASE " + " ".join(whens) + f" ELSE {float(default_lat)} END"
+
+
+def build_pop_lon_case_sql(pop_col: str = "pop", default_lon: float = -97.0) -> str:
+    """Build a SQL CASE expression mapping POP code to longitude."""
+    coords = _effective_pop_lat_lon_map()
+    whens = [f"WHEN {pop_col} = '{code}' THEN {plon}" for code, (_plat, plon) in coords.items()]
+    return "CASE " + " ".join(whens) + f" ELSE {float(default_lon)} END"

@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.models._base import PassthroughModel
+from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import BaseResponse
 
 
@@ -209,7 +209,7 @@ class ServiceCredentialsBody(BaseModel):
     secret_key: str = ""
 
 
-class CronRunEntry(PassthroughModel):
+class CronRunEntry(WireSafeModel):
     """One row of GET /api/cron-runs.
 
     ``extra="allow"`` passes any future cron_runs column through verbatim, and
@@ -236,11 +236,14 @@ class CronRunEntry(PassthroughModel):
     summary: str | None = None
 
 
-class CronRunsResponse(PassthroughModel):
+class CronRunsResponse(WireSafeModel):
     total: int | None = None
     page: int | None = None
     per_page: int | None = None
     entries: list[CronRunEntry] = []
+
+
+CronRunsPageResponse = CronRunsResponse
 
 
 # ── Wire-safe responses for the remaining services/core routes ─────────────

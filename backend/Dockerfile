@@ -126,7 +126,7 @@ COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
 COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
 COPY --chown=app:app compute/scorer/matrix.default.json ./compute/scorer/matrix.default.json
-COPY --chown=app:app compute/scorer/pkg/session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
+COPY --chown=app:app compute/scorer/matrix.default.json compute/scorer/pkg/session-scorer.tar.g[z] ./compute/scorer/pkg/
 
 # Copy backend application source
 COPY --chown=app:app backend/ ./backend/

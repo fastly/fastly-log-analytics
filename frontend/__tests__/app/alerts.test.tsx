@@ -22,7 +22,7 @@ import React from 'react'
 import AlertsClient from '@/app/alerts/_sections/AlertsClient'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 // Mock the heavy plotly child — irrelevant to the assertion here.
 vi.mock('@/components/PlotlyChart', () => ({

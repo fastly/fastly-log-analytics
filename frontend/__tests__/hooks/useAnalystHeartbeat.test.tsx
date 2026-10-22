@@ -150,4 +150,70 @@ describe('useAnalystHeartbeat', () => {
     })
     expect(replace).toHaveBeenCalledWith('/share-login')
   })
+
+  it('does not call fetch when enabled=false (even after multiple intervals)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: false, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + INTERVAL * 5)
+      await vi.advanceTimersByTimeAsync(INTERVAL * 5)
+    })
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('stops polling after unmount', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    const { unmount } = renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + IDLE + 1)
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    const callsBeforeUnmount = fetchSpy.mock.calls.length
+
+    unmount()
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + INTERVAL * 5)
+      await vi.advanceTimersByTimeAsync(INTERVAL * 5)
+    })
+
+    expect(fetchSpy.mock.calls.length).toBe(callsBeforeUnmount)
+  })
+
+  it('swallows fetch errors silently (no unhandled rejection)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('boom'))
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+
+    const { result } = renderHook(() =>
+      useAnalystHeartbeat({
+        enabled: true,
+        idleAfterMs: IDLE,
+        intervalMs: INTERVAL,
+        failuresBeforeOverlay: 999,
+      }),
+    )
+
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        vi.setSystemTime(Date.now() + IDLE + 1)
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+      })
+    }
+
+    expect(result.current.disconnected).toBe(false)
+    expect(unhandled).not.toHaveBeenCalled()
+    process.off('unhandledRejection', unhandled)
+  })
 })

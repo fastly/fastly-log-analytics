@@ -6,7 +6,6 @@ from backend.core.clickhouse_client import get_clickhouse_client
 
 _SCHEMA_FILES = [
     "publication_schema.sql",
-    "archive_manifest_schema.sql",
     "request_schema.sql",
     "rum_schema.sql",
     "cmcd_schema.sql",

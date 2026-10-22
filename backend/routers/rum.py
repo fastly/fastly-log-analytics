@@ -45,6 +45,7 @@ from backend.models.provision import (
 from backend.models.rum import (
     RumAnalyticsResponse,
     RumBeaconHealthResponse,
+    RumLiveEventItem,
     RumSettingsUpdateResponse,
     RumStatusResponse,
 )
@@ -980,7 +981,7 @@ _live_events_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=1
 _CacheRegistry.register("rum._live_events_cache", _live_events_cache)
 
 
-@router.get("/{service_id}/rum/live-events")
+@router.get("/{service_id}/rum/live-events", response_model=list[RumLiveEventItem])
 async def rum_live_events(
     start_time: str | None = None,
     end_time: str | None = None,

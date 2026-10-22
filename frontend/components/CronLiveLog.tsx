@@ -17,29 +17,30 @@ export function CronLiveLog({
   onDone?: () => void
 }) {
   const { lines, status, start, stop } = useSSE()
-  const started = useRef(false)
-  const doneFired = useRef(false)
+  const startedForRunId = useRef<number | string | undefined>(undefined)
+  const doneFiredForRunId = useRef<number | string | undefined>(undefined)
   const { full, abbr } = useDateFormat()
 
   useEffect(() => {
-    if (runId && !started.current) {
-      started.current = true
+    if (runId && startedForRunId.current !== runId) {
+      startedForRunId.current = runId
+      doneFiredForRunId.current = undefined
       start(`/api/cron-runs/${runId}/stream`)
     }
     return () => {
-      if (started.current) {
+      if (startedForRunId.current !== undefined) {
         stop()
-        started.current = false
+        startedForRunId.current = undefined
       }
     }
   }, [runId, start, stop])
 
   useEffect(() => {
-    if ((status === 'done' || status === 'error') && onDone && !doneFired.current) {
-      doneFired.current = true
+    if ((status === 'done' || status === 'error') && onDone && doneFiredForRunId.current !== runId) {
+      doneFiredForRunId.current = runId
       onDone()
     }
-  }, [status, onDone])
+  }, [status, onDone, runId])
 
   // Under singleLine, only show the last line.
   // Otherwise under terminalMode show all lines. Fallback to last 2 lines.

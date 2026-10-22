@@ -29,6 +29,7 @@ import {
   historyHoursFromExtents,
   pickInsightsDefault,
 } from '@/lib/insights-defaults'
+import type { Schema } from '@/types/api'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -58,10 +59,14 @@ export function resolveInsightsDefault(
  * open record in the generated schema). Returns undefined when absent →
  * pickInsightsDefault falls back to STATIC_DEFAULT, matching the client.
  */
-function earliestFromLogExtents(logExtents: unknown): string | null | undefined {
-  if (!logExtents || typeof logExtents !== 'object') return undefined
-  const v = (logExtents as Record<string, unknown>).earliest_log_at
-  return typeof v === 'string' ? v : undefined
+type LogExtentsLike = Pick<Schema<'LogExtentsResponse'>, 'earliest_log_at'>
+
+function earliestFromLogExtents(
+  logExtents: LogExtentsLike | null | undefined,
+): string | null | undefined {
+  return typeof logExtents?.earliest_log_at === 'string'
+    ? logExtents.earliest_log_at
+    : undefined
 }
 
 /**
@@ -74,7 +79,7 @@ function earliestFromLogExtents(logExtents: unknown): string | null | undefined 
  */
 export async function fetchInsightsServerSide(
   serviceId: string | undefined,
-  logExtents: unknown,
+  logExtents: LogExtentsLike | null | undefined,
 ): Promise<InsightsSsrSeed | null> {
   const { windowHours, baselineHours } = resolveInsightsDefault(
     earliestFromLogExtents(logExtents),

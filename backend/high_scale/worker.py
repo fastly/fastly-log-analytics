@@ -104,44 +104,63 @@ class HighScaleWorkerLoop:
     def __init__(
         self,
         *,
-        coordinator: HighScaleWorkerCoordinator,
-        service_ids: tuple[str, ...],
+        coordinator: HighScaleWorkerCoordinator | None = None,
+        coordinators: tuple[tuple[str, HighScaleWorkerCoordinator], ...] | None = None,
+        service_ids: tuple[str, ...] = (),
         domains: tuple[str, ...] = ("request", "rum", "cmcd"),
         interval_seconds: float = 5.0,
         stop_event: Event | None = None,
         sleeper: Any = time.sleep,
         deletion_sweeper: HighScaleDeletionSweeper | None = None,
+        deletion_sweepers: tuple[tuple[str, HighScaleDeletionSweeper | None], ...] | None = None,
         deletion_sweep_limit: int = 100,
         pages_per_tick: int | None = None,
         service_weights: Mapping[str, int] | None = None,
     ) -> None:
-        if not service_ids:
+        if coordinators is not None:
+            resolved_coordinators = coordinators
+            resolved_service_ids = tuple(service_id for service_id, _ in coordinators)
+        else:
+            if not service_ids:
+                raise ValueError("at least one high-scale service is required")
+            if coordinator is None:
+                raise ValueError("coordinator is required")
+            resolved_service_ids = service_ids
+            resolved_coordinators = tuple((service_id, coordinator) for service_id in service_ids)
+        if not resolved_service_ids:
             raise ValueError("at least one high-scale service is required")
         if not domains:
             raise ValueError("at least one high-scale domain is required")
         if interval_seconds < 0:
             raise ValueError("worker interval must be non-negative")
         self._coordinator = coordinator
-        self._service_ids = service_ids
+        self._coordinators = resolved_coordinators
+        self._service_ids = resolved_service_ids
         self._domains = domains
         self._interval_seconds = interval_seconds
         self._stop_event = stop_event or Event()
         self._sleeper = sleeper
         self._deletion_sweeper = deletion_sweeper
+        self._deletion_sweepers = (
+            deletion_sweepers
+            if deletion_sweepers is not None
+            else tuple((service_id, deletion_sweeper) for service_id in resolved_service_ids)
+        )
         self._deletion_sweep_limit = deletion_sweep_limit
         self._deletion_thread: Thread | None = None
         self._last_system_cleanup = 0.0
         self._selector = FairPageSelector(
-            tuple((service_id, domain) for service_id in service_ids for domain in domains),
+            tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains),
             capacity=pages_per_tick,
             weights=service_weights,
         )
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
         results: list[WorkerPageResult] = []
+        coordinators = dict(self._coordinators)
         for service_id, domain in self._selector.select():
             try:
-                page = self._coordinator.run_page(service_id=service_id, domain=domain)
+                page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
             except Exception as exc:
                 logger.exception(
                     "high-scale worker page failed",
@@ -155,9 +174,7 @@ class HighScaleWorkerLoop:
         return tuple(results)
 
     def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
-        if self._deletion_sweeper is None:
-            return ()
-        return tuple((service_id, self._deletion_sweeper) for service_id in self._service_ids)
+        return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
 
     def _run_deletion_sweeps(self) -> None:
         # Each deletion re-verifies the archive in FOS (~1s), so a full sweep
@@ -189,7 +206,7 @@ class HighScaleWorkerLoop:
         if now - self._last_system_cleanup < 300:
             return
         self._last_system_cleanup = now
-        for service_id in self._service_ids:
+        for service_id, _ in self._coordinators:
             try:
                 from backend.utils.usage_logger import run_usage_log_cleanup
 
@@ -208,12 +225,16 @@ class HighScaleWorkerLoop:
             logger.debug("periodic clickhouse system tables maintenance failed")
 
     def _has_full_page(self, results: tuple[WorkerPageResult, ...]) -> bool:
-        page_size = getattr(self._coordinator, "_page_size", None)
-        return (
-            page_size is not None
-            and page_size > 0
-            and any(r.page is not None and r.page.discovered >= page_size for r in results)
-        )
+        if not self._coordinators:
+            return False
+        coord_map = dict(self._coordinators)
+        for r in results:
+            if r.page is not None:
+                c = coord_map.get(r.service_id)
+                page_size = getattr(c, "_page_size", None) if c else None
+                if page_size is not None and page_size > 0 and r.page.discovered >= page_size:
+                    return True
+        return False
 
     def run(self, *, max_iterations: int | None = None) -> None:
         if max_iterations is not None and max_iterations < 0:
@@ -373,76 +394,15 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         pages_per_tick: int | None = None,
         service_weights: Mapping[str, int] | None = None,
     ) -> None:
-        self._coordinators = coordinators
-        self._domains = domains
-        self._interval_seconds = interval_seconds
-        self._stop_event = Event()
-        self._sleeper = time.sleep
-        self._deletion_sweepers = deletion_sweepers
-        self._deletion_sweep_limit = deletion_sweep_limit
-        self._deletion_thread: Thread | None = None
-        self._last_system_cleanup = 0.0
-        self._selector = FairPageSelector(
-            tuple((service_id, domain) for service_id, _ in coordinators for domain in domains),
-            capacity=pages_per_tick,
-            weights=service_weights,
+        super().__init__(
+            coordinators=coordinators,
+            domains=domains,
+            interval_seconds=interval_seconds,
+            deletion_sweepers=deletion_sweepers,
+            deletion_sweep_limit=deletion_sweep_limit,
+            pages_per_tick=pages_per_tick,
+            service_weights=service_weights,
         )
-
-    def run_once(self) -> tuple[WorkerPageResult, ...]:
-        results: list[WorkerPageResult] = []
-        coordinators = dict(self._coordinators)
-        for service_id, domain in self._selector.select():
-            try:
-                page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
-            except Exception as exc:
-                logger.exception(
-                    "high-scale worker page failed",
-                    extra={"service_id": service_id, "domain": domain},
-                )
-                results.append(WorkerPageResult(service_id, domain, None, exc))
-            else:
-                results.append(WorkerPageResult(service_id, domain, page))
-        self._run_deletion_sweeps()
-        self._run_system_cleanups()
-        return tuple(results)
-
-    def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
-        return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
-
-    def _has_full_page(self, results: tuple[WorkerPageResult, ...]) -> bool:
-        if not self._coordinators:
-            return False
-        coord_map = {sid: c for sid, c in self._coordinators}
-        for r in results:
-            if r.page is not None:
-                c = coord_map.get(r.service_id)
-                page_size = getattr(c, "_page_size", None) if c else None
-                if page_size is not None and page_size > 0 and r.page.discovered >= page_size:
-                    return True
-        return False
-
-    def _run_system_cleanups(self) -> None:
-        now = time.time()
-        if now - self._last_system_cleanup < 300:
-            return
-        self._last_system_cleanup = now
-        for service_id, _ in self._coordinators:
-            try:
-                from backend.utils.usage_logger import run_usage_log_cleanup
-
-                run_usage_log_cleanup(service_id)
-            except Exception:
-                logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
-
-        try:
-            from backend.core.clickhouse_client import get_clickhouse_client
-            from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
-
-            client = get_clickhouse_client()
-            if client is not None:
-                maintain_clickhouse_system_tables(client)
-        except Exception:
-            logger.debug("periodic clickhouse system tables maintenance failed")
 
 
 def _csv_env(name: str) -> tuple[str, ...]:

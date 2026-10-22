@@ -302,42 +302,9 @@ def _build_io_per_request_metrics(
 # ── Overview rollup reader ──────────────────────────────────────────────
 
 
-def _collapse_hourly_to_daily_bundle_paths(
-    src: dict,
-    rollup_paths: list[str],
-    bundle_filename: str,
-) -> list[str]:
-    """Replace any full 24-hour closed day in ``rollup_paths`` with its compacted
-    ``day_bundled/day=YYYY-MM-DD/{bundle_filename}`` file when present on disk."""
-    import os
-
-    from backend.core.rollups._common import _day_bundled_root
-
-    if len(rollup_paths) < 24:
-        return rollup_paths
-    day_root = _day_bundled_root(src)
-    if not os.path.isdir(day_root):
-        return rollup_paths
-
-    by_day: dict[str, list[str]] = {}
-    other_paths: list[str] = []
-    for p in rollup_paths:
-        parent = os.path.basename(os.path.dirname(p))
-        if parent.startswith("hour=") and len(parent) >= 18:
-            day_key = parent[5:15]
-            by_day.setdefault(day_key, []).append(p)
-        else:
-            other_paths.append(p)
-
-    collapsed: list[str] = list(other_paths)
-    for day_key, paths in sorted(by_day.items()):
-        if len(paths) == 24:
-            day_file = os.path.join(day_root, f"day={day_key}", bundle_filename)
-            if os.path.isfile(day_file):
-                collapsed.append(day_file)
-                continue
-        collapsed.extend(paths)
-    return collapsed
+from backend.repositories._rollup_planner import (
+    collapse_hourly_to_daily_bundle_paths as _collapse_hourly_to_daily_bundle_paths,
+)
 
 
 def _try_overview_from_rollup(

@@ -1904,7 +1904,7 @@ def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, con
             "distinct_urls": w_distinct,
             "requests_per_url": reqs_per_url,
             "surge_ratio": surge,
-            "filters": {"ip": row[0]},
+            "filters": {"ip": ip},
         },
         "severity": "critical" if reqs_per_url >= 20.0 else "warning",
     }

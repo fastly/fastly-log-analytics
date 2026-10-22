@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from backend.models._base import PassthroughModel
+from backend.models._base import PassthroughModel, WireSafeModel
 
 
 class ShareStartPayload(BaseModel):
@@ -127,9 +127,12 @@ class _ShareAdminRead(PassthroughModel):
     """Base for share-admin responses — passes undeclared keys through."""
 
 
-class ShareBannerResponse(_ShareAdminRead):
+class ShareBannerResponse(_ShareAdminRead, WireSafeModel):
     sharing_active: bool | None = None
     public_url: str | None = None
+
+
+ShareStatusBannerResponse = ShareBannerResponse
 
 
 class InviteRecord(_ShareAdminRead):
@@ -331,3 +334,26 @@ class ShareTosResponse(_ShareAdminRead):
     version: str | None = None
     text: str | None = None
     published_at: str | None = None
+
+
+class SharingDeployRequest(BaseModel):
+    service_name: str
+    domain_name: str
+    origin_host: str
+    origin_port: int = 80
+    use_ssl: bool = False
+    token_override: str | None = None
+    override_host: str | None = None
+    service_id: str | None = None
+
+
+class SharingDeployResponse(BaseModel):
+    service_id: str
+    version: int
+    domain_name: str
+    origin_host: str
+
+
+class SharingTeardownRequest(BaseModel):
+    service_id: str
+    token_override: str | None = None

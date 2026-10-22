@@ -218,8 +218,7 @@ def sync_data(
     if not fast_path_used:
         try:
             import dateutil.parser
-
-            from backend.utils.iceberg_expr import gte, lte
+            from pyiceberg.expressions import GreaterThanOrEqual, LessThanOrEqual
 
             scan = table.scan()
 
@@ -243,11 +242,11 @@ def sync_data(
                 # start_time truthy ⇒ st_dt was set above; narrow for mypy.
                 if st_dt is None:
                     raise RuntimeError("st_dt is unexpectedly None")
-                scan = scan.filter(gte("timestamp", st_dt.isoformat()))
+                scan = scan.filter(GreaterThanOrEqual("timestamp", st_dt.isoformat()))  # type: ignore[misc,call-arg,arg-type]
             if end_time:
                 if et_dt is None:
                     raise RuntimeError("et_dt is unexpectedly None")
-                scan = scan.filter(lte("timestamp", et_dt.isoformat()))
+                scan = scan.filter(LessThanOrEqual("timestamp", et_dt.isoformat()))  # type: ignore[misc,call-arg,arg-type]
 
             for f in scan.plan_files():
                 uri = f.file.file_path

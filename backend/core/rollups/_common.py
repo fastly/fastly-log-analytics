@@ -8,11 +8,13 @@ sub-module needs.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
+import shutil
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -987,7 +989,6 @@ def build_per_hour_bundles(
 
     import duckdb
 
-    from backend.core.duckdb import get_connection
     from backend.core.iceberg.view import _get_service_lock
 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
@@ -1010,15 +1011,13 @@ def build_per_hour_bundles(
     os.makedirs(bundled_root, exist_ok=True)
     lock_key = source.get("name", "default")
 
-    con = get_connection(source=source, read_only=True)
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source,
+        table_ident,
+        logger=logger,
+        log_label=f"cannot describe {describe_label or label} bundle",
+    )
     try:
-        cols = describe_columns(
-            con,
-            source,
-            table_ident,
-            logger=logger,
-            log_label=f"cannot describe {describe_label or label} bundle",
-        )
         if cols is None:
             return 0
 
@@ -1067,7 +1066,272 @@ def build_per_hour_bundles(
 
         return rebuilt
     finally:
-        con.close()
+        if owns_con:
+            con.close()
+
+
+class _SharedRollupSession:
+    """Lazy per-tick cache for the read-only DuckDB connection and DESCRIBE columns."""
+
+    def __init__(self, source: dict) -> None:
+        self.source = source
+        self.con: duckdb.DuckDBPyConnection | None = None
+        self.cols_by_table: dict[str, set[str] | None] = {}
+
+    def acquire(
+        self,
+        table_ident: str,
+        *,
+        logger: logging.Logger,
+        log_label: str,
+    ) -> tuple[duckdb.DuckDBPyConnection, set[str] | None]:
+        from backend.core.duckdb import get_connection
+
+        if self.con is None:
+            self.con = get_connection(source=self.source, read_only=True)
+        if table_ident not in self.cols_by_table:
+            self.cols_by_table[table_ident] = describe_columns(
+                self.con,
+                self.source,
+                table_ident,
+                logger=logger,
+                log_label=log_label,
+            )
+        return self.con, self.cols_by_table[table_ident]
+
+    def close(self) -> None:
+        if self.con is not None:
+            try:
+                self.con.close()
+            finally:
+                self.con = None
+
+
+_SHARED_ROLLUP_SESSION: contextvars.ContextVar[_SharedRollupSession | None] = contextvars.ContextVar(
+    "_SHARED_ROLLUP_SESSION", default=None
+)
+
+
+@contextlib.contextmanager
+def shared_rollup_session(source: dict) -> Iterator[_SharedRollupSession]:
+    """Share a single lazy read-only DuckDB connection and DESCRIBE column set
+    across all writers within a recompute tick."""
+    existing = _SHARED_ROLLUP_SESSION.get()
+    if existing is not None and existing.source is source:
+        yield existing
+        return
+
+    session = _SharedRollupSession(source)
+    token = _SHARED_ROLLUP_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _SHARED_ROLLUP_SESSION.reset(token)
+        session.close()
+
+
+def acquire_rollup_connection_and_cols(
+    source: dict,
+    table_ident: str,
+    *,
+    logger: logging.Logger,
+    log_label: str,
+) -> tuple[duckdb.DuckDBPyConnection, set[str] | None, bool]:
+    """Return ``(con, cols, owns_con)`` using the active :func:`shared_rollup_session`
+    when available, or opening a standalone connection otherwise."""
+    from backend.core.duckdb import get_connection
+
+    session = _SHARED_ROLLUP_SESSION.get()
+    if session is not None and session.source is source:
+        con, cols = session.acquire(table_ident, logger=logger, log_label=log_label)
+        return con, cols, False
+
+    con = get_connection(source=source, read_only=True)
+    cols = describe_columns(con, source, table_ident, logger=logger, log_label=log_label)
+    return con, cols, True
+
+
+MultiBundleSpec = tuple[
+    str,
+    str,
+    tuple[str, ...],
+    Callable[[object, str, str, str, str], str],
+]
+
+
+def build_multi_spec_bundles(
+    service_id: str,
+    source: dict,
+    hours: list[str],
+    *,
+    specs: Sequence[MultiBundleSpec],
+    group_label: str,
+    tmp_prefix: str,
+    logger: logging.Logger = logger,
+    context_fn: Callable[[set[str], str], object | None] | None = None,
+    driver: Callable[..., int] | None = None,
+) -> int:
+    """Shared multi-bundle per-hour writer for modules that emit multiple
+    dimension parquet files per closed hour."""
+    run_driver = driver or build_per_hour_bundles
+    written = 0
+    for sub_label, filename, req_cols, build_copy_sql in specs:
+
+        def eligibility(cols: set[str], table_ident: str, _req_cols: tuple[str, ...] = req_cols) -> object | None:
+            ctx = context_fn(cols, table_ident) if context_fn is not None else True
+            if ctx is None:
+                return None
+            for c in _req_cols:
+                if c not in cols:
+                    return None
+            return ctx
+
+        written += run_driver(
+            service_id,
+            source,
+            hours,
+            bundle_filename=filename,
+            tmp_prefix=tmp_prefix,
+            label=f"{group_label}({sub_label})",
+            describe_label=group_label,
+            eligibility=eligibility,
+            build_copy_sql=build_copy_sql,
+            logger=logger,
+        )
+    return written
+
+
+def backfill_multi_spec_bundles(
+    service_id: str,
+    source: dict,
+    *,
+    specs: Sequence[MultiBundleSpec],
+    group_label: str,
+    tmp_prefix: str,
+    logger: logging.Logger = logger,
+    context_fn: Callable[[set[str], str], object | None] | None = None,
+    driver: Callable[..., int] | None = None,
+) -> int:
+    """Self-heal pass for multi-bundle rollup modules: walks each bundle
+    filename independently so an interrupted partial run never strands the
+    remaining bundles behind a single sentinel."""
+    written = 0
+    for spec in specs:
+        sub_label, filename, _, _ = spec
+
+        def _one_bundle_builder(
+            sid: str,
+            src: dict,
+            hours: list[str],
+            _spec: MultiBundleSpec = spec,
+        ) -> int:
+            return build_multi_spec_bundles(
+                sid,
+                src,
+                hours,
+                specs=(_spec,),
+                group_label=group_label,
+                tmp_prefix=tmp_prefix,
+                logger=logger,
+                context_fn=context_fn,
+                driver=driver,
+            )
+
+        written += backfill_missing_bundles(
+            service_id,
+            source,
+            bundle_filename=filename,
+            label=f"{group_label}({sub_label})",
+            builder=_one_bundle_builder,
+            logger=logger,
+        )
+    return written
+
+
+def cleanup_per_field_after_bundle(
+    per_field_root: str,
+    partition_subdir: str,
+    bundle_path: str,
+    service_id: str,
+    *,
+    file_kind_label: str = "per-field",
+    dir_kind_label: str = "per-field",
+    cleanup_label: str = "cleanup",
+    logger: logging.Logger = logger,
+) -> None:
+    """Sweep per-field parquet directories for ``partition_subdir`` (e.g.
+    ``hour=YYYY-MM-DD-HH`` or ``day=YYYY-MM-DD``) after its bundled file
+    has been published and verified to be at least as new as every source
+    per-field parquet."""
+    if not os.path.exists(bundle_path):
+        return
+    try:
+        bundle_mtime = os.path.getmtime(bundle_path)
+    except OSError:
+        return
+
+    dry_run = os.environ.get("ROLLUP_CLEANUP_DRY_RUN") == "1"
+    candidate_dirs: list[str] = []
+    file_count = 0
+    try:
+        for field_entry in os.listdir(per_field_root):
+            if not field_entry.startswith("field="):
+                continue
+            target_dir = os.path.join(per_field_root, field_entry, partition_subdir)
+            if not os.path.isdir(target_dir):
+                continue
+            ok = True
+            count_here = 0
+            try:
+                for fname in os.listdir(target_dir):
+                    if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
+                        continue
+                    p = os.path.join(target_dir, fname)
+                    try:
+                        if os.path.getmtime(p) > bundle_mtime:
+                            ok = False
+                            break
+                        count_here += 1
+                    except OSError:
+                        ok = False
+                        break
+            except OSError:
+                ok = False
+            if ok and count_here > 0:
+                candidate_dirs.append(target_dir)
+                file_count += count_here
+    except OSError:
+        return
+
+    if not candidate_dirs:
+        return
+
+    if dry_run:
+        logger.info(
+            "[rollups] %s: ROLLUP_CLEANUP_DRY_RUN — would delete %d %s parquets across %d field dirs for %s",
+            service_id,
+            file_count,
+            file_kind_label,
+            len(candidate_dirs),
+            partition_subdir,
+        )
+        return
+
+    deleted_dirs = 0
+    for target_dir in candidate_dirs:
+        try:
+            shutil.rmtree(target_dir)
+            deleted_dirs += 1
+        except OSError as e:
+            logger.warning("[rollups] %s: %s failed for %s: %s", service_id, cleanup_label, target_dir, e)
+    logger.debug(
+        "[rollups] %s: cleaned %d %s dirs (~%d parquets) for bundled %s",
+        service_id,
+        deleted_dirs,
+        dir_kind_label,
+        file_count,
+        partition_subdir,
+    )
 
 
 def describe_columns(

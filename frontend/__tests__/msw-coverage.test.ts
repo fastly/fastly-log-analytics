@@ -26,7 +26,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { handlers } from '../tests/msw/handlers'
+import { handlers } from '@/__tests__/helpers/msw/handlers'
 
 // Paths that intentionally have NO MSW handler.
 //

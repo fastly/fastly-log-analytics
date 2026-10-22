@@ -4,9 +4,11 @@
 // Replicates the /origin SSR template (commit 319c1b0) — POST callers of the
 // shared transport, inheriting its Caddy-marker trust gate + analyst clamp.
 
-import { quantizeAnchor } from '@/lib/time-window'
-
-import { parseSsrJson, ssrUpstreamGet } from './_transport'
+import {
+  parseSsrJson,
+  resolveDefaultSsrRangeKey,
+  ssrUpstreamGet,
+} from './upstream'
 
 // 'p99' is the literal sort_by default in the performance query key (the page
 // hard-codes 'p99'); it is a key element, so it must match the seed.
@@ -23,14 +25,7 @@ export interface PerformanceSsrSeed {
   anchor: string
 }
 
-export function resolvePerformanceDefaultKey(
-  now: Date = new Date(),
-): {
-  rangeToken: string
-  anchor: string
-} {
-  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
-}
+export const resolvePerformanceDefaultKey = resolveDefaultSsrRangeKey
 
 async function fetchPerformanceData(
   serviceId: string,

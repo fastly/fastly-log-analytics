@@ -18,7 +18,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-import { server } from '../../tests/msw/server'
+import { server } from '@/__tests__/helpers/msw/server'
 
 const API_BASE = 'http://127.0.0.1:8000'
 

@@ -2882,11 +2882,11 @@
             "requests_per_url": 3.6666666666666665,
             "surge_ratio": 55.0,
             "filters": {
-              "ip": "10.10.0.1"
+              "ip": "10.10.0.xxx"
             }
           },
           "severity": "warning",
-          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.10.0.1"
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.10.0.xxx"
         }
       ]
     },

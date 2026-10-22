@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from backend.models._base import PassthroughModel
+from backend.models._base import PassthroughModel, WireSafeModel
 
 
 class ScoringThresholdBody(BaseModel):
@@ -308,7 +308,7 @@ class ScoringAnalyticsResponse(_ScoringRead):
     evaluation_per_reason: dict | None = None
 
 
-class ScoringLabelRow(_ScoringRead):
+class ScoringLabelRow(_ScoringRead, WireSafeModel):
     # Fields ordered to match labels._row_to_dict so the serialized key order
     # is byte-identical. All Optional: the analyst path projects out the PII /
     # attribution fields (notes/flagged_by/sample_*), and response_model_exclude_unset
@@ -331,16 +331,19 @@ class ScoringLabelRow(_ScoringRead):
     updated_at: str | None = None
 
 
-class ScoringLabelCounts(_ScoringRead):
+class ScoringLabelCounts(_ScoringRead, WireSafeModel):
     # labels.counts_by_label always seeds all three keys (0 when unlabeled).
     good: int
     bad: int
     neutral: int
 
 
-class ScoringLabelsListResponse(_ScoringRead):
+class ScoringLabelsListResponse(_ScoringRead, WireSafeModel):
     labels: list[ScoringLabelRow]
     counts: ScoringLabelCounts
+
+
+ScoringLabelsResponse = ScoringLabelsListResponse
 
 
 # ── Response models for the admin endpoints (session_scoring_admin.py) ───────
