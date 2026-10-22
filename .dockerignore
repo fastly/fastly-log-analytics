@@ -10,6 +10,7 @@ configs/
 node_modules/
 frontend/node_modules/
 frontend/.next/
+frontend/.next-e2e/
 frontend/out/
 frontend/public/maplibre-gl-worker.mjs
 frontend/public/maplibre-gl-shared.mjs
@@ -34,6 +35,9 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/coverage/
 frontend/vitest.config.*
+frontend/vitest.setup.ts
+frontend/playwright.config.*
+compute/scorer/target/
 
 # Local docs / planning
 TESTING_PLAN*.md
