@@ -23,7 +23,7 @@ services:
       - --web.enable-remote-write-receiver
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml:/etc/prometheus/clickhouse.rules.yml:ro
+      - ./observability/clickhouse.rules.yml:/etc/prometheus/clickhouse.rules.yml:ro
       - prometheus-data:/prometheus
     networks: [app-network]
     ports:
@@ -33,7 +33,7 @@ services:
     image: grafana/tempo:2.7.2
     command: ["-config.file=/etc/tempo/tempo.yml"]
     volumes:
-      - ./deploy/chart/fastly-log-analytics/files/observability/tempo.yml:/etc/tempo/tempo.yml:ro
+      - ./observability/tempo.yml:/etc/tempo/tempo.yml:ro
       - tempo-data:/var/tempo
     networks: [app-network]
     ports:
@@ -45,9 +45,9 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
-      - ./deploy/chart/fastly-log-analytics/files/observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
-      - ./deploy/chart/fastly-log-analytics/files/observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/fla.yml:ro
-      - ./deploy/chart/fastly-log-analytics/files/observability/dashboards:/var/lib/grafana/dashboards:ro
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/fla.yml:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
     networks: [app-network]
     ports:
       - 127.0.0.1:3000:3000

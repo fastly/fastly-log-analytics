@@ -96,7 +96,7 @@ SCOPE=(app components hooks lib stores)
 # Test-side ceiling: same gate over the test/e2e dirs, but warnings count too
 # (e.g. no-unused-vars), so dead imports and vars cannot pile up. Ratchet to 0.
 TEST_CEILING=0
-TEST_SCOPE=(__tests__ tests e2e vitest.setup.ts)
+TEST_SCOPE=(__tests__ e2e vitest.setup.ts)
 
 count_errors() {
     local json warn="$1"

@@ -19,6 +19,7 @@ from typing import Any, NoReturn, get_args
 
 from fastapi import HTTPException, Request
 
+from backend.models.admin import SyncStartResponse
 from backend.utils.error_redaction import redact_error_text
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,48 @@ def start_or_resume_cron(
             status_code=503,
             detail=make_error("cron_busy", "A run for this task is already in progress", busy=True),
         ) from e
+
+
+def run_admin_cron_trigger(
+    source: dict[str, Any],
+    task_name: str,
+    target_fn: Any,
+    *,
+    target_kwargs: dict[str, Any] | None = None,
+    success_msg: str,
+    in_progress_msg: str,
+    readonly_detail: Any,
+    invalidate_cache: bool = True,
+    require_high_scale: bool = False,
+    high_scale_detail: Any = None,
+) -> SyncStartResponse:
+    """Shared execution wrapper for manual admin cron trigger routes."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail=readonly_detail)
+
+    if require_high_scale:
+        from backend import config as svcconfig
+
+        if not svcconfig.is_high_scale_mode(source):
+            raise HTTPException(
+                status_code=400,
+                detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
+            )
+
+    if invalidate_cache:
+        from backend.repositories.dashboard import invalidate_service
+
+        invalidate_service(source["name"])
+
+    res = start_or_resume_cron(
+        source,
+        task_name,
+        target_fn,
+        target_kwargs=target_kwargs,
+        success_msg=success_msg,
+        in_progress_msg=in_progress_msg,
+    )
+    return SyncStartResponse(**res)
 
 
 def load_service_config(service_id: str) -> dict:

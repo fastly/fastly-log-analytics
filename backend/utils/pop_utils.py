@@ -154,7 +154,7 @@ def _effective_pop_lat_lon_map() -> dict[str, tuple[float, float]]:
     merged = dict(_DEFAULT_POP_COORDS)
     for code, coords in get_pop_lat_lon_map().items():
         norm = str(code).upper()
-        if _SAFE_POP_CODE_RE.match(norm) and isinstance(coords, (tuple, list)) and len(coords) == 2:
+        if _SAFE_POP_CODE_RE.fullmatch(norm) and isinstance(coords, (tuple, list)) and len(coords) == 2:
             try:
                 merged[norm] = (float(coords[0]), float(coords[1]))
             except (TypeError, ValueError):
