@@ -479,42 +479,28 @@ def read_wellknown_bots_rollup(
     try:
         paths_sql = quote_path_list(paths)
         try:
-            # First check: is the rollup version current? Pull a single
-            # distinct version value — if any row's version mismatches
-            # the current set, fall back (the writer guarantees one
-            # version per partition, but a stale partition from before
-            # a source refresh could still be on disk).
-            version_row = con.execute(
-                f"SELECT DISTINCT pattern_set_version FROM read_parquet([{paths_sql}]) LIMIT 2"
+            # Single-pass parquet scan: aggregate (ua, ip) ACROSS hours before
+            # the LIMIT while simultaneously computing MIN/MAX(pattern_set_version)
+            # over the whole window (window functions run before LIMIT) so we
+            # validate version freshness without a second read_parquet pass.
+            rows = con.execute(
+                f"SELECT ua, ip, request_count, "
+                f"MIN(min_row_ver) OVER () AS min_ver, "
+                f"MAX(max_row_ver) OVER () AS max_ver "
+                f"FROM (SELECT ua, ip, SUM(request_count) AS request_count, "
+                f"MIN(pattern_set_version) AS min_row_ver, "
+                f"MAX(pattern_set_version) AS max_row_ver "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"GROUP BY ua, ip) "
+                f"ORDER BY request_count DESC LIMIT 10000"
             ).fetchall()
         except duckdb.Error:
             return None
-        if not version_row:
-            # Empty rollup — no bot traffic in window. Safe to return
-            # an empty list (the reader handles that the same as a
-            # live SQL returning zero rows).
+        if not rows:
             return []
-        versions = {r[0] for r in version_row}
-        if len(versions) > 1 or current_version not in versions:
+        min_ver, max_ver = rows[0][3], rows[0][4]
+        if min_ver != current_version or max_ver != current_version:
             return None
-
-        # Aggregate (ua, ip) ACROSS hours before the LIMIT. Each hour's
-        # partition holds one row per (ua, ip); a 30 d window has ~700 hour
-        # partitions but typically only ~1k distinct (ua, ip) pairs, so a raw
-        # per-hour read returns ~200k rows that collapse to ~1k. Two reasons
-        # the GROUP BY is load-bearing, not cosmetic:
-        #   1. Correctness — the old per-hour ``LIMIT 10000`` capped on
-        #      per-hour counts, so a bot with a small count in each of many
-        #      hours (large total) could be dropped, and surviving bots had
-        #      only their top-10k per-hour slices summed (undercount). SUM
-        #      first, cap second → exact totals + no dropped long tail.
-        #   2. Cost — the caller runs a 500-pattern UA matcher + an rDNS-cache
-        #      lookup PER returned row; collapsing ~200k → ~1k cut that
-        #      request-path enrichment from seconds to sub-second.
-        rows = con.execute(
-            f"SELECT ua, ip, SUM(request_count) AS request_count FROM read_parquet([{paths_sql}]) "
-            f"GROUP BY ua, ip ORDER BY request_count DESC LIMIT 10000"
-        ).fetchall()
         return [(r[0], r[1], int(r[2])) for r in rows]
     finally:
         con.close()

@@ -417,6 +417,7 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     else:
         top_ips = list(ip_totals)
     hostnames = get_hostnames(top_ips)
+    top_ips_set = set(top_ips)
 
     # 3. Cache per-(bot_id, ip) verification classification so repeated UAs from the same IP
     # don't re-parse CIDR ranges.
@@ -424,7 +425,7 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
 
     for matches, ip_val, cnt in matched_rows:
         hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
-        if status == "pending" and len(new_ips) < _RDNS_ENQUEUE_LIMIT:
+        if ip_val not in top_ips_set and ip_val not in hostnames and len(new_ips) < _RDNS_ENQUEUE_LIMIT:
             new_ips.add(ip_val)
         for entry in matches:
             bot_id = entry.get("id", "unknown")
@@ -433,7 +434,7 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
             if state is None:
                 verification = entry.get("verification", {})
                 verification_domains = verification.get("domains", [])
-                verification_cidrs = verification.get("cidrs", [])
+                verification_cidrs = tuple(verification.get("cidrs") or ())
                 state = classify(ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
                 classify_cache[cache_key] = state
 
@@ -1290,8 +1291,8 @@ def _build_security_response(
         _t = _time.perf_counter()
         be_rows = runner.try_security_bot_efficiency_from_rollup(start_time, end_time, has_filters=bool(filters))
         if be_rows is not None:
-            timer.mark("bot_efficiency_rollup", _t)
             results["bot_efficiency"] = summarize_bot_efficiency_rows(be_rows)
+            timer.mark("bot_efficiency_rollup", _t)
         else:
             be_cols = {"ua", "ip"}
             if "referer" in actual_cols:
@@ -1318,11 +1319,10 @@ def _build_security_response(
     if _want("proxies"):
         proxy_cols = {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"}
         px_rollup: dict | None = None
+        _t = _time.perf_counter()
         if proxy_cols <= set(actual_cols):
-            _t = _time.perf_counter()
             px_rollup = runner.try_security_proxies_from_rollup(start_time, end_time, has_filters=bool(filters))
         if px_rollup is not None:
-            timer.mark("proxies_rollup", _t)
             results.update(
                 _finish_proxies(
                     src["name"],
@@ -1333,6 +1333,7 @@ def _build_security_response(
                     mask_ips,
                 )
             )
+            timer.mark("proxies_rollup", _t)
         else:
             _need("proxies", proxy_cols | {"country", "city"})
 
@@ -1519,7 +1520,9 @@ def _build_security_response(
                 if _wk_rows is None:
                     results["wellknown_bots"] = []
                 else:
+                    _t_sum = _time.perf_counter()
                     results["wellknown_bots"] = summarize_wellknown_bot_rows(_wk_rows)
+                    timer.mark("wellknown_bots_summarize", _t_sum)
             except Exception as e:
                 _logger.error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []
