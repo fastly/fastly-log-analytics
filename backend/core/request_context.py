@@ -233,7 +233,9 @@ def build_request_context(
     )
     telemetry.start_request()
 
-    holder = _ConnectionHolder(source, read_only=True)
+    from backend.core.duckdb_pool import is_heavy_route
+
+    holder = _ConnectionHolder(source, read_only=True, heavy=is_heavy_route(route_template))
     analyst_session = getattr(request.state, "analyst_session", None)
     # Resolve the analyst clamp window once here (same request.state source
     # get_analyst_time_bounds reads) so handlers can call ctx.clamp(...).

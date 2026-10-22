@@ -50,6 +50,17 @@ Concurrency:
     accelerators remain a separate constraint. See
     docs/adr/18-serving-tier-single-pod.md.
 
+Heavy/light bulkhead:
+  * Aggregate endpoints scan large windows and can hold a connection for
+    seconds; cheap requests (cron-runs, banners, status) need one for
+    milliseconds. With one small shared pool the cheap ones queue behind the
+    heavy ones. Heavy checkouts (``heavy=True``, chosen by route in
+    ``is_heavy_route``) therefore also take a slot from a per-pool semaphore of
+    ``DUCKDB_POOL_HEAVY_MAX`` (default ``max_size - 1``), so at least one
+    connection is always left for light requests. A mixed-workload benchmark
+    (6 heavy + 6 light clients, pool of 4) kept light p99 at 4 ms with a cap of 3
+    and heavy throughput unchanged.
+
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a
     fresh one. After ``max_retries`` consecutive failures we surface
@@ -84,6 +95,43 @@ def _pool_max_size() -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return 12
+
+
+def _pool_heavy_cap(max_size: int) -> int:
+    """Max pool slots heavy requests may hold at once (see "Heavy/light bulkhead").
+
+    ``DUCKDB_POOL_HEAVY_MAX`` overrides; the default leaves one connection for
+    light requests. Clamped to ``[1, max_size]``; a pool of one has nothing to
+    reserve, so the cap equals the pool.
+    """
+    raw = os.getenv("DUCKDB_POOL_HEAVY_MAX")
+    if raw:
+        try:
+            return min(max_size, max(1, int(raw)))
+        except (TypeError, ValueError):
+            pass
+    return max(1, max_size - 1)
+
+
+# Route templates ending in one of these scan wide windows and hold a connection
+# for seconds. Override with DUCKDB_POOL_HEAVY_ROUTES (comma-separated suffixes).
+_DEFAULT_HEAVY_ROUTE_SUFFIXES = (
+    "/aggregates",
+    "/bundle",
+    "/network-health",
+    "/insights",
+    "/insights/cache-collapse-detail",
+    "/slow-urls",
+)
+
+
+def is_heavy_route(route_template: str | None) -> bool:
+    """True for routes that should take a heavy slot (see "Heavy/light bulkhead")."""
+    if not route_template:
+        return False
+    raw = os.getenv("DUCKDB_POOL_HEAVY_ROUTES")
+    suffixes = tuple(s.strip() for s in raw.split(",") if s.strip()) if raw else _DEFAULT_HEAVY_ROUTE_SUFFIXES
+    return route_template.rstrip("/").endswith(suffixes)
 
 
 def _pool_conn_memory_limit() -> str | None:
@@ -340,6 +388,32 @@ class _Pool:
         # "waiting for cron to release the view lock".
         self._rebind_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._rebind_wait_samples_lock = threading.Lock()
+        # Heavy/light bulkhead: heavy checkouts also hold one of ``heavy_cap``
+        # semaphore slots, so light requests always have at least
+        # ``max_size - heavy_cap`` connections to themselves.
+        self.heavy_cap = _pool_heavy_cap(max_size)
+        self._heavy_sem = threading.BoundedSemaphore(self.heavy_cap)
+        self._heavy_in_use = 0
+        self._heavy_lock = threading.Lock()
+        self._heavy_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
+        self._heavy_wait_samples_lock = threading.Lock()
+
+    def acquire_heavy_slot(self, max_wait: float) -> None:
+        """Take a heavy slot, waiting up to ``max_wait`` seconds; raises ``_PoolBusy``."""
+        t0 = time.monotonic()
+        if not self._heavy_sem.acquire(timeout=max_wait):
+            with self._cond:
+                self._saturated_rejects_total += 1
+            raise _PoolBusy(f"heavy-request slots exhausted ({self.heavy_cap}) after {max_wait:.1f}s")
+        with self._heavy_lock:
+            self._heavy_in_use += 1
+        with self._heavy_wait_samples_lock:
+            self._heavy_wait_samples.append((time.monotonic() - t0) * 1000.0)
+
+    def release_heavy_slot(self) -> None:
+        with self._heavy_lock:
+            self._heavy_in_use -= 1
+        self._heavy_sem.release()
 
     def acquire(
         self,
@@ -888,6 +962,11 @@ class _Pool:
         # checkout waiters up behind a sort.
         base["wait"] = self._wait_stats()
         base["rebind_wait"] = self._rebind_wait_stats()
+        base["heavy"] = {
+            "cap": self.heavy_cap,
+            "in_use": self._heavy_in_use,
+            "wait": _percentile_summary(self._heavy_wait_samples, self._heavy_wait_samples_lock),
+        }
         return base
 
 
@@ -912,12 +991,24 @@ def _get_pool(service_key: str, max_size: int | None = None) -> _Pool:
 
 
 @contextmanager
-def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: bool = False, reuse_only: bool = False):
+def checkout_connection(
+    src: dict,
+    max_wait: float = 10.0,
+    *,
+    skip_view_update: bool = False,
+    reuse_only: bool = False,
+    heavy: bool = False,
+):
     """Yield a fully-configured DuckDB connection from the per-service pool.
 
     Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
     is disabled. Returns the connection to the pool on clean exit; discards
     it on any exception so a poisoned connection doesn't get reused.
+
+    ``heavy=True`` marks a request that may hold its connection for seconds
+    (aggregate routes): it must first take a heavy slot so light requests keep
+    capacity. Extra checkouts made inside a request that already holds a heavy
+    slot (``reuse_only`` parallel branches) leave it False.
 
     The yielded value is an :class:`InstrumentedDuckDBConnection` proxy that
     records every ``execute()``/``sql()``/``query()`` in the Live Query
@@ -956,7 +1047,20 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    raw_con = pool.acquire(src, max_wait=max_wait, skip_view_update=skip_view_update, reuse_only=reuse_only)
+    heavy_deadline = time.monotonic() + max_wait
+    if heavy:
+        pool.acquire_heavy_slot(max_wait)
+    try:
+        raw_con = pool.acquire(
+            src,
+            max_wait=max(0.0, heavy_deadline - time.monotonic()) if heavy else max_wait,
+            skip_view_update=skip_view_update,
+            reuse_only=reuse_only,
+        )
+    except BaseException:
+        if heavy:
+            pool.release_heavy_slot()
+        raise
     wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:
@@ -967,7 +1071,11 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
     finally:
         # Always release the RAW connection — pool internals key on id(raw)
         # and _conn_state lookups would miss if we passed the proxy in.
-        pool.release(raw_con, errored=errored)
+        try:
+            pool.release(raw_con, errored=errored)
+        finally:
+            if heavy:
+                pool.release_heavy_slot()
 
 
 def _instrument(raw_con, *, service_key: str | None):
