@@ -4123,6 +4123,183 @@ class QueryRunner:
             return None
         return int(row[0]), int(row[1] or 0)
 
+    def try_security_proxies_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> dict | None:
+        """Serve /api/security/aggregates' ``proxies`` section from per-hour +
+        per-day security_proxy_quality / security_proxy_flagged parquets.
+
+        Same eligibility posture as :meth:`try_security_req_size_from_rollup`
+        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage). EXACT
+        across hours: quality counts SUM, and the distinct-IP stats are counted
+        over the stored flagged tuples. One difference from the live scan: the
+        client list is built from grouped tuples, so a client that tripped the
+        flag on several identical requests appears once instead of repeated.
+
+        Returns ``{"stats": {...}, "quality_rows": [(type, count)], "isps":
+        [{"asn", "count"}], "clients": [{...}]}`` in the shapes
+        ``get_security_proxies`` already consumes, or ``None`` on any
+        eligibility miss / read error / empty window.
+        """
+        from backend.core.rollups._common import (
+            SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME,
+            SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
+        )
+        from backend.utils.pop_utils import (
+            build_pop_haversine_case_sql,
+            build_pop_lat_case_sql,
+            build_pop_lon_case_sql,
+        )
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        quality_paths = self._collect_rollup_paths(st, et, SECURITY_PROXY_QUALITY_BUNDLE_FILENAME)
+        flagged_paths = self._collect_rollup_paths(st, et, SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME)
+        if quality_paths is None or flagged_paths is None:
+            return None
+
+        prefix = (
+            f"WITH f AS ("
+            f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
+            f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) GROUP BY ALL"
+            f"), "
+            f"geo AS ("
+            f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "
+            f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL)"
+            f"), "
+            f"m AS ("
+            f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
+            f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
+            f"         {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon, "
+            f"         geo.distance_km AS distance_km, f.country, f.city, f.cnt "
+            f"  FROM f LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
+            f"                      AND f.lat IS NOT DISTINCT FROM geo.g_lat "
+            f"                      AND f.lon IS NOT DISTINCT FROM geo.g_lon"
+            f") "
+        )
+        dist_flag = "distance_km > (rtt_min_ms * 100.0 + 150.0)"
+        tunnel_flag = "tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1"
+        try:
+            quality_rows = self.execute(
+                f"SELECT type, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{quote_path_list(quality_paths)}]) GROUP BY type ORDER BY c DESC"
+            ).fetchall()
+            if not quality_rows:
+                return None
+            stats_row = self.execute(
+                prefix + f"SELECT "
+                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END), "
+                f"  CAST(COALESCE(SUM(CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END), 0) "
+                f"       AS BIGINT), "
+                f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) "
+                f"FROM m"
+            ).fetchone()
+            isp_rows = self.execute(
+                prefix + "SELECT asn, CAST(SUM(cnt) AS BIGINT) AS c FROM m "
+                "WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
+                "GROUP BY asn ORDER BY c DESC LIMIT 10"
+            ).fetchall()
+            client_rows = self.execute(
+                prefix + f"SELECT ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
+                f"  ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
+                f"  CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
+                f"  CASE WHEN {dist_flag} THEN 'High' "
+                f"       WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
+                f"       WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
+                f"       ELSE 'Low' END AS risk_level, country, city "
+                f"FROM m "
+                f"WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
+                f"ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
+                f"LIMIT 100"
+            ).fetchall()
+        except duckdb.Error as e:
+            _logger.debug("[security_proxies_rollup] read failed, falling back: %s", e)
+            return None
+
+        return {
+            "stats": {
+                "active_proxies_count": stats_row[0] or 0,
+                "total_requests_count": stats_row[1] or 0,
+                "distance_mismatches_count": stats_row[2] or 0,
+            },
+            "quality_rows": [(r[0], r[1]) for r in quality_rows],
+            "isps": [{"asn": r[0], "count": r[1]} for r in isp_rows],
+            "clients": [
+                {
+                    "ip": r[0],
+                    "asn": r[1],
+                    "rtt_min_ms": r[2],
+                    "tcp_rtt_ms": r[3],
+                    "distance_km": r[4],
+                    "pop": r[5],
+                    "client_lat": r[6],
+                    "client_lon": r[7],
+                    "pop_lat": r[8],
+                    "pop_lon": r[9],
+                    "impossible_distance": r[10],
+                    "risk_level": r[11],
+                    "country": r[12],
+                    "city": r[13],
+                }
+                for r in client_rows
+            ],
+        }
+
+    def try_security_bot_efficiency_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[tuple[str, str, int, int]] | None:
+        """Serve /api/security/aggregates' ``bot_efficiency`` section from per-hour
+        + per-day security_bot_eff parquets.
+
+        Same eligibility posture as :meth:`try_security_req_size_from_rollup`.
+        Site totals and per-UA counts/bytes SUM exactly (per-UA re-capped to the
+        live top 2000 by bytes); the per-stem referral counts are a SUM of per-hour
+        distinct IPs, so they overcount IPs seen in several hours.
+
+        Returns ``(kind, key, cnt, resp_bytes)`` rows in the shape the live
+        ``BOT_EFFICIENCY`` query yields (input to ``summarize_bot_efficiency_rows``),
+        or ``None`` on any eligibility miss / read error / missing site row.
+        """
+        from backend.core.rollups._common import SECURITY_BOT_EFF_BUNDLE_FILENAME, SECURITY_BOT_EFF_UA_TOP_K
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_BOT_EFF_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        sql = (
+            f"WITH g AS ("
+            f"  SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
+            f"  FROM read_parquet([{quote_path_list(rollup_paths)}]) GROUP BY kind, key"
+            f"), r AS ("
+            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM g"
+            f") "
+            f"SELECT kind, key, cnt, resp_bytes FROM r WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.Error as e:
+            _logger.debug("[security_bot_efficiency_rollup] read failed, falling back: %s", e)
+            return None
+        if not any(r[0] == "site" for r in rows):
+            return None
+        return [(str(r[0]), str(r[1] or ""), int(r[2] or 0), int(r[3] or 0)) for r in rows]
+
     def try_perf_ttl_dist_from_rollup(
         self,
         start_time: str | None,

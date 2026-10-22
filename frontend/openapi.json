@@ -54672,6 +54672,28 @@
             ],
             "title": "Security Dims Days"
           },
+          "security_proxies": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Proxies"
+          },
+          "security_proxies_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Proxies Days"
+          },
           "perf_ttl_dist": {
             "anyOf": [
               {

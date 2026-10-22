@@ -596,6 +596,8 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     perf_latency_days: int | None = None
     security_dims: int | None = None
     security_dims_days: int | None = None
+    security_proxies: int | None = None
+    security_proxies_days: int | None = None
     perf_ttl_dist: int | None = None
     perf_ttl_dist_days: int | None = None
     ngwaf_bots: int | None = None

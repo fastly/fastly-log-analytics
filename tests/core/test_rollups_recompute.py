@@ -678,6 +678,7 @@ def test_recompute_touched_hours_malformed_hour_skipped(tmp_path):
         stack.enter_context(patch("backend.core.rollups.recompute.build_origin_dims_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_origin_latency_ts_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_security_dims_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_security_proxies_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_perf_dims_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_network_heatmap_bundles", return_value=0))
         stack.enter_context(patch("backend.core.rollups.recompute.build_network_geo_bundles", return_value=0))

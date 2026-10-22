@@ -64,8 +64,12 @@ from ._common import (
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_UA_TOP_K,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
     SECURITY_COV_BUNDLE_FILENAME,
+    SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME,
+    SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_TOP_K,
@@ -107,6 +111,7 @@ from .day_bundles import (
     compact_perf_latency_closed_days_to_daily,
     compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
+    compact_security_proxies_closed_days_to_daily,
     compact_time_series_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
     retire_compacted_hour_bundles,
@@ -137,6 +142,7 @@ from .recompute import (
 )
 from .rum import backfill_missing_rum_aggregates, recompute_rum_aggregates
 from .security_dims import backfill_security_dims_bundles, build_security_dims_bundles
+from .security_proxies import backfill_security_proxies_bundles, build_security_proxies_bundles
 from .sessions import build_session_bundles
 from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
 from .time_series import build_time_series_bundles
@@ -183,6 +189,8 @@ __all__ = [
     "backfill_perf_dims_bundles",
     "build_security_dims_bundles",
     "backfill_security_dims_bundles",
+    "build_security_proxies_bundles",
+    "backfill_security_proxies_bundles",
     "bundle_hours",
     "bundle_days",
     "backfill_day_bundles",
@@ -200,6 +208,7 @@ __all__ = [
     "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
+    "compact_security_proxies_closed_days_to_daily",
     "compact_time_series_closed_days_to_daily",
     "retire_compacted_hour_bundles",
     "recompute_touched_hours",
@@ -240,6 +249,10 @@ __all__ = [
     "SECURITY_TOPIPS_BUNDLE_FILENAME",
     "SECURITY_COV_BUNDLE_FILENAME",
     "SECURITY_TOPIPS_BUNDLE_TOP_K",
+    "SECURITY_PROXY_QUALITY_BUNDLE_FILENAME",
+    "SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME",
+    "SECURITY_BOT_EFF_BUNDLE_FILENAME",
+    "SECURITY_BOT_EFF_UA_TOP_K",
     # Cross-package + test-touched internals
     "_is_safe_ident",
     "_safe_table_for",

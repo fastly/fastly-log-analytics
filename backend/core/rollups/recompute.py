@@ -59,6 +59,7 @@ from .overview import build_overview_bundles  # noqa: F401
 from .perf_dims import build_perf_dims_bundles  # noqa: F401
 from .perf_latency import build_perf_latency_bundles  # noqa: F401
 from .security_dims import build_security_dims_bundles  # noqa: F401
+from .security_proxies import build_security_proxies_bundles  # noqa: F401
 from .sessions import build_session_bundles  # noqa: F401
 from .slow_urls import build_slow_urls_bundles  # noqa: F401
 from .spec import HOUR_WRITERS

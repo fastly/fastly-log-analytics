@@ -615,6 +615,7 @@ def _mock_rollups(monkeypatch):
     monkeypatch.setattr("backend.core.rollups.compact_overview_closed_days_to_daily", lambda *a, **kw: 0)
     monkeypatch.setattr("backend.core.rollups.compact_perf_latency_closed_days_to_daily", lambda *a, **kw: 0)
     monkeypatch.setattr("backend.core.rollups.compact_security_dims_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_security_proxies_closed_days_to_daily", lambda *a, **kw: 0)
     monkeypatch.setattr("backend.core.rollups.compact_verified_bots_ts_closed_days_to_daily", lambda *a, **kw: 0)
 
 

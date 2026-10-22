@@ -33,8 +33,12 @@ from ._common import (
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
     POP_HEALTH_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_UA_TOP_K,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
     SECURITY_COV_BUNDLE_FILENAME,
+    SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME,
+    SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_TOP_K,
@@ -1065,6 +1069,74 @@ def compact_security_dims_closed_days_to_daily(
             (SECURITY_CONN_REUSE_BUNDLE_FILENAME, ".tmp_sd_", _bucket_copy_sql),
             (SECURITY_TOPIPS_BUNDLE_FILENAME, ".tmp_sd_", _topips_copy_sql),
             (SECURITY_COV_BUNDLE_FILENAME, ".tmp_sd_", _cov_copy_sql),
+        ],
+        lookback_days=lookback_days,
+        logger=logger,
+    )
+
+
+# ── security_proxies (proxy_quality / proxy_flagged / bot_eff) closed-day compaction ─
+
+
+def compact_security_proxies_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
+    """Consolidate closed-day per-hour security_proxy_quality /
+    security_proxy_flagged / security_bot_eff parquets into per-day files at
+    ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
+
+      - proxy_quality: ``GROUP BY type`` with ``SUM(count)`` (exact).
+      - proxy_flagged: ``GROUP BY`` the client tuple with ``SUM(cnt)`` (exact; the
+        reader counts distinct IPs over these rows, so the tuple must survive).
+      - bot_eff: ``GROUP BY kind, key`` with ``SUM(cnt)`` / ``SUM(resp_bytes)``;
+        the per-UA rows are re-capped to the same top-K by bytes. The ``ref``
+        count stays a SUM of per-hour distinct IPs (approximate, see
+        :mod:`.security_proxies`).
+
+    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the other
+    rollup day-compactors. Returns the number of day files rebuilt.
+    """
+
+    def _quality_copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT type, CAST(SUM(count) AS BIGINT) AS count "
+            f"  FROM read_parquet([{paths_sql}]) GROUP BY type"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    def _flagged_copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, CAST(SUM(cnt) AS BIGINT) AS cnt "
+            f"  FROM read_parquet([{paths_sql}]) GROUP BY ALL"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    def _bot_eff_copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  WITH merged AS ("
+            f"    SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
+            f"    FROM read_parquet([{paths_sql}]) GROUP BY kind, key"
+            f"  ), "
+            f"  ranked AS ("
+            f"    SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM merged"
+            f"  ) "
+            f"  SELECT kind, key, cnt, resp_bytes FROM ranked "
+            f"  WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[
+            (SECURITY_PROXY_QUALITY_BUNDLE_FILENAME, ".tmp_sp_", _quality_copy_sql),
+            (SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME, ".tmp_sp_", _flagged_copy_sql),
+            (SECURITY_BOT_EFF_BUNDLE_FILENAME, ".tmp_sp_", _bot_eff_copy_sql),
         ],
         lookback_days=lookback_days,
         logger=logger,

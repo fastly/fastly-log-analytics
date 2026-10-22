@@ -662,6 +662,24 @@ SECURITY_COV_BUNDLE_FILENAME = "security_cov.parquet"
 # dropping an IP whose window-max lands outside any single hour's top-10.
 SECURITY_TOPIPS_BUNDLE_TOP_K = 500
 
+# Per-hour rollups feeding /api/security/aggregates' ``proxies`` + ``bot_efficiency``
+# sections, so the catalog temp is skipped entirely when both are rollup-served.
+#  - security_proxy_quality.parquet — (type VARCHAR, count BIGINT): the
+#    GET_SECURITY_PROXIES_COMBINED traffic-quality classification over ALL rows.
+#  - security_proxy_flagged.parquet — one row per distinct flagged client tuple
+#    (rtt_min present AND ratio < 0.2 or a distance mismatch); a small slice of
+#    traffic. Schema: (ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city,
+#    cnt). Distance is NOT stored: the reader recomputes it from (pop, lat, lon)
+#    so a POP-coordinate update applies to old hours too.
+#  - security_bot_eff.parquet — (kind, key, cnt, resp_bytes) in the exact row
+#    shape BOT_EFFICIENCY returns ('site' totals, top-K 'ua' by bytes, 'ref'
+#    distinct-IP count per referral stem).
+SECURITY_PROXY_QUALITY_BUNDLE_FILENAME = "security_proxy_quality.parquet"
+SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME = "security_proxy_flagged.parquet"
+SECURITY_BOT_EFF_BUNDLE_FILENAME = "security_bot_eff.parquet"
+# Matches BOT_EFFICIENCY's ``LIMIT 2000`` on the per-UA aggregate.
+SECURITY_BOT_EFF_UA_TOP_K = 2000
+
 # Filename for the per-hour NGWAF-bots rollup feeding get_top_bots'
 # ``ngwaf_bots`` panel. One row per (bot_name, category) per closed hour —
 # the hour's waf_req_ids joined against the SQLite ngwaf_bot_cache at WRITE

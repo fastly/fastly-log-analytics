@@ -26,6 +26,7 @@ EXPECTED_ORDER = (
     "build_origin_dims_bundles",
     "build_origin_latency_ts_bundles",
     "build_security_dims_bundles",
+    "build_security_proxies_bundles",
     "build_perf_dims_bundles",
     "build_ngwaf_bots_bundles",
     "build_overview_bundles",

@@ -7366,6 +7366,10 @@ export interface components {
             security_dims?: number | null;
             /** Security Dims Days */
             security_dims_days?: number | null;
+            /** Security Proxies */
+            security_proxies?: number | null;
+            /** Security Proxies Days */
+            security_proxies_days?: number | null;
             /** Perf Ttl Dist */
             perf_ttl_dist?: number | null;
             /** Perf Ttl Dist Days */

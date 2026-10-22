@@ -1219,12 +1219,18 @@ def _build_security_response(
         results["wellknown_bots"] = []
 
     if _want("bot_efficiency") and "ua" in actual_cols and "ip" in actual_cols:
-        be_cols = {"ua", "ip"}
-        if "referer" in actual_cols:
-            be_cols.add("referer")
-        if "resp_bytes" in actual_cols:
-            be_cols.add("resp_bytes")
-        _need("bot_efficiency", be_cols)
+        _t = _time.perf_counter()
+        be_rows = runner.try_security_bot_efficiency_from_rollup(start_time, end_time, has_filters=bool(filters))
+        if be_rows is not None:
+            timer.mark("bot_efficiency_rollup", _t)
+            results["bot_efficiency"] = summarize_bot_efficiency_rows(be_rows)
+        else:
+            be_cols = {"ua", "ip"}
+            if "referer" in actual_cols:
+                be_cols.add("referer")
+            if "resp_bytes" in actual_cols:
+                be_cols.add("resp_bytes")
+            _need("bot_efficiency", be_cols)
     elif _want("bot_efficiency"):
         results["bot_efficiency"] = []
 
@@ -1232,7 +1238,25 @@ def _build_security_response(
         _need("top_bots", {"ua", "waf_req_id"})
 
     if _want("proxies"):
-        _need("proxies", {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn", "country", "city"})
+        proxy_cols = {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"}
+        px_rollup: dict | None = None
+        if proxy_cols <= set(actual_cols):
+            _t = _time.perf_counter()
+            px_rollup = runner.try_security_proxies_from_rollup(start_time, end_time, has_filters=bool(filters))
+        if px_rollup is not None:
+            timer.mark("proxies_rollup", _t)
+            results.update(
+                _finish_proxies(
+                    src["name"],
+                    px_rollup["stats"],
+                    px_rollup["quality_rows"],
+                    px_rollup["isps"],
+                    px_rollup["clients"],
+                    mask_ips,
+                )
+            )
+        else:
+            _need("proxies", proxy_cols | {"country", "city"})
 
     # ── Build the (narrowed / NGWAF-only / skipped) catalog temp ──
     temp_table: str | None = None
@@ -1511,6 +1535,92 @@ def _build_security_response(
     return results
 
 
+def _finish_proxies(
+    source_name: str,
+    stats: dict[str, Any],
+    quality_rows: list[tuple[Any, Any]],
+    raw_isps: list[dict[str, Any]],
+    raw_clients: list[dict[str, Any]],
+    mask_ips: bool,
+) -> dict[str, Any]:
+    """Shape the proxies panels (quality %, ASN names, IP masking) from live or rollup rows."""
+    traffic_quality = []
+    if quality_rows:
+        total_count = sum(int(r[1] or 0) for r in quality_rows)
+        if total_count > 0:
+            for row_type, row_count in quality_rows:
+                label = str(row_type if row_type is not None else "Unknown")
+                item_count = float(row_count or 0)
+                value = round((item_count / total_count) * 100, 1)
+                traffic_quality.append({"label": label, "value": value})
+
+    # Gather all distinct ASNs to resolve
+    asns_to_resolve = set()
+    for row in raw_isps:
+        asn_val = row.get("asn")
+        if asn_val is not None:
+            try:
+                asns_to_resolve.add(int(asn_val))
+            except (ValueError, TypeError):
+                pass
+    for row in raw_clients:
+        asn_val = row.get("asn")
+        if asn_val is not None:
+            try:
+                asns_to_resolve.add(int(asn_val))
+            except (ValueError, TypeError):
+                pass
+
+    # Resolve ASN names in batch
+    from backend.core.duckdb import get_asn_names
+
+    asn_names = get_asn_names(source_name, list(asns_to_resolve))
+
+    # Format suspicious ISPs
+    suspicious_isps = []
+    for row in raw_isps:
+        asn_val = row.get("asn")
+        try:
+            asn_int = int(asn_val) if asn_val is not None else None
+        except (ValueError, TypeError):
+            asn_int = None
+        name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
+        suspicious_isps.append(
+            {
+                "isp": name,
+                "asn": asn_int,
+                "count": int(row.get("count", 0)),
+            }
+        )
+
+    # Format active clients
+    active_clients = []
+    for row in raw_clients:
+        asn_val = row.get("asn")
+        try:
+            asn_int = int(asn_val) if asn_val is not None else None
+        except (ValueError, TypeError):
+            asn_int = None
+        name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
+        client_item = {**row}
+        if mask_ips and client_item.get("ip"):
+            from backend.core.share_db.validation import mask_ip
+
+            client_item["ip"] = mask_ip(str(client_item["ip"]))
+        client_item["asn_name"] = name
+        if "asn" in client_item:
+            del client_item["asn"]
+        active_clients.append(client_item)
+    return {
+        "active_proxies_count": int(stats.get("active_proxies_count", 0)),
+        "tunnel_requests_count": int(stats.get("total_requests_count", 0)),
+        "distance_mismatches_count": int(stats.get("distance_mismatches_count", 0)),
+        "traffic_quality": traffic_quality,
+        "suspicious_isps": suspicious_isps,
+        "active_clients": active_clients,
+    }
+
+
 def get_security_proxies(
     con: duckdb.DuckDBPyConnection,
     src: dict[str, Any],
@@ -1621,82 +1731,7 @@ def get_security_proxies(
                     }
                 )
 
-        traffic_quality = []
-        if quality_rows:
-            total_count = sum(int(r[1] or 0) for r in quality_rows)
-            if total_count > 0:
-                for row_type, row_count in quality_rows:
-                    label = str(row_type if row_type is not None else "Unknown")
-                    item_count = float(row_count or 0)
-                    value = round((item_count / total_count) * 100, 1)
-                    traffic_quality.append({"label": label, "value": value})
-
-        # Gather all distinct ASNs to resolve
-        asns_to_resolve = set()
-        for row in raw_isps:
-            asn_val = row.get("asn")
-            if asn_val is not None:
-                try:
-                    asns_to_resolve.add(int(asn_val))
-                except (ValueError, TypeError):
-                    pass
-        for row in raw_clients:
-            asn_val = row.get("asn")
-            if asn_val is not None:
-                try:
-                    asns_to_resolve.add(int(asn_val))
-                except (ValueError, TypeError):
-                    pass
-
-        # Resolve ASN names in batch
-        from backend.core.duckdb import get_asn_names
-
-        asn_names = get_asn_names(source_name, list(asns_to_resolve))
-
-        # Format suspicious ISPs
-        suspicious_isps = []
-        for row in raw_isps:
-            asn_val = row.get("asn")
-            try:
-                asn_int = int(asn_val) if asn_val is not None else None
-            except (ValueError, TypeError):
-                asn_int = None
-            name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
-            suspicious_isps.append(
-                {
-                    "isp": name,
-                    "asn": asn_int,
-                    "count": int(row.get("count", 0)),
-                }
-            )
-
-        # Format active clients
-        active_clients = []
-        for row in raw_clients:
-            asn_val = row.get("asn")
-            try:
-                asn_int = int(asn_val) if asn_val is not None else None
-            except (ValueError, TypeError):
-                asn_int = None
-            name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
-            client_item = {**row}
-            if mask_ips and client_item.get("ip"):
-                from backend.core.share_db.validation import mask_ip
-
-                client_item["ip"] = mask_ip(str(client_item["ip"]))
-            client_item["asn_name"] = name
-            if "asn" in client_item:
-                del client_item["asn"]
-            active_clients.append(client_item)
-
-    return {
-        "active_proxies_count": int(stats.get("active_proxies_count", 0)),
-        "tunnel_requests_count": int(stats.get("total_requests_count", 0)),
-        "distance_mismatches_count": int(stats.get("distance_mismatches_count", 0)),
-        "traffic_quality": traffic_quality,
-        "suspicious_isps": suspicious_isps,
-        "active_clients": active_clients,
-    }
+        return _finish_proxies(source_name, stats, quality_rows, raw_isps, raw_clients, mask_ips)
 
 
 def get_threat_intel_rows(con, src: dict, table_name: str, start: str, end: str) -> list[tuple]:
