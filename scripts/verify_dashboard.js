@@ -210,7 +210,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
     ]);
     await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
   }
-  await waitForPoolIdle(context, name);
+  await logPoolAtStart(context, name);
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
 
@@ -271,24 +271,19 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   await context.close();
 }
 
-// Pages abandoned by the previous check can leave their queries running server-side,
-// holding pooled DuckDB connections. Wait (bounded) for the pool to drain before timing
-// the next page so its numbers reflect the page, and log how long the drain took.
-async function waitForPoolIdle(context, name, maxMs = 45000) {
-  const started = Date.now();
-  let inUse = null;
+// Snapshot (never a wait) of how busy the DuckDB pool is when a page check starts: pages the
+// previous check abandoned can still have queries running, which is what a user who clicks
+// through pages quickly runs into. `in_use` counts open connections including idle ones, so
+// busy = in_use - idle.
+async function logPoolAtStart(context, name) {
   try {
-    while (Date.now() - started < maxMs) {
-      const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 15000 });
-      if (!res.ok()) return;
-      const pools = (await res.json()).pool_wait || [];
-      inUse = pools.reduce((n, p) => n + (p.in_use || 0), 0);
-      if (inUse === 0) break;
-      await new Promise(r => setTimeout(r, 500));
-    }
-    console.log(`[POOL-DRAIN ${name}] in_use=${inUse} after ${Date.now() - started} ms`);
+    const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 15000 });
+    if (!res.ok()) return;
+    const pools = (await res.json()).pool_wait || [];
+    const busy = pools.reduce((n, p) => n + Math.max(0, (p.in_use || 0) - (p.idle || 0)), 0);
+    console.log(`[POOL-START ${name}] busy=${busy}`);
   } catch (err) {
-    console.log(`[POOL-DRAIN ${name}] unavailable: ${err.message}`);
+    console.log(`[POOL-START ${name}] unavailable: ${err.message}`);
   }
 }
 
@@ -300,7 +295,7 @@ async function logPoolStats(context, name) {
     const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 20000 });
     if (!res.ok()) throw new Error(`status ${res.status()}`);
     const pools = ((await res.json()).pool_wait || []).map(p => ({
-      max: p.max_size, inUse: p.in_use, idle: p.idle, created: p.created_total, reused: p.reused_total,
+      max: p.max_size, open: p.in_use, idle: p.idle, busy: Math.max(0, (p.in_use || 0) - (p.idle || 0)), created: p.created_total, reused: p.reused_total,
       discarded: p.discarded_total, saturated: p.saturated_rejects_total, wait: p.wait, rebindWait: p.rebind_wait,
     }));
     console.log(`[POOL ${name}] ${JSON.stringify(pools)}`);
