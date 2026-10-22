@@ -16,10 +16,10 @@ export function useServiceQuery<T>(
 ) {
   const isReady = useIsDataReady()
   return useQuery<T, Error, T>({
+    ...options,
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
     placeholderData: keepPreviousWithinService(queryKey),
-    ...options,
   })
 }

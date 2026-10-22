@@ -293,7 +293,7 @@ def get_health(
     def get_runner() -> QueryRunner:
         nonlocal _runner
         if _runner is None:
-            _runner = QueryRunner(con_factory(), src)
+            _runner = QueryRunner(con_factory, src)
         return _runner
 
     _t = _time.perf_counter()
@@ -1113,7 +1113,7 @@ def get_quality(
     def get_runner() -> QueryRunner:
         nonlocal _runner
         if _runner is None:
-            _runner = QueryRunner(con_factory(), src)
+            _runner = QueryRunner(con_factory, src)
         return _runner
 
     _t = _time.perf_counter()

@@ -282,7 +282,7 @@ test('network health queries keep the range-wire key shape and request body afte
   })
   const keys = queryClient.getQueryCache().getAll().map((q) => q.queryKey)
   const prefix = ['test-svc', rangeKey, anchor, {}]
-  expect(keys).toContainEqual(['network', 'health', 'core', ...prefix, 3600, 'all', 'health_score'])
+  expect(keys).toContainEqual(['network', 'health', 'core', ...prefix, 3600, 'health_score'])
   expect(keys).toContainEqual(['network', 'health', 'map', ...prefix, 3600, 'all', 'health_score'])
   expect(keys).toContainEqual(['network', 'health', 'shielding', ...prefix])
 

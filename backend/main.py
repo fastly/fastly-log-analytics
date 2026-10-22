@@ -929,6 +929,25 @@ async def telemetry_middleware(request: Request, call_next):
     _prev_attr = _current_attribution.get()
     _current_attribution.set(attr)
 
+    async def _watch_disconnect() -> None:
+        try:
+            await asyncio.sleep(0.2)
+            while True:
+                if request.method in ("GET", "HEAD", "DELETE", "OPTIONS") or getattr(
+                    request, "_stream_consumed", False
+                ):
+                    if await request.is_disconnected():
+                        from backend.core.query_registry import query_registry as _qr
+
+                        _qr.cancel_for_key(cancel_key)
+                        return
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    _disconnect_watcher = asyncio.create_task(_watch_disconnect())
     with process_context_scope(ctx_name):
         try:
             response = await call_next(request)
@@ -945,6 +964,7 @@ async def telemetry_middleware(request: Request, call_next):
                 pass
             raise
         finally:
+            _disconnect_watcher.cancel()
             # Active-request gate (perf #84): balance the increment above so the
             # cron-defer counter falls back to 0 when the request finishes.
             # Lives in the finally so an exception in call_next can't leak the

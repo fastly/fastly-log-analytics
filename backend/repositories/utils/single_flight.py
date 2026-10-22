@@ -71,6 +71,8 @@ def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
     if not is_leader:
         slot.event.wait()
         if slot.error is not None:
+            if type(slot.error).__name__ == "InterruptException":
+                return coalesce(key, build)
             raise slot.error
         return slot.result, False  # type: ignore[return-value]
 

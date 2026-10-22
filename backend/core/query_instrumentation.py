@@ -34,6 +34,7 @@ import weakref
 from collections.abc import Callable
 from typing import Any
 
+import duckdb
 import structlog
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,11 @@ class InstrumentedDuckDBConnection:
 
         con_ref = _safe_weakref(self._con)
         bound = getattr(self._con, method_name)
+        _is_cleanup_sql = sql_text.lstrip().upper().startswith("DROP ")
+        if not _is_cleanup_sql and query_registry.is_query_cancelled(qid):
+            err = duckdb.InterruptException("Interrupt Error: Interrupted!")
+            _deregister(qid, err, peak_memory_mb=None)
+            raise err
         try:
             result = bound(query, *args, **kwargs)
         except BaseException as err:

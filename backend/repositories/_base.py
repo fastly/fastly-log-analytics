@@ -662,8 +662,10 @@ class QueryRunner:
     recovery logic. Reduces boilerplate in repository functions.
     """
 
-    def __init__(self, con: duckdb.DuckDBPyConnection, src: dict):
-        self.con = con
+    def __init__(self, con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection], src: dict):
+        self._con: duckdb.DuckDBPyConnection | None = None
+        self._con_factory: Callable[[], duckdb.DuckDBPyConnection] | None = None
+        self.con = con  # type: ignore[assignment]
         self.src = src
         self.debug_queries: list[dict] = []
         self.actual_cols: set[str] = set()
@@ -678,6 +680,23 @@ class QueryRunner:
         from backend.core.iceberg import inject_view_debug
 
         inject_view_debug(self.debug_queries, src)
+
+    @property
+    def con(self) -> duckdb.DuckDBPyConnection:
+        if self._con is None:
+            if self._con_factory is None:
+                raise RuntimeError("QueryRunner has no connection or con_factory")
+            self._con = self._con_factory()
+        return self._con
+
+    @con.setter
+    def con(self, value: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection]) -> None:
+        if callable(value) and not hasattr(value, "execute"):
+            self._con = None
+            self._con_factory = value
+        else:
+            self._con = value  # type: ignore[assignment]
+            self._con_factory = None
 
     def begin_shared_active_hour_temps(self) -> None:
         """Enable request-scoped reuse of the direct active-hour temps.
@@ -1178,6 +1197,8 @@ class QueryRunner:
         # mid-schema-change buffer window.
         try:
             self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("false"))
+        except duckdb.InterruptException:
+            raise
         except Exception:
             try:
                 self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
@@ -1186,6 +1207,8 @@ class QueryRunner:
                     _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
             try:
                 self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
+            except duckdb.InterruptException:
+                raise
             except Exception:
                 # Missing column, unreadable file, etc. Caller falls back.
                 try:
@@ -1421,6 +1444,8 @@ class QueryRunner:
         if rolled_q is not None:
             try:
                 rolled_res = self.execute(rolled_q).fetchall()
+            except duckdb.InterruptException:
+                raise
             except Exception:
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
@@ -1602,6 +1627,8 @@ class QueryRunner:
                     # Deferred to scope-exit when the shared active-hour scope
                     # owns this temp (dashboard rollup path).
                     self.release_active_direct_temp(tmp_name)
+        except duckdb.InterruptException:
+            raise
         except Exception:
             _logger.exception("[top_n_rollups] live active hour query failed")
         return live_res, partial_rows
@@ -1662,6 +1689,8 @@ class QueryRunner:
                     except Exception:
                         if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
                             _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
+        except duckdb.InterruptException:
+            raise
         except Exception:
             _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
         return heal_res
@@ -1995,6 +2024,8 @@ class QueryRunner:
 
         try:
             rows = self.execute(final_sql, params if live_needs_params else []).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             # Any read failure (stale view, missing column, schema drift
             # in older bundles, …) drops us to the raw path. Logged at
@@ -2158,6 +2189,8 @@ class QueryRunner:
 
         try:
             return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
+        except duckdb.InterruptException:
+            raise
         except Exception as e:
             _logger.debug("[count_rollup] read failed, falling back to raw: %s", e)
             return None
@@ -2288,6 +2321,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
             return None
@@ -2395,6 +2430,8 @@ class QueryRunner:
         )
         try:
             row = self.execute(sql).fetchone()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
             return None
@@ -2492,6 +2529,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql, [limit]).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_pop_rollup] read failed, falling back: %s", e)
             return None
@@ -2578,6 +2617,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql, [limit]).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_ip_rollup] read failed, falling back: %s", e)
             return None
@@ -2640,6 +2681,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_path_rollup] read failed, falling back: %s", e)
             return None
@@ -2724,6 +2767,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_status_rollup] read failed, falling back: %s", e)
             return None
@@ -2892,6 +2937,8 @@ class QueryRunner:
 
         try:
             rows = self.execute(final_sql, params if crosses_active else []).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
             return None
@@ -2998,6 +3045,8 @@ class QueryRunner:
                 "countries": [c["value"] for c in by_country],
                 "_approx": True,
             }
+        except duckdb.InterruptException:
+            raise
         except Exception as e:
             _logger.debug("[network_quality_rollup] read failed: %s", e)
             return None
@@ -3055,6 +3104,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql, top_asns).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[network_rtt_rollup] read failed, falling back: %s", e)
             return None
@@ -3139,6 +3190,8 @@ class QueryRunner:
             )
         try:
             rows = self.execute(sql, top_asns).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[network_speed_rollup] read failed, falling back: %s", e)
             return None
@@ -3273,6 +3326,8 @@ class QueryRunner:
             )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[network_heatmap_rollup] read failed, falling back: %s", e)
             return None
@@ -3455,6 +3510,8 @@ class QueryRunner:
         try:
             map_rows = self.execute(map_sql).fetchall()
             metro_rows = self.execute(metro_sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[network_geo_rollup] read failed, falling back: %s", e)
             return None
@@ -3553,6 +3610,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
             return None
@@ -3618,6 +3677,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[perf_latency_rollup] read failed, falling back: %s", e)
             return None
@@ -3679,6 +3740,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_req_size_rollup] read failed, falling back: %s", e)
             return None
@@ -3724,6 +3787,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
             return None
@@ -3814,6 +3879,8 @@ class QueryRunner:
             sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[conn_requests_hist_rollup] read failed, falling back: %s", e)
             return None
@@ -3900,6 +3967,8 @@ class QueryRunner:
                 "WHERE field = ? GROUP BY value ORDER BY c DESC",
                 [virtual_id],
             ).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error:
             return None
 
@@ -3927,6 +3996,8 @@ class QueryRunner:
                         f'FROM "{tmp}" WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != \'\') '
                         "WHERE trim(signal) != '' GROUP BY value"
                     ).fetchall()
+                except duckdb.InterruptException:
+                    raise
                 except duckdb.Error:
                     return None
                 finally:
@@ -3996,6 +4067,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[ngwaf_bots_rollup] read failed, falling back: %s", e)
             return None
@@ -4076,6 +4149,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_top_ips_rollup] read failed, falling back: %s", e)
             return None
@@ -4116,6 +4191,8 @@ class QueryRunner:
         sql = f"SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([{paths_sql}])"
         try:
             row = self.execute(sql).fetchone()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_coverage_rollup] read failed, falling back: %s", e)
             return None
@@ -4219,6 +4296,8 @@ class QueryRunner:
                 f"ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
                 f"LIMIT 100"
             ).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_proxies_rollup] read failed, falling back: %s", e)
             return None
@@ -4293,6 +4372,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[security_bot_efficiency_rollup] read failed, falling back: %s", e)
             return None
@@ -4344,6 +4425,8 @@ class QueryRunner:
         )
         try:
             rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             _logger.debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
             return None
@@ -4425,6 +4508,8 @@ class QueryRunner:
         _t = time.perf_counter()
         try:
             rows = self.execute(_build_ip_spread_sql(plan, safe_fields)).fetchall()
+        except duckdb.InterruptException:
+            raise
         except duckdb.Error as e:
             # A read failure here drops the caller to its live fallback
             # — never let an ip_spread bug take down the security tab.

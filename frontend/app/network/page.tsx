@@ -117,11 +117,20 @@ function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; fi
 // scan (origin repo) and the heavy map payload paint independently from
 // the small summary + leaderboard cards above the fold.
 //   core      → summary + leaderboard + metro_leaderboard (shared temp)
-//   map       → heatmap/buckets + cities/map_buckets (big payload)
+//   core      → summary + leaderboard + metro_leaderboard + heatmap/buckets + default (all-ASN) cities/map_buckets
+//   map       → per-ASN cities/map_buckets override when mapAsn !== 'all'
 //   shielding → shielding_analysis (origin path, most-likely-empty card)
 type NetworkSections = NonNullable<components['schemas']['NetworkHealthRequest']['sections']>
-const NETWORK_CORE_SECTIONS: NetworkSections = ['summary', 'leaderboard', 'metro_leaderboard']
-const NETWORK_MAP_SECTIONS: NetworkSections = ['heatmap', 'buckets', 'cities', 'map_buckets']
+const NETWORK_CORE_SECTIONS: NetworkSections = [
+  'summary',
+  'leaderboard',
+  'metro_leaderboard',
+  'heatmap',
+  'buckets',
+  'cities',
+  'map_buckets',
+]
+const NETWORK_MAP_SECTIONS: NetworkSections = ['cities', 'map_buckets']
 const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
 
 export default function NetworkPage() {
@@ -250,7 +259,7 @@ function NetworkBody({
     serviceId: activeServiceId,
     filterPayload,
     range,
-    keyParts: [animBucketSeconds, mapAsn, metric],
+    keyParts: [animBucketSeconds, metric],
     queryFn: async ({ rangeToken, signal }) => {
       const { data } = await client.POST("/api/network-health", { signal,
         body: {
@@ -260,7 +269,7 @@ function NetworkBody({
           metric,
           bucket_seconds: animBucketSeconds,
           top_n: 30,
-          map_asn: mapAsn,
+          map_asn: 'all',
           sections: NETWORK_CORE_SECTIONS,
           // Keyed path: server resolves the scan window from (range_token,
           // quantized anchor) and ignores the absolute start/end above (kept for
@@ -279,6 +288,9 @@ function NetworkBody({
     filterPayload,
     range,
     keyParts: [animBucketSeconds, mapAsn, metric],
+    queryOptions: {
+      enabled: mapAsn !== 'all',
+    },
     queryFn: async ({ rangeToken, signal }) => {
       const { data } = await client.POST("/api/network-health", { signal,
         body: {
@@ -342,12 +354,16 @@ function NetworkBody({
 
   // `available`/`has_metro`/`reason` come back on every section response
   // (the backend sets them on the base get_health result). Use core as
-  // the canonical source for these top-level signals.
+  // the canonical source for these top-level signals, and fall back to core
+  // for mapData when mapAsn === 'all' so cold load doesn't fire a duplicate POST.
   const data = coreQuery.data
-  const mapData = mapQuery.data
+  const mapData = (mapAsn === 'all' ? coreQuery.data : mapQuery.data) ?? coreQuery.data
   const qualityData = qualityQuery.data
   const isCoreLoadingInitial = coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data)
-  const isMapLoadingInitial = mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data)
+  const isMapLoadingInitial =
+    mapAsn === 'all'
+      ? isCoreLoadingInitial
+      : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data)
   const isShieldingLoadingInitial = shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
   const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
 
@@ -378,8 +394,8 @@ function NetworkBody({
     return leaderboard.map((a) => ({ value: String(a.asn), label: a.label }))
   }, [leaderboard])
 
-  const heatmapRows = mapData?.heatmap
-  const heatmapBuckets = mapData?.buckets
+  const heatmapRows = data?.heatmap
+  const heatmapBuckets = data?.buckets
   const heatmapData = React.useMemo(() => {
     if (!heatmapRows?.length || !heatmapBuckets?.length) return null
     const yLabels = heatmapRows.map((d) => d.label)
@@ -442,7 +458,7 @@ function NetworkBody({
       <NetworkMap
         data={mapData}
         isLoading={isMapLoadingInitial}
-        error={mapQuery.error}
+        error={mapAsn === 'all' ? coreQuery.error : mapQuery.error}
         metric={metric}
         onMetricChange={setMetric}
         bucketSeconds={animBucketSeconds}
@@ -521,8 +537,8 @@ function NetworkBody({
           title="ASN Health Score over Time"
           helpTitle="ASN Health Score over Time"
           helpContent={<HeatmapHelp />}
-          isFetching={mapQuery.isFetching}
-          error={mapQuery.error as AnalyticsCardError | null}
+          isFetching={coreQuery.isFetching}
+          error={coreQuery.error as AnalyticsCardError | null}
           className="[contain-intrinsic-size:380px] [content-visibility:auto]"
         >
           <PlotlyChart data={heatmapTrace} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />

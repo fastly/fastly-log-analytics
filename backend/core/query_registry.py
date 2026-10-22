@@ -232,6 +232,7 @@ class QueryRegistry:
         self._queries: dict[int, ActiveQuery] = {}
         # deque is thread-safe for single appends/iter under CPython GIL.
         self._history: collections.deque[CompletedQuery] = collections.deque(maxlen=_HISTORY_CAP)
+        self._cancelled_keys: collections.deque[str] = collections.deque(maxlen=512)
 
     # ── register / deregister ────────────────────────────────────────────────
 
@@ -257,10 +258,11 @@ class QueryRegistry:
             base = current_attribution.get() or Attribution.system()
             attribution = base.with_caller(qualname, file_line).with_pool_slot(pool_slot)
             con_id = id(con) if con is not None else None
+            sql_str = sql if isinstance(sql, str) else str(sql)
             active = ActiveQuery(
                 query_id=qid,
                 db_type=db_type,
-                sql=_truncate(_scrub_secrets(sql if isinstance(sql, str) else str(sql)), _SQL_TRUNCATE),
+                sql=_truncate(_scrub_secrets(sql_str), _SQL_TRUNCATE),
                 attribution=attribution,
                 service_id=service_id,
                 started_at_mono=time.monotonic(),
@@ -268,6 +270,13 @@ class QueryRegistry:
                 _con_ref=_safe_weakref(con) if con is not None else None,
                 _con_id=con_id,
             )
+            if (
+                db_type == "DuckDB"
+                and attribution.cancel_key
+                and attribution.cancel_key in self._cancelled_keys
+                and not sql_str.lstrip().upper().startswith("DROP ")
+            ):
+                active.cancelled_at = time.time()
             self._queries[qid] = active
             if con_id is not None:
                 with _conn_to_query_lock:
@@ -447,6 +456,17 @@ class QueryRegistry:
         _metric_safe(lambda: _metric_cancelled_total.add(1, {"db": target_db, "kind": target_kind}))
         return "cancelled"
 
+    def is_key_cancelled(self, cancel_key: str | None) -> bool:
+        """Return True if ``cancel_key`` was cancelled via :meth:`cancel_for_key`."""
+        return bool(cancel_key and cancel_key in self._cancelled_keys)
+
+    def is_query_cancelled(self, qid: int) -> bool:
+        """Return True if active query ``qid`` has been marked cancelled."""
+        if qid < 0:
+            return False
+        active = self._queries.get(qid)
+        return bool(active is not None and active.cancelled_at is not None)
+
     def cancel_for_key(self, cancel_key: str | None, *, admin_id: str = "client-disconnect") -> int:
         """Interrupt every still-running DuckDB query started by the request that owns ``cancel_key``.
 
@@ -458,6 +478,8 @@ class QueryRegistry:
         """
         if not cancel_key:
             return 0
+        if cancel_key not in self._cancelled_keys:
+            self._cancelled_keys.append(cancel_key)
         interrupted = 0
         for active in tuple(self._queries.values()):
             if (
