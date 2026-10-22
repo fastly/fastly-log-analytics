@@ -4266,7 +4266,8 @@ class QueryRunner:
         prefix = (
             f"WITH f AS ("
             f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
-            f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) GROUP BY ALL"
+            f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
+            f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
             f"), "
             f"geo AS ("
             f"  SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, {build_pop_haversine_case_sql()} AS distance_km "

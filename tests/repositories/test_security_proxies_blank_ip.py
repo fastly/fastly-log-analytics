@@ -33,3 +33,47 @@ def test_blank_ip_rows_are_not_suspicious_clients_or_counted_as_proxies():
     assert stats[3] == 1  # flagged requests
     quality = {r[1]: r[2] for r in rows if r[0] == "quality"}
     assert quality == {"Active Tunnel / Proxy": 2}  # traffic quality still counts every request
+
+
+def test_rollup_reader_drops_blank_ip_tuples(tmp_path):
+    """The rollup path serves the default 24h-48h+ windows, so it needs the same filter."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from backend.repositories._base import QueryRunner
+
+    base = (datetime.now(UTC) - timedelta(hours=100)).replace(minute=0, second=0, microsecond=0)
+    hours = [base + timedelta(hours=i) for i in range(50)]
+    flagged = pa.table(
+        {
+            "ip": ["10.0.0.2", ""],
+            "asn": [200, 700],
+            "pop": ["IAD", "IAD"],
+            "rtt_min": [1000.0, 1000.0],
+            "tcp_rtt": [50000.0, 50000.0],
+            "lat": [39.0, 39.0],
+            "lon": [-77.1, -77.1],
+            "country": ["US", ""],
+            "city": ["Reston", ""],
+            "cnt": pa.array([1, 1], type=pa.int64()),
+        }
+    )
+    quality = pa.table({"type": ["Active Tunnel / Proxy"], "count": pa.array([2], type=pa.int64())})
+    for h in hours:
+        d = tmp_path / "rollups" / "hour_bundled" / f"hour={h.strftime('%Y-%m-%d-%H')}"
+        d.mkdir(parents=True)
+        pq.write_table(flagged, str(d / "security_proxy_flagged.parquet"))
+        pq.write_table(quality, str(d / "security_proxy_quality.parquet"))
+
+    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc-blank-rollup"})
+    st = hours[0].isoformat().replace("+00:00", "Z")
+    et = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        rolled = runner.try_security_proxies_from_rollup(st, et, has_filters=False)
+
+    assert rolled is not None
+    assert [c["ip"] for c in rolled["clients"]] == ["10.0.0.2"]
+    assert rolled["stats"]["active_proxies_count"] == 1
