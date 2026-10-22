@@ -26,6 +26,7 @@ import { Activity, Database, AlertTriangle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useBootstrap } from '@/hooks/useBootstrap'
+import { useMounted } from '@/hooks/useMounted'
 import type { components } from '@/types/api.generated'
 import { adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -78,10 +79,15 @@ function LiveQueriesCard() {
   // /queries/summary is the GLOBAL live-query registry (process-wide, not
   // service-scoped), so the key intentionally omits the service id — the
   // number is the same regardless of which service is active.
+  // SSR-safe: gate live SSE/query cache reads behind useMounted() so the first
+  // client hydration pass matches the server's seed/initial render even if
+  // useAdminEventStream (mounted in the layout chunk) pushes before this page
+  // chunk hydrates.
+  const mounted = useMounted()
   const seed = useOpsOverviewSeed().seed.queries_summary
   // Freshness via useAdminEventStream (mounted in SyncStatusBadge).
   // 5-min refetchInterval is a pure safety net.
-  const { data, isLoading, isFetching, isError } = useQuery<SummaryResponse>({
+  const { data: queryData, isLoading: queryIsLoading, isFetching, isError } = useQuery<SummaryResponse>({
     queryKey: queryKeys.admin.overviewQueriesSummary(),
     queryFn: async ({ signal }) => {
       return adminJson('/api/admin/queries/summary', '/api/admin/queries/summary', { signal })
@@ -92,6 +98,8 @@ function LiveQueriesCard() {
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
   })
+  const data = mounted ? queryData : seed
+  const isLoading = !mounted ? !seed : queryIsLoading
   const active = data?.active_total ?? 0
   return (
     <OverviewCard
@@ -110,8 +118,8 @@ function LiveQueriesCard() {
                 .join(' · ') || 'idle'
             : '—'
       }
-      isStale={isError && !!data}
-      isRefreshing={isFetching && !isLoading}
+      isStale={mounted && isError && !!data}
+      isRefreshing={mounted && isFetching && !isLoading}
     />
   )
 }
@@ -123,13 +131,18 @@ function IngestHealthCard() {
   // 400s without a service. On a fresh install there is none yet, so gate
   // the fetch off — firing it just spams the console with 400s and the gap
   // is meaningless with nothing ingested.
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  // SSR-safe: StoreHydrator / useBootstrap live in RootLayout and can flip
+  // activeServiceId before this page chunk hydrates; gate on useMounted() so
+  // the first client render matches the server's activeServiceId=null state.
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   const { seed: opsSeed, seedServiceId } = useOpsOverviewSeed()
   // Only honour the seed when it belongs to the active service (it's
   // currently never seeded — see bootstrap.py — but stay correct if that
   // changes). The gap is per-service, so the key MUST include the service id;
   // without it, switching services serves the previous service's cached gap.
-  const seed = activeServiceId === seedServiceId ? opsSeed.log_accounting : undefined
+  const seed = activeServiceId && activeServiceId === seedServiceId ? opsSeed.log_accounting : undefined
   const { data, isFetching, isLoading, isError } = useQuery<LogAccountingResponse>({
     queryKey: queryKeys.admin.overviewLogAccounting(activeServiceId),
     queryFn: async ({ signal }) => {
@@ -214,12 +227,14 @@ function SlowQueriesTeaser() {
   // slow-queries/count is service-scoped (the backend 400s `service_id_required`
   // without one). Gate it off on a fresh install so we don't spam 400s before
   // any service — and any query exists — to count.
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   const { seed: opsSeed, seedServiceId } = useOpsOverviewSeed()
   // slow-queries/count is service-scoped, so the key must include the service
   // id; gate the seed to the matching service to avoid flashing the previous
   // service's count on switch.
-  const seed = activeServiceId === seedServiceId ? opsSeed.slow_queries_count : undefined
+  const seed = activeServiceId && activeServiceId === seedServiceId ? opsSeed.slow_queries_count : undefined
   const { data, isFetching, isLoading, isError } = useQuery<{ count: number }>({
     queryKey: queryKeys.admin.overviewSlowQueriesCount(activeServiceId),
     queryFn: async ({ signal }) => {
@@ -292,7 +307,9 @@ function OverviewCard({
   isStale?: boolean
   isRefreshing?: boolean
 }) {
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore((s) => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   // Tone-driven classes for the primary metric. Keep these as literal
   // strings so Tailwind's content-scanner can see them — building class
   // names dynamically (e.g. `text-${tone}-600`) would be invisible to
@@ -347,7 +364,8 @@ function OverviewCard({
 // ── Card 4: Celery Status ───────────────────────────────────────────
 
 function CeleryStatusCard() {
-  const { data, isFetching, isLoading, isError } = useQuery({
+  const mounted = useMounted()
+  const { data: queryData, isFetching, isLoading, isError } = useQuery({
     queryKey: queryKeys.admin.overviewCeleryStatus(),
     queryFn: async ({ signal }) => {
       return adminJson<'/api/admin/celery/status'>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
@@ -356,6 +374,7 @@ function CeleryStatusCard() {
     staleTime: POLL_MS,
     refetchInterval: POLL_MS,
   })
+  const data = mounted ? queryData : undefined
 
   const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const workers = data?.workers?.count ?? 0

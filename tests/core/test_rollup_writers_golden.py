@@ -155,7 +155,10 @@ def _canon(v: Any) -> Any:
     return v
 
 
-def _snapshot_tree(root: Path) -> dict[str, dict]:
+def _snapshot_tree(
+    root: Path,
+    file_cache: dict[Path, tuple[int, int, dict[str, Any], list[str]]] | None = None,
+) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for p in sorted(root.rglob("*")):
         if not p.is_file():
@@ -163,18 +166,29 @@ def _snapshot_tree(root: Path) -> dict[str, dict]:
         rel = _RANDOM_NAME_RE.sub(r"\1<id>", p.relative_to(root).as_posix())
         if rel.startswith("_scratch"):
             continue
+        st = p.stat()
         if p.suffix != ".parquet":
-            out[rel] = {"bytes": p.stat().st_size}
+            out[rel] = {"bytes": st.st_size}
+            continue
+        cached = file_cache.get(p) if file_cache is not None else None
+        if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            entry, schema = cached[2], cached[3]
+            SCHEMAS[entry["schema"]] = schema
+            out[rel] = entry
             continue
         table = pq.ParquetFile(p).read()
         rows = sorted(json.dumps(_canon(list(r.values())), default=str) for r in table.to_pylist())
         schema = [f"{f.name}:{f.type}" for f in table.schema]
-        SCHEMAS[_digest(json.dumps(schema))] = schema
-        out[rel] = {
-            "schema": _digest(json.dumps(schema)),
+        schema_digest = _digest(json.dumps(schema))
+        SCHEMAS[schema_digest] = schema
+        entry = {
+            "schema": schema_digest,
             "rows": len(rows),
             "sha": _digest("\n".join(rows)),
         }
+        if file_cache is not None:
+            file_cache[p] = (st.st_mtime_ns, st.st_size, entry, schema)
+        out[rel] = entry
     return out
 
 
@@ -307,6 +321,9 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
     shared.execute("PRAGMA threads=1")
     shared.execute("SET TimeZone='UTC'")
     shared.execute(_LOG_TABLE_SQL)
+    mem_shared = duckdb.connect(":memory:")
+    mem_shared.execute("PRAGMA threads=1")
+    mem_shared.execute("SET TimeZone='UTC'")
     ngwaf_db = tmp_path / "ngwaf_bot_cache.db"
     _write_ngwaf_cache(ngwaf_db)
 
@@ -316,21 +333,21 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         return _Recorder(cur, log, close=True)
 
     def _memory_con(*_a: Any, **_k: Any) -> _Recorder:
-        con = duckdb.connect(":memory:")
-        con.execute("PRAGMA threads=1")
-        con.execute("SET TimeZone='UTC'")
-        return _Recorder(con, log, close=True)
+        cur = mem_shared.cursor()
+        cur.execute("SET TimeZone='UTC'")
+        return _Recorder(cur, log, close=True)
 
     source = {"name": SERVICE, "service_id": SERVICE}
     hours = _closed_hours()
     phases: dict[str, Any] = {}
     texts: dict[str, str] = {}
     seen: dict[str, dict] = {}
+    file_cache: dict[Path, tuple[int, int, dict[str, Any], list[str]]] = {}
 
     def phase(name: str, fn: Callable[[], Any]) -> None:
         log.clear()
         returned = fn()
-        tree = _snapshot_tree(cache_root)
+        tree = _snapshot_tree(cache_root, file_cache)
         delta = {k: v for k, v in tree.items() if seen.get(k) != v}
         removed = sorted(k for k in seen if k not in tree)
         seen.clear()
@@ -364,13 +381,14 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         for name, compactor in _compactors():
             phase(f"day_compactor:{name}", lambda c=compactor: c(SERVICE, source))
         _write_data_partitions(shared, cache_root, hours)
-        seen.update(_snapshot_tree(cache_root))
+        seen.update(_snapshot_tree(cache_root, file_cache))
         phase(
             "wellknown_bots:recompute", lambda: wellknown_bots.recompute_wellknown_bots_rollup(SERVICE, source, hours)
         )
         _plant_stale_wellknown(shared, cache_root)
-        seen.update(_snapshot_tree(cache_root))
+        seen.update(_snapshot_tree(cache_root, file_cache))
         phase("wellknown_bots:backfill", lambda: wellknown_bots.backfill_wellknown_bots_rollup(SERVICE, source))
+    mem_shared.close()
     shared.close()
     return phases, texts
 

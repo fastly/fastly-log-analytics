@@ -3,6 +3,7 @@ import React, { useState } from 'react'
 import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
+import { useMounted } from '@/hooks/useMounted'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { components } from '@/types/api.generated'
@@ -85,11 +86,12 @@ function fmtRelative(iso: string | null | undefined): string {
 }
 
 export function BotSourcesPanel() {
+  const mounted = useMounted()
   const [refreshingSource, setRefreshingSource] = useState<string | null>(null)
   const [enriching, setEnriching] = useState(false)
   const [enrichError, setEnrichError] = useState<string | null>(null)
 
-  const { data: botSourcesData, refetch: refetchBotSources } = useQuery({
+  const { data: queryBotSourcesData, refetch: refetchBotSources } = useQuery({
     queryKey: ['bot-sources'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/bot-sources", { signal })
@@ -97,6 +99,7 @@ export function BotSourcesPanel() {
     },
     staleTime: 60_000,
   })
+  const botSourcesData = mounted ? queryBotSourcesData : undefined
 
   async function handleRefreshBotSource(sourceId: string) {
     setRefreshingSource(sourceId)

@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { adminFetch, adminJson } from '@/lib/api'
 import { formatBytesTiered } from '@/lib/format'
 import { downloadBlob } from '@/lib/utils'
+import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
 import { queryKeys } from '@/lib/query-keys'
@@ -23,7 +24,9 @@ type QuarantineItem = components['schemas']['QuarantineEvidenceItem']
 const PAGE_SIZE = 20
 
 export function QuarantineSection() {
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   const queryClient = useQueryClient()
   const [showDetails, setShowDetails] = React.useState(false)
   const [errorCategory, setErrorCategory] = React.useState('')

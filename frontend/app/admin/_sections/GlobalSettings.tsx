@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
 import { useDerivedState } from '@/hooks/useDerivedState'
+import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 import { AnalyticsCard } from "@/components/AnalyticsCard"
@@ -62,6 +63,7 @@ const _PRICING_DEFAULTS = {
 
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
+  const mounted = useMounted()
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
 
@@ -120,7 +122,7 @@ export const PricingSettings = () => {
     }
   }
 
-  if (isLoading) return <AnalyticsCard title="FOS Pricing Defaults" isLoading>{null}</AnalyticsCard>
+  if (!mounted || isLoading) return <AnalyticsCard title="FOS Pricing Defaults" isLoading>{null}</AnalyticsCard>
 
   const fields = [
     { label: 'Class A Ops ($/1k)', value: rateA, setValue: setRateA },
@@ -184,11 +186,13 @@ export const PricingSettings = () => {
 export function GlobalSettings() {
   const queryClient = useQueryClient()
   const router = useRouter()
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore((s) => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   const [usageLoggingLoading, setUsageLoggingLoading] = useState(false)
   const [popLocationsOpen, setPopLocationsOpen] = useState(false)
 
-  const { data: usageLoggingSettings } = useQuery({
+  const { data: queryUsageLoggingSettings } = useQuery({
     queryKey: ['usage-logging-settings'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/usage-logging')
@@ -196,6 +200,7 @@ export function GlobalSettings() {
     },
     staleTime: 60_000,
   })
+  const usageLoggingSettings = mounted ? queryUsageLoggingSettings : undefined
 
   const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
   const usageLogRetention = usageLoggingSettings?.retention_days ?? 30

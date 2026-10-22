@@ -234,10 +234,10 @@ class TestIaCReconciler:
 
         status_cb = MagicMock()
 
-        # Capture sleep duration to verify drain
+        # Capture sleep duration to verify drain (use assert_any_call so unrelated background thread sleeps don't flake)
         with patch("backend.provision.declarative.iac_reconciler.time.sleep") as mock_sleep:
             reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=status_cb)
-            mock_sleep.assert_called_once_with(5.0)
+            mock_sleep.assert_any_call(5.0)
 
         # VCL reconciliation should be triggered (this deactivates the restart hooks and scoring backend first)
         mock_reconcile_vcl.assert_called_once_with("srv_123", "token", dry_run=False, status_cb=status_cb)

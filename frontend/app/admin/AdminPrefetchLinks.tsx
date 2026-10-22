@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/lib/queries/scoring'
+import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buttonVariants } from '@/components/ui/button'
 import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye, Database } from 'lucide-react'
@@ -12,7 +13,9 @@ import { queryKeys } from '@/lib/query-keys'
 
 export function AdminPrefetchLinks() {
   const queryClient = useQueryClient()
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
 
   return (
     <>

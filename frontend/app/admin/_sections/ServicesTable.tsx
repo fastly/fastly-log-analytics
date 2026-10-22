@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
+import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in.
@@ -27,9 +28,11 @@ import type { ServiceConfig } from '@/types/api'
 
 export function ServicesTable() {
   const queryClient = useQueryClient()
+  const mounted = useMounted()
   // Separate selectors — each subscribes to only its slice. Destructuring
   // useServiceStore() rebuilds the table on every setServices/setInitialized.
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
   const setActiveServiceId = useServiceStore(s => s.setActiveServiceId)
   const router = useRouter()
   const [cronService, setCronService] = useState<ServiceConfig | null>(null)
