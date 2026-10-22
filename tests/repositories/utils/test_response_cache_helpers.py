@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -103,6 +104,14 @@ def test_fresh_observation_replaces_both_alias_spellings() -> None:
     assert "_is_cached" not in fresh
     assert BaseResponse(**fresh).response_cache.state == "miss"
     assert payload["_response_cache"]["state"] == "hit"
+
+
+@pytest.mark.parametrize("state", ["hit", "miss", "bypass", "unknown"])
+def test_observation_wire_bytes_match_the_typed_response(state: str) -> None:
+    payload = rc.cache_result({}, state=state, ttl_seconds=15, prewarmer=False)
+    raw = json.dumps(payload["_response_cache"], separators=(",", ":"))
+    serialized = BaseResponse(**payload).model_dump(by_alias=True)["_response_cache"]
+    assert json.dumps(serialized, separators=(",", ":")) == raw
 
 
 def test_failed_builder_propagates_without_manufacturing_an_observation() -> None:

@@ -1,4 +1,5 @@
 import pytest
+from pydantic import AliasChoices
 
 from backend.models.dashboard import AggregatesResponse
 from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
@@ -81,7 +82,14 @@ def test_repository_keys_match_pydantic_model(in_memory_duckdb, repo_fn, pydanti
     repo_keys.discard("_debug_calls")
     repo_keys.discard("_is_cached")
 
+    parsed = pydantic_model.model_validate(repo_result)
     model_keys = set(pydantic_model.model_fields.keys())
+    for name in parsed.model_fields_set:
+        alias = pydantic_model.model_fields[name].validation_alias
+        if isinstance(alias, str):
+            model_keys.add(alias)
+        elif isinstance(alias, AliasChoices):
+            model_keys.update(choice for choice in alias.choices if isinstance(choice, str))
 
     # Check if the repository is returning keys that the model doesn't know about
     missing_in_model = repo_keys - model_keys

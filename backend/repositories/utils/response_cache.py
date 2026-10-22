@@ -58,13 +58,14 @@ def cache_result(
     single_flight_role: Literal["leader", "follower"] | None = None,
     wait_ms: float | None = None,
 ) -> dict:
-    observation: dict[str, Any] = {"state": state, "prewarmer": prewarmer}
+    observation: dict[str, Any] = {"state": state}
     if ttl_seconds is not None:
-        observation["ttl_seconds"] = ttl_seconds
+        observation["ttl_seconds"] = float(ttl_seconds)
+    observation["prewarmer"] = prewarmer
     if single_flight_role is not None:
         observation["single_flight"] = single_flight_role
     if wait_ms is not None:
-        observation["wait_ms"] = wait_ms
+        observation["wait_ms"] = float(wait_ms)
     result = {key: value for key, value in payload.items() if key not in {"response_cache", "_is_cached"}}
     return {**result, "is_cached": state == "hit", "_response_cache": observation}
 
