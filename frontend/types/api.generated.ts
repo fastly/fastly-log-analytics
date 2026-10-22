@@ -6692,6 +6692,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -6830,6 +6831,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -6868,6 +6870,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -6925,6 +6928,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -6952,6 +6956,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7019,6 +7024,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7044,6 +7050,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7209,6 +7216,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7493,6 +7501,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7687,6 +7696,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7777,6 +7787,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -7841,6 +7852,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -8380,6 +8392,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -8424,6 +8437,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -8482,6 +8496,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -8528,6 +8543,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -9386,6 +9402,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -9591,6 +9608,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -9695,6 +9713,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -9964,6 +9983,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10318,6 +10338,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10367,6 +10388,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10441,6 +10463,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10480,6 +10503,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10508,6 +10532,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10598,6 +10623,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10665,6 +10691,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10704,6 +10731,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10752,6 +10780,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -10950,6 +10979,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -11210,6 +11240,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -12652,6 +12683,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -12958,6 +12990,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13025,6 +13058,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13202,6 +13236,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13266,6 +13301,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13624,6 +13660,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13709,6 +13746,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -13984,6 +14022,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -14444,6 +14483,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -14510,6 +14550,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -14652,6 +14693,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -14756,6 +14798,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -14856,6 +14899,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15007,6 +15051,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15104,6 +15149,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15176,6 +15222,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15234,6 +15281,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15378,6 +15426,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15638,6 +15687,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15842,6 +15892,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15920,6 +15971,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -15951,6 +16003,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -16033,6 +16086,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -16674,6 +16728,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -16846,6 +16901,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -17245,6 +17301,24 @@ export interface components {
             asn_expansion_ratio: number;
         } & {
             [key: string]: unknown;
+        };
+        /** ResponseCacheObservation */
+        ResponseCacheObservation: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "hit" | "miss" | "bypass" | "unknown";
+            /** Ttl Seconds */
+            ttl_seconds?: number | null;
+            /** Prewarmer */
+            prewarmer?: boolean | null;
+            /** Single Flight */
+            single_flight?: ("leader" | "follower") | null;
+            /** Scope */
+            scope?: ("self" | "subtree") | null;
+            /** Wait Ms */
+            wait_ms?: number | null;
         };
         /**
          * RollupCompactResponse
@@ -18827,6 +18901,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -19007,6 +19082,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -19193,6 +19269,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -19296,6 +19373,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -19413,6 +19491,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -19944,6 +20023,7 @@ export interface components {
          *     only sets the keys relevant to each branch).
          */
         ShieldingAnalysis: {
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /**
              * Has Data
              * @default false
@@ -20252,6 +20332,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20293,6 +20374,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20377,6 +20459,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20489,6 +20572,7 @@ export interface components {
         };
         /** TransportMetrics */
         TransportMetrics: {
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /**
              * Has Transport Data
              * @default true
@@ -20585,6 +20669,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20651,6 +20736,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20696,6 +20782,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20824,6 +20911,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20920,6 +21008,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -20956,6 +21045,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;
@@ -21050,6 +21140,7 @@ export interface components {
              * @default false
              */
             _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: {
                 [key: string]: unknown;

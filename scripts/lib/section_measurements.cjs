@@ -42,18 +42,22 @@ function describeResponse(payload) {
     const hitMarker = body._is_cached === true || body.is_cached === true;
     const conflict = ['miss', 'bypass'].includes(metadata.state) && hitMarker;
     const state = conflict ? 'unknown' : cacheStates.has(metadata.state) ? metadata.state : hitMarker ? 'hit' : 'unknown';
-    const cachedExecution = enclosingHit || hitMarker || state === 'hit';
+    const singleFlight = ['leader', 'follower'].includes(metadata.single_flight) ? metadata.single_flight : null;
+    const shared = singleFlight === 'follower';
+    const cachedExecution = enclosingHit || hitMarker || state === 'hit' || shared;
     const raw = Object.hasOwn(body, '_section_timings') ? body._section_timings : body.section_timings;
     const sections = (Array.isArray(raw) ? raw : []).filter(row => isObject(row) && typeof row.section === 'string').map(row => describeSection(row, cachedExecution ? 'hit' : state));
     const prewarmer = typeof metadata.prewarmer === 'boolean' ? metadata.prewarmer : null;
     const gaps = conflict ? ['response_cache_conflict'] : [];
     if (state === 'unknown') gaps.push('response_cache_unknown');
+    if (shared) gaps.push('shared_execution');
     if (prewarmer === null) gaps.push('prewarmer_unknown');
     if (!sections.length) gaps.push('section_timings_missing');
     if (cachedExecution && sections.length) gaps.push('historical_or_unverified_timings');
-    components.push({ component: path, cache_state: state, prewarmer, sections, gaps });
+    components.push({ component: path, cache_state: state, prewarmer, ttl_seconds: duration(metadata.ttl_seconds), single_flight: singleFlight, wait_ms: duration(metadata.wait_ms), execution_reused: cachedExecution, lookup_current: !enclosingHit && !shared, sections, gaps });
     for (const name of componentNames) {
-      if (isObject(body[name])) visit(body[name], path === 'response' ? name : `${path}.${name}`, cachedExecution);
+      const inherit = enclosingHit || (cachedExecution && metadata.scope !== 'self');
+      if (isObject(body[name])) visit(body[name], path === 'response' ? name : `${path}.${name}`, inherit);
     }
   }
   visit(payload, 'response');

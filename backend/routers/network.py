@@ -23,6 +23,7 @@ from backend.models.network import (
 )
 from backend.repositories import network as repo
 from backend.repositories._base import _safe_table
+from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import process_context_scope
@@ -115,8 +116,10 @@ def network_health(
             invite_clamp_fingerprint=invite_fp,
         )
     else:
-        res = {"available": True}
+        res = cache_result({"available": True}, state="bypass", prewarmer=False)
 
+    if "_response_cache" in res:
+        res["_response_cache"] = {**res["_response_cache"], "scope": "self"}
     if want_shielding:
         try:
             from backend.repositories import origin as _origin
@@ -169,7 +172,7 @@ def network_quality(
         filters=req.filters,
         region_country=req.region_country,
     )
-    return NetworkQualityResponse.with_telemetry(**res)
+    return NetworkQualityResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
 
 
 def _fetch_pop_health_data(
@@ -308,8 +311,10 @@ def _network_bundle_impl(
                     invite_clamp_fingerprint=invite_fp,
                 )
             else:
-                res = {"available": True}
+                res = cache_result({"available": True}, state="bypass", prewarmer=False)
 
+            if "_response_cache" in res:
+                res["_response_cache"] = {**res["_response_cache"], "scope": "self"}
             if want_shielding:
                 try:
                     from backend.repositories import origin as _origin
@@ -349,7 +354,7 @@ def _network_bundle_impl(
             )
             bundle_dq.extend(q_res.get("debug_queries") or [])
             bundle_dc.extend(q_res.get("debug_calls") or [])
-            quality_resp = NetworkQualityResponse.with_telemetry(**q_res)
+            quality_resp = NetworkQualityResponse.with_telemetry(**cache_result(q_res, state="bypass", prewarmer=False))
 
         # 3. Pop Health
         want_pop_health = sections is None or "pop_health" in sections
@@ -382,9 +387,10 @@ def _network_bundle_impl(
             )
             bundle_dq.extend(t_res.get("debug_queries") or [])
             bundle_dc.extend(t_res.get("debug_calls") or [])
-            transport_resp = TransportMetrics(**t_res)
+            transport_resp = TransportMetrics(**cache_result(t_res, state="bypass", prewarmer=False))
 
         return NetworkBundleResponse.with_telemetry(
+            **cache_result({}, state="bypass", prewarmer=False),
             available=True,
             health=health_resp,
             quality=quality_resp,

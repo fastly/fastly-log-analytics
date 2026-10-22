@@ -14,8 +14,11 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-from typing import TYPE_CHECKING, Any
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
+from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import filter_spec_attr
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.telemetry import get_queries, get_tracked_calls
@@ -43,7 +46,47 @@ def client_cache_token(client: Any) -> int:
 
 # Keys never persisted in the memo cache: per-request telemetry would leak
 # across requests if kept, and the cache-hit marker is stamped fresh on read.
-_NEVER_CACHE = ("debug_queries", "debug_calls", "is_cached", "_is_cached")
+_NEVER_CACHE = ("debug_queries", "debug_calls", "is_cached", "_is_cached", "response_cache", "_response_cache")
+
+
+def cache_result(
+    payload: dict,
+    *,
+    state: Literal["hit", "miss", "bypass", "unknown"],
+    ttl_seconds: float | None = None,
+    prewarmer: bool | None = None,
+    single_flight_role: Literal["leader", "follower"] | None = None,
+    wait_ms: float | None = None,
+) -> dict:
+    observation: dict[str, Any] = {"state": state, "prewarmer": prewarmer}
+    if ttl_seconds is not None:
+        observation["ttl_seconds"] = ttl_seconds
+    if single_flight_role is not None:
+        observation["single_flight"] = single_flight_role
+    if wait_ms is not None:
+        observation["wait_ms"] = wait_ms
+    result = {key: value for key, value in payload.items() if key not in {"response_cache", "_is_cached"}}
+    return {**result, "is_cached": state == "hit", "_response_cache": observation}
+
+
+def coalesced_cache_result(
+    key: str, build: Callable[[], dict], *, ttl_seconds: float, prewarmer: bool | None = None
+) -> dict:
+    started = time.perf_counter()
+    payload, leader = single_flight.coalesce(key, build)
+    if not leader:
+        return cache_result(
+            payload,
+            state="unknown",
+            ttl_seconds=ttl_seconds,
+            prewarmer=prewarmer,
+            single_flight_role="follower",
+            wait_ms=(time.perf_counter() - started) * 1000,
+        )
+    state: Literal["hit", "miss"] = (
+        "hit" if payload.get("is_cached") is True or payload.get("_is_cached") is True else "miss"
+    )
+    return cache_result(payload, state=state, ttl_seconds=ttl_seconds, prewarmer=prewarmer, single_flight_role="leader")
 
 
 def serialize_filters_for_key(filters: FiltersDict | None) -> dict[str, tuple[Any, list[str]]]:
@@ -87,7 +130,7 @@ def bucket_time_to_minute(ts: str | None) -> str | None:
     return ts[:16]
 
 
-def cache_get(cache: BoundedTTLCache, key: str) -> dict | None:
+def cache_get(cache: BoundedTTLCache, key: str, *, prewarmer: bool | None = None) -> dict | None:
     """Return a copy of the cached payload with the cache-hit marker stamped,
     or ``None`` on a miss.
 
@@ -98,9 +141,7 @@ def cache_get(cache: BoundedTTLCache, key: str) -> dict | None:
     cached = cache.get(key)
     if cached is None:
         return None
-    result = cached.copy()
-    result["is_cached"] = True
-    return result
+    return cache_result(cached, state="hit", ttl_seconds=cache.ttl, prewarmer=prewarmer)
 
 
 def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
@@ -122,12 +163,21 @@ class ResponseMemo:
     ``icf``), and passes the resulting key in.
     """
 
-    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256) -> None:
+    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
         self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
         self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+        self.prewarmer = prewarmer
 
     def get(self, key: str) -> dict | None:
-        return cache_get(self.cache, key)
+        return cache_get(self.cache, key, prewarmer=self.prewarmer)
+
+    def coalesce(self, key: str, build: Callable[[], dict]) -> dict:
+        return coalesced_cache_result(key, build, ttl_seconds=self.cache.ttl, prewarmer=self.prewarmer)
+
+    def result(self, payload: dict, *, state: Literal["miss", "bypass"]) -> dict:
+        return cache_result(
+            payload, state=state, ttl_seconds=self.cache.ttl if state == "miss" else None, prewarmer=self.prewarmer
+        )
 
     def get_with_telemetry(self, key: str) -> dict | None:
         """Return a copy of the cached payload with cached query/call attribution restored."""
@@ -161,9 +211,9 @@ class ResponseMemo:
         cached = self.get(key)
         if cached is None:
             return None
-        return {**cached, **runner.telemetry()}
+        return {**cached, **runner.telemetry(), "is_cached": True}
 
     def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
         """Persist ``payload`` and return it with this request's telemetry merged in."""
         self.put(key, payload)
-        return {**payload, **runner.telemetry()}
+        return self.result({**payload, **runner.telemetry()}, state="miss")

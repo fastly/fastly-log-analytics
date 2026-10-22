@@ -35,10 +35,10 @@ from backend.repositories.security import (
     classify_ua_counts,
     summarize_wellknown_bot_rows,
 )
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
+    cache_result,
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
@@ -46,7 +46,7 @@ from backend.repositories.utils.response_cache import (
 from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
-_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_security_aggregates_memo", _memo.cache)
 
 _WHERE = "__WHERE__"
@@ -567,7 +567,7 @@ def security_aggregates(
         _memo.put(memo_key, dict(res))
         return res
 
-    res, _ = single_flight.coalesce(f"hs_security_agg:{memo_key}", _compute)
+    res = _memo.coalesce(f"hs_security_agg:{memo_key}", _compute)
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
@@ -595,7 +595,9 @@ def top_bots(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityTopBotsResponse:
     scope = _scope(service, req, start_time, end_time)
-    return SecurityTopBotsResponse.with_telemetry(**_top_bots(service, scope))
+    return SecurityTopBotsResponse.with_telemetry(
+        **cache_result(_top_bots(service, scope), state="bypass", prewarmer=False)
+    )
 
 
 _PROXY_SOURCE = f"""

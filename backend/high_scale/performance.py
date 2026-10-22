@@ -24,7 +24,7 @@ from backend.repositories.utils.response_cache import (
 from backend.utils.cache_registry import CacheRegistry
 
 _HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
-_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128)
+_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_performance_aggregates_memo", _memo.cache)
 
 _ALL_SECTIONS = frozenset({"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"})
@@ -384,4 +384,6 @@ def performance_aggregates(
     payload = {**result, "_approx": not filters}
     if cache_key is not None:
         _memo.put(cache_key, payload)
-    return PerformanceAggregatesResponse.with_telemetry(**payload)
+    return PerformanceAggregatesResponse.with_telemetry(
+        **_memo.result(payload, state="miss" if cache_key is not None else "bypass")
+    )

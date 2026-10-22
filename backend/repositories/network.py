@@ -22,6 +22,7 @@ from backend.repositories.utils.response_cache import (
     bucket_time_to_minute,
     cache_get,
     cache_put,
+    cache_result,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -282,10 +283,16 @@ def get_health(
         invite_clamp_fingerprint=invite_clamp_fingerprint,
     )
     if not force_refresh:
-        cached = cache_get(_response_cache, cache_key)
+        cached = cache_get(_response_cache, cache_key, prewarmer=False)
         if cached is not None:
             return {**cached, "telemetry": {}}
 
+    observation = cache_result(
+        {},
+        state="bypass" if force_refresh else "miss",
+        ttl_seconds=None if force_refresh else _response_cache.ttl,
+        prewarmer=False,
+    )
     table_name = _safe_table(src["name"])
 
     _runner: QueryRunner | None = None
@@ -310,6 +317,7 @@ def get_health(
         return {
             "available": False,
             "reason": "Enable Groups F and G (Network Quality) in your log field configuration.",
+            **observation,
             **(_runner.telemetry() if _runner else {"telemetry": {}}),
         }
 
@@ -625,6 +633,7 @@ def get_health(
             return {
                 "available": False,
                 "reason": "Data temporarily unavailable — view refresh failed. Retry in a moment.",
+                **observation,
                 **(_runner.telemetry() if _runner else {"telemetry": {}}),
             }
         if not is_leader:
@@ -1081,7 +1090,7 @@ def get_health(
             # network additionally strips section_timings (per-request paint
             # telemetry) from the stored copy.
             cache_put(_response_cache, cache_key, payload, strip=("section_timings",))
-        return payload
+        return {**payload, **observation}
 
     finally:
         if temp_table is not None:

@@ -19,6 +19,7 @@ from backend.high_scale.aggregate_query import (
 )
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleService
+from backend.models.common import ResponseCacheObservation
 from backend.models.dashboard import (
     AggregatesRequest,
     AggregatesResponse,
@@ -33,6 +34,7 @@ from backend.models.dashboard import (
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
+    cache_result,
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
@@ -41,7 +43,7 @@ from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
 _HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
-_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128)
+_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_dashboard_aggregates_memo", _memo.cache)
 
 _FIELD_DIMENSIONS = {
@@ -489,6 +491,9 @@ def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> Aggregat
                 "latest_log_at": resp.latest_log_at,
             },
         )
+    resp.response_cache = ResponseCacheObservation.model_validate(
+        _memo.result({}, state="miss" if cache_key is not None else "bypass")["_response_cache"]
+    )
     return resp
 
 
@@ -616,6 +621,7 @@ def bundle(
         res_top_bots.debug_calls = []
 
     return {
+        **cache_result({}, state="bypass", prewarmer=False),
         "aggregates": res_aggregates,
         "top_bots": res_top_bots,
         "debug_queries": get_queries(),

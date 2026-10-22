@@ -10,6 +10,7 @@ an API response. Response-cache, history, coverage and browser gaps stay explici
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import stat
@@ -29,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.lib.cache_sampling import sample_cache_pair
 from scripts.lib.section_measurements import (
     BUDGETS,
     active_filter_count,
@@ -185,7 +187,8 @@ def _post(
     *,
     page_load_id: str,
 ) -> tuple[Any, float]:
-    from scripts.lib.admin_tls import admin_urlopen, is_admin_url
+    from scripts.lib.admin_http import async_admin_json
+    from scripts.lib.admin_tls import is_admin_url
 
     if not is_admin_url(origin):
         raise ValueError("No exact-origin administrator TLS identity configured")
@@ -196,8 +199,7 @@ def _post(
         headers={"Content-Type": "application/json", "X-Page-Load-ID": page_load_id, "X-Debug-Responses": "1"},
     )
     started = time.perf_counter()
-    with admin_urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read())
+    payload = asyncio.run(async_admin_json(request, timeout=timeout))
     return payload, (time.perf_counter() - started) * 1000.0
 
 
@@ -212,6 +214,7 @@ def sweep_one(
     *,
     sample_count: int = 30,
     environment: str = "unknown",
+    controlled_cache_pair: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= sample_count <= 1000:
         raise ValueError("sample_count must be between 1 and 1000")
@@ -272,6 +275,15 @@ def sweep_one(
         )
         for state in ("hit", "miss", "bypass", "unknown", "mixed")
     }
+    if controlled_cache_pair:
+
+        def request_pair(payload: dict, remaining: float) -> Any:
+            response, _ = _post(origin, path, service_id, payload, min(timeout, remaining), page_load_id=uuid4().hex)
+            return response
+
+        record["controlled_cache_pair"] = sample_cache_pair(request_pair, body)
+        if record["controlled_cache_pair"]["status"] in {"observed", "not_applicable"}:
+            record["gaps"].remove("controlled_miss_unverified")
     return record
 
 
@@ -286,6 +298,7 @@ def run_sweep(
     environment: str = "unknown",
     filters: dict[str, Any] | None = None,
     anchor: str | None = None,
+    controlled_cache_pair: bool = False,
 ) -> list[dict[str, Any]]:
     wanted = set(endpoints) if endpoints else {item[0] for item in ENDPOINTS}
     unknown = wanted - {item[0] for item in ENDPOINTS}
@@ -313,6 +326,7 @@ def run_sweep(
                         timeout,
                         sample_count=sample_count,
                         environment=environment,
+                        controlled_cache_pair=controlled_cache_pair,
                     )
                 )
     return records
@@ -359,6 +373,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--parallel", type=int, default=0)
     parser.add_argument("--samples", type=int, default=BUDGETS["minimum_samples_per_state"])
+    parser.add_argument(
+        "--controlled-cache-pair",
+        action="store_true",
+        help="Observe normal TTL expiry (120s / 4-request bound per scenario)",
+    )
     parser.add_argument("--filters-json", default="{}")
     parser.add_argument("--anchor", default="")
     parser.add_argument("--prerequisites", type=Path)
@@ -412,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         environment=args.env,
         filters=filters,
         anchor=args.anchor,
+        controlled_cache_pair=args.controlled_cache_pair,
     )
     result = {
         "env": args.env,

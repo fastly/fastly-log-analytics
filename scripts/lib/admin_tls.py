@@ -161,6 +161,17 @@ def admin_urlopen(request_or_url: Request | str, timeout: float = 5.0):
     return opener.open(request, timeout=timeout)
 
 
+def admin_request_context(request: Request) -> ssl.SSLContext:
+    """Require an exact-origin identity for a credential-free administrator request."""
+    origin = _origin(request.full_url)
+    config = next((item for item in _settings().values() if item["origin"] == origin), None)
+    if config is None:
+        raise ValueError("No exact-origin administrator TLS identity configured")
+    if any(name.lower() in {"x-admin-gateway-token", "x-admin-token"} for name, _ in request.header_items()):
+        raise ValueError("Admin client mTLS must not send server gateway or bootstrap credentials")
+    return _context(config)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verified exact-origin admin client TLS GET")
     parser.add_argument("url")

@@ -10,7 +10,6 @@ import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -24,7 +23,7 @@ _CMCD_REQUIRED_COL = "cmcd_sid"
 
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 128
-_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE, prewarmer=False)
 _response_cache = _memo.cache
 
 
@@ -104,9 +103,11 @@ def get_cmcd_aggregates(
         )
 
     if start_time is not None and end_time is not None:
-        coalesced, _ = single_flight.coalesce(f"cmcd_agg:{cache_key}", _compute)
-        return dict(coalesced)
-    return _compute()
+        return _memo.coalesce(f"cmcd_agg:{cache_key}", _compute)
+    result = _compute()
+    if result.get("is_cached") is True:
+        return result
+    return _memo.result(result, state="miss")
 
 
 def _compute_cmcd_aggregates(

@@ -17,7 +17,6 @@ from backend.repositories._base import (
     _safe_table,
     percentile_ms_expr,
 )
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -31,7 +30,7 @@ from backend.utils.log_throttle import log_once_per
 logger = logging.getLogger(__name__)
 
 _PERF_CACHE_TTL = float(os.getenv("PERF_CACHE_TTL_SECONDS", "30"))
-_memo = ResponseMemo(ttl=_PERF_CACHE_TTL, maxsize=128)
+_memo = ResponseMemo(ttl=_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("performance_aggregates_memo", _memo.cache)
 
 
@@ -103,9 +102,8 @@ def get_performance_aggregates(
         return _compute_performance_aggregates(con, src, start_time, end_time, filters, sort_by, sections, cache_key)
 
     if cache_key is not None:
-        coalesced, _ = single_flight.coalesce(f"perf_agg:{cache_key}", _compute)
-        return dict(coalesced)
-    return _compute()
+        return _memo.coalesce(f"perf_agg:{cache_key}", _compute)
+    return _memo.result(_compute(), state="bypass")
 
 
 def _compute_performance_aggregates(

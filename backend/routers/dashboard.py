@@ -23,6 +23,7 @@ from backend.models.dashboard import (
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import dashboard as repo
+from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import get_sqlite_queries
@@ -280,6 +281,7 @@ async def dashboard_bundle(
                 single_debug_calls.extend(sub.pop("debug_calls", []) or [])
                 single_debug_calls.extend(sub.pop("_debug_calls", []) or [])
         return {
+            **cache_result({}, state="bypass", prewarmer=False),
             "aggregates": aggregates,
             "top_bots": top_bots,
             "section_timings": section_timings,
@@ -439,6 +441,7 @@ async def dashboard_bundle(
             all_debug_calls.extend(sub.pop("debug_calls", []) or [])
             all_debug_calls.extend(sub.pop("_debug_calls", []) or [])
     return {
+        **cache_result({}, state="bypass", prewarmer=False),
         "aggregates": aggregates,
         "top_bots": top_bots,
         "section_timings": section_timings,

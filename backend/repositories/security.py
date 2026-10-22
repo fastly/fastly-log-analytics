@@ -21,11 +21,11 @@ from backend.repositories._base import (
     time_bucket_select,
 )
 from backend.repositories._sql import security as SQL
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
+    cache_result,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -37,7 +37,7 @@ from backend.utils.sql_validator import escape_sql_literal
 _logger = logging.getLogger(__name__)
 
 _SECURITY_CACHE_TTL = float(os.getenv("SECURITY_CACHE_TTL_SECONDS", "30"))
-_memo = ResponseMemo(ttl=_SECURITY_CACHE_TTL, maxsize=128)
+_memo = ResponseMemo(ttl=_SECURITY_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("security_aggregates_memo", _memo.cache)
 
 
@@ -645,7 +645,9 @@ def get_top_bots(
         cached_entry = _dashboard_repo._dashboard_cache.get(cache_key)
         if cached_entry is not None:
             _cached_at, cached_res = cached_entry
-            return cached_res.copy()
+            return cache_result(
+                cached_res, state="hit", ttl_seconds=_dashboard_repo._dashboard_cache.ttl, prewarmer=False
+            )
 
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
@@ -654,7 +656,12 @@ def get_top_bots(
     actual_cols = runner.get_schema_cols()
     timer.mark("top_bots:get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry())
+        return cache_result(
+            empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry()),
+            state="miss" if cache_key is not None else "bypass",
+            ttl_seconds=_dashboard_repo._dashboard_cache.ttl if cache_key is not None else None,
+            prewarmer=False,
+        )
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -819,7 +826,12 @@ def get_top_bots(
     }
     if cache_key is not None and (arcjet_bots or ngwaf_bots):
         _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict.copy())
-    return res_dict
+    return cache_result(
+        res_dict,
+        state="miss" if cache_key is not None else "bypass",
+        ttl_seconds=_dashboard_repo._dashboard_cache.ttl if cache_key is not None else None,
+        prewarmer=False,
+    )
 
 
 def get_security_aggregates(
@@ -903,9 +915,8 @@ def get_security_aggregates(
         return res
 
     if memo_key is not None:
-        coalesced, _ = single_flight.coalesce(f"security_agg:{memo_key}", _compute)
-        return dict(coalesced)
-    return _compute()
+        return _memo.coalesce(f"security_agg:{memo_key}", _compute)
+    return _memo.result(_compute(), state="bypass")
 
 
 def _build_security_response(

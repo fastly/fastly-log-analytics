@@ -29,9 +29,8 @@ from backend.repositories._base import (
     time_bucket_select,
 )
 from backend.repositories._sql import dashboard as SQL
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import build_where_clause
-from backend.repositories.utils.response_cache import bucket_time_to_minute
+from backend.repositories.utils.response_cache import bucket_time_to_minute, cache_result, coalesced_cache_result
 
 # ── In-memory caches ──────────────────────────────────────────────────────────
 # Bounded + actively-reaped: dashboard responses can be 30-240MB per entry,
@@ -230,8 +229,7 @@ def peek_aggregates(
     if cached_entry is not None:
         _, cached_res = cached_entry
         cached_res = cached_res.copy()
-        cached_res["is_cached"] = True
-        return cached_res
+        return cache_result(cached_res, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
     return None
 
 
@@ -303,8 +301,7 @@ def get_aggregates(
             # ``_is_cached`` here gets dropped because Pydantic only matches
             # the unaliased name — the cached response was silently returning
             # ``"_is_cached": false`` in JSON, masking every cache hit.
-            cached_res["is_cached"] = True
-            return cached_res
+            return cache_result(cached_res, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
 
     def _compute() -> dict:
         if cache_key is not None:
@@ -312,8 +309,7 @@ def get_aggregates(
             if cached_inner is not None:
                 _, cr = cached_inner
                 cr = cr.copy()
-                cr["is_cached"] = True
-                return cr
+                return cache_result(cr, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
         return _compute_dashboard_aggregates(
             con=con,
             src=src,
@@ -335,9 +331,15 @@ def get_aggregates(
         )
 
     if cache_key is not None and _query_table is None and _selected_aggregates is None:
-        coalesced, _ = single_flight.coalesce(f"dash_agg:{cache_key}", _compute)
-        return dict(coalesced)
-    return _compute()
+        return coalesced_cache_result(
+            f"dash_agg:{cache_key}", _compute, ttl_seconds=_dashboard_cache.ttl, prewarmer=False
+        )
+    return cache_result(
+        _compute(),
+        state="miss" if cache_key is not None else "bypass",
+        ttl_seconds=_dashboard_cache.ttl if cache_key is not None else None,
+        prewarmer=False,
+    )
 
 
 def _compute_dashboard_aggregates(

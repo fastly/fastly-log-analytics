@@ -17,7 +17,6 @@ from typing import Any
 from backend.high_scale._projection_utils import range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.cmcd import CmcdRequest
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
@@ -27,7 +26,7 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.utils.cache_registry import CacheRegistry
 
-_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 
 _DEFAULT_WINDOW = timedelta(days=1)
@@ -208,9 +207,9 @@ def cmcd_aggregates(
     def _compute() -> dict[str, Any]:
         return _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
 
-    result, _is_leader = single_flight.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
+    result = _memo.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
     _memo.put(memo_key, result)
-    return dict(result)
+    return result
 
 
 def _cmcd_aggregates_compute(

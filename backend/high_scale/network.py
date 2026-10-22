@@ -25,6 +25,7 @@ from backend.models.network import (
     TransportProtocolShare,
 )
 from backend.models.origin import OriginShieldingAnalysisResponse
+from backend.repositories.utils.response_cache import cache_result
 from backend.utils.geo import format_city_label
 
 
@@ -162,8 +163,10 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
             {"service_id": service.service_id, "start": start, "end": end},
         )
         if shield_rows and int(shield_rows[0]["n"]) == 0:
-            return ShieldingAnalysis(has_data=False, edge_only=True, rows=[])
-        return ShieldingAnalysis(has_data=False, rows=[])
+            return ShieldingAnalysis(
+                **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
+            )
+        return ShieldingAnalysis(**cache_result({}, state="bypass", prewarmer=False), has_data=False, rows=[])
 
     # Keep the union of the top routes by volume and by transit overhead so a
     # low-volume mis-peered route is never truncated away behind busy ones.
@@ -187,7 +190,13 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         )
         for r in sorted(kept.values(), key=lambda r: int(r["requests"]), reverse=True)
     ]
-    return ShieldingAnalysis(has_data=True, rows=rows, total_routes=len(pairs), truncated=len(pairs) > len(rows))
+    return ShieldingAnalysis(
+        **cache_result({}, state="bypass", prewarmer=False),
+        has_data=True,
+        rows=rows,
+        total_routes=len(pairs),
+        truncated=len(pairs) > len(rows),
+    )
 
 
 def origin_shielding_analysis(
@@ -201,6 +210,7 @@ def origin_shielding_analysis(
     rows = analysis.rows[:limit]
     truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
     return OriginShieldingAnalysisResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
         has_data=analysis.has_data,
         requires_fields=analysis.requires_fields or [],
         edge_only=bool(analysis.edge_only),
@@ -226,7 +236,9 @@ def network_health(
     if _want_shielding(sections):
         shielding = _shielding_analysis(service, start, end, getattr(req, "filters", None))
     if not _want_core(sections):
-        return NetworkHealthResponse.with_telemetry(available=True, shielding_analysis=shielding)
+        return NetworkHealthResponse.with_telemetry(
+            **cache_result({}, state="bypass", prewarmer=False), available=True, shielding_analysis=shielding
+        )
 
     # Coarsen for wide windows exactly like the standard path (network.py:348)
     # so the heatmap x-axis never exceeds ~8640 buckets.
@@ -612,6 +624,7 @@ def network_health(
 
     want_map_payload = not sections or "health" in sections or "map_buckets" in sections or "cities" in sections
     return NetworkHealthResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
         available=True,
         has_data=bool(heatmap_rows),
         metric="health_score",
@@ -715,6 +728,7 @@ def network_quality(
     ]
 
     return NetworkQualityResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
         available=True,
         by_country=by_country,
         by_asn=by_asn,
@@ -862,6 +876,7 @@ def get_transport_metrics(
         )
 
     return TransportMetrics(
+        **cache_result({}, state="bypass", prewarmer=False),
         has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
         tcp_rtt_p50_ms=tcp_rtt_p50,
         tcp_rtt_p90_ms=tcp_rtt_p90,
@@ -930,6 +945,7 @@ def network_bundle(
         transport_resp = f_transport.result() if f_transport else None
 
     return NetworkBundleResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
         available=True,
         health=health_resp,
         quality=quality_resp,

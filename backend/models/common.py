@@ -5,7 +5,7 @@ from __future__ import annotations
 import os as _os
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator, model_serializer
+from pydantic import AfterValidator, AliasChoices, BaseModel, Field, field_validator, model_serializer
 
 from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
@@ -221,6 +221,19 @@ _DEBUG_ENVELOPE_KEYS = (
 )
 
 
+class ResponseCacheObservation(BaseModel):
+    state: Literal["hit", "miss", "bypass", "unknown"]
+    ttl_seconds: float | None = Field(default=None, gt=0)
+    prewarmer: bool | None = None
+    single_flight: Literal["leader", "follower"] | None = None
+    scope: Literal["self", "subtree"] | None = None
+    wait_ms: float | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        return {key: value for key, value in handler(self).items() if value is not None or key == "prewarmer"}
+
+
 class BaseResponse(BaseModel):
     """Base response that automatically includes telemetry if present."""
 
@@ -231,6 +244,11 @@ class BaseResponse(BaseModel):
     debug_sqlite: list[dict] = Field(default_factory=list, serialization_alias="_debug_sqlite")
     debug_postgres: list[dict] = Field(default_factory=list, serialization_alias="_debug_postgres")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
+    response_cache: ResponseCacheObservation | None = Field(
+        default=None,
+        validation_alias=AliasChoices("response_cache", "_response_cache"),
+        serialization_alias="_response_cache",
+    )
     # Per-phase wall-clock timing for the handler. Always emitted as
     # _section_timings under serialization. Default empty so endpoints
     # that don't instrument get a benign empty list. Safe to surface in
@@ -241,6 +259,9 @@ class BaseResponse(BaseModel):
     @model_serializer(mode="wrap")
     def _strip_debug_when_disabled(self, handler):
         data = handler(self)
+        if self.response_cache is None:
+            data.pop("_response_cache", None)
+            data.pop("response_cache", None)
         if not _debug_responses_enabled():
             for key in _DEBUG_ENVELOPE_KEYS:
                 data.pop(key, None)

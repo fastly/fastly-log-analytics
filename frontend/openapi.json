@@ -52827,6 +52827,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -53225,6 +53235,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -53318,6 +53338,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -53474,6 +53504,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -53543,6 +53583,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -53700,6 +53750,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -53754,6 +53814,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -54241,6 +54311,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -55049,6 +55129,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -55649,6 +55739,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -55849,6 +55949,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -55971,6 +56081,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -57465,6 +57585,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -57575,6 +57705,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -57692,6 +57832,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -57831,6 +57981,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -60253,6 +60413,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -60586,6 +60756,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -60882,6 +61062,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -61626,6 +61816,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -62551,6 +62751,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -62674,6 +62884,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -62885,6 +63105,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -62981,6 +63211,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -63041,6 +63281,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -63270,6 +63520,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -63495,6 +63755,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -63570,6 +63840,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -63687,6 +63967,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -64253,6 +64543,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -65059,6 +65359,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -69596,6 +69906,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -70774,6 +71094,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -70947,6 +71277,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -71537,6 +71877,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -71689,6 +72039,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -72663,6 +73023,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -72912,6 +73282,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -73677,6 +74057,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -74859,6 +75249,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -74993,6 +75393,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -75353,6 +75763,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -75609,6 +76029,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -75815,6 +76245,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -76174,6 +76614,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -76379,6 +76829,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -76519,6 +76979,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -76627,6 +77097,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -77069,6 +77549,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -77871,6 +78361,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -78444,6 +78944,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -78674,6 +79184,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -78732,6 +79252,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -78928,6 +79458,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -80652,6 +81192,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -81064,6 +81614,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -82086,6 +82646,90 @@
           "asn_expansion_ratio"
         ],
         "title": "ResidentialFingerprintDispersionMeta"
+      },
+      "ResponseCacheObservation": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "hit",
+              "miss",
+              "bypass",
+              "unknown"
+            ],
+            "title": "State"
+          },
+          "ttl_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl Seconds"
+          },
+          "prewarmer": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prewarmer"
+          },
+          "single_flight": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "leader",
+                  "follower"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Single Flight"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "self",
+                  "subtree"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "wait_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "ResponseCacheObservation"
       },
       "RollupCompactResponse": {
         "properties": {
@@ -87300,6 +87944,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -87667,6 +88321,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -88283,6 +88947,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -88691,6 +89365,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -88984,6 +89668,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -90432,6 +91126,16 @@
       },
       "ShieldingAnalysis": {
         "properties": {
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "has_data": {
             "type": "boolean",
             "title": "Has Data",
@@ -91268,6 +91972,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -91389,6 +92103,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -91604,6 +92328,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -91893,6 +92627,16 @@
       },
       "TransportMetrics": {
         "properties": {
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "has_transport_data": {
             "type": "boolean",
             "title": "Has Transport Data",
@@ -92158,6 +92902,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -92335,6 +93089,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -92453,6 +93217,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -92738,6 +93512,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -93061,6 +93845,16 @@
             "title": "Is Cached",
             "default": false
           },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_section_timings": {
             "items": {
               "additionalProperties": true,
@@ -93147,6 +93941,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {
@@ -93413,6 +94217,16 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_section_timings": {
             "items": {

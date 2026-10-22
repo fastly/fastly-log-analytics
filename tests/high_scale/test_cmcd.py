@@ -124,7 +124,15 @@ def test_no_cmcd_events_in_the_window_reports_no_data_after_a_single_probe() -> 
 
     result = _run(client)
 
-    assert result == {"available": True, "has_data": False}
+    assert result == {
+        "available": True,
+        "has_data": False,
+        "is_cached": False,
+        "_response_cache": {"state": "miss", "ttl_seconds": 30.0, "prewarmer": False, "single_flight": "leader"},
+    }
+    hit = _run(client)
+    assert hit["_response_cache"]["state"] == "hit"
+    assert hit["is_cached"] is True
     assert len(client.calls) == 1
 
 

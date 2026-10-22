@@ -30,6 +30,7 @@ from backend.models.origin import (
     SectionName,
 )
 from backend.repositories import origin as repo
+from backend.repositories.utils.response_cache import cache_result
 from backend.utils.router_utils import make_section_expander, query_errors
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
@@ -88,7 +89,7 @@ async def origin_aggregates(
         res = await asyncio.to_thread(
             high_scale_aggregates, high_scale_service, req, start_time, end_time, sections=sections
         )
-        return OriginAggregatesResponse.with_telemetry(**res)
+        return OriginAggregatesResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
 
     await ctx.prewarm_con()
     res = await repo.get_aggregates(
@@ -107,7 +108,7 @@ async def origin_aggregates(
         pop_latency_limit=req.pop_latency_limit,
         sections=sections,
     )
-    return OriginAggregatesResponse.with_telemetry(**res)
+    return OriginAggregatesResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
 
 
 @router.post("/summary", response_model=OriginSummaryResponse)

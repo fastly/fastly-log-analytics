@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # for an interactive analytics view.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 256
-_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE, prewarmer=False)
 _response_cache = _memo.cache
 
 
@@ -738,13 +738,16 @@ def get_shielding_analysis(
     table_name = _safe_table(src["name"])
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
+        return _memo.result(empty_schema_response(has_data=False, rows=[], **runner.telemetry()), state="miss")
 
     # We need rid, prid, edge, pop, ottfb, ttfb for this analysis
     required = {"rid", "prid", "edge", "pop", "ottfb", "ttfb"}
     missing = required - set(actual_cols)
     if missing:
-        return empty_schema_response(has_data=False, requires_fields=list(missing), rows=[], **runner.telemetry())
+        return _memo.result(
+            empty_schema_response(has_data=False, requires_fields=list(missing), rows=[], **runner.telemetry()),
+            state="miss",
+        )
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
 

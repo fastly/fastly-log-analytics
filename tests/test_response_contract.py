@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
+from pydantic import AliasChoices
 
 from backend.repositories._base import _safe_table
 
@@ -170,6 +171,12 @@ def _check_no_dropped_keys(repo_result: dict, response_model_cls, label: str):
     the response model OR in the allowlist of intentionally-stripped
     telemetry keys."""
     declared_fields = set(response_model_cls.model_fields.keys())
+    for field in response_model_cls.model_fields.values():
+        alias = field.validation_alias
+        if isinstance(alias, str):
+            declared_fields.add(alias)
+        elif isinstance(alias, AliasChoices):
+            declared_fields.update(choice for choice in alias.choices if isinstance(choice, str))
     repo_keys = set(repo_result.keys())
     dropped = repo_keys - declared_fields - _ALLOWED_DROPPED_KEYS
     assert not dropped, (
@@ -181,6 +188,16 @@ def _check_no_dropped_keys(repo_result: dict, response_model_cls, label: str):
 
 
 # ── dashboard.get_aggregates ↔ AggregatesResponse ────────────────────────
+
+
+def test_cache_observation_alias_is_declared_and_preserved():
+    from backend.models.common import BaseResponse
+
+    payload = {"_response_cache": {"state": "miss", "ttl_seconds": 15, "prewarmer": False}}
+    _check_no_dropped_keys(payload, BaseResponse, "cache observation")
+    assert BaseResponse(**payload).model_dump(by_alias=True)["_response_cache"] == payload["_response_cache"]
+    with pytest.raises(AssertionError, match="undeclared_key"):
+        _check_no_dropped_keys({"undeclared_key": True}, BaseResponse, "invalid observation")
 
 
 def test_dashboard_aggregates_contract(seeded_con):

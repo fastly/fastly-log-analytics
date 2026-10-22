@@ -30,7 +30,9 @@ def test_store_returns_fresh_telemetry_and_caches_a_request_clean_copy():
     assert hit is not None
     assert hit["rows"] == [1]
     assert hit["debug_queries"] == ["q2"]
-    assert hit["is_cached"] is False
+    assert hit["is_cached"] is True
+    assert hit["_response_cache"]["state"] == "hit"
+    assert first["_response_cache"]["state"] == "miss"
 
 
 def test_check_miss_returns_none():
@@ -40,7 +42,11 @@ def test_check_miss_returns_none():
 def test_put_strips_extra_keys():
     memo = ResponseMemo()
     memo.put("k", {"a": 1, "section_timings": [1]}, strip=("section_timings",))
-    assert memo.get("k") == {"a": 1, "is_cached": True}
+    assert memo.get("k") == {
+        "a": 1,
+        "is_cached": True,
+        "_response_cache": {"state": "hit", "ttl_seconds": 30.0, "prewarmer": None},
+    }
 
 
 def test_get_with_telemetry_restores_cached_query_attribution():
@@ -53,7 +59,11 @@ def test_get_with_telemetry_restores_cached_query_attribution():
             "debug_calls": [{"service": "fastly", "method": "GET", "path": "/x", "time_ms": 2.0}],
         },
     )
-    assert memo.get("k") == {"a": 1, "is_cached": True}
+    assert memo.get("k") == {
+        "a": 1,
+        "is_cached": True,
+        "_response_cache": {"state": "hit", "ttl_seconds": 30.0, "prewarmer": None},
+    }
     hit = memo.get_with_telemetry("k")
     assert hit is not None
     assert hit["a"] == 1

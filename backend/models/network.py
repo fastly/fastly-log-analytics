@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, model_serializer
+from pydantic import AliasChoices, BaseModel, Field, model_serializer
 
 from backend.models._base import PassthroughModel, WireSafeModel
-from backend.models.common import BaseResponse, FilteredRequest, Limit100, RangeKeyedRequest, Seconds14400
+from backend.models.common import (
+    BaseResponse,
+    FilteredRequest,
+    Limit100,
+    RangeKeyedRequest,
+    ResponseCacheObservation,
+    Seconds14400,
+)
 
 
 class NetworkWorstEntry(BaseModel):
@@ -64,6 +71,12 @@ class ShieldingAnalysis(PassthroughModel):
     only sets the keys relevant to each branch).
     """
 
+    response_cache: ResponseCacheObservation | None = Field(
+        default=None,
+        validation_alias=AliasChoices("response_cache", "_response_cache"),
+        serialization_alias="_response_cache",
+        exclude_if=lambda value: value is None,
+    )
     has_data: bool = False
     rows: list[ShieldingRow] = []
     edge_only: bool | None = None
@@ -242,6 +255,12 @@ class TransportProtocolShare(BaseModel):
 
 
 class TransportMetrics(BaseModel):
+    response_cache: ResponseCacheObservation | None = Field(
+        default=None,
+        validation_alias=AliasChoices("response_cache", "_response_cache"),
+        serialization_alias="_response_cache",
+        exclude_if=lambda value: value is None,
+    )
     has_transport_data: bool = True
     tcp_rtt_p50_ms: float | None = None
     tcp_rtt_p90_ms: float | None = None

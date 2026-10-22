@@ -90,7 +90,11 @@ def describe_response(payload: Any) -> dict[str, Any]:
         prewarmer = metadata.get("prewarmer")
         if not isinstance(prewarmer, bool):
             prewarmer = None
-        cached_execution = enclosing_hit or hit_marker or state == "hit"
+        single_flight = metadata.get("single_flight")
+        if not isinstance(single_flight, str) or single_flight not in {"leader", "follower"}:
+            single_flight = None
+        shared = single_flight == "follower"
+        cached_execution = enclosing_hit or hit_marker or state == "hit" or shared
         raw = body.get("_section_timings", body.get("section_timings"))
         sections = [
             _section(row, "hit" if cached_execution else state)
@@ -100,6 +104,8 @@ def describe_response(payload: Any) -> dict[str, Any]:
         gaps = ["response_cache_conflict"] if conflict else []
         if state == "unknown":
             gaps.append("response_cache_unknown")
+        if shared:
+            gaps.append("shared_execution")
         if prewarmer is None:
             gaps.append("prewarmer_unknown")
         if not sections:
@@ -107,12 +113,24 @@ def describe_response(payload: Any) -> dict[str, Any]:
         if cached_execution and sections:
             gaps.append("historical_or_unverified_timings")
         components.append(
-            {"component": path, "cache_state": state, "prewarmer": prewarmer, "sections": sections, "gaps": gaps}
+            {
+                "component": path,
+                "cache_state": state,
+                "prewarmer": prewarmer,
+                "ttl_seconds": _duration(metadata.get("ttl_seconds")),
+                "single_flight": single_flight,
+                "wait_ms": _duration(metadata.get("wait_ms")),
+                "execution_reused": cached_execution,
+                "lookup_current": not enclosing_hit and not shared,
+                "sections": sections,
+                "gaps": gaps,
+            }
         )
         for name in COMPONENTS:
             child = body.get(name)
             if isinstance(child, dict):
-                visit(child, name if path == "response" else f"{path}.{name}", cached_execution)
+                inherit = enclosing_hit or (cached_execution and metadata.get("scope") != "self")
+                visit(child, name if path == "response" else f"{path}.{name}", inherit)
 
     visit(payload, "response")
     gaps = {gap for component in components for gap in component["gaps"]}
