@@ -29,6 +29,7 @@ EXPECTED_ORDER = (
     "build_security_proxies_bundles",
     "build_perf_dims_bundles",
     "build_ngwaf_bots_bundles",
+    "build_ngwaf_bots_ts_bundles",
     "build_overview_bundles",
     "build_network_summary_bundles",
     "recompute_wellknown_bots_rollup",

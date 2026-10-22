@@ -235,6 +235,7 @@ def _writers() -> list[tuple[str, Callable[[str, dict, list[str]], int]]]:
         ("pop_health", pop_health.build_pop_health_bundles),
         ("verified_bots_ts", verified_bots_ts.build_verified_bots_ts_bundles),
         ("ngwaf_bots", ngwaf_bots.build_ngwaf_bots_bundles),
+        ("ngwaf_bots_ts", ngwaf_bots.build_ngwaf_bots_ts_bundles),
     ]
 
 
@@ -246,6 +247,7 @@ def _compactors() -> list[tuple[str, Callable[..., int]]]:
         ("network_rtt", d.compact_network_rtt_closed_days_to_daily),
         ("network_speed", d.compact_network_speed_closed_days_to_daily),
         ("ngwaf_bots", d.compact_ngwaf_bots_closed_days_to_daily),
+        ("ngwaf_bots_ts", d.compact_ngwaf_bots_ts_closed_days_to_daily),
         ("verified_bots_ts", d.compact_verified_bots_ts_closed_days_to_daily),
         ("origin_latency_ts", d.compact_origin_latency_ts_closed_days_to_daily),
         ("perf_latency", d.compact_perf_latency_closed_days_to_daily),

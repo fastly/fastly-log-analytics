@@ -53,6 +53,7 @@ from ._common import (
     DAY_BUNDLE_TOP_K,
     NETWORK_SUMMARY_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
+    NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
     ORIGIN_IP_MIN_REQUESTS_PER_HOUR,
@@ -103,6 +104,7 @@ from .day_bundles import (
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
+    compact_ngwaf_bots_ts_closed_days_to_daily,
     compact_origin_dims_closed_days_to_daily,
     compact_origin_latency_ts_closed_days_to_daily,
     compact_origin_summary_closed_days_to_daily,
@@ -124,7 +126,12 @@ from .network_quality import backfill_network_quality_bundles, build_network_qua
 from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
 from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
 from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
-from .ngwaf_bots import backfill_ngwaf_bots_bundles, build_ngwaf_bots_bundles
+from .ngwaf_bots import (
+    backfill_ngwaf_bots_bundles,
+    backfill_ngwaf_bots_ts_bundles,
+    build_ngwaf_bots_bundles,
+    build_ngwaf_bots_ts_bundles,
+)
 from .origin_dims import backfill_origin_dims_bundles, build_origin_dims_bundles
 from .origin_latency_ts import backfill_origin_latency_ts_bundles, build_origin_latency_ts_bundles
 from .origin_summary import backfill_origin_summary_bundles, build_origin_summary_bundles
@@ -179,6 +186,8 @@ __all__ = [
     "backfill_network_speed_bundles",
     "build_ngwaf_bots_bundles",
     "backfill_ngwaf_bots_bundles",
+    "build_ngwaf_bots_ts_bundles",
+    "backfill_ngwaf_bots_ts_bundles",
     "build_verified_bots_ts_bundles",
     "backfill_verified_bots_ts_bundles",
     "build_perf_latency_bundles",
@@ -203,6 +212,7 @@ __all__ = [
     "compact_network_quality_closed_days_to_daily",
     "compact_network_speed_closed_days_to_daily",
     "compact_ngwaf_bots_closed_days_to_daily",
+    "compact_ngwaf_bots_ts_closed_days_to_daily",
     "compact_verified_bots_ts_closed_days_to_daily",
     "compact_perf_latency_closed_days_to_daily",
     "compact_pop_health_closed_days_to_daily",
@@ -245,6 +255,7 @@ __all__ = [
     "PERF_TTL_DIST_BUNDLE_FILENAME",
     "SECURITY_REQ_SIZE_BUNDLE_FILENAME",
     "NGWAF_BOTS_BUNDLE_FILENAME",
+    "NGWAF_BOTS_TS_BUNDLE_FILENAME",
     "SECURITY_CONN_REUSE_BUNDLE_FILENAME",
     "SECURITY_TOPIPS_BUNDLE_FILENAME",
     "SECURITY_COV_BUNDLE_FILENAME",

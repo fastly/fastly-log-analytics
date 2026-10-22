@@ -602,6 +602,8 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     perf_ttl_dist_days: int | None = None
     ngwaf_bots: int | None = None
     ngwaf_bots_days: int | None = None
+    ngwaf_bots_ts: int | None = None
+    ngwaf_bots_ts_days: int | None = None
     wellknown_bots: int | None = None
     overview: int | None = None
     overview_days: int | None = None

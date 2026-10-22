@@ -681,12 +681,13 @@ SECURITY_BOT_EFF_BUNDLE_FILENAME = "security_bot_eff.parquet"
 SECURITY_BOT_EFF_UA_TOP_K = 2000
 
 # Filename for the per-hour NGWAF-bots rollup feeding get_top_bots'
-# ``ngwaf_bots`` panel. One row per (bot_name, category) per closed hour —
-# the hour's waf_req_ids joined against the SQLite ngwaf_bot_cache at WRITE
+# ``ngwaf_bots`` panel and /api/security/aggregates' ``ngwaf_verified_bots``
+# panel. One row per (bot_name, wellknown_bot_name, category) per closed hour
+# — the hour's waf_req_ids joined against the ngwaf_bots cache at WRITE
 # time, so the reader SUMs tiny parquets instead of joining the raw window
 # per request. EXACT SUM across hours; no per-hour cap (bot cardinality is
-# tens, not thousands). Schema: (bot_name VARCHAR, category VARCHAR,
-# count BIGINT).
+# tens, not thousands). Schema: (bot_name VARCHAR, wellknown_bot_name VARCHAR,
+# category VARCHAR, count BIGINT).
 #
 # Freshness note: the bot cache syncs every ~5 min, so an hour built right
 # at close can miss attributions for the final few minutes — bounded, tiny,
@@ -695,6 +696,14 @@ SECURITY_BOT_EFF_UA_TOP_K = 2000
 # while the rows were live PRESERVES those counts after the cache forgets
 # them, so old windows read BETTER from the rollup than from a live join.
 NGWAF_BOTS_BUNDLE_FILENAME = "ngwaf_bots.parquet"
+
+# Filename for the per-hour minute-granularity NGWAF-bots time-series rollup
+# feeding /api/security/aggregates' ``ngwaf_verified_bots_ts`` panel. Stored
+# at 1-minute resolution so the reader can re-bucket to any caller-requested
+# ``bucket_seconds`` (matching ``verified_bots_ts.parquet``). Schema:
+# (bucket_ts TIMESTAMPTZ, bot_name VARCHAR, count BIGINT). EXACT SUM across
+# hours; no ``_approx`` flag.
+NGWAF_BOTS_TS_BUNDLE_FILENAME = "ngwaf_bots_ts.parquet"
 
 # Filename for the per-hour performance-dimension TTL-distribution rollup
 # feeding /api/performance/aggregates' ``ttl_dist`` histogram panel (an

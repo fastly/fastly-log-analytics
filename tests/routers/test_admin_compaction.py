@@ -435,6 +435,7 @@ def test_backfill_bundle_rollups_success(client):
         "backfill_perf_dims_bundles",
         "backfill_wellknown_bots_rollup",
         "backfill_ngwaf_bots_bundles",
+        "backfill_ngwaf_bots_ts_bundles",
         "backfill_overview_bundles",
         "backfill_network_summary_bundles",
         "compact_origin_summary_closed_days_to_daily",
@@ -450,6 +451,7 @@ def test_backfill_bundle_rollups_success(client):
         "compact_security_proxies_closed_days_to_daily",
         "compact_perf_dims_closed_days_to_daily",
         "compact_ngwaf_bots_closed_days_to_daily",
+        "compact_ngwaf_bots_ts_closed_days_to_daily",
         "compact_overview_closed_days_to_daily",
     ]
 
@@ -494,6 +496,7 @@ def test_backfill_bundle_rollups_response_maps_each_backfiller_and_compactor_to_
         "backfill_perf_dims_bundles": "perf_ttl_dist",
         "backfill_wellknown_bots_rollup": "wellknown_bots",
         "backfill_ngwaf_bots_bundles": "ngwaf_bots",
+        "backfill_ngwaf_bots_ts_bundles": "ngwaf_bots_ts",
         "backfill_overview_bundles": "overview",
         "backfill_network_summary_bundles": "network_summary",
     }
@@ -511,6 +514,7 @@ def test_backfill_bundle_rollups_response_maps_each_backfiller_and_compactor_to_
         "compact_security_proxies_closed_days_to_daily": "security_proxies_days",
         "compact_perf_dims_closed_days_to_daily": "perf_ttl_dist_days",
         "compact_ngwaf_bots_closed_days_to_daily": "ngwaf_bots_days",
+        "compact_ngwaf_bots_ts_closed_days_to_daily": "ngwaf_bots_ts_days",
         "compact_overview_closed_days_to_daily": "overview_days",
     }
     values = {name: 100 + i for i, name in enumerate([*backfills, *compactors])}

@@ -51,7 +51,7 @@ from .network_health_heatmap import build_network_heatmap_bundles  # noqa: F401
 from .network_rtt import build_network_rtt_bundles  # noqa: F401
 from .network_speed import build_network_speed_bundles  # noqa: F401
 from .network_summary import build_network_summary_bundles  # noqa: F401
-from .ngwaf_bots import build_ngwaf_bots_bundles  # noqa: F401
+from .ngwaf_bots import build_ngwaf_bots_bundles, build_ngwaf_bots_ts_bundles  # noqa: F401
 from .origin_dims import build_origin_dims_bundles  # noqa: F401
 from .origin_latency_ts import build_origin_latency_ts_bundles  # noqa: F401
 from .origin_summary import build_origin_summary_bundles  # noqa: F401

@@ -989,9 +989,9 @@ def _build_security_response(
     # Materialize the NGWAF bot cache once per connection if it exists and
     # waf_req_id is in schema (see ensure_ngwaf_bots_materialized — reuses
     # an already-materialized alias on this connection, so this is cheap
-    # after the first call). The bot JOIN needs raw waf_req_id
-    # (high-cardinality UUID, never rolled up), so the NGWAF pair always
-    # live-scans a (tiny) temp when materialized.
+    # after the first call). Try the per-hour/per-day NGWAF rollups first
+    # (they only need the materialized cache for the active-hour direct temp
+    # top-up); fall back to the catalog temp scan only when a rollup misses.
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
@@ -1001,9 +1001,29 @@ def _build_security_response(
                 "_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
             )  # materialization failed — fall back gracefully
     if _ngwaf_attached:
-        # The pair runs together (shared ATTACH); both need the temp.
-        _need("ngwaf_verified_bots", {"waf_req_id"})
-        _need("ngwaf_verified_bots_ts", {"timestamp", "waf_req_id"})
+        if _want("ngwaf_verified_bots"):
+            _t = _time.perf_counter()
+            rolled_nb = runner.try_ngwaf_verified_bots_from_rollup(start_time, end_time, has_filters=bool(filters))
+            if rolled_nb is not None:
+                timer.mark("ngwaf_verified_bots_rollup", _t)
+                results["ngwaf_verified_bots"] = rolled_nb
+            else:
+                _need("ngwaf_verified_bots", {"waf_req_id"})
+        if _want("ngwaf_verified_bots_ts"):
+            _t = _time.perf_counter()
+            rolled_nb_ts = runner.try_ngwaf_verified_bots_ts_from_rollup(
+                start_time,
+                end_time,
+                bucket_seconds=bucket_seconds,
+                has_filters=bool(filters),
+            )
+            if rolled_nb_ts is not None:
+                timer.mark("ngwaf_verified_bots_ts_rollup", _t)
+                results["ngwaf_verified_bots_ts"] = [
+                    {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in rolled_nb_ts
+                ]
+            else:
+                _need("ngwaf_verified_bots_ts", {"timestamp", "waf_req_id"})
     elif _want_ngwaf_bots:
         results["ngwaf_verified_bots"] = []
         results["ngwaf_verified_bots_ts"] = []
@@ -1386,35 +1406,43 @@ def _build_security_response(
                 timer.mark("verified_bots_ts", _t)
                 results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
 
-        if _ngwaf_attached and temp_table:
+        if (
+            _ngwaf_attached
+            and temp_table
+            and ("ngwaf_verified_bots" in live_sections or "ngwaf_verified_bots_ts" in live_sections)
+        ):
             try:
-                # Table: group by bot_name + wellknown_bot_name + category
-                q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
-                _t = _time.perf_counter()
-                res = runner.execute(q).fetchall()
-                timer.mark("ngwaf_verified_bots", _t)
-                results["ngwaf_verified_bots"] = [
-                    {
-                        "bot_name": r[0],
-                        "wellknown_bot_name": r[1],
-                        "category": r[2],
-                        "request_count": r[3],
-                    }
-                    for r in res
-                ]
+                if "ngwaf_verified_bots" in live_sections:
+                    # Table: group by bot_name + wellknown_bot_name + category
+                    q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
+                    _t = _time.perf_counter()
+                    res = runner.execute(q).fetchall()
+                    timer.mark("ngwaf_verified_bots", _t)
+                    results["ngwaf_verified_bots"] = [
+                        {
+                            "bot_name": r[0],
+                            "wellknown_bot_name": r[1],
+                            "category": r[2],
+                            "request_count": r[3],
+                        }
+                        for r in res
+                    ]
 
-                # Time series: bucketed counts by bot_name
-                q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
-                _t = _time.perf_counter()
-                res = runner.execute(q).fetchall()
-                timer.mark("ngwaf_verified_bots_ts", _t)
-                results["ngwaf_verified_bots_ts"] = [
-                    {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res
-                ]
+                if "ngwaf_verified_bots_ts" in live_sections:
+                    # Time series: bucketed counts by bot_name
+                    q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
+                    _t = _time.perf_counter()
+                    res = runner.execute(q).fetchall()
+                    timer.mark("ngwaf_verified_bots_ts", _t)
+                    results["ngwaf_verified_bots_ts"] = [
+                        {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res
+                    ]
             except Exception as e:
                 _logger.error("[security] NGWAF bot join failed: %s", e)
-                results["ngwaf_verified_bots"] = []
-                results["ngwaf_verified_bots_ts"] = []
+                if "ngwaf_verified_bots" in live_sections:
+                    results["ngwaf_verified_bots"] = []
+                if "ngwaf_verified_bots_ts" in live_sections:
+                    results["ngwaf_verified_bots_ts"] = []
 
         # Live FINGERPRINT_TOP_N for any fingerprint col the rollup didn't
         # serve (cols absent from the schema were already defaulted above).

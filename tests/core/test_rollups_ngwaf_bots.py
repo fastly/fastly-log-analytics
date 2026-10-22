@@ -31,8 +31,8 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
         con.execute(f"INSERT INTO {table} VALUES (?, ?)", [r["timestamp"], r.get("waf_req_id")])
 
 
-def _create_cache_db(db_path: str, entries: list[tuple[str, str, str]]) -> None:
-    """entries: (waf_req_id, bot_name, category)."""
+def _create_cache_db(db_path: str, entries: list[tuple]) -> None:
+    """entries: (waf_req_id, bot_name, category[, wellknown_bot_name])."""
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute(
@@ -40,8 +40,16 @@ def _create_cache_db(db_path: str, entries: list[tuple[str, str, str]]) -> None:
         " waf_req_id TEXT PRIMARY KEY, bot_name TEXT, category TEXT,"
         " wellknown_bot_id TEXT, wellknown_bot_name TEXT, synced_at TEXT)"
     )
-    for wid, name, cat in entries:
-        con.execute("INSERT INTO ngwaf_bots VALUES (?, ?, ?, NULL, NULL, '2026-01-01T00:00:00Z')", (wid, name, cat))
+    for entry in entries:
+        if len(entry) == 4:
+            wid, name, cat, wk_name = entry
+        else:
+            wid, name, cat = entry
+            wk_name = None
+        con.execute(
+            "INSERT INTO ngwaf_bots VALUES (?, ?, ?, NULL, ?, '2026-01-01T00:00:00Z')",
+            (wid, name, cat, wk_name),
+        )
     con.commit()
     con.close()
 
@@ -64,7 +72,7 @@ def _build_patches(cache_root, table: str, con_factory):
 
 def test_build_ngwaf_bots_writes_aggregated_join(tmp_path):
     """A closed hour's waf_req_ids join against the cache and aggregate to
-    (bot_name, category, count); unmatched ids and NULLs drop out."""
+    (bot_name, wellknown_bot_name, category, count); unmatched ids and NULLs drop out."""
     from backend.core.rollups import ngwaf_bots as nb
 
     cache_root = tmp_path / "cache"
@@ -72,7 +80,11 @@ def test_build_ngwaf_bots_writes_aggregated_join(tmp_path):
     db_path = str(tmp_path / "ngwaf_bot_cache.db")
     _create_cache_db(
         db_path,
-        [("w1", "GPTBot", "AI-CRAWLER"), ("w2", "GPTBot", "AI-CRAWLER"), ("w3", "AhrefsBot", "SEO")],
+        [
+            ("w1", "GPTBot", "AI-CRAWLER", "GPTBot"),
+            ("w2", "GPTBot", "AI-CRAWLER", "GPTBot"),
+            ("w3", "AhrefsBot", "SEO", None),
+        ],
     )
     src = {"name": "svc-nb-1"}
     hour_token, hour_dt = _past_hour(2)
@@ -98,8 +110,10 @@ def test_build_ngwaf_bots_writes_aggregated_join(tmp_path):
     assert n == 1
     out = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "ngwaf_bots.parquet"
     assert out.is_file()
-    got = {(r["bot_name"], r["category"]): r["count"] for r in pq.read_table(str(out)).to_pylist()}
-    assert got == {("GPTBot", "AI-CRAWLER"): 2, ("AhrefsBot", "SEO"): 1}
+    got = {
+        (r["bot_name"], r["wellknown_bot_name"], r["category"]): r["count"] for r in pq.read_table(str(out)).to_pylist()
+    }
+    assert got == {("GPTBot", "GPTBot", "AI-CRAWLER"): 2, ("AhrefsBot", None, "SEO"): 1}
 
 
 def test_build_ngwaf_bots_zero_bot_hour_writes_empty_marker(tmp_path):
@@ -176,6 +190,7 @@ def test_compact_ngwaf_bots_days_sums_hours(tmp_path):
             pa.table(
                 {
                     "bot_name": ["GPTBot"],
+                    "wellknown_bot_name": ["GPTBot"],
                     "category": ["AI-CRAWLER"],
                     "count": pa.array([2], type=pa.int64()),
                 }
@@ -195,9 +210,214 @@ def test_compact_ngwaf_bots_days_sums_hours(tmp_path):
     rows = pq.read_table(str(out)).to_pylist()
     # The shared compactor stamps a hive-style `day` column alongside the
     # feature columns; the reader selects columns by name so it's inert.
-    assert [{k: r[k] for k in ("bot_name", "category", "count")} for r in rows] == [
-        {"bot_name": "GPTBot", "category": "AI-CRAWLER", "count": 48}
+    assert [{k: r[k] for k in ("bot_name", "wellknown_bot_name", "category", "count")} for r in rows] == [
+        {"bot_name": "GPTBot", "wellknown_bot_name": "GPTBot", "category": "AI-CRAWLER", "count": 48}
     ]
+
+
+def test_compact_ngwaf_bots_ts_days_sums_hours(tmp_path):
+    """24 closed hours of minute-bucketed ngwaf_bots_ts fold into one per-day file."""
+    from backend.core.rollups.day_bundles import compact_ngwaf_bots_ts_closed_days_to_daily
+
+    cache_root = tmp_path / "cache"
+    day_dt = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    day = day_dt.strftime("%Y-%m-%d")
+    for h in range(24):
+        hour_dt = day_dt + timedelta(hours=h)
+        hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={day}-{h:02d}"
+        hour_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "bucket_ts": pa.array([hour_dt], type=pa.timestamp("us", tz="UTC")),
+                    "bot_name": ["GPTBot"],
+                    "count": pa.array([3], type=pa.int64()),
+                }
+            ),
+            str(hour_dir / "ngwaf_bots_ts.parquet"),
+        )
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+    ):
+        n = compact_ngwaf_bots_ts_closed_days_to_daily("svc-nb-4-ts", {"name": "svc-nb-4-ts"})
+
+    assert n == 1
+    out = cache_root / "rollups" / "day_bundled" / f"day={day}" / "ngwaf_bots_ts.parquet"
+    assert out.is_file()
+    rows = pq.read_table(str(out)).to_pylist()
+    assert len(rows) == 24
+    assert sum(r["count"] for r in rows) == 72
+
+
+def test_stale_3col_ngwaf_bots_parquet_fallback_and_purge(tmp_path):
+    """Trap #24: pre-rebundle 3-col ngwaf_bots.parquet (without wellknown_bot_name)
+    causes try_ngwaf_verified_bots_from_rollup to return None (live fallback),
+    and _purge_stale_ngwaf_bots_parquets removes it so backfill rewrites 4 cols."""
+    from backend.core.rollups.ngwaf_bots import _purge_stale_ngwaf_bots_parquets
+    from backend.repositories._base import QueryRunner
+
+    cache_root = tmp_path / "cache"
+    base = (datetime.now(UTC) - timedelta(hours=30)).replace(minute=0, second=0, microsecond=0)
+    for i in range(24):
+        hour_dir = (
+            cache_root / "rollups" / "hour_bundled" / f"hour={(base + timedelta(hours=i)).strftime('%Y-%m-%d-%H')}"
+        )
+        hour_dir.mkdir(parents=True)
+        # Legacy 3-col schema without wellknown_bot_name
+        pq.write_table(
+            pa.table(
+                {
+                    "bot_name": ["GPTBot"],
+                    "category": ["AI-CRAWLER"],
+                    "count": pa.array([2], type=pa.int64()),
+                }
+            ),
+            str(hour_dir / "ngwaf_bots.parquet"),
+        )
+
+    con = duckdb.connect(":memory:")
+    src = {"name": "svc-nb-trap24"}
+    runner = QueryRunner(con, src)
+    st = base.isoformat()
+    et = (base + timedelta(hours=24)).isoformat()
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        # Reader detects missing wellknown_bot_name column and falls back
+        assert runner.try_ngwaf_verified_bots_from_rollup(st, et, has_filters=False) is None
+        # Purge unlinks all 24 legacy 3-col files
+        purged = _purge_stale_ngwaf_bots_parquets(src)
+        assert purged == 24
+
+
+def test_ngwaf_verified_bots_and_ts_parity_with_live_sql_and_temp_skip(tmp_path):
+    """End-to-end parity: writer → reader produces identical rows to
+    SQL.NGWAF_VERIFIED_BOTS and SQL.NGWAF_VERIFIED_BOTS_TS (at 60s and 300s
+    buckets, including active-hour top-up), and _build_security_response
+    logs security:temp_skipped when both sections are rollup-served."""
+    from backend.core.rollups import ngwaf_bots as nb
+    from backend.repositories._base import QueryRunner, ensure_ngwaf_bots_materialized, safe_iso
+    from backend.repositories._sql import security as SQL
+    from backend.repositories.security import _build_security_response
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    db_path = str(tmp_path / "ngwaf_bot_cache.db")
+    _create_cache_db(
+        db_path,
+        [
+            ("w1", "Google Feed Fetcher", "FEED_FETCHER", "Google FeedFetcher"),
+            ("w2", "GPTBot", "AI-CRAWLER", "GPTBot"),
+            ("w3", "Facebook Crawler", "SOCIAL", None),
+        ],
+    )
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    base_dt = active_dt - timedelta(hours=24)
+    closed_hours = [(base_dt + timedelta(hours=i)).strftime("%Y-%m-%d-%H") for i in range(24)]
+
+    # Seed events across closed hours plus the active hour
+    h0 = base_dt + timedelta(minutes=2, seconds=15)
+    h1 = base_dt + timedelta(hours=1, minutes=7, seconds=40)
+    h_active = active_dt + timedelta(minutes=4, seconds=10)
+    raw_rows = [
+        {"timestamp": h0, "waf_req_id": "w1"},
+        {"timestamp": h0 + timedelta(seconds=10), "waf_req_id": "w1"},
+        {"timestamp": h0 + timedelta(seconds=20), "waf_req_id": "w1"},
+        {"timestamp": h0 + timedelta(minutes=1), "waf_req_id": "w2"},
+        {"timestamp": h1, "waf_req_id": "w3"},
+        {"timestamp": h1 + timedelta(seconds=20), "waf_req_id": "unmatched"},
+        {"timestamp": h_active, "waf_req_id": "w2"},
+    ]
+
+    def _fresh_con():
+        c = duckdb.connect(":memory:")
+        _seed_logs(c, "logs_parity", raw_rows)
+        return c
+
+    src = {"name": "svc-nb-parity", "service_id": "svc-nb-parity"}
+    p = _build_patches(cache_root, "logs_parity", _fresh_con)
+    with p[0], p[1], p[2], p[3], p[4], patch("backend.config.ngwaf_db_path", return_value=db_path):
+        assert nb.build_ngwaf_bots_bundles("svc-nb-parity", src, closed_hours) == 24
+        assert nb.build_ngwaf_bots_ts_bundles("svc-nb-parity", src, closed_hours) == 24
+
+    # Write active-hour row to live buffer so active-hour direct temp picks it up
+    buffer_dir = cache_root / "buffer"
+    buffer_dir.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": pa.array([h_active], type=pa.timestamp("us", tz="UTC")),
+                "waf_req_id": pa.array(["w2"], type=pa.string()),
+            }
+        ),
+        str(buffer_dir / "live.parquet"),
+    )
+
+    con = _fresh_con()
+    st_iso = base_dt.isoformat()
+    et_iso = (active_dt + timedelta(minutes=30)).isoformat()
+
+    with (
+        patch("backend.config.ngwaf_db_path", return_value=db_path),
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+    ):
+        assert ensure_ngwaf_bots_materialized(con, "ngwaf_cache")
+        runner = QueryRunner(con, src)
+        runner.get_schema_cols = lambda: ["timestamp", "waf_req_id"]  # type: ignore[method-assign]
+
+        # Direct SQL reference over logs_parity (full window including active hour)
+        live_table_rows = [
+            {
+                "bot_name": r[0],
+                "wellknown_bot_name": r[1],
+                "category": r[2],
+                "request_count": r[3],
+            }
+            for r in con.execute(SQL.NGWAF_VERIFIED_BOTS.format(temp_table="logs_parity")).fetchall()
+        ]
+        rolled_table_rows = runner.try_ngwaf_verified_bots_from_rollup(st_iso, et_iso, has_filters=False)
+        assert rolled_table_rows == live_table_rows
+
+        for bucket_s in (60, 300):
+            live_ts = [
+                {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]}
+                for r in con.execute(
+                    SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_s, temp_table="logs_parity")
+                ).fetchall()
+            ]
+            rolled_ts_raw = runner.try_ngwaf_verified_bots_ts_from_rollup(
+                st_iso, et_iso, bucket_seconds=bucket_s, has_filters=False
+            )
+            assert rolled_ts_raw is not None
+            rolled_ts = [{"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in rolled_ts_raw]
+            assert rolled_ts == live_ts
+
+        # Verify _build_security_response skips the catalog temp entirely
+        section_timings: list[dict] = []
+        resp = _build_security_response(
+            runner,
+            src,
+            con,
+            ["timestamp", "waf_req_id"],
+            "logs_parity",
+            "",
+            None,
+            60,
+            section_timings,
+            start_time=st_iso,
+            end_time=et_iso,
+            filters=None,
+            sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"},
+        )
+        assert resp["ngwaf_verified_bots"] == live_table_rows
+        phase_names = {entry.get("name") or entry.get("section") for entry in section_timings}
+        assert "security:temp_skipped" in phase_names
+        assert "ngwaf_verified_bots_rollup" in phase_names
+        assert "ngwaf_verified_bots_ts_rollup" in phase_names
+        assert "temp_table_create" not in phase_names
+        assert "security:temp_ngwaf_narrowed" not in phase_names
 
 
 # ── Reader ───────────────────────────────────────────────────────────────────
@@ -257,6 +477,36 @@ def test_reader_eligibility_gates(tmp_path):
         assert call("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False) is None
         assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", False) is None
         assert call("not-a-date", "2026-06-02T00:00:00Z", False) is None
+
+        assert (
+            runner.try_ngwaf_verified_bots_from_rollup("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", has_filters=True)
+            is None
+        )
+        assert (
+            runner.try_ngwaf_verified_bots_from_rollup(
+                "2026-06-01T00:00:00Z", "2026-06-01T12:00:00Z", has_filters=False
+            )
+            is None
+        )
+
+        assert (
+            runner.try_ngwaf_verified_bots_ts_from_rollup(
+                "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", bucket_seconds=60, has_filters=True
+            )
+            is None
+        )
+        assert (
+            runner.try_ngwaf_verified_bots_ts_from_rollup(
+                "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", bucket_seconds=45, has_filters=False
+            )
+            is None
+        )
+        assert (
+            runner.try_ngwaf_verified_bots_ts_from_rollup(
+                "2026-06-01T00:00:00Z", "2026-06-01T12:00:00Z", bucket_seconds=60, has_filters=False
+            )
+            is None
+        )
 
 
 def test_reader_live_topup_joins_active_hour_buffer(tmp_path):

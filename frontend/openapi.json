@@ -54738,6 +54738,28 @@
             ],
             "title": "Ngwaf Bots Days"
           },
+          "ngwaf_bots_ts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Bots Ts"
+          },
+          "ngwaf_bots_ts_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Bots Ts Days"
+          },
           "wellknown_bots": {
             "anyOf": [
               {

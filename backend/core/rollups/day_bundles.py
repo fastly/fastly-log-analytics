@@ -21,6 +21,7 @@ from ._common import (
     NETWORK_RTT_BUNDLE_FILENAME,
     NETWORK_SPEED_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
+    NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
     ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
@@ -724,16 +725,21 @@ def compact_ngwaf_bots_closed_days_to_daily(
     files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots.parquet``.
 
     Same shape as :func:`compact_network_speed_closed_days_to_daily`:
-    pure GROUP BY (bot_name, category) + SUM(count) — exact for integer
-    counts, no re-cap needed (bot cardinality is tens per day).
+    pure GROUP BY (bot_name, wellknown_bot_name, category) + SUM(count) —
+    exact for integer counts, no re-cap needed (bot cardinality is tens per day).
+    Purges pre-wellknown_bot_name 3-column hour/day files first (Trap #24).
     """
+    from .ngwaf_bots import _purge_stale_ngwaf_bots_parquets
+
+    _purge_stale_ngwaf_bots_parquets(source)
 
     def _copy_sql(paths_sql: str, tmp_file: str) -> str:
         return (
             f"COPY ("
-            f"  SELECT bot_name, category, CAST(SUM(count) AS BIGINT) AS count "
+            f"  SELECT bot_name, wellknown_bot_name, category, "
+            f"         CAST(SUM(count) AS BIGINT) AS count "
             f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bot_name, category"
+            f"  GROUP BY bot_name, wellknown_bot_name, category"
             f") {parquet_zstd_target(tmp_file)}"
         )
 
@@ -741,6 +747,36 @@ def compact_ngwaf_bots_closed_days_to_daily(
         service_id,
         source,
         jobs=[(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _copy_sql)],
+        lookback_days=lookback_days,
+        logger=logger,
+    )
+
+
+def compact_ngwaf_bots_ts_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
+    """Consolidate closed-day per-hour ngwaf_bots_ts parquets into per-day
+    files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots_ts.parquet``.
+
+    Preserves minute granularity (``bucket_ts``) so the reader can re-bucket
+    across any window — same shape as :func:`compact_verified_bots_ts_closed_days_to_daily`.
+    """
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT bucket_ts, bot_name, CAST(SUM(count) AS BIGINT) AS count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY bucket_ts, bot_name"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _copy_sql)],
         lookback_days=lookback_days,
         logger=logger,
     )

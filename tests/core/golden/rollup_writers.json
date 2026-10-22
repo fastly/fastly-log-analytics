@@ -825,20 +825,41 @@
    "changed": {
     "rollups/day_bundled/day=2026-06-13/ngwaf_bots.parquet": {
      "rows": 9,
-     "schema": "080c9a3b39bc",
-     "sha": "abd64c855cc9"
+     "schema": "2dfa30cea5d0",
+     "sha": "d82ef40f022a"
     },
     "rollups/day_bundled/day=2026-06-14/ngwaf_bots.parquet": {
      "rows": 9,
-     "schema": "080c9a3b39bc",
-     "sha": "da7715ddef8c"
+     "schema": "2dfa30cea5d0",
+     "sha": "b3f3bd1c5fb5"
     }
    },
    "removed": [],
    "returned": 2,
    "sql": [
-    "1660651a3d57",
-    "dafb0db2faf5"
+    "004dcf4ad471",
+    "6f464d5db432"
+   ],
+   "sql_count": 2
+  },
+  "day_compactor:ngwaf_bots_ts": {
+   "changed": {
+    "rollups/day_bundled/day=2026-06-13/ngwaf_bots_ts.parquet": {
+     "rows": 206,
+     "schema": "4db311b6f4e4",
+     "sha": "016862ad8462"
+    },
+    "rollups/day_bundled/day=2026-06-14/ngwaf_bots_ts.parquet": {
+     "rows": 206,
+     "schema": "4db311b6f4e4",
+     "sha": "7dbde5333e73"
+    }
+   },
+   "removed": [],
+   "returned": 2,
+   "sql": [
+    "9a16b23474ae",
+    "ac38c48b2022"
    ],
    "sql_count": 2
   },
@@ -3762,297 +3783,595 @@
    "changed": {
     "rollups/hour_bundled/hour=2026-06-13-00/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-13-01/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-13-02/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-13-03/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-13-04/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-13-05/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-13-06/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-13-07/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-13-08/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-13-09/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-13-10/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-13-11/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-13-12/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-13-13/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-13-14/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-13-15/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-13-16/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-13-17/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-13-18/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-13-19/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-13-20/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-13-21/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-13-22/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-13-23/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-14-00/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-14-01/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-14-02/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-14-03/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-14-04/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-14-05/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-14-06/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-14-07/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-14-08/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-14-09/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-14-10/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-14-11/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-14-12/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-14-13/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-14-14/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-14-15/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-14-16/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     },
     "rollups/hour_bundled/hour=2026-06-14-17/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "63457727288b"
+     "schema": "2dfa30cea5d0",
+     "sha": "58bece51e67f"
     },
     "rollups/hour_bundled/hour=2026-06-14-18/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "c59345d98eb6"
+     "schema": "2dfa30cea5d0",
+     "sha": "e99339745601"
     },
     "rollups/hour_bundled/hour=2026-06-14-19/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "482eddd60b5a"
+     "schema": "2dfa30cea5d0",
+     "sha": "3219d9b3b4bb"
     },
     "rollups/hour_bundled/hour=2026-06-14-20/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "992d790de4ed"
+     "schema": "2dfa30cea5d0",
+     "sha": "b9db31b636cd"
     },
     "rollups/hour_bundled/hour=2026-06-14-21/ngwaf_bots.parquet": {
      "rows": 6,
-     "schema": "080c9a3b39bc",
-     "sha": "10306a0d3ab3"
+     "schema": "2dfa30cea5d0",
+     "sha": "e74dcf4bd6c2"
     },
     "rollups/hour_bundled/hour=2026-06-14-22/ngwaf_bots.parquet": {
      "rows": 7,
-     "schema": "080c9a3b39bc",
-     "sha": "6cdd70dc9085"
+     "schema": "2dfa30cea5d0",
+     "sha": "4f29b311ba43"
     },
     "rollups/hour_bundled/hour=2026-06-14-23/ngwaf_bots.parquet": {
      "rows": 8,
-     "schema": "080c9a3b39bc",
-     "sha": "84bafd2cf8db"
+     "schema": "2dfa30cea5d0",
+     "sha": "aae2c7d1921b"
     }
    },
    "removed": [],
    "returned": 48,
    "sql": [
-    "0c7138121234",
-    "13d931a849f5",
-    "17cf8b1b17a8",
-    "1b3649176bc3",
-    "1cc1a5ef0a0b",
-    "2517f179b998",
-    "255410371e70",
-    "281284e26aae",
-    "28b2fa1a1574",
-    "351d66cee911",
-    "354c32089672",
-    "36cd9f95e627",
-    "3de2d67f81f7",
-    "401d7e0b281e",
-    "47ff5061cfb7",
-    "58ff01c7c9b0",
-    "636f34ca3ba5",
-    "6f389dde14e7",
-    "70b79f59c64e",
-    "784ddf6d5c8a",
+    "08ce04a6c439",
+    "0910ff1da731",
+    "0b513909ae64",
+    "0bce9cde1941",
+    "177e24d89723",
+    "1b21d90a183d",
+    "1cb390f363af",
+    "22f3e3047728",
+    "45baca4d25bc",
+    "48d06b0e43be",
+    "570c3ba4b24a",
+    "66be1846fec9",
+    "67782fae0175",
+    "69061e3e86bd",
+    "6c55f19bbbeb",
+    "6c649b69f724",
+    "6d47a8f9b6d7",
+    "6d57ed51015a",
+    "6d7de23fdda9",
+    "784cdc01c34a",
+    "7e66683fdea1",
     "8244ddffb3cd",
-    "8b2edb51772f",
-    "8ca053ef4397",
-    "8e384cee63fa",
-    "9a7460664b0e",
-    "9e507acb2980",
-    "9fb08736816b",
-    "a636efe1f1b1",
-    "abab33881bd5",
-    "b21bc766e7ac",
-    "b3470d7792f9",
-    "b46b34f30b89",
-    "b97ab8992f06",
-    "bc22cd4c279e",
-    "beedcc83edf5",
-    "c6946a21a10b",
-    "c6c73b18f0a7",
-    "cc367f84270a",
-    "d2cff801c344",
-    "d74d80bf04e2",
-    "d8a2ba5d3116",
-    "da0cba622ce7",
-    "dd24415d3cbd",
-    "de2f5c85902a",
-    "e03adce129b6",
-    "ebbb83fde5f9",
-    "f04532f5fa7e",
-    "fee0bd26d346",
-    "ffc4c537830d"
+    "8469fd6dfa2d",
+    "866e4a032cc5",
+    "8931e58f7b15",
+    "8a5973ca62eb",
+    "8d4ce0d63931",
+    "8e093e2cb8fc",
+    "8e397cecedbd",
+    "8e5c9f71a0d7",
+    "9323bd089f58",
+    "93aaa6f3a7a2",
+    "967f12ef7401",
+    "9ccea6891be6",
+    "a0ffc85fb8d8",
+    "a1eac01e02bb",
+    "a6836984f741",
+    "ae7271900b9d",
+    "b17ab0787fd1",
+    "b83e82a69b9a",
+    "c88b8fcc073b",
+    "c8943cdde0df",
+    "cffcc567e4ea",
+    "d2ea697675a8",
+    "de4c769c215e",
+    "e22b425bf5cc",
+    "e763ea785b22",
+    "ec37bf7a16fd",
+    "f5273081d369"
+   ],
+   "sql_count": 49
+  },
+  "hour_writer:ngwaf_bots_ts": {
+   "changed": {
+    "rollups/hour_bundled/hour=2026-06-13-00/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "b022d2caae4b"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-01/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "f794e623cb02"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-02/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "7dedc8e29d55"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-03/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "53a7ce028dc2"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-04/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "f4647a14b605"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-05/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "c247bd04cb46"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-06/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "d77ef01182f7"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-07/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "c159f7399907"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-08/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "e2d43027b4ce"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-09/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "4e9e1203875a"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-10/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "deff09a0b29e"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-11/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "004976b07d02"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-12/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "4ad4a57837a1"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-13/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "9cf36b23accc"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-14/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "6d7c797ad579"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-15/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "d2c4022fefc5"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-16/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "af3e8ee7ff68"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-17/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "18322c7d473f"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-18/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "d055ccdcd586"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-19/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "4b0c674c5326"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-20/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "274a95ef40cb"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-21/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "3c2f6a08a8e9"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-22/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "c6d020f8ba3d"
+    },
+    "rollups/hour_bundled/hour=2026-06-13-23/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "1cd36e977238"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-00/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "157f5cd2b7fb"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-01/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "c39ded515585"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-02/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "a0958994c064"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-03/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "dc0d65fb5da5"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-04/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "e2294d457878"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-05/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "3350d325d544"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-06/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "495376813ee1"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-07/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "962f003dda4c"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-08/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "775ce7f28685"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-09/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "eb098c1cfca5"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-10/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "ac690e00c2b1"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-11/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "47279cec9877"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-12/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "658372e82be1"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-13/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "a93f39b7434e"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-14/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "6712ba2a19a5"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-15/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "7360907ae676"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-16/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "c6378ebdc4d3"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-17/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "0dfff3f73f65"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-18/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "c4b3a36e7e8f"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-19/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "8cad1bb836ce"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-20/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "b5b4913f7d2d"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-21/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "fda00ffbb702"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-22/ngwaf_bots_ts.parquet": {
+     "rows": 8,
+     "schema": "4db311b6f4e4",
+     "sha": "1fb9916609df"
+    },
+    "rollups/hour_bundled/hour=2026-06-14-23/ngwaf_bots_ts.parquet": {
+     "rows": 9,
+     "schema": "4db311b6f4e4",
+     "sha": "d029f50959f7"
+    }
+   },
+   "removed": [],
+   "returned": 48,
+   "sql": [
+    "0002a95daeed",
+    "0e05fc9cdd50",
+    "12c7afa20521",
+    "1ae99357ba6f",
+    "1e77575e3e08",
+    "23d3bfb5a7b3",
+    "2dd4e5cfa28c",
+    "2f04998675b0",
+    "33a54388b0d6",
+    "437b4f45a847",
+    "43a89e4da061",
+    "44cc49cf8eb2",
+    "4c514c2aa601",
+    "4ca11840e928",
+    "4e73c65a13e8",
+    "5136b530e4bf",
+    "5451806b4f60",
+    "5777fcbcd095",
+    "58d8ee66a994",
+    "61d40b8911e5",
+    "66cec59ea184",
+    "66f7ab69489f",
+    "6c87ebf3385a",
+    "6cd896b08341",
+    "6cf85c7e6774",
+    "6dec140545ae",
+    "71508d9d142e",
+    "7c3d266de983",
+    "7ec7eb2d69c3",
+    "8244ddffb3cd",
+    "a12cb486f8de",
+    "a73af9ee4e0c",
+    "abd91a7bc58d",
+    "b81322055b84",
+    "ba2c1a9fe0a4",
+    "c04d17ea2e5b",
+    "c34a67d52562",
+    "c7cce0085ce6",
+    "cc9a08a9cbba",
+    "ccf251a1d6ad",
+    "ce2fd7f76966",
+    "ceaaddaf4da6",
+    "d4318581a02d",
+    "d84a167240b7",
+    "daf41da78ce3",
+    "e31ad39c8d40",
+    "e75a9f27ec29",
+    "f4d4cb305654",
+    "ff32194c4bf4"
    ],
    "sql_count": 49
   },
@@ -12601,11 +12920,6 @@
    "tls_requests:int64",
    "ipv6_requests:int64"
   ],
-  "080c9a3b39bc": [
-   "bot_name:string",
-   "category:string",
-   "count:int64"
-  ],
   "0899caceb6be": [
    "timestamp:timestamp[us, tz=UTC]",
    "ip:string",
@@ -12701,6 +13015,12 @@
    "p95_us:double",
    "p99_us:double"
   ],
+  "2dfa30cea5d0": [
+   "bot_name:string",
+   "wellknown_bot_name:string",
+   "category:string",
+   "count:int64"
+  ],
   "3f126d294973": [
    "bucket:timestamp[us, tz=UTC]",
    "requests:int64",
@@ -12717,6 +13037,11 @@
    "ip_sketch:binary",
    "ip_count_observed:int64",
    "sample_capped:bool"
+  ],
+  "4db311b6f4e4": [
+   "bucket_ts:timestamp[us, tz=UTC]",
+   "bot_name:string",
+   "count:int64"
   ],
   "4e822903eca0": [
    "dim_val:string",
@@ -12900,20 +13225,22 @@
   "COPY(SELECT CAST(asn AS BIGINT)AS asn, CAST(COUNT(*)AS BIGINT)AS requests, CAST(COUNT(*)FILTER(WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0)AS BIGINT)AS rtt_count, CAST(APPROX_QUANTILE(tcp_rtt, 0.95)AS DOUBLE)AS p95_us, CAST(APPROX_QUANTILE(tcp_rtt, 0.99)AS DOUBLE)AS p99_us FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND asn IS NOT NULL AND tcp_rtt IS NOT NULL AND tcp_rtt > 0 GROUP BY asn HAVING COUNT(*)>= 5 ORDER BY COUNT(*)DESC LIMIT 100)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_nr_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(asn AS BIGINT)AS asn, TIMESTAMPTZ '<date>' AS hour_ts, CAST(COUNT(*)AS BIGINT)AS reqs, CAST(COUNT(*)FILTER(WHERE status >= 400 OR status = 0)AS BIGINT)AS errors, CAST(SUM(resp_bytes)AS DOUBLE)AS resp_bytes_sum, CAST(APPROX_QUANTILE(tcp_rtt, 0.5)AS DOUBLE)AS rtt_p50_us, CAST(APPROX_QUANTILE(rtt_min, 0.5)AS DOUBLE)AS rtt_min_p50_us, CAST(APPROX_QUANTILE(rtt_var, 0.5)AS DOUBLE)AS rtt_var_p50_us, CAST(COUNT(*)FILTER(WHERE tcp_rtt IS NOT NULL)AS BIGINT)AS rtt_count, CAST(SUM(ploss)AS DOUBLE)AS ploss_sum, CAST(COUNT(*)FILTER(WHERE ploss IS NOT NULL)AS BIGINT)AS ploss_count FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND asn IS NOT NULL AND tcp_rtt IS NOT NULL AND tcp_rtt > 0 GROUP BY asn HAVING COUNT(*)>= 3 ORDER BY COUNT(*)DESC LIMIT 200)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_nh_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(country AS VARCHAR)AS country, CAST(city AS VARCHAR)AS city, CAST(lat AS DOUBLE)AS lat, CAST(lon AS DOUBLE)AS lon, CAST(metro AS VARCHAR)AS metro, TIMESTAMPTZ '<date>' AS hour_ts, CAST(COUNT(*)AS BIGINT)AS reqs, CAST(COUNT(*)FILTER(WHERE status >= 400 OR status = 0)AS BIGINT)AS errors, CAST(SUM(ploss)AS DOUBLE)AS ploss_sum, CAST(COUNT(*)FILTER(WHERE ploss IS NOT NULL)AS BIGINT)AS ploss_count, CAST(SUM(tcp_rtt)AS DOUBLE)AS rtt_sum, CAST(COUNT(*)FILTER(WHERE tcp_rtt IS NOT NULL)AS BIGINT)AS rtt_count FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND country IS NOT NULL AND country != '' GROUP BY country, city, lat, lon, metro HAVING COUNT(*)>= 1)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_ng_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
+  "COPY(SELECT CAST(date_trunc('minute', t.timestamp)AS TIMESTAMPTZ)AS bucket_ts, CAST(nb.bot_name AS VARCHAR)AS bot_name, CAST(COUNT(*)AS BIGINT)AS count FROM logs_svc_golden t INNER JOIN(VALUES('req0', 'bot0', NULL, NULL),('req7', 'bot1', NULL, 'cat1'),('req14', 'bot2', NULL, 'cat0'),('req21', 'bot0', NULL, 'cat1'),('req28', 'bot1', NULL, 'cat0'),('req35', 'bot2', NULL, NULL),('req42', 'bot0', NULL, 'cat0'),('req49', 'bot1', NULL, 'cat1'),('req56', 'bot2', NULL, 'cat0'),('req63', 'bot0', NULL, 'cat1'),('req70', 'bot1', NULL, NULL),('req77', 'bot2', NULL, 'cat1'),('req84', 'bot0', NULL, 'cat0'),('req91', 'bot1', NULL, 'cat1'),('req98', 'bot2', NULL, 'cat0'),('req105', 'bot0', NULL, NULL),('req112', 'bot1', NULL, 'cat0'),('req119', 'bot2', NULL, 'cat1'),('req126', 'bot0', NULL, 'cat0'),('req133', 'bot1', NULL, 'cat1'),('req140', 'bot2', NULL, NULL),('req147', 'bot0', NULL, 'cat1'),('req154', 'bot1', NULL, 'cat0'),('req161', 'bot2', NULL, 'cat1'),('req168', 'bot0', NULL, 'cat0'),('req175', 'bot1', NULL, NULL),('req182', 'bot2', NULL, 'cat0'),('req189', 'bot0', NULL, 'cat1'),('req196', 'bot1', NULL, 'cat0'),('req203', 'bot2', NULL, 'cat1'),('req210', 'bot0', NULL, NULL),('req217', 'bot1', NULL, 'cat1'),('req224', 'bot2', NULL, 'cat0'),('req231', 'bot0', NULL, 'cat1'),('req238', 'bot1', NULL, 'cat0'),('req245', 'bot2', NULL, NULL),('req252', 'bot0', NULL, 'cat0'),('req259', 'bot1', NULL, 'cat1'),('req266', 'bot2', NULL, 'cat0'),('req273', 'bot0', NULL, 'cat1'),('req280', 'bot1', NULL, NULL),('req287', 'bot2', NULL, 'cat1'),('req294', 'bot0', NULL, 'cat0'),('req301', 'bot1', NULL, 'cat1'),('req308', 'bot2', NULL, 'cat0'),('req315', 'bot0', NULL, NULL),('req322', 'bot1', NULL, 'cat0'),('req329', 'bot2', NULL, 'cat1'),('req336', 'bot0', NULL, 'cat0'),('req343', 'bot1', NULL, 'cat1'),('req350', 'bot2', NULL, NULL),('req357', 'bot0', NULL, 'cat1'),('req364', 'bot1', NULL, 'cat0'),('req371', 'bot2', NULL, 'cat1'),('req378', 'bot0', NULL, 'cat0'),('req385', 'bot1', NULL, NULL),('req392', 'bot2', NULL, 'cat0'),('req399', 'bot0', NULL, 'cat1'),('req406', 'bot1', NULL, 'cat0'),('req413', 'bot2', NULL, 'cat1'),('req420', 'bot0', NULL, NULL),('req427', 'bot1', NULL, 'cat1'),('req434', 'bot2', NULL, 'cat0'),('req441', 'bot0', NULL, 'cat1'),('req448', 'bot1', NULL, 'cat0'),('req455', 'bot2', NULL, NULL),('req462', 'bot0', NULL, 'cat0'),('req469', 'bot1', NULL, 'cat1'),('req476', 'bot2', NULL, 'cat0'),('req483', 'bot0', NULL, 'cat1'),('req490', 'bot1', NULL, NULL),('req497', 'bot2', NULL, 'cat1'),('req504', 'bot0', NULL, 'cat0'),('req511', 'bot1', NULL, 'cat1'),('req518', 'bot2', NULL, 'cat0'),('req525', 'bot0', NULL, NULL),('req532', 'bot1', NULL, 'cat0'),('req539', 'bot2', NULL, 'cat1'),('req546', 'bot0', NULL, 'cat0'),('req553', 'bot1', NULL, 'cat1'),('req560', 'bot2', NULL, NULL),('req567', 'bot0', NULL, 'cat1'),('req574', 'bot1', NULL, 'cat0'),('req581', 'bot2', NULL, 'cat1'),('req588', 'bot0', NULL, 'cat0'),('req595', 'bot1', NULL, NULL),('req602', 'bot2', NULL, 'cat0'),('req609', 'bot0', NULL, 'cat1'),('req616', 'bot1', NULL, 'cat0'),('req623', 'bot2', NULL, 'cat1'),('req630', 'bot0', NULL, NULL),('req637', 'bot1', NULL, 'cat1'),('req644', 'bot2', NULL, 'cat0'),('req651', 'bot0', NULL, 'cat1'),('req658', 'bot1', NULL, 'cat0'),('req665', 'bot2', NULL, NULL),('req672', 'bot0', NULL, 'cat0'),('req679', 'bot1', NULL, 'cat1'),('req686', 'bot2', NULL, 'cat0'),('req693', 'bot0', NULL, 'cat1'),('req700', 'bot1', NULL, NULL),('req707', 'bot2', NULL, 'cat1'),('req714', 'bot0', NULL, 'cat0'),('req721', 'bot1', NULL, 'cat1'),('req728', 'bot2', NULL, 'cat0'),('req735', 'bot0', NULL, NULL),('req742', 'bot1', NULL, 'cat0'),('req749', 'bot2', NULL, 'cat1'),('req756', 'bot0', NULL, 'cat0'),('req763', 'bot1', NULL, 'cat1'),('req770', 'bot2', NULL, NULL),('req777', 'bot0', NULL, 'cat1'),('req784', 'bot1', NULL, 'cat0'),('req791', 'bot2', NULL, 'cat1'),('req798', 'bot0', NULL, 'cat0'),('req805', 'bot1', NULL, NULL),('req812', 'bot2', NULL, 'cat0'),('req819', 'bot0', NULL, 'cat1'),('req826', 'bot1', NULL, 'cat0'),('req833', 'bot2', NULL, 'cat1'),('req840', 'bot0', NULL, NULL),('req847', 'bot1', NULL, 'cat1'),('req854', 'bot2', NULL, 'cat0'),('req861', 'bot0', NULL, 'cat1'),('req868', 'bot1', NULL, 'cat0'),('req875', 'bot2', NULL, NULL),('req882', 'bot0', NULL, 'cat0'),('req889', 'bot1', NULL, 'cat1'),('req896', 'bot2', NULL, 'cat0'),('req903', 'bot0', NULL, 'cat1'),('req910', 'bot1', NULL, NULL),('req917', 'bot2', NULL, 'cat1'),('req924', 'bot0', NULL, 'cat0'),('req931', 'bot1', NULL, 'cat1'),('req938', 'bot2', NULL, 'cat0'),('req945', 'bot0', NULL, NULL),('req952', 'bot1', NULL, 'cat0'),('req959', 'bot2', NULL, 'cat1'),('req966', 'bot0', NULL, 'cat0'),('req973', 'bot1', NULL, 'cat1'),('req980', 'bot2', NULL, NULL),('req987', 'bot0', NULL, 'cat1'),('req994', 'bot1', NULL, 'cat0'),('req1001', 'bot2', NULL, 'cat1'),('req1008', 'bot0', NULL, 'cat0'),('req1015', 'bot1', NULL, NULL),('req1022', 'bot2', NULL, 'cat0'),('req1029', 'bot0', NULL, 'cat1'),('req1036', 'bot1', NULL, 'cat0'),('req1043', 'bot2', NULL, 'cat1'),('req1050', 'bot0', NULL, NULL),('req1057', 'bot1', NULL, 'cat1'),('req1064', 'bot2', NULL, 'cat0'),('req1071', 'bot0', NULL, 'cat1'),('req1078', 'bot1', NULL, 'cat0'),('req1085', 'bot2', NULL, NULL),('req1092', 'bot0', NULL, 'cat0'),('req1099', 'bot1', NULL, 'cat1'),('req1106', 'bot2', NULL, 'cat0'),('req1113', 'bot0', NULL, 'cat1'),('req1120', 'bot1', NULL, NULL),('req1127', 'bot2', NULL, 'cat1'),('req1134', 'bot0', NULL, 'cat0'),('req1141', 'bot1', NULL, 'cat1'),('req1148', 'bot2', NULL, 'cat0'),('req1155', 'bot0', NULL, NULL),('req1162', 'bot1', NULL, 'cat0'),('req1169', 'bot2', NULL, 'cat1'),('req1176', 'bot0', NULL, 'cat0'),('req1183', 'bot1', NULL, 'cat1'),('req1190', 'bot2', NULL, NULL),('req1197', 'bot0', NULL, 'cat1'),('req1204', 'bot1', NULL, 'cat0'),('req1211', 'bot2', NULL, 'cat1'),('req1218', 'bot0', NULL, 'cat0'),('req1225', 'bot1', NULL, NULL),('req1232', 'bot2', NULL, 'cat0'),('req1239', 'bot0', NULL, 'cat1'),('req1246', 'bot1', NULL, 'cat0'),('req1253', 'bot2', NULL, 'cat1'),('req1260', 'bot0', NULL, NULL),('req1267', 'bot1', NULL, 'cat1'),('req1274', 'bot2', NULL, 'cat0'),('req1281', 'bot0', NULL, 'cat1'),('req1288', 'bot1', NULL, 'cat0'),('req1295', 'bot2', NULL, NULL),('req1302', 'bot0', NULL, 'cat0'),('req1309', 'bot1', NULL, 'cat1'),('req1316', 'bot2', NULL, 'cat0'),('req1323', 'bot0', NULL, 'cat1'),('req1330', 'bot1', NULL, NULL),('req1337', 'bot2', NULL, 'cat1'),('req1344', 'bot0', NULL, 'cat0'),('req1351', 'bot1', NULL, 'cat1'),('req1358', 'bot2', NULL, 'cat0'),('req1365', 'bot0', NULL, NULL),('req1372', 'bot1', NULL, 'cat0'),('req1379', 'bot2', NULL, 'cat1'),('req1386', 'bot0', NULL, 'cat0'),('req1393', 'bot1', NULL, 'cat1'),('req1400', 'bot2', NULL, NULL),('req1407', 'bot0', NULL, 'cat1'),('req1414', 'bot1', NULL, 'cat0'),('req1421', 'bot2', NULL, 'cat1'),('req1428', 'bot0', NULL, 'cat0'),('req1435', 'bot1', NULL, NULL),('req1442', 'bot2', NULL, 'cat0'),('req1449', 'bot0', NULL, 'cat1'),('req1456', 'bot1', NULL, 'cat0'),('req1463', 'bot2', NULL, 'cat1'),('req1470', 'bot0', NULL, NULL),('req1477', 'bot1', NULL, 'cat1'),('req1484', 'bot2', NULL, 'cat0'),('req1491', 'bot0', NULL, 'cat1'),('req1498', 'bot1', NULL, 'cat0'),('req1505', 'bot2', NULL, NULL),('req1512', 'bot0', NULL, 'cat0'),('req1519', 'bot1', NULL, 'cat1'),('req1526', 'bot2', NULL, 'cat0'),('req1533', 'bot0', NULL, 'cat1'),('req1540', 'bot1', NULL, NULL),('req1547', 'bot2', NULL, 'cat1'),('req1554', 'bot0', NULL, 'cat0'),('req1561', 'bot1', NULL, 'cat1'),('req1568', 'bot2', NULL, 'cat0'),('req1575', 'bot0', NULL, NULL),('req1582', 'bot1', NULL, 'cat0'),('req1589', 'bot2', NULL, 'cat1'),('req1596', 'bot0', NULL, 'cat0'),('req1603', 'bot1', NULL, 'cat1'),('req1610', 'bot2', NULL, NULL),('req1617', 'bot0', NULL, 'cat1'),('req1624', 'bot1', NULL, 'cat0'),('req1631', 'bot2', NULL, 'cat1'),('req1638', 'bot0', NULL, 'cat0'),('req1645', 'bot1', NULL, NULL),('req1652', 'bot2', NULL, 'cat0'),('req1659', 'bot0', NULL, 'cat1'),('req1666', 'bot1', NULL, 'cat0'),('req1673', 'bot2', NULL, 'cat1'),('req1680', 'bot0', NULL, NULL),('req1687', 'bot1', NULL, 'cat1'),('req1694', 'bot2', NULL, 'cat0'),('req1701', 'bot0', NULL, 'cat1'),('req1708', 'bot1', NULL, 'cat0'),('req1715', 'bot2', NULL, NULL),('req1722', 'bot0', NULL, 'cat0'),('req1729', 'bot1', NULL, 'cat1'),('req1736', 'bot2', NULL, 'cat0'),('req1743', 'bot0', NULL, 'cat1'),('req1750', 'bot1', NULL, NULL),('req1757', 'bot2', NULL, 'cat1'),('req1764', 'bot0', NULL, 'cat0'),('req1771', 'bot1', NULL, 'cat1'),('req1778', 'bot2', NULL, 'cat0'),('req1785', 'bot0', NULL, NULL),('req1792', 'bot1', NULL, 'cat0'),('req1799', 'bot2', NULL, 'cat1'),('req1806', 'bot0', NULL, 'cat0'),('req1813', 'bot1', NULL, 'cat1'),('req1820', 'bot2', NULL, NULL),('req1827', 'bot0', NULL, 'cat1'),('req1834', 'bot1', NULL, 'cat0'),('req1841', 'bot2', NULL, 'cat1'),('req1848', 'bot0', NULL, 'cat0'),('req1855', 'bot1', NULL, NULL),('req1862', 'bot2', NULL, 'cat0'),('req1869', 'bot0', NULL, 'cat1'),('req1876', 'bot1', NULL, 'cat0'),('req1883', 'bot2', NULL, 'cat1'),('req1890', 'bot0', NULL, NULL),('req1897', 'bot1', NULL, 'cat1'),('req1904', 'bot2', NULL, 'cat0'),('req1911', 'bot0', NULL, 'cat1'),('req1918', 'bot1', NULL, 'cat0'),('req1925', 'bot2', NULL, NULL),('req1932', 'bot0', NULL, 'cat0'),('req1939', 'bot1', NULL, 'cat1'),('req1946', 'bot2', NULL, 'cat0'),('req1953', 'bot0', NULL, 'cat1'),('req1960', 'bot1', NULL, NULL),('req1967', 'bot2', NULL, 'cat1'),('req1974', 'bot0', NULL, 'cat0'),('req1981', 'bot1', NULL, 'cat1'),('req1988', 'bot2', NULL, 'cat0'),('req1995', 'bot0', NULL, NULL),('req2002', 'bot1', NULL, 'cat0'),('req2009', 'bot2', NULL, 'cat1'),('req2016', 'bot0', NULL, 'cat0'),('req2023', 'bot1', NULL, 'cat1'),('req2030', 'bot2', NULL, NULL),('req2037', 'bot0', NULL, 'cat1'),('req2044', 'bot1', NULL, 'cat0'),('req2051', 'bot2', NULL, 'cat1'),('req2058', 'bot0', NULL, 'cat0'),('req2065', 'bot1', NULL, NULL),('req2072', 'bot2', NULL, 'cat0'),('req2079', 'bot0', NULL, 'cat1'),('req2086', 'bot1', NULL, 'cat0'),('req2093', 'bot2', NULL, 'cat1'),('req2100', 'bot0', NULL, NULL),('req2107', 'bot1', NULL, 'cat1'),('req2114', 'bot2', NULL, 'cat0'),('req2121', 'bot0', NULL, 'cat1'),('req2128', 'bot1', NULL, 'cat0'),('req2135', 'bot2', NULL, NULL),('req2142', 'bot0', NULL, 'cat0'),('req2149', 'bot1', NULL, 'cat1'),('req2156', 'bot2', NULL, 'cat0'),('req2163', 'bot0', NULL, 'cat1'),('req2170', 'bot1', NULL, NULL),('req2177', 'bot2', NULL, 'cat1'),('req2184', 'bot0', NULL, 'cat0'),('req2191', 'bot1', NULL, 'cat1'),('req2198', 'bot2', NULL, 'cat0'),('req2205', 'bot0', NULL, NULL),('req2212', 'bot1', NULL, 'cat0'),('req2219', 'bot2', NULL, 'cat1'),('req2226', 'bot0', NULL, 'cat0'),('req2233', 'bot1', NULL, 'cat1'),('req2240', 'bot2', NULL, NULL),('req2247', 'bot0', NULL, 'cat1'),('req2254', 'bot1', NULL, 'cat0'),('req2261', 'bot2', NULL, 'cat1'),('req2268', 'bot0', NULL, 'cat0'),('req2275', 'bot1', NULL, NULL),('req2282', 'bot2', NULL, 'cat0'),('req2289', 'bot0', NULL, 'cat1'),('req2296', 'bot1', NULL, 'cat0'),('req2303', 'bot2', NULL, 'cat1'),('req2310', 'bot0', NULL, NULL),('req2317', 'bot1', NULL, 'cat1'),('req2324', 'bot2', NULL, 'cat0'),('req2331', 'bot0', NULL, 'cat1'),('req2338', 'bot1', NULL, 'cat0'),('req2345', 'bot2', NULL, NULL),('req2352', 'bot0', NULL, 'cat0'),('req2359', 'bot1', NULL, 'cat1'),('req2366', 'bot2', NULL, 'cat0'),('req2373', 'bot0', NULL, 'cat1'),('req2380', 'bot1', NULL, NULL),('req2387', 'bot2', NULL, 'cat1'),('req2394', 'bot0', NULL, 'cat0'),('req2401', 'bot1', NULL, 'cat1'),('req2408', 'bot2', NULL, 'cat0'),('req2415', 'bot0', NULL, NULL),('req2422', 'bot1', NULL, 'cat0'),('req2429', 'bot2', NULL, 'cat1'),('req2436', 'bot0', NULL, 'cat0'),('req2443', 'bot1', NULL, 'cat1'),('req2450', 'bot2', NULL, NULL),('req2457', 'bot0', NULL, 'cat1'),('req2464', 'bot1', NULL, 'cat0'),('req2471', 'bot2', NULL, 'cat1'),('req2478', 'bot0', NULL, 'cat0'),('req2485', 'bot1', NULL, NULL),('req2492', 'bot2', NULL, 'cat0'),('req2499', 'bot0', NULL, 'cat1'),('req2506', 'bot1', NULL, 'cat0'),('req2513', 'bot2', NULL, 'cat1'),('req2520', 'bot0', NULL, NULL),('req2527', 'bot1', NULL, 'cat1'),('req2534', 'bot2', NULL, 'cat0'),('req2541', 'bot0', NULL, 'cat1'),('req2548', 'bot1', NULL, 'cat0'),('req2555', 'bot2', NULL, NULL),('req2562', 'bot0', NULL, 'cat0'),('req2569', 'bot1', NULL, 'cat1'),('req2576', 'bot2', NULL, 'cat0'),('req2583', 'bot0', NULL, 'cat1'),('req2590', 'bot1', NULL, NULL),('req2597', 'bot2', NULL, 'cat1'),('req2604', 'bot0', NULL, 'cat0'),('req2611', 'bot1', NULL, 'cat1'),('req2618', 'bot2', NULL, 'cat0'),('req2625', 'bot0', NULL, NULL),('req2632', 'bot1', NULL, 'cat0'),('req2639', 'bot2', NULL, 'cat1'),('req2646', 'bot0', NULL, 'cat0'),('req2653', 'bot1', NULL, 'cat1'),('req2660', 'bot2', NULL, NULL),('req2667', 'bot0', NULL, 'cat1'),('req2674', 'bot1', NULL, 'cat0'),('req2681', 'bot2', NULL, 'cat1'),('req2688', 'bot0', NULL, 'cat0'),('req2695', 'bot1', NULL, NULL),('req2702', 'bot2', NULL, 'cat0'),('req2709', 'bot0', NULL, 'cat1'),('req2716', 'bot1', NULL, 'cat0'),('req2723', 'bot2', NULL, 'cat1'),('req2730', 'bot0', NULL, NULL),('req2737', 'bot1', NULL, 'cat1'),('req2744', 'bot2', NULL, 'cat0'),('req2751', 'bot0', NULL, 'cat1'),('req2758', 'bot1', NULL, 'cat0'),('req2765', 'bot2', NULL, NULL),('req2772', 'bot0', NULL, 'cat0'),('req2779', 'bot1', NULL, 'cat1'),('req2786', 'bot2', NULL, 'cat0'),('req2793', 'bot0', NULL, 'cat1'),('req2800', 'bot1', NULL, NULL),('req2807', 'bot2', NULL, 'cat1'),('req2814', 'bot0', NULL, 'cat0'),('req2821', 'bot1', NULL, 'cat1'),('req2828', 'bot2', NULL, 'cat0'),('req2835', 'bot0', NULL, NULL),('req2842', 'bot1', NULL, 'cat0'),('req2849', 'bot2', NULL, 'cat1'),('req2856', 'bot0', NULL, 'cat0'),('req2863', 'bot1', NULL, 'cat1'),('req2870', 'bot2', NULL, NULL),('req2877', 'bot0', NULL, 'cat1'))AS nb(waf_req_id, bot_name, wellknown_bot_name, category)ON t.waf_req_id = nb.waf_req_id WHERE t.timestamp >= TIMESTAMPTZ '<date>' AND t.timestamp < TIMESTAMPTZ '<date>' AND t.waf_req_id IS NOT NULL AND nb.bot_name IS NOT NULL GROUP BY 1, 2)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_nbts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(date_trunc('minute', timestamp)AS TIMESTAMPTZ)AS bucket_ts, CAST(COUNT(*)FILTER(WHERE COALESCE(\"ottfb\", \"ttfb\" * 1000000.0)IS NOT NULL)AS BIGINT)AS ttfb_count, CAST(MEDIAN(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0))AS DOUBLE)AS ttfb_p50_us, CAST(APPROX_QUANTILE(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0), 0.95)AS DOUBLE)AS ttfb_p95_us, CAST(APPROX_QUANTILE(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0), 0.99)AS DOUBLE)AS ttfb_p99_us, CAST(COUNT(*)FILTER(WHERE \"ottlb\" IS NOT NULL)AS BIGINT)AS ttlb_count, CAST(MEDIAN(\"ottlb\")AS DOUBLE)AS ttlb_p50_us, CAST(APPROX_QUANTILE(\"ottlb\", 0.95)AS DOUBLE)AS ttlb_p95_us, CAST(APPROX_QUANTILE(\"ottlb\", 0.99)AS DOUBLE)AS ttlb_p99_us FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' GROUP BY 1)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_olts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(date_trunc('minute', timestamp)AS TIMESTAMPTZ)AS bucket_ts, replace(tag, 'VERIFIED-BOT.', '')AS bot_type, CAST(COUNT(*)AS BIGINT)AS count FROM(SELECT timestamp, unnest(string_split(waf_sig, ','))AS tag FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%')sub WHERE tag LIKE 'VERIFIED-BOT.%' GROUP BY 1, 2)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_vbts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
-  "COPY(SELECT CAST(nb.bot_name AS VARCHAR)AS bot_name, CAST(nb.category AS VARCHAR)AS category, CAST(COUNT(*)AS BIGINT)AS count FROM logs_svc_golden t INNER JOIN(VALUES('req0', 'bot0', NULL),('req7', 'bot1', 'cat1'),('req14', 'bot2', 'cat0'),('req21', 'bot0', 'cat1'),('req28', 'bot1', 'cat0'),('req35', 'bot2', NULL),('req42', 'bot0', 'cat0'),('req49', 'bot1', 'cat1'),('req56', 'bot2', 'cat0'),('req63', 'bot0', 'cat1'),('req70', 'bot1', NULL),('req77', 'bot2', 'cat1'),('req84', 'bot0', 'cat0'),('req91', 'bot1', 'cat1'),('req98', 'bot2', 'cat0'),('req105', 'bot0', NULL),('req112', 'bot1', 'cat0'),('req119', 'bot2', 'cat1'),('req126', 'bot0', 'cat0'),('req133', 'bot1', 'cat1'),('req140', 'bot2', NULL),('req147', 'bot0', 'cat1'),('req154', 'bot1', 'cat0'),('req161', 'bot2', 'cat1'),('req168', 'bot0', 'cat0'),('req175', 'bot1', NULL),('req182', 'bot2', 'cat0'),('req189', 'bot0', 'cat1'),('req196', 'bot1', 'cat0'),('req203', 'bot2', 'cat1'),('req210', 'bot0', NULL),('req217', 'bot1', 'cat1'),('req224', 'bot2', 'cat0'),('req231', 'bot0', 'cat1'),('req238', 'bot1', 'cat0'),('req245', 'bot2', NULL),('req252', 'bot0', 'cat0'),('req259', 'bot1', 'cat1'),('req266', 'bot2', 'cat0'),('req273', 'bot0', 'cat1'),('req280', 'bot1', NULL),('req287', 'bot2', 'cat1'),('req294', 'bot0', 'cat0'),('req301', 'bot1', 'cat1'),('req308', 'bot2', 'cat0'),('req315', 'bot0', NULL),('req322', 'bot1', 'cat0'),('req329', 'bot2', 'cat1'),('req336', 'bot0', 'cat0'),('req343', 'bot1', 'cat1'),('req350', 'bot2', NULL),('req357', 'bot0', 'cat1'),('req364', 'bot1', 'cat0'),('req371', 'bot2', 'cat1'),('req378', 'bot0', 'cat0'),('req385', 'bot1', NULL),('req392', 'bot2', 'cat0'),('req399', 'bot0', 'cat1'),('req406', 'bot1', 'cat0'),('req413', 'bot2', 'cat1'),('req420', 'bot0', NULL),('req427', 'bot1', 'cat1'),('req434', 'bot2', 'cat0'),('req441', 'bot0', 'cat1'),('req448', 'bot1', 'cat0'),('req455', 'bot2', NULL),('req462', 'bot0', 'cat0'),('req469', 'bot1', 'cat1'),('req476', 'bot2', 'cat0'),('req483', 'bot0', 'cat1'),('req490', 'bot1', NULL),('req497', 'bot2', 'cat1'),('req504', 'bot0', 'cat0'),('req511', 'bot1', 'cat1'),('req518', 'bot2', 'cat0'),('req525', 'bot0', NULL),('req532', 'bot1', 'cat0'),('req539', 'bot2', 'cat1'),('req546', 'bot0', 'cat0'),('req553', 'bot1', 'cat1'),('req560', 'bot2', NULL),('req567', 'bot0', 'cat1'),('req574', 'bot1', 'cat0'),('req581', 'bot2', 'cat1'),('req588', 'bot0', 'cat0'),('req595', 'bot1', NULL),('req602', 'bot2', 'cat0'),('req609', 'bot0', 'cat1'),('req616', 'bot1', 'cat0'),('req623', 'bot2', 'cat1'),('req630', 'bot0', NULL),('req637', 'bot1', 'cat1'),('req644', 'bot2', 'cat0'),('req651', 'bot0', 'cat1'),('req658', 'bot1', 'cat0'),('req665', 'bot2', NULL),('req672', 'bot0', 'cat0'),('req679', 'bot1', 'cat1'),('req686', 'bot2', 'cat0'),('req693', 'bot0', 'cat1'),('req700', 'bot1', NULL),('req707', 'bot2', 'cat1'),('req714', 'bot0', 'cat0'),('req721', 'bot1', 'cat1'),('req728', 'bot2', 'cat0'),('req735', 'bot0', NULL),('req742', 'bot1', 'cat0'),('req749', 'bot2', 'cat1'),('req756', 'bot0', 'cat0'),('req763', 'bot1', 'cat1'),('req770', 'bot2', NULL),('req777', 'bot0', 'cat1'),('req784', 'bot1', 'cat0'),('req791', 'bot2', 'cat1'),('req798', 'bot0', 'cat0'),('req805', 'bot1', NULL),('req812', 'bot2', 'cat0'),('req819', 'bot0', 'cat1'),('req826', 'bot1', 'cat0'),('req833', 'bot2', 'cat1'),('req840', 'bot0', NULL),('req847', 'bot1', 'cat1'),('req854', 'bot2', 'cat0'),('req861', 'bot0', 'cat1'),('req868', 'bot1', 'cat0'),('req875', 'bot2', NULL),('req882', 'bot0', 'cat0'),('req889', 'bot1', 'cat1'),('req896', 'bot2', 'cat0'),('req903', 'bot0', 'cat1'),('req910', 'bot1', NULL),('req917', 'bot2', 'cat1'),('req924', 'bot0', 'cat0'),('req931', 'bot1', 'cat1'),('req938', 'bot2', 'cat0'),('req945', 'bot0', NULL),('req952', 'bot1', 'cat0'),('req959', 'bot2', 'cat1'),('req966', 'bot0', 'cat0'),('req973', 'bot1', 'cat1'),('req980', 'bot2', NULL),('req987', 'bot0', 'cat1'),('req994', 'bot1', 'cat0'),('req1001', 'bot2', 'cat1'),('req1008', 'bot0', 'cat0'),('req1015', 'bot1', NULL),('req1022', 'bot2', 'cat0'),('req1029', 'bot0', 'cat1'),('req1036', 'bot1', 'cat0'),('req1043', 'bot2', 'cat1'),('req1050', 'bot0', NULL),('req1057', 'bot1', 'cat1'),('req1064', 'bot2', 'cat0'),('req1071', 'bot0', 'cat1'),('req1078', 'bot1', 'cat0'),('req1085', 'bot2', NULL),('req1092', 'bot0', 'cat0'),('req1099', 'bot1', 'cat1'),('req1106', 'bot2', 'cat0'),('req1113', 'bot0', 'cat1'),('req1120', 'bot1', NULL),('req1127', 'bot2', 'cat1'),('req1134', 'bot0', 'cat0'),('req1141', 'bot1', 'cat1'),('req1148', 'bot2', 'cat0'),('req1155', 'bot0', NULL),('req1162', 'bot1', 'cat0'),('req1169', 'bot2', 'cat1'),('req1176', 'bot0', 'cat0'),('req1183', 'bot1', 'cat1'),('req1190', 'bot2', NULL),('req1197', 'bot0', 'cat1'),('req1204', 'bot1', 'cat0'),('req1211', 'bot2', 'cat1'),('req1218', 'bot0', 'cat0'),('req1225', 'bot1', NULL),('req1232', 'bot2', 'cat0'),('req1239', 'bot0', 'cat1'),('req1246', 'bot1', 'cat0'),('req1253', 'bot2', 'cat1'),('req1260', 'bot0', NULL),('req1267', 'bot1', 'cat1'),('req1274', 'bot2', 'cat0'),('req1281', 'bot0', 'cat1'),('req1288', 'bot1', 'cat0'),('req1295', 'bot2', NULL),('req1302', 'bot0', 'cat0'),('req1309', 'bot1', 'cat1'),('req1316', 'bot2', 'cat0'),('req1323', 'bot0', 'cat1'),('req1330', 'bot1', NULL),('req1337', 'bot2', 'cat1'),('req1344', 'bot0', 'cat0'),('req1351', 'bot1', 'cat1'),('req1358', 'bot2', 'cat0'),('req1365', 'bot0', NULL),('req1372', 'bot1', 'cat0'),('req1379', 'bot2', 'cat1'),('req1386', 'bot0', 'cat0'),('req1393', 'bot1', 'cat1'),('req1400', 'bot2', NULL),('req1407', 'bot0', 'cat1'),('req1414', 'bot1', 'cat0'),('req1421', 'bot2', 'cat1'),('req1428', 'bot0', 'cat0'),('req1435', 'bot1', NULL),('req1442', 'bot2', 'cat0'),('req1449', 'bot0', 'cat1'),('req1456', 'bot1', 'cat0'),('req1463', 'bot2', 'cat1'),('req1470', 'bot0', NULL),('req1477', 'bot1', 'cat1'),('req1484', 'bot2', 'cat0'),('req1491', 'bot0', 'cat1'),('req1498', 'bot1', 'cat0'),('req1505', 'bot2', NULL),('req1512', 'bot0', 'cat0'),('req1519', 'bot1', 'cat1'),('req1526', 'bot2', 'cat0'),('req1533', 'bot0', 'cat1'),('req1540', 'bot1', NULL),('req1547', 'bot2', 'cat1'),('req1554', 'bot0', 'cat0'),('req1561', 'bot1', 'cat1'),('req1568', 'bot2', 'cat0'),('req1575', 'bot0', NULL),('req1582', 'bot1', 'cat0'),('req1589', 'bot2', 'cat1'),('req1596', 'bot0', 'cat0'),('req1603', 'bot1', 'cat1'),('req1610', 'bot2', NULL),('req1617', 'bot0', 'cat1'),('req1624', 'bot1', 'cat0'),('req1631', 'bot2', 'cat1'),('req1638', 'bot0', 'cat0'),('req1645', 'bot1', NULL),('req1652', 'bot2', 'cat0'),('req1659', 'bot0', 'cat1'),('req1666', 'bot1', 'cat0'),('req1673', 'bot2', 'cat1'),('req1680', 'bot0', NULL),('req1687', 'bot1', 'cat1'),('req1694', 'bot2', 'cat0'),('req1701', 'bot0', 'cat1'),('req1708', 'bot1', 'cat0'),('req1715', 'bot2', NULL),('req1722', 'bot0', 'cat0'),('req1729', 'bot1', 'cat1'),('req1736', 'bot2', 'cat0'),('req1743', 'bot0', 'cat1'),('req1750', 'bot1', NULL),('req1757', 'bot2', 'cat1'),('req1764', 'bot0', 'cat0'),('req1771', 'bot1', 'cat1'),('req1778', 'bot2', 'cat0'),('req1785', 'bot0', NULL),('req1792', 'bot1', 'cat0'),('req1799', 'bot2', 'cat1'),('req1806', 'bot0', 'cat0'),('req1813', 'bot1', 'cat1'),('req1820', 'bot2', NULL),('req1827', 'bot0', 'cat1'),('req1834', 'bot1', 'cat0'),('req1841', 'bot2', 'cat1'),('req1848', 'bot0', 'cat0'),('req1855', 'bot1', NULL),('req1862', 'bot2', 'cat0'),('req1869', 'bot0', 'cat1'),('req1876', 'bot1', 'cat0'),('req1883', 'bot2', 'cat1'),('req1890', 'bot0', NULL),('req1897', 'bot1', 'cat1'),('req1904', 'bot2', 'cat0'),('req1911', 'bot0', 'cat1'),('req1918', 'bot1', 'cat0'),('req1925', 'bot2', NULL),('req1932', 'bot0', 'cat0'),('req1939', 'bot1', 'cat1'),('req1946', 'bot2', 'cat0'),('req1953', 'bot0', 'cat1'),('req1960', 'bot1', NULL),('req1967', 'bot2', 'cat1'),('req1974', 'bot0', 'cat0'),('req1981', 'bot1', 'cat1'),('req1988', 'bot2', 'cat0'),('req1995', 'bot0', NULL),('req2002', 'bot1', 'cat0'),('req2009', 'bot2', 'cat1'),('req2016', 'bot0', 'cat0'),('req2023', 'bot1', 'cat1'),('req2030', 'bot2', NULL),('req2037', 'bot0', 'cat1'),('req2044', 'bot1', 'cat0'),('req2051', 'bot2', 'cat1'),('req2058', 'bot0', 'cat0'),('req2065', 'bot1', NULL),('req2072', 'bot2', 'cat0'),('req2079', 'bot0', 'cat1'),('req2086', 'bot1', 'cat0'),('req2093', 'bot2', 'cat1'),('req2100', 'bot0', NULL),('req2107', 'bot1', 'cat1'),('req2114', 'bot2', 'cat0'),('req2121', 'bot0', 'cat1'),('req2128', 'bot1', 'cat0'),('req2135', 'bot2', NULL),('req2142', 'bot0', 'cat0'),('req2149', 'bot1', 'cat1'),('req2156', 'bot2', 'cat0'),('req2163', 'bot0', 'cat1'),('req2170', 'bot1', NULL),('req2177', 'bot2', 'cat1'),('req2184', 'bot0', 'cat0'),('req2191', 'bot1', 'cat1'),('req2198', 'bot2', 'cat0'),('req2205', 'bot0', NULL),('req2212', 'bot1', 'cat0'),('req2219', 'bot2', 'cat1'),('req2226', 'bot0', 'cat0'),('req2233', 'bot1', 'cat1'),('req2240', 'bot2', NULL),('req2247', 'bot0', 'cat1'),('req2254', 'bot1', 'cat0'),('req2261', 'bot2', 'cat1'),('req2268', 'bot0', 'cat0'),('req2275', 'bot1', NULL),('req2282', 'bot2', 'cat0'),('req2289', 'bot0', 'cat1'),('req2296', 'bot1', 'cat0'),('req2303', 'bot2', 'cat1'),('req2310', 'bot0', NULL),('req2317', 'bot1', 'cat1'),('req2324', 'bot2', 'cat0'),('req2331', 'bot0', 'cat1'),('req2338', 'bot1', 'cat0'),('req2345', 'bot2', NULL),('req2352', 'bot0', 'cat0'),('req2359', 'bot1', 'cat1'),('req2366', 'bot2', 'cat0'),('req2373', 'bot0', 'cat1'),('req2380', 'bot1', NULL),('req2387', 'bot2', 'cat1'),('req2394', 'bot0', 'cat0'),('req2401', 'bot1', 'cat1'),('req2408', 'bot2', 'cat0'),('req2415', 'bot0', NULL),('req2422', 'bot1', 'cat0'),('req2429', 'bot2', 'cat1'),('req2436', 'bot0', 'cat0'),('req2443', 'bot1', 'cat1'),('req2450', 'bot2', NULL),('req2457', 'bot0', 'cat1'),('req2464', 'bot1', 'cat0'),('req2471', 'bot2', 'cat1'),('req2478', 'bot0', 'cat0'),('req2485', 'bot1', NULL),('req2492', 'bot2', 'cat0'),('req2499', 'bot0', 'cat1'),('req2506', 'bot1', 'cat0'),('req2513', 'bot2', 'cat1'),('req2520', 'bot0', NULL),('req2527', 'bot1', 'cat1'),('req2534', 'bot2', 'cat0'),('req2541', 'bot0', 'cat1'),('req2548', 'bot1', 'cat0'),('req2555', 'bot2', NULL),('req2562', 'bot0', 'cat0'),('req2569', 'bot1', 'cat1'),('req2576', 'bot2', 'cat0'),('req2583', 'bot0', 'cat1'),('req2590', 'bot1', NULL),('req2597', 'bot2', 'cat1'),('req2604', 'bot0', 'cat0'),('req2611', 'bot1', 'cat1'),('req2618', 'bot2', 'cat0'),('req2625', 'bot0', NULL),('req2632', 'bot1', 'cat0'),('req2639', 'bot2', 'cat1'),('req2646', 'bot0', 'cat0'),('req2653', 'bot1', 'cat1'),('req2660', 'bot2', NULL),('req2667', 'bot0', 'cat1'),('req2674', 'bot1', 'cat0'),('req2681', 'bot2', 'cat1'),('req2688', 'bot0', 'cat0'),('req2695', 'bot1', NULL),('req2702', 'bot2', 'cat0'),('req2709', 'bot0', 'cat1'),('req2716', 'bot1', 'cat0'),('req2723', 'bot2', 'cat1'),('req2730', 'bot0', NULL),('req2737', 'bot1', 'cat1'),('req2744', 'bot2', 'cat0'),('req2751', 'bot0', 'cat1'),('req2758', 'bot1', 'cat0'),('req2765', 'bot2', NULL),('req2772', 'bot0', 'cat0'),('req2779', 'bot1', 'cat1'),('req2786', 'bot2', 'cat0'),('req2793', 'bot0', 'cat1'),('req2800', 'bot1', NULL),('req2807', 'bot2', 'cat1'),('req2814', 'bot0', 'cat0'),('req2821', 'bot1', 'cat1'),('req2828', 'bot2', 'cat0'),('req2835', 'bot0', NULL),('req2842', 'bot1', 'cat0'),('req2849', 'bot2', 'cat1'),('req2856', 'bot0', 'cat0'),('req2863', 'bot1', 'cat1'),('req2870', 'bot2', NULL),('req2877', 'bot0', 'cat1'))AS nb(waf_req_id, bot_name, category)ON t.waf_req_id = nb.waf_req_id WHERE t.timestamp >= TIMESTAMPTZ '<date>' AND t.timestamp < TIMESTAMPTZ '<date>' AND t.waf_req_id IS NOT NULL AND nb.bot_name IS NOT NULL GROUP BY 1, 2)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_nb_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
+  "COPY(SELECT CAST(nb.bot_name AS VARCHAR)AS bot_name, CAST(nb.wellknown_bot_name AS VARCHAR)AS wellknown_bot_name, CAST(nb.category AS VARCHAR)AS category, CAST(COUNT(*)AS BIGINT)AS count FROM logs_svc_golden t INNER JOIN(VALUES('req0', 'bot0', NULL, NULL),('req7', 'bot1', NULL, 'cat1'),('req14', 'bot2', NULL, 'cat0'),('req21', 'bot0', NULL, 'cat1'),('req28', 'bot1', NULL, 'cat0'),('req35', 'bot2', NULL, NULL),('req42', 'bot0', NULL, 'cat0'),('req49', 'bot1', NULL, 'cat1'),('req56', 'bot2', NULL, 'cat0'),('req63', 'bot0', NULL, 'cat1'),('req70', 'bot1', NULL, NULL),('req77', 'bot2', NULL, 'cat1'),('req84', 'bot0', NULL, 'cat0'),('req91', 'bot1', NULL, 'cat1'),('req98', 'bot2', NULL, 'cat0'),('req105', 'bot0', NULL, NULL),('req112', 'bot1', NULL, 'cat0'),('req119', 'bot2', NULL, 'cat1'),('req126', 'bot0', NULL, 'cat0'),('req133', 'bot1', NULL, 'cat1'),('req140', 'bot2', NULL, NULL),('req147', 'bot0', NULL, 'cat1'),('req154', 'bot1', NULL, 'cat0'),('req161', 'bot2', NULL, 'cat1'),('req168', 'bot0', NULL, 'cat0'),('req175', 'bot1', NULL, NULL),('req182', 'bot2', NULL, 'cat0'),('req189', 'bot0', NULL, 'cat1'),('req196', 'bot1', NULL, 'cat0'),('req203', 'bot2', NULL, 'cat1'),('req210', 'bot0', NULL, NULL),('req217', 'bot1', NULL, 'cat1'),('req224', 'bot2', NULL, 'cat0'),('req231', 'bot0', NULL, 'cat1'),('req238', 'bot1', NULL, 'cat0'),('req245', 'bot2', NULL, NULL),('req252', 'bot0', NULL, 'cat0'),('req259', 'bot1', NULL, 'cat1'),('req266', 'bot2', NULL, 'cat0'),('req273', 'bot0', NULL, 'cat1'),('req280', 'bot1', NULL, NULL),('req287', 'bot2', NULL, 'cat1'),('req294', 'bot0', NULL, 'cat0'),('req301', 'bot1', NULL, 'cat1'),('req308', 'bot2', NULL, 'cat0'),('req315', 'bot0', NULL, NULL),('req322', 'bot1', NULL, 'cat0'),('req329', 'bot2', NULL, 'cat1'),('req336', 'bot0', NULL, 'cat0'),('req343', 'bot1', NULL, 'cat1'),('req350', 'bot2', NULL, NULL),('req357', 'bot0', NULL, 'cat1'),('req364', 'bot1', NULL, 'cat0'),('req371', 'bot2', NULL, 'cat1'),('req378', 'bot0', NULL, 'cat0'),('req385', 'bot1', NULL, NULL),('req392', 'bot2', NULL, 'cat0'),('req399', 'bot0', NULL, 'cat1'),('req406', 'bot1', NULL, 'cat0'),('req413', 'bot2', NULL, 'cat1'),('req420', 'bot0', NULL, NULL),('req427', 'bot1', NULL, 'cat1'),('req434', 'bot2', NULL, 'cat0'),('req441', 'bot0', NULL, 'cat1'),('req448', 'bot1', NULL, 'cat0'),('req455', 'bot2', NULL, NULL),('req462', 'bot0', NULL, 'cat0'),('req469', 'bot1', NULL, 'cat1'),('req476', 'bot2', NULL, 'cat0'),('req483', 'bot0', NULL, 'cat1'),('req490', 'bot1', NULL, NULL),('req497', 'bot2', NULL, 'cat1'),('req504', 'bot0', NULL, 'cat0'),('req511', 'bot1', NULL, 'cat1'),('req518', 'bot2', NULL, 'cat0'),('req525', 'bot0', NULL, NULL),('req532', 'bot1', NULL, 'cat0'),('req539', 'bot2', NULL, 'cat1'),('req546', 'bot0', NULL, 'cat0'),('req553', 'bot1', NULL, 'cat1'),('req560', 'bot2', NULL, NULL),('req567', 'bot0', NULL, 'cat1'),('req574', 'bot1', NULL, 'cat0'),('req581', 'bot2', NULL, 'cat1'),('req588', 'bot0', NULL, 'cat0'),('req595', 'bot1', NULL, NULL),('req602', 'bot2', NULL, 'cat0'),('req609', 'bot0', NULL, 'cat1'),('req616', 'bot1', NULL, 'cat0'),('req623', 'bot2', NULL, 'cat1'),('req630', 'bot0', NULL, NULL),('req637', 'bot1', NULL, 'cat1'),('req644', 'bot2', NULL, 'cat0'),('req651', 'bot0', NULL, 'cat1'),('req658', 'bot1', NULL, 'cat0'),('req665', 'bot2', NULL, NULL),('req672', 'bot0', NULL, 'cat0'),('req679', 'bot1', NULL, 'cat1'),('req686', 'bot2', NULL, 'cat0'),('req693', 'bot0', NULL, 'cat1'),('req700', 'bot1', NULL, NULL),('req707', 'bot2', NULL, 'cat1'),('req714', 'bot0', NULL, 'cat0'),('req721', 'bot1', NULL, 'cat1'),('req728', 'bot2', NULL, 'cat0'),('req735', 'bot0', NULL, NULL),('req742', 'bot1', NULL, 'cat0'),('req749', 'bot2', NULL, 'cat1'),('req756', 'bot0', NULL, 'cat0'),('req763', 'bot1', NULL, 'cat1'),('req770', 'bot2', NULL, NULL),('req777', 'bot0', NULL, 'cat1'),('req784', 'bot1', NULL, 'cat0'),('req791', 'bot2', NULL, 'cat1'),('req798', 'bot0', NULL, 'cat0'),('req805', 'bot1', NULL, NULL),('req812', 'bot2', NULL, 'cat0'),('req819', 'bot0', NULL, 'cat1'),('req826', 'bot1', NULL, 'cat0'),('req833', 'bot2', NULL, 'cat1'),('req840', 'bot0', NULL, NULL),('req847', 'bot1', NULL, 'cat1'),('req854', 'bot2', NULL, 'cat0'),('req861', 'bot0', NULL, 'cat1'),('req868', 'bot1', NULL, 'cat0'),('req875', 'bot2', NULL, NULL),('req882', 'bot0', NULL, 'cat0'),('req889', 'bot1', NULL, 'cat1'),('req896', 'bot2', NULL, 'cat0'),('req903', 'bot0', NULL, 'cat1'),('req910', 'bot1', NULL, NULL),('req917', 'bot2', NULL, 'cat1'),('req924', 'bot0', NULL, 'cat0'),('req931', 'bot1', NULL, 'cat1'),('req938', 'bot2', NULL, 'cat0'),('req945', 'bot0', NULL, NULL),('req952', 'bot1', NULL, 'cat0'),('req959', 'bot2', NULL, 'cat1'),('req966', 'bot0', NULL, 'cat0'),('req973', 'bot1', NULL, 'cat1'),('req980', 'bot2', NULL, NULL),('req987', 'bot0', NULL, 'cat1'),('req994', 'bot1', NULL, 'cat0'),('req1001', 'bot2', NULL, 'cat1'),('req1008', 'bot0', NULL, 'cat0'),('req1015', 'bot1', NULL, NULL),('req1022', 'bot2', NULL, 'cat0'),('req1029', 'bot0', NULL, 'cat1'),('req1036', 'bot1', NULL, 'cat0'),('req1043', 'bot2', NULL, 'cat1'),('req1050', 'bot0', NULL, NULL),('req1057', 'bot1', NULL, 'cat1'),('req1064', 'bot2', NULL, 'cat0'),('req1071', 'bot0', NULL, 'cat1'),('req1078', 'bot1', NULL, 'cat0'),('req1085', 'bot2', NULL, NULL),('req1092', 'bot0', NULL, 'cat0'),('req1099', 'bot1', NULL, 'cat1'),('req1106', 'bot2', NULL, 'cat0'),('req1113', 'bot0', NULL, 'cat1'),('req1120', 'bot1', NULL, NULL),('req1127', 'bot2', NULL, 'cat1'),('req1134', 'bot0', NULL, 'cat0'),('req1141', 'bot1', NULL, 'cat1'),('req1148', 'bot2', NULL, 'cat0'),('req1155', 'bot0', NULL, NULL),('req1162', 'bot1', NULL, 'cat0'),('req1169', 'bot2', NULL, 'cat1'),('req1176', 'bot0', NULL, 'cat0'),('req1183', 'bot1', NULL, 'cat1'),('req1190', 'bot2', NULL, NULL),('req1197', 'bot0', NULL, 'cat1'),('req1204', 'bot1', NULL, 'cat0'),('req1211', 'bot2', NULL, 'cat1'),('req1218', 'bot0', NULL, 'cat0'),('req1225', 'bot1', NULL, NULL),('req1232', 'bot2', NULL, 'cat0'),('req1239', 'bot0', NULL, 'cat1'),('req1246', 'bot1', NULL, 'cat0'),('req1253', 'bot2', NULL, 'cat1'),('req1260', 'bot0', NULL, NULL),('req1267', 'bot1', NULL, 'cat1'),('req1274', 'bot2', NULL, 'cat0'),('req1281', 'bot0', NULL, 'cat1'),('req1288', 'bot1', NULL, 'cat0'),('req1295', 'bot2', NULL, NULL),('req1302', 'bot0', NULL, 'cat0'),('req1309', 'bot1', NULL, 'cat1'),('req1316', 'bot2', NULL, 'cat0'),('req1323', 'bot0', NULL, 'cat1'),('req1330', 'bot1', NULL, NULL),('req1337', 'bot2', NULL, 'cat1'),('req1344', 'bot0', NULL, 'cat0'),('req1351', 'bot1', NULL, 'cat1'),('req1358', 'bot2', NULL, 'cat0'),('req1365', 'bot0', NULL, NULL),('req1372', 'bot1', NULL, 'cat0'),('req1379', 'bot2', NULL, 'cat1'),('req1386', 'bot0', NULL, 'cat0'),('req1393', 'bot1', NULL, 'cat1'),('req1400', 'bot2', NULL, NULL),('req1407', 'bot0', NULL, 'cat1'),('req1414', 'bot1', NULL, 'cat0'),('req1421', 'bot2', NULL, 'cat1'),('req1428', 'bot0', NULL, 'cat0'),('req1435', 'bot1', NULL, NULL),('req1442', 'bot2', NULL, 'cat0'),('req1449', 'bot0', NULL, 'cat1'),('req1456', 'bot1', NULL, 'cat0'),('req1463', 'bot2', NULL, 'cat1'),('req1470', 'bot0', NULL, NULL),('req1477', 'bot1', NULL, 'cat1'),('req1484', 'bot2', NULL, 'cat0'),('req1491', 'bot0', NULL, 'cat1'),('req1498', 'bot1', NULL, 'cat0'),('req1505', 'bot2', NULL, NULL),('req1512', 'bot0', NULL, 'cat0'),('req1519', 'bot1', NULL, 'cat1'),('req1526', 'bot2', NULL, 'cat0'),('req1533', 'bot0', NULL, 'cat1'),('req1540', 'bot1', NULL, NULL),('req1547', 'bot2', NULL, 'cat1'),('req1554', 'bot0', NULL, 'cat0'),('req1561', 'bot1', NULL, 'cat1'),('req1568', 'bot2', NULL, 'cat0'),('req1575', 'bot0', NULL, NULL),('req1582', 'bot1', NULL, 'cat0'),('req1589', 'bot2', NULL, 'cat1'),('req1596', 'bot0', NULL, 'cat0'),('req1603', 'bot1', NULL, 'cat1'),('req1610', 'bot2', NULL, NULL),('req1617', 'bot0', NULL, 'cat1'),('req1624', 'bot1', NULL, 'cat0'),('req1631', 'bot2', NULL, 'cat1'),('req1638', 'bot0', NULL, 'cat0'),('req1645', 'bot1', NULL, NULL),('req1652', 'bot2', NULL, 'cat0'),('req1659', 'bot0', NULL, 'cat1'),('req1666', 'bot1', NULL, 'cat0'),('req1673', 'bot2', NULL, 'cat1'),('req1680', 'bot0', NULL, NULL),('req1687', 'bot1', NULL, 'cat1'),('req1694', 'bot2', NULL, 'cat0'),('req1701', 'bot0', NULL, 'cat1'),('req1708', 'bot1', NULL, 'cat0'),('req1715', 'bot2', NULL, NULL),('req1722', 'bot0', NULL, 'cat0'),('req1729', 'bot1', NULL, 'cat1'),('req1736', 'bot2', NULL, 'cat0'),('req1743', 'bot0', NULL, 'cat1'),('req1750', 'bot1', NULL, NULL),('req1757', 'bot2', NULL, 'cat1'),('req1764', 'bot0', NULL, 'cat0'),('req1771', 'bot1', NULL, 'cat1'),('req1778', 'bot2', NULL, 'cat0'),('req1785', 'bot0', NULL, NULL),('req1792', 'bot1', NULL, 'cat0'),('req1799', 'bot2', NULL, 'cat1'),('req1806', 'bot0', NULL, 'cat0'),('req1813', 'bot1', NULL, 'cat1'),('req1820', 'bot2', NULL, NULL),('req1827', 'bot0', NULL, 'cat1'),('req1834', 'bot1', NULL, 'cat0'),('req1841', 'bot2', NULL, 'cat1'),('req1848', 'bot0', NULL, 'cat0'),('req1855', 'bot1', NULL, NULL),('req1862', 'bot2', NULL, 'cat0'),('req1869', 'bot0', NULL, 'cat1'),('req1876', 'bot1', NULL, 'cat0'),('req1883', 'bot2', NULL, 'cat1'),('req1890', 'bot0', NULL, NULL),('req1897', 'bot1', NULL, 'cat1'),('req1904', 'bot2', NULL, 'cat0'),('req1911', 'bot0', NULL, 'cat1'),('req1918', 'bot1', NULL, 'cat0'),('req1925', 'bot2', NULL, NULL),('req1932', 'bot0', NULL, 'cat0'),('req1939', 'bot1', NULL, 'cat1'),('req1946', 'bot2', NULL, 'cat0'),('req1953', 'bot0', NULL, 'cat1'),('req1960', 'bot1', NULL, NULL),('req1967', 'bot2', NULL, 'cat1'),('req1974', 'bot0', NULL, 'cat0'),('req1981', 'bot1', NULL, 'cat1'),('req1988', 'bot2', NULL, 'cat0'),('req1995', 'bot0', NULL, NULL),('req2002', 'bot1', NULL, 'cat0'),('req2009', 'bot2', NULL, 'cat1'),('req2016', 'bot0', NULL, 'cat0'),('req2023', 'bot1', NULL, 'cat1'),('req2030', 'bot2', NULL, NULL),('req2037', 'bot0', NULL, 'cat1'),('req2044', 'bot1', NULL, 'cat0'),('req2051', 'bot2', NULL, 'cat1'),('req2058', 'bot0', NULL, 'cat0'),('req2065', 'bot1', NULL, NULL),('req2072', 'bot2', NULL, 'cat0'),('req2079', 'bot0', NULL, 'cat1'),('req2086', 'bot1', NULL, 'cat0'),('req2093', 'bot2', NULL, 'cat1'),('req2100', 'bot0', NULL, NULL),('req2107', 'bot1', NULL, 'cat1'),('req2114', 'bot2', NULL, 'cat0'),('req2121', 'bot0', NULL, 'cat1'),('req2128', 'bot1', NULL, 'cat0'),('req2135', 'bot2', NULL, NULL),('req2142', 'bot0', NULL, 'cat0'),('req2149', 'bot1', NULL, 'cat1'),('req2156', 'bot2', NULL, 'cat0'),('req2163', 'bot0', NULL, 'cat1'),('req2170', 'bot1', NULL, NULL),('req2177', 'bot2', NULL, 'cat1'),('req2184', 'bot0', NULL, 'cat0'),('req2191', 'bot1', NULL, 'cat1'),('req2198', 'bot2', NULL, 'cat0'),('req2205', 'bot0', NULL, NULL),('req2212', 'bot1', NULL, 'cat0'),('req2219', 'bot2', NULL, 'cat1'),('req2226', 'bot0', NULL, 'cat0'),('req2233', 'bot1', NULL, 'cat1'),('req2240', 'bot2', NULL, NULL),('req2247', 'bot0', NULL, 'cat1'),('req2254', 'bot1', NULL, 'cat0'),('req2261', 'bot2', NULL, 'cat1'),('req2268', 'bot0', NULL, 'cat0'),('req2275', 'bot1', NULL, NULL),('req2282', 'bot2', NULL, 'cat0'),('req2289', 'bot0', NULL, 'cat1'),('req2296', 'bot1', NULL, 'cat0'),('req2303', 'bot2', NULL, 'cat1'),('req2310', 'bot0', NULL, NULL),('req2317', 'bot1', NULL, 'cat1'),('req2324', 'bot2', NULL, 'cat0'),('req2331', 'bot0', NULL, 'cat1'),('req2338', 'bot1', NULL, 'cat0'),('req2345', 'bot2', NULL, NULL),('req2352', 'bot0', NULL, 'cat0'),('req2359', 'bot1', NULL, 'cat1'),('req2366', 'bot2', NULL, 'cat0'),('req2373', 'bot0', NULL, 'cat1'),('req2380', 'bot1', NULL, NULL),('req2387', 'bot2', NULL, 'cat1'),('req2394', 'bot0', NULL, 'cat0'),('req2401', 'bot1', NULL, 'cat1'),('req2408', 'bot2', NULL, 'cat0'),('req2415', 'bot0', NULL, NULL),('req2422', 'bot1', NULL, 'cat0'),('req2429', 'bot2', NULL, 'cat1'),('req2436', 'bot0', NULL, 'cat0'),('req2443', 'bot1', NULL, 'cat1'),('req2450', 'bot2', NULL, NULL),('req2457', 'bot0', NULL, 'cat1'),('req2464', 'bot1', NULL, 'cat0'),('req2471', 'bot2', NULL, 'cat1'),('req2478', 'bot0', NULL, 'cat0'),('req2485', 'bot1', NULL, NULL),('req2492', 'bot2', NULL, 'cat0'),('req2499', 'bot0', NULL, 'cat1'),('req2506', 'bot1', NULL, 'cat0'),('req2513', 'bot2', NULL, 'cat1'),('req2520', 'bot0', NULL, NULL),('req2527', 'bot1', NULL, 'cat1'),('req2534', 'bot2', NULL, 'cat0'),('req2541', 'bot0', NULL, 'cat1'),('req2548', 'bot1', NULL, 'cat0'),('req2555', 'bot2', NULL, NULL),('req2562', 'bot0', NULL, 'cat0'),('req2569', 'bot1', NULL, 'cat1'),('req2576', 'bot2', NULL, 'cat0'),('req2583', 'bot0', NULL, 'cat1'),('req2590', 'bot1', NULL, NULL),('req2597', 'bot2', NULL, 'cat1'),('req2604', 'bot0', NULL, 'cat0'),('req2611', 'bot1', NULL, 'cat1'),('req2618', 'bot2', NULL, 'cat0'),('req2625', 'bot0', NULL, NULL),('req2632', 'bot1', NULL, 'cat0'),('req2639', 'bot2', NULL, 'cat1'),('req2646', 'bot0', NULL, 'cat0'),('req2653', 'bot1', NULL, 'cat1'),('req2660', 'bot2', NULL, NULL),('req2667', 'bot0', NULL, 'cat1'),('req2674', 'bot1', NULL, 'cat0'),('req2681', 'bot2', NULL, 'cat1'),('req2688', 'bot0', NULL, 'cat0'),('req2695', 'bot1', NULL, NULL),('req2702', 'bot2', NULL, 'cat0'),('req2709', 'bot0', NULL, 'cat1'),('req2716', 'bot1', NULL, 'cat0'),('req2723', 'bot2', NULL, 'cat1'),('req2730', 'bot0', NULL, NULL),('req2737', 'bot1', NULL, 'cat1'),('req2744', 'bot2', NULL, 'cat0'),('req2751', 'bot0', NULL, 'cat1'),('req2758', 'bot1', NULL, 'cat0'),('req2765', 'bot2', NULL, NULL),('req2772', 'bot0', NULL, 'cat0'),('req2779', 'bot1', NULL, 'cat1'),('req2786', 'bot2', NULL, 'cat0'),('req2793', 'bot0', NULL, 'cat1'),('req2800', 'bot1', NULL, NULL),('req2807', 'bot2', NULL, 'cat1'),('req2814', 'bot0', NULL, 'cat0'),('req2821', 'bot1', NULL, 'cat1'),('req2828', 'bot2', NULL, 'cat0'),('req2835', 'bot0', NULL, NULL),('req2842', 'bot1', NULL, 'cat0'),('req2849', 'bot2', NULL, 'cat1'),('req2856', 'bot0', NULL, 'cat0'),('req2863', 'bot1', NULL, 'cat1'),('req2870', 'bot2', NULL, NULL),('req2877', 'bot0', NULL, 'cat1'))AS nb(waf_req_id, bot_name, wellknown_bot_name, category)ON t.waf_req_id = nb.waf_req_id WHERE t.timestamp >= TIMESTAMPTZ '<date>' AND t.timestamp < TIMESTAMPTZ '<date>' AND t.waf_req_id IS NOT NULL AND nb.bot_name IS NOT NULL GROUP BY 1, 2, 3)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_nb_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(pop AS VARCHAR)AS pop, CAST(COUNT(*)AS BIGINT)AS requests, CAST(COUNT(*)FILTER(WHERE status >= 400 OR status = 0)AS BIGINT)AS errors, CAST(COUNT(*)FILTER(WHERE cache IN('HIT', 'HIT-STALE'))AS BIGINT)AS cache_hits, CAST(SUM(resp_bytes)AS BIGINT)AS bandwidth_bytes, CAST(approx_quantile(tcp_rtt, 0.5)AS DOUBLE)AS p50_rtt_us, CAST(approx_quantile(ttfb, 0.95)AS DOUBLE)AS p95_ttfb_ms FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>' AND pop IS NOT NULL AND pop != '' GROUP BY pop)TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_ph_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT CAST(pop AS VARCHAR)AS pop, CAST(SUM(requests)AS BIGINT)AS requests, CAST(SUM(errors)AS BIGINT)AS errors, CAST(SUM(cache_hits)AS BIGINT)AS cache_hits, CAST(SUM(bandwidth_bytes)AS BIGINT)AS bandwidth_bytes, CAST(SUM(p50_rtt_us * requests)/ NULLIF(SUM(requests), 0)AS DOUBLE)AS p50_rtt_us, CAST(SUM(p95_ttfb_ms * requests)/ NULLIF(SUM(requests), 0)AS DOUBLE)AS p95_ttfb_ms FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet', '<R>/rollups/hour_bundled/hour=<date>/pop_health.parquet'])GROUP BY pop)TO '<R>/rollups/day_bundled/day=<date>/.tmp_ph_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT TIMESTAMPTZ '<date>' AS hour_start, CAST(COUNT(*)AS BIGINT)AS requests, CAST(COUNT(*)FILTER(WHERE cache IN('HIT', 'HIT-STALE', 'HIT-CLUSTER'))AS BIGINT)AS hit_requests, CAST(COUNT(*)FILTER(WHERE cache = 'MISS')AS BIGINT)AS miss_requests, CAST(COUNT(*)FILTER(WHERE cache = 'PASS')AS BIGINT)AS pass_requests, CAST(COUNT(*)FILTER(WHERE cache = 'SYNTH')AS BIGINT)AS synth_requests, CAST(COUNT(*)FILTER(WHERE cache IN('MISS', 'PASS', 'SYNTH', 'ERROR'))AS BIGINT)AS origin_requests, CAST(COALESCE(SUM(resp_bytes)FILTER(WHERE cache IN('HIT', 'HIT-STALE', 'HIT-CLUSTER')), 0)AS BIGINT)AS bandwidth_saved_bytes, CAST(COALESCE(SUM(resp_bytes), 0)AS BIGINT)AS total_bandwidth_bytes, CAST(COUNT(*)FILTER(WHERE is_shield = true AND cache IN('HIT', 'HIT-STALE', 'HIT-CLUSTER'))AS BIGINT)AS shield_hit_requests, CAST(COUNT(*)FILTER(WHERE is_shield = true)AS BIGINT)AS shield_total_requests, CAST(COUNT(*)FILTER(WHERE waf = 1 AND waf_resp = 406)AS BIGINT)AS threats_blocked, CAST(COALESCE(SUM(elapsed)FILTER(WHERE cache IN('HIT', 'HIT-STALE', 'HIT-CLUSTER')), 0.0)AS DOUBLE)AS hit_elapsed_sum, CAST(COUNT(elapsed)FILTER(WHERE cache IN('HIT', 'HIT-STALE', 'HIT-CLUSTER'))AS BIGINT)AS hit_elapsed_count, CAST(COALESCE(SUM(elapsed)FILTER(WHERE cache = 'MISS'), 0.0)AS DOUBLE)AS miss_elapsed_sum, CAST(COUNT(elapsed)FILTER(WHERE cache = 'MISS')AS BIGINT)AS miss_elapsed_count FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>')TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_ov_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT TIMESTAMPTZ '<date>' AS hour_start, CAST(COUNT(*)AS BIGINT)AS requests, CAST(COUNT(*)FILTER(WHERE protocol = 'HTTP/3')AS BIGINT)AS http3_requests, CAST(COUNT(*)FILTER(WHERE protocol = 'HTTP/2')AS BIGINT)AS h2_requests, CAST(COUNT(*)FILTER(WHERE protocol = 'HTTP/1.1')AS BIGINT)AS h11_requests, CAST(COUNT(*)FILTER(WHERE protocol NOT IN('HTTP/3', 'HTTP/2', 'HTTP/1.1'))AS BIGINT)AS other_proto_requests, CAST(COUNT(*)FILTER(WHERE is_ssl = true)AS BIGINT)AS tls_requests, CAST(COUNT(*)FILTER(WHERE ipv6 = true)AS BIGINT)AS ipv6_requests FROM logs_svc_golden WHERE timestamp >= TIMESTAMPTZ '<date>' AND timestamp < TIMESTAMPTZ '<date>')TO '<R>/rollups/hour_bundled/hour=<date>/.tmp_ns_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT asn, CAST(SUM(requests)AS BIGINT)AS requests, CAST(SUM(rtt_count)AS BIGINT)AS rtt_count, CAST(SUM(p95_us * rtt_count)/ NULLIF(SUM(rtt_count), 0)AS DOUBLE)AS p95_us, CAST(SUM(p99_us * rtt_count)/ NULLIF(SUM(rtt_count), 0)AS DOUBLE)AS p99_us FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_rtt.parquet'])GROUP BY asn)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nr_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT asn, c_speed, CAST(SUM(count)AS BIGINT)AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_speed.parquet'])GROUP BY asn, c_speed)TO '<R>/rollups/day_bundled/day=<date>/.tmp_ns_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
-  "COPY(SELECT bot_name, category, CAST(SUM(count)AS BIGINT)AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet'])GROUP BY bot_name, category)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nb_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
+  "COPY(SELECT bot_name, wellknown_bot_name, category, CAST(SUM(count)AS BIGINT)AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots.parquet'])GROUP BY bot_name, wellknown_bot_name, category)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nb_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT bucket, CAST(SUM(count)AS BIGINT)AS count, CAST(MIN(min_ttl)AS BIGINT)AS min_ttl FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet', '<R>/rollups/hour_bundled/hour=<date>/perf_ttl_dist.parquet'])GROUP BY bucket)TO '<R>/rollups/day_bundled/day=<date>/.tmp_pd_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT bucket, CAST(SUM(count)AS BIGINT)AS count, CAST(MIN(min_val)AS BIGINT)AS min_val FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_conn_reuse.parquet'])GROUP BY bucket)TO '<R>/rollups/day_bundled/day=<date>/.tmp_sd_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT bucket, CAST(SUM(count)AS BIGINT)AS count, CAST(MIN(min_val)AS BIGINT)AS min_val FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet', '<R>/rollups/hour_bundled/hour=<date>/security_req_size.parquet'])GROUP BY bucket)TO '<R>/rollups/day_bundled/day=<date>/.tmp_sd_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT bucket_ts, CAST(SUM(ttfb_count)AS BIGINT)AS ttfb_count, SUM(ttfb_p50_us * ttfb_count)/ NULLIF(SUM(ttfb_count), 0)AS ttfb_p50_us, SUM(ttfb_p95_us * ttfb_count)/ NULLIF(SUM(ttfb_count), 0)AS ttfb_p95_us, SUM(ttfb_p99_us * ttfb_count)/ NULLIF(SUM(ttfb_count), 0)AS ttfb_p99_us, CAST(SUM(ttlb_count)AS BIGINT)AS ttlb_count, SUM(ttlb_p50_us * ttlb_count)/ NULLIF(SUM(ttlb_count), 0)AS ttlb_p50_us, SUM(ttlb_p95_us * ttlb_count)/ NULLIF(SUM(ttlb_count), 0)AS ttlb_p95_us, SUM(ttlb_p99_us * ttlb_count)/ NULLIF(SUM(ttlb_count), 0)AS ttlb_p99_us FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/origin_latency_ts.parquet'])GROUP BY bucket_ts)TO '<R>/rollups/day_bundled/day=<date>/.tmp_olts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
+  "COPY(SELECT bucket_ts, bot_name, CAST(SUM(count)AS BIGINT)AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/ngwaf_bots_ts.parquet'])GROUP BY bucket_ts, bot_name)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nbts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT bucket_ts, bot_type, CAST(SUM(count)AS BIGINT)AS count FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet', '<R>/rollups/hour_bundled/hour=<date>/verified_bots_ts.parquet'])GROUP BY bucket_ts, bot_type)TO '<R>/rollups/day_bundled/day=<date>/.tmp_vbts_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT dim_val , CAST(SUM(requests)AS BIGINT)AS requests, CAST(SUM(p50_us * requests)/ NULLIF(SUM(requests), 0)AS DOUBLE)AS p50_us FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_asn.parquet'])GROUP BY dim_val ORDER BY requests DESC LIMIT 100)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nq_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",
   "COPY(SELECT dim_val , CAST(SUM(requests)AS BIGINT)AS requests, CAST(SUM(p50_us * requests)/ NULLIF(SUM(requests), 0)AS DOUBLE)AS p50_us FROM read_parquet(['<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet', '<R>/rollups/hour_bundled/hour=<date>/network_quality_country.parquet'])GROUP BY dim_val ORDER BY requests DESC LIMIT 100)TO '<R>/rollups/day_bundled/day=<date>/.tmp_nq_<id>.parquet'(FORMAT PARQUET, COMPRESSION ZSTD)",

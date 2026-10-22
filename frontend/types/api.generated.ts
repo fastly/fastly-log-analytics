@@ -7378,6 +7378,10 @@ export interface components {
             ngwaf_bots?: number | null;
             /** Ngwaf Bots Days */
             ngwaf_bots_days?: number | null;
+            /** Ngwaf Bots Ts */
+            ngwaf_bots_ts?: number | null;
+            /** Ngwaf Bots Ts Days */
+            ngwaf_bots_ts_days?: number | null;
             /** Wellknown Bots */
             wellknown_bots?: number | null;
             /** Overview */

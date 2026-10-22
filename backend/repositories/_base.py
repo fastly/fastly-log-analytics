@@ -4138,6 +4138,195 @@ class QueryRunner:
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
         return [{"name": bn, "category": cat, "request_count": c} for (bn, cat), c in ranked]
 
+    def try_ngwaf_verified_bots_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots`` panel
+        from per-hour/per-day ``ngwaf_bots.parquet`` files + a live active-hour
+        top-up over the direct buffer/hourly temp.
+
+        Counts SUM exactly across hours — no ``_approx`` flag. Pre-rebundle
+        3-column ``ngwaf_bots.parquet`` files (missing ``wellknown_bot_name``,
+        Trap #24) are detected via footer schema inspection and return ``None``
+        so the caller falls back to the live temp scan until backfilled.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        import pyarrow.parquet as pq
+
+        from backend.core.rollups._common import NGWAF_BOTS_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        try:
+            for probe_path in (rollup_paths[0], rollup_paths[-1]):
+                if "wellknown_bot_name" not in pq.read_schema(probe_path).names:
+                    return None
+        except Exception:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        sql = (
+            f"SELECT bot_name, wellknown_bot_name, category, CAST(SUM(count) AS BIGINT) AS c "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"GROUP BY bot_name, wellknown_bot_name, category"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
+        except duckdb.Error as e:
+            _logger.debug("[ngwaf_verified_bots_rollup] read failed, falling back: %s", e)
+            return None
+
+        counts: dict[tuple[str | None, str | None, str | None], int] = {}
+        for bot_name, wellknown_bot_name, category, cnt in rows:
+            key = (bot_name, wellknown_bot_name, category)
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = self.get_schema_cols()
+            if "waf_req_id" in cols:
+                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
+                    try:
+                        live_q = (
+                            f"SELECT nb.bot_name, nb.wellknown_bot_name, nb.category, "
+                            f"       CAST(COUNT(*) AS BIGINT) AS c "
+                            f'FROM "{tmp}" t '
+                            f"INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id) "
+                            f"WHERE nb.bot_name IS NOT NULL "
+                            f"GROUP BY 1, 2, 3"
+                        )
+                        for bot_name, wellknown_bot_name, category, cnt in self.execute(live_q).fetchall():
+                            key = (bot_name, wellknown_bot_name, category)
+                            counts[key] = counts.get(key, 0) + int(cnt or 0)
+                    except duckdb.Error as e:
+                        _logger.debug("[ngwaf_verified_bots_rollup] live top-up failed (skipped): %s", e)
+                    finally:
+                        self.release_active_direct_temp(tmp)
+
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        return [
+            {
+                "bot_name": bn,
+                "wellknown_bot_name": wk,
+                "category": cat,
+                "request_count": c,
+            }
+            for (bn, wk, cat), c in ranked
+        ]
+
+    def try_ngwaf_verified_bots_ts_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        bucket_seconds: int,
+        has_filters: bool,
+    ) -> list[tuple] | None:
+        """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots_ts`` panel
+        from minute-granular ``ngwaf_bots_ts.parquet`` files + a live
+        active-hour top-up over the direct buffer/hourly temp.
+
+        Re-bucketing from stored 1-minute granularity is exact whenever
+        ``bucket_seconds`` is a whole number of minutes. Counts SUM exactly
+        across hours — no ``_approx`` flag. Returns ``[(bucket_ts, bot_name,
+        count), ...]`` ordered by ``(bucket_ts, bot_name)``, or ``None`` on
+        any eligibility miss / read error.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.rollups._common import NGWAF_BOTS_TS_BUNDLE_FILENAME
+
+        if has_filters or not start_time or not end_time:
+            return None
+        try:
+            n = int(bucket_seconds)
+        except (TypeError, ValueError):
+            return None
+        if n < 60 or n % 60 != 0:
+            return None
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_TS_BUNDLE_FILENAME, skip_partial_start=False)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+        st_iso = st.isoformat()
+        et_iso = et.isoformat()
+        sql = (
+            f"SELECT time_bucket(INTERVAL '{n} seconds', bucket_ts) AS bucket, "
+            f"       bot_name, "
+            f"       CAST(SUM(count) AS BIGINT) AS c "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"WHERE bucket_ts >= TIMESTAMPTZ '{st_iso}' AND bucket_ts < TIMESTAMPTZ '{et_iso}' "
+            f"GROUP BY 1, 2"
+        )
+        try:
+            rows = self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
+        except duckdb.Error as e:
+            _logger.debug("[ngwaf_verified_bots_ts_rollup] read failed, falling back: %s", e)
+            return None
+
+        counts: dict[tuple[Any, str], int] = {}
+        for bucket, bot_name, cnt in rows:
+            key = (bucket, str(bot_name))
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = self.get_schema_cols()
+            if "waf_req_id" in cols:
+                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
+                    try:
+                        live_q = (
+                            f"SELECT time_bucket(INTERVAL '{n} seconds', t.timestamp) AS bucket, "
+                            f"       nb.bot_name, "
+                            f"       CAST(COUNT(*) AS BIGINT) AS c "
+                            f'FROM "{tmp}" t '
+                            f"INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id) "
+                            f"WHERE nb.bot_name IS NOT NULL "
+                            f"GROUP BY 1, 2"
+                        )
+                        for bucket, bot_name, cnt in self.execute(live_q).fetchall():
+                            key = (bucket, str(bot_name))
+                            counts[key] = counts.get(key, 0) + int(cnt or 0)
+                    except duckdb.Error as e:
+                        _logger.debug("[ngwaf_verified_bots_ts_rollup] live top-up failed (skipped): %s", e)
+                    finally:
+                        self.release_active_direct_temp(tmp)
+
+        return [(b, bn, c) for (b, bn), c in sorted(counts.items())]
+
     def try_security_top_ips_from_rollup(
         self,
         start_time: str | None,
