@@ -5,15 +5,19 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from backend.repositories._base import _safe_table
+from backend.repositories._base import QueryRunner, _safe_table
 from backend.utils import bot_sources
+from backend.utils.date_utils import floor_to_hour
 from tests.conftest import MOCK_SERVICE_ID
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 @pytest.fixture
 def observation_request(in_memory_duckdb, test_service_source, tmp_path, monkeypatch) -> dict:
+    in_memory_duckdb.execute("SET TimeZone = 'UTC'")
     test_service_source["_cache_dir_override"] = str(tmp_path / "request-cache")
+    # Fixture rows exist only in the view, not the live-hour buffer or lake.
+    monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
     source_dir = tmp_path / "bot-sources"
     source_dir.mkdir()
     (source_dir / "well-known-bots.json").write_text(
@@ -32,8 +36,11 @@ def observation_request(in_memory_duckdb, test_service_source, tmp_path, monkeyp
     )
     monkeypatch.setattr(bot_sources, "_CACHE_DIR", source_dir)
     logs = generate_mock_logs(test_service_source, num_logs=40, hours_ago=1)
-    for log in logs:
+    seed_time = datetime.now(UTC)
+    closed_time = floor_to_hour(seed_time) - timedelta(microseconds=1)
+    for index, log in enumerate(logs):
         log.update(
+            timestamp=(seed_time - timedelta(microseconds=1) if index % 2 else closed_time).isoformat(),
             ua="Googlebot/2.1",
             tcp_rtt=1000,
             asn=15169,
