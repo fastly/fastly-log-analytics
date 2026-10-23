@@ -264,6 +264,44 @@ def _update_local_config(service_id: str, mutate: Callable[[dict], None]) -> Non
         logger.info("Skipped updating read-only config cache: %s", e)
 
 
+_FORMAT_KEY_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*:')
+
+
+def _format_field_names(endpoints: list[LoggingEndpoint]) -> set[str]:
+    return {m for ep in endpoints if ep.format_string for m in _FORMAT_KEY_RE.findall(ep.format_string)}
+
+
+def _record_reconcile_audit(
+    service_id: str,
+    diff: DiffResult,
+    current_endpoints: list[LoggingEndpoint],
+    desired_endpoints: list[LoggingEndpoint],
+    version: int,
+) -> None:
+    """Write a ``log_format_change`` audit row for an activated reconcile.
+
+    Failure is logged, never raised: the new version is already live, so a
+    missing history row must not turn a successful reconcile into an error.
+    """
+    before = _format_field_names(current_endpoints)
+    after = _format_field_names(desired_endpoints)
+    details = {
+        "source": "reconciler",
+        "version": version,
+        "groups_before": [],
+        "groups_after": [],
+        "fields_added": sorted(after - before),
+        "fields_removed": sorted(before - after),
+        "changes": diff.summary(),
+    }
+    try:
+        from backend.core import metadata as metadata_db
+
+        metadata_db.record_audit(service_id, "log_format_change", details, actor="reconciler")
+    except Exception:
+        logger.warning("Failed to record reconcile audit for %s", service_id, exc_info=True)
+
+
 def reconcile_vcl_state(
     service_id: str,
     token: str,
@@ -448,6 +486,7 @@ def reconcile_vcl_state(
                         status_cb("⏳ Activating draft version...")
                     _activate_draft(service_id, token, draft_version)
                     result.activated_version = draft_version
+                    _record_reconcile_audit(service_id, diff, current_endpoints, desired_endpoints_list, draft_version)
 
                     # Step 8.5: Upload RUM tracker JS now that the just-
                     # activated VCL actually serves the route it depends on
