@@ -74,16 +74,16 @@ The system supports three distinct operational personas across the Dashboard:
 - **Serving Path:** Pooled DuckDB connection (`DUCKDB_POOL_MAX_SIZE = 8`) executing queries over the session-scoped `logs` view.
 - **Data Layers:** Dynamically stitches local transient Parquet buffers (`cache/{bucket}/**/*.parquet`) with committed DuckLake tables.
 - **Rollup & Fallback Strategy:**
-  - For long-horizon windows (`7d` and `30d`), the backend queries precomputed Top-N Parquet rollups (`rollups/` directory) first for maximum speed.
-  - If rollups are not yet compiled, missing, or partially behind, the backend **transparently falls back to scanning raw Parquet buffers and DuckLake tables**, logging an attributed notice in `telemetry_queries` without failing or interrupting the user experience.
-- **Reader Coverage Evidence (partial):** Optional component-owned `_reader_coverage` records expose the connection-request histogram and NGWAF bot readers' actual 2-hour eligibility floor, 50% closed-hour planning threshold, selected day/hour coverage and live-top-up outcome. A planned read, a served result or file presence is not proof of complete retained history. Cached observations are historical; missing top-N/count/time-series/UA evidence stays incomplete. See [the measurement contract](../runbooks/section-sweep-measurements.md#reader-coverage-observations--partial-implementation).
+  - Unfiltered requests use reader-specific rollup policies when the local tree is available and ready; there is no universal 48-hour threshold.
+  - Scalar count/time-series and histogram readers can refuse a plan and fall back to raw SQL. Top-N merges selected rollups with active-hour data and bounded gap healing; older gaps and compacted boundary hours can remain partial. Coverage observations expose that existing posture rather than asserting that every missing file triggers a complete raw fallback.
+- **Reader Coverage Evidence:** Component-owned `_reader_coverage` records expose each reader's actual policy: connection histogram/NGWAF use a 2-hour floor and 50% closed-hour threshold; scalar count/time-series retain daily-prefix/trailing-hour decisions; top-N/UA record any-field presence and bounded healing without claiming all-field completeness. Optional `_history` separates cached/live extents and raw/temp/rollup count provenance. Neither served results nor file presence proves complete retained history. Cached observations remain historical. See [the measurement contract](../runbooks/section-sweep-measurements.md#reader-coverage-observations--partial-implementation).
 - **Stale View Handling:** Uses `execute_with_stale_view_retry` to recover from transient file swaps during active ingestion. Displays calm "Preparing your data" status rather than error toasts.
 
 ### High-Scale Architecture (Elevation K8s)
-- **Serving Path:** Ephemeral in-memory DuckDB instance or ClickHouse serving plane (per ADR-20/21).
-- **Data Layers:** Reads directly from committed DuckLake tables in Object Storage backed by PostgreSQL catalog metadata; local Parquet buffer is bypassed.
-- **Rollups & Pre-aggregations:** 7d/30d queries execute against precomputed Top-N rollups or ClickHouse materialized aggregates to maintain sub-second response times under 5M RPS load, with transparent raw MergeTree fallback if aggregates are compiling.
-- **Worker Separation:** Serving pod handles read-only queries; background Celery workers handle log discovery, conversion, and commits via Redis/PostgreSQL ledger.
+- **Serving Path:** The explicitly bound High-Scale service reads ClickHouse through the native reader (ADR-21). The rejected ADR-20 diagnostic index is not the dashboard serving path.
+- **Data Layers:** Published request facts and projections serve queries; verified FOS archive manifests remain the durable reconstruction authority. Standard-mode local buffers are not opened by this reader.
+- **Projections & Facts:** Unfiltered summaries use eligible projections; active filters and second-level charts use facts. Section/query metadata records actual dispatch. ClickHouse failures propagate through the error envelope rather than silently returning empty data or switching to DuckLake.
+- **Worker Separation:** Dedicated High-Scale workers archive and publish ingest batches; the serving tier handles analytical requests. Instrumentation and deployment smoke checks do not qualify production capacity or long-window latency.
 
 ---
 
@@ -114,6 +114,8 @@ The system supports three distinct operational personas across the Dashboard:
     - `map_data`: Array of `{ country: ISO_CODE, count: int }`.
     - `total_rows`: Filtered row count.
     - `total_rows_total`: Total unfiltered row count for period.
+    - `_section_timings`: Component-owned wall-time sections; High-Scale sections carry service/request/section correlation and explicit projection/fact source. Client query phases are not server CPU or additive wall time.
+    - `_reader_coverage`, `_history`: Optional planning/history observations with provenance and explicit unknowns; not a certification of the requested window.
     - `interval`, `metric`, `where_clause`.
   - `top_bots`:
     - `bots`: Array of Fastly bot categories `{ id, name, request_count }`.

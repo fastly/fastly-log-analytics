@@ -8,12 +8,12 @@ column is missing; ClickHouse failures propagate rather than becoming empty char
 
 from __future__ import annotations
 
-import contextvars
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._projection_utils import range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.cmcd import CmcdRequest
@@ -228,17 +228,22 @@ def _cmcd_aggregates_compute(
     def wanted(name: str) -> bool:
         return sections is None or name in sections
 
-    probe = execute(
-        "/* cmcd:probe */ SELECT count() AS events, uniqExact(sid) AS sessions, "
-        "countIf(bl IS NOT NULL) AS has_bl, countIf(br IS NOT NULL) AS has_br, countIf(bs IS NOT NULL) AS has_bs, "
-        "countIf(mtp IS NOT NULL) AS has_mtp, countIf(ot != '') AS has_ot, countIf(sf != '') AS has_sf, "
-        "countIf(su IS NOT NULL) AS has_su, countIf(tb IS NOT NULL) AS has_tb, countIf(cid != '') AS has_cid, "
-        "countIf(country != '') AS has_country, countIf(asn IS NOT NULL) AS has_asn "
-        f"FROM ({events})",
-        params,
+    trace = HighScaleSections(service.service_id, "cmcd")
+    probe = trace.run(
+        "probe",
+        lambda: execute(
+            "/* cmcd:probe */ SELECT count() AS events, uniqExact(sid) AS sessions, "
+            "countIf(bl IS NOT NULL) AS has_bl, countIf(br IS NOT NULL) AS has_br, countIf(bs IS NOT NULL) AS has_bs, "
+            "countIf(mtp IS NOT NULL) AS has_mtp, countIf(ot != '') AS has_ot, countIf(sf != '') AS has_sf, "
+            "countIf(su IS NOT NULL) AS has_su, countIf(tb IS NOT NULL) AS has_tb, countIf(cid != '') AS has_cid, "
+            "countIf(country != '') AS has_country, countIf(asn IS NOT NULL) AS has_asn "
+            f"FROM ({events})",
+            params,
+        ),
+        source="projected_fact",
     )[0]
     if not int(probe["events"] or 0):
-        return {"available": True, "has_data": False}
+        return {"available": True, "has_data": False, "section_timings": trace.timings()}
     has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
     has_country = bool(int(probe["has_country"] or 0))
     has_asn = bool(int(probe["has_asn"] or 0))
@@ -246,7 +251,7 @@ def _cmcd_aggregates_compute(
     video = _VIDEO if has_video_filter else "1"
 
     result: dict[str, Any] = {"available": True, "has_data": True}
-    tasks: list[Callable[[], dict[str, Any]]] = []
+    tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = []
 
     if wanted("overview"):
 
@@ -284,7 +289,7 @@ def _cmcd_aggregates_compute(
                 }
             }
 
-        tasks.append(_run_overview)
+        tasks.append(("overview", _run_overview))
 
     want_ts = {
         "sessions_ts": wanted("sessions_ts"),
@@ -389,7 +394,7 @@ def _cmcd_aggregates_compute(
                 )
             return ts_out
 
-        tasks.append(_run_timeseries)
+        tasks.append(("timeseries", _run_timeseries))
 
     if wanted("top_content") and has["cid"]:
 
@@ -417,7 +422,7 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_top_content)
+        tasks.append(("top_content", _run_top_content))
 
     if wanted("rebuffer_by_country") and has_country and has["bs"]:
 
@@ -444,7 +449,7 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_rebuffer_country)
+        tasks.append(("rebuffer_country", _run_rebuffer_country))
 
     if wanted("rebuffer_by_asn") and has_asn and has["bs"]:
 
@@ -474,7 +479,7 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_rebuffer_asn)
+        tasks.append(("rebuffer_asn", _run_rebuffer_asn))
 
     if wanted("object_type_dist") and has["ot"]:
 
@@ -490,7 +495,7 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_object_type)
+        tasks.append(("object_type", _run_object_type))
 
     if wanted("streaming_format_dist") and has["sf"]:
 
@@ -507,7 +512,7 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_streaming_format)
+        tasks.append(("streaming_format", _run_streaming_format))
 
     if wanted("session_duration_dist"):
 
@@ -530,14 +535,16 @@ def _cmcd_aggregates_compute(
                 ]
             }
 
-        tasks.append(_run_session_duration)
+        tasks.append(("session_duration", _run_session_duration))
 
     if len(tasks) == 1:
-        result.update(tasks[0]())
+        name, fn = tasks[0]
+        result.update(trace.run(name, fn, source="projected_fact"))
     elif tasks:
         with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, fn) for fn in tasks]
+            futures = [trace.submit(pool, name, fn, source="projected_fact") for name, fn in tasks]
             for fut in futures:
                 result.update(fut.result())
 
+    result["section_timings"] = trace.timings()
     return result

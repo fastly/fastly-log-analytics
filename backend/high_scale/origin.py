@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale import origin_facts
 from backend.high_scale._filters import (
     build_clickhouse_filters,
@@ -420,18 +420,25 @@ def aggregates(
     if "ip_health" in sections:
         tasks.append(("ip_health", _build_ip_health))
 
+    trace = HighScaleSections(service.service_id, "origin")
     result: dict[str, Any] = {}
     if len(tasks) <= 1:
         for key, fn in tasks:
-            result[key] = fn()
+            result[key] = trace.run(key, fn, source="projection" if facts is None else "fact")
     else:
         with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = [(key, pool.submit(contextvars.copy_context().run, fn)) for key, fn in tasks]
+            futures = [
+                (
+                    key,
+                    trace.submit(pool, key, fn, source="projection" if facts is None else "fact"),
+                )
+                for key, fn in tasks
+            ]
             for key, fut in futures:
                 result[key] = fut.result()
 
     summary = result.get("summary", _EMPTY["summary"])
-    return {"has_data": bool(summary.get("has_data")), **result}
+    return {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
 
 
 def _is_elevated(value_us: object, median_p95_ms: float) -> bool:

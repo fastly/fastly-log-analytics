@@ -26,6 +26,7 @@ import structlog
 
 from backend import config
 from backend.core.clickhouse_metrics import record_operation
+from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.query_registry import query_registry
 from backend.utils.telemetry import _QUERIES, get_queries, record_call
 
@@ -258,6 +259,16 @@ def _parameter(value: Any) -> str:
     raise ValueError("unsupported ClickHouse parameter type; use typed scalar parameters")
 
 
+def _server_elapsed_ms(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        elapsed = float(value) * 1000
+    except OverflowError:
+        return None
+    return elapsed if math.isfinite(elapsed) and elapsed >= 0 else None
+
+
 def _record_operation(**stats: Any) -> None:
     logger.info("clickhouse.operation", **stats)
     record_call(
@@ -409,6 +420,14 @@ class ClickHouseClient:
         acquired = False
         active = False
         stats: dict[str, Any] = {
+            **current_clickhouse_scope(),
+            "admission_wait_ms": None,
+            "network_ms": None,
+            "decode_ms": None,
+            "server_cpu_ms": None,
+            "server_elapsed_ms": None,
+            "server_elapsed_source": None,
+            "timing_kind": "client_operation_wall",
             "operation": operation,
             "query_id": query_id,
             "outcome": "error",
@@ -424,14 +443,21 @@ class ClickHouseClient:
                     # No client/connection handle: shared HTTP pools cannot be
                     # safely interrupted. Avoid SQL values in the monitor too.
                     registry_id = query_registry.register(
-                        "ClickHouse", f"ClickHouse {operation}; query_id={query_id}", con=None
+                        "ClickHouse",
+                        f"ClickHouse {operation}; query_id={query_id}",
+                        service_id=stats["service_id"],
+                        con=None,
                     )
                 except Exception:
                     logger.debug("_request: query_registry.register failed (ignored)", exc_info=True)
             with self._state_lock:
                 if self._closed:
                     raise ClickHouseError("client closed", query_id=query_id)
-            acquired = self._slots.acquire(timeout=self._settings.pool_timeout_s)
+            admission_started = time.perf_counter()
+            try:
+                acquired = self._slots.acquire(timeout=self._settings.pool_timeout_s)
+            finally:
+                stats["admission_wait_ms"] = (time.perf_counter() - admission_started) * 1000
             if not acquired:
                 raise ClickHouseError("pool acquisition timeout", query_id=query_id)
             with self._state_lock:
@@ -470,37 +496,50 @@ class ClickHouseClient:
                         "max_block_size": "2048",
                     }
                 )
-            response = self._http.post(
-                "/",
-                params=query,
-                # ClickHouse parses POST query parameters as multipart forms,
-                # not URL-encoded SQL bodies. Keep values out of URLs/logs.
-                files={key: (None, value) for key, value in data.items()} if data else None,
-                content=content,
-                timeout=httpx.Timeout(
-                    timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
-                ),
-            )
+            network_started = time.perf_counter()
+            try:
+                response = self._http.post(
+                    "/",
+                    params=query,
+                    # ClickHouse parses POST query parameters as multipart forms,
+                    # not URL-encoded SQL bodies. Keep values out of URLs/logs.
+                    files={key: (None, value) for key, value in data.items()} if data else None,
+                    content=content,
+                    timeout=httpx.Timeout(
+                        timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
+                    ),
+                )
+            finally:
+                stats["network_ms"] = (time.perf_counter() - network_started) * 1000
             stats["status_code"] = response.status_code
             stats["response_bytes"] = len(response.content)
             if not response.is_success or response.headers.get("X-ClickHouse-Exception-Code", "0") != "0":
                 raise ClickHouseError("server error", query_id=query_id, status_code=response.status_code)
-            result = []
-            if response.content.strip():
-                payload = response.json()
-                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                    raise ValueError("invalid response shape")
-                result = payload["data"]
-                if not all(isinstance(row, dict) for row in result):
-                    raise ValueError("invalid row shape")
-                summary = payload.get("statistics") or {}
-                if isinstance(summary, dict):
-                    stats["rows_read"] = _safe_count(summary.get("rows_read"))
-                    stats["bytes_read"] = _safe_count(summary.get("bytes_read"))
-            elif data and re.match(r"\s*(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN|EXISTS)\b", data["query"], re.IGNORECASE):
-                raise ValueError("missing query response")
-            if operation == "health" and result != [{"ok": 1}]:
-                raise ValueError("invalid health response")
+            decode_started = time.perf_counter()
+            try:
+                result = []
+                if response.content.strip():
+                    payload = response.json()
+                    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                        raise ValueError("invalid response shape")
+                    result = payload["data"]
+                    if not all(isinstance(row, dict) for row in result):
+                        raise ValueError("invalid row shape")
+                    summary = payload.get("statistics") or {}
+                    if isinstance(summary, dict):
+                        stats["rows_read"] = _safe_count(summary.get("rows_read"))
+                        stats["bytes_read"] = _safe_count(summary.get("bytes_read"))
+                        stats["server_elapsed_ms"] = _server_elapsed_ms(summary.get("elapsed"))
+                        if stats["server_elapsed_ms"] is not None:
+                            stats["server_elapsed_source"] = "statistics.elapsed"
+                elif data and re.match(
+                    r"\s*(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN|EXISTS)\b", data["query"], re.IGNORECASE
+                ):
+                    raise ValueError("missing query response")
+                if operation == "health" and result != [{"ok": 1}]:
+                    raise ValueError("invalid health response")
+            finally:
+                stats["decode_ms"] = (time.perf_counter() - decode_started) * 1000
             summary_header = response.headers.get("X-ClickHouse-Summary")
             if summary_header:
                 # Statistics are observational: malformed metadata cannot break a write.
@@ -534,6 +573,7 @@ class ClickHouseClient:
                 if acquired:
                     self._slots.release()
                 stats["duration_ms"] = (time.perf_counter() - started) * 1000
+                stats["client_elapsed_ms"] = stats["duration_ms"]
                 if operation == "execute" and data and "query" in data:
                     try:
                         redacted_sql = _redact_ddl_secrets(data["query"].strip())
@@ -544,12 +584,42 @@ class ClickHouseClient:
                                 "sql": redacted_sql,
                                 "time_ms": dur_ms,
                                 "engine": "ClickHouse",
+                                "clickhouse": {
+                                    key: stats[key]
+                                    for key in (
+                                        "query_id",
+                                        "request_id",
+                                        "page_load_id",
+                                        "service_id",
+                                        "component",
+                                        "section",
+                                        "section_id",
+                                        "parent_section_id",
+                                        "source",
+                                        "outcome",
+                                        "admission_wait_ms",
+                                        "network_ms",
+                                        "decode_ms",
+                                        "client_elapsed_ms",
+                                        "server_cpu_ms",
+                                        "server_elapsed_ms",
+                                        "server_elapsed_source",
+                                        "timing_kind",
+                                    )
+                                },
                             }
                         )
                         _QUERIES.set(queries)
                         from backend.utils.telemetry import record_telemetry_query
 
-                        record_telemetry_query("clickhouse", redacted_sql, dur_ms)
+                        record_telemetry_query(
+                            "clickhouse",
+                            redacted_sql,
+                            dur_ms,
+                            service_id=stats["service_id"],
+                            request_id=stats["request_id"],
+                            allow_active_service_fallback=False,
+                        )
                     except Exception:
                         logger.debug("_request: _QUERIES.set failed (ignored)", exc_info=True)
                 try:

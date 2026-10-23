@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import duckdb
 
@@ -20,7 +20,13 @@ from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import quote_path_list
-from backend.models.reader_coverage import ReaderCoverage, RollupPathCoverage
+from backend.models.reader_coverage import (
+    HistoryObservation,
+    ReaderCoverage,
+    RollupPathCoverage,
+    ScalarRollupCoverage,
+    TopNRollupCoverage,
+)
 from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
@@ -536,11 +542,19 @@ def get_source_extent(
 
     Checks the svcconfig status cache first; falls back to a live COUNT query.
     """
+    observed = getattr(runner, "history", None)
+    if not isinstance(observed, HistoryObservation):
+        observed = HistoryObservation()
+    runner.history = observed
     try:
         from backend import config as svcconfig
 
         cached = svcconfig.get_status(src["name"])
         if cached:
+            observed.extent_source = "status_cache"
+            observed.extent_rows = cached.get("local_rows")
+            observed.earliest_event_at = cached.get("earliest_log_at")
+            observed.latest_event_at = cached.get("latest_log_at")
             return (
                 cached.get("local_rows", 0),
                 cached.get("earliest_log_at"),
@@ -548,13 +562,20 @@ def get_source_extent(
             )
         row = runner.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {orig_table_name}").fetchone()
         if row:
+            observed.extent_source = "live_query"
+            observed.extent_rows = row[0]
+            observed.earliest_event_at, observed.latest_event_at = safe_iso(row[1]), safe_iso(row[2])
             return row[0], safe_iso(row[1]), safe_iso(row[2])
     except Exception:
         try:
             count = runner.execute(f"SELECT count(*) FROM {orig_table_name}").fetchone()[0]
+            observed.extent_source, observed.extent_rows = "count_only_query", count
+            observed.earliest_event_at, observed.latest_event_at = None, None
             return count, None, None
         except Exception:
             _logger.debug("get_source_extent: step failed (ignored)", exc_info=True)
+    observed.extent_source, observed.extent_rows = "unavailable", None
+    observed.earliest_event_at, observed.latest_event_at = None, None
     return 0, None, None
 
 
@@ -669,6 +690,7 @@ class QueryRunner:
         self.src = src
         self.debug_queries: list[dict] = []
         self.reader_coverage: list[ReaderCoverage] = []
+        self.history: HistoryObservation | None = None
         self.actual_cols: set[str] = set()
         # Request-scoped sharing of the direct active-hour temps (see
         # begin_shared_active_hour_temps). None = sharing disabled: every
@@ -959,9 +981,11 @@ class QueryRunner:
 
     def telemetry(self) -> dict:
         """Return the standard debug telemetry dict for response construction."""
-        result = {"debug_queries": self.debug_queries, "debug_calls": self.debug_calls}
+        result: dict[str, Any] = {"debug_queries": self.debug_queries, "debug_calls": self.debug_calls}
         if self.reader_coverage:
             result["reader_coverage"] = [observation.model_dump() for observation in self.reader_coverage]
+        if self.history is not None:
+            result["history"] = self.history.model_dump()
         return result
 
     def create_filtered_temp_table(
@@ -1374,6 +1398,7 @@ class QueryRunner:
         _phase_log: list[dict] | None = None,
         actual_cols: list[str] | None = None,
         schema_types: dict[str, str] | None = None,
+        _coverage_reader: Literal["dashboard.top_n", "dashboard.ua_bots"] = "dashboard.top_n",
     ) -> tuple[list[tuple[str, Any, int]], list[str]]:
         """Compute per-field top-N from rollup parquets + the live active
         hour from the base table. Returns merged (field, value, count)
@@ -1417,7 +1442,12 @@ class QueryRunner:
         from backend.core.rollups import _is_safe_ident, _safe_table_for
         from backend.utils.date_utils import parse_iso_utc
 
+        observed = ReaderCoverage(
+            reader=_coverage_reader, maximum_window_days=None, eligible=False, outcome="ineligible"
+        )
+        self.reader_coverage.append(observed)
         if durable_serving_blocked(self.src):
+            observed.eligibility_reason = "durable_unready"
             # The result shape is retained for existing callers, but an
             # empty tuple is explicitly an unavailable rollup result.  Each
             # serving path must then run its DuckLake-backed raw fallback.
@@ -1439,9 +1469,11 @@ class QueryRunner:
         # we re-validate here so a future caller can't pierce the boundary.
         safe_fields = [f for f in fields if _is_safe_ident(f)]
         if not safe_fields:
+            observed.eligibility_reason = "unsafe_fields"
             return [], fields
         base_table = _safe_table_for(self.src)
         if not base_table:
+            observed.eligibility_reason = "unsafe_service"
             # Service name failed the identifier safelist; refuse to query.
             return [], fields
 
@@ -1449,10 +1481,15 @@ class QueryRunner:
         st_dt = parse_iso_utc(start_time) if start_time else None
         et_dt = parse_iso_utc(end_time) if end_time else None
 
+        observed.window_start = st_dt.isoformat() if st_dt else None
+        observed.window_end = et_dt.isoformat() if et_dt else None
+        observed.eligible, observed.eligibility_reason = True, "eligible"
+        observed.outcome = "unknown"
+        observed.top_n_plan = TopNRollupCoverage()
         win = _TopNWindow.build(st_dt, et_dt, datetime.now(UTC))
         active_dt = win.active_dt
         _t_dir_enum = time.perf_counter()
-        plan = _plan_top_n_paths(cache_dir, safe_fields, win)
+        plan = _plan_top_n_paths(cache_dir, safe_fields, win, observation=observed.top_n_plan)
         day_paths = plan.paths.day_paths
         hour_paths = plan.paths.hour_paths
         bundled_hour_paths = plan.paths.bundled_hour_paths
@@ -1470,9 +1507,11 @@ class QueryRunner:
         if rolled_q is not None:
             try:
                 rolled_res = self.execute(rolled_q).fetchall()
+                observed.top_n_plan.rolled_read = "used"
             except duckdb.InterruptException:
                 raise
             except Exception:
+                observed.top_n_plan.rolled_read = "failed"
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
 
@@ -1484,7 +1523,7 @@ class QueryRunner:
         # Live active hour: the rollup tree never holds it.
         _t_live = time.perf_counter()
         live_res, partial_rows = self._top_n_live_active_hour(
-            win, safe_fields, base_table, limit, per_field_limits, schema, _phase
+            win, safe_fields, base_table, limit, per_field_limits, schema, _phase, observation=observed
         )
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
@@ -1501,9 +1540,13 @@ class QueryRunner:
         # `missing_hours` is empty. The scan only fires while the writer is
         # behind, bounded by _MISSING_HOUR_HEAL_CAP hours.
         _t_heal = time.perf_counter()
-        missing_hours = _find_unrolled_hours(plan, win, safe_fields, _MISSING_HOUR_HEAL_CAP)
+        missing_hours = _find_unrolled_hours(
+            plan, win, safe_fields, _MISSING_HOUR_HEAL_CAP, observation=observed.top_n_plan
+        )
         heal_res = (
-            self._top_n_heal_hours(missing_hours, win, safe_fields, base_table, limit, per_field_limits, schema)
+            self._top_n_heal_hours(
+                missing_hours, win, safe_fields, base_table, limit, per_field_limits, schema, observation=observed
+            )
             if missing_hours
             else []
         )
@@ -1550,6 +1593,7 @@ class QueryRunner:
                 )
         _phase("merge_sort", (time.perf_counter() - _t_merge) * 1000)
 
+        observed.outcome = "served"
         return top_results, fields
 
     def _top_n_live_active_hour(
@@ -1561,6 +1605,8 @@ class QueryRunner:
         per_field_limits: dict[str, int] | None,
         schema: _SchemaSeeds,
         _phase: Callable[[str, float], None],
+        *,
+        observation: ReaderCoverage | None = None,
     ) -> tuple[list[tuple], list[tuple]]:
         """Top-N rows for the active hour, from the base table: ``(live_rows, partial_rows)``.
 
@@ -1572,6 +1618,8 @@ class QueryRunner:
         st_dt, et_dt, active_dt = win.st_dt, win.et_dt, win.active_dt
         live_res: list[tuple] = []
         partial_rows: list[tuple] = []
+        if observation is not None:
+            observation.live_top_up = "outside_window"
 
         # Clamp the live window to the intersection of (active hour) and
         # (requested window). Without this, a partial-hour request like
@@ -1607,6 +1655,9 @@ class QueryRunner:
             # re-scans [hour_start, watermark) — the range partial_rows already
             # covers — and both get summed into the same bucket, double-counting.
             live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
+            if observation is not None:
+                observation.live_start, observation.live_end = live_start.isoformat(), live_end.isoformat()
+                observation.live_top_up = "unavailable"
             _t_lt = time.perf_counter()
             temp_proj_fields = (
                 live_topn_fields + ["waf_req_id"]
@@ -1616,8 +1667,14 @@ class QueryRunner:
             tmp_name = self._create_active_hour_temp_direct(temp_proj_fields, actual_cols, live_start, live_end)
             if tmp_name == "__empty__":
                 tmp_name = None
+                if observation is not None:
+                    observation.live_top_up = "empty"
             elif tmp_name is None:
                 tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
+                if observation is not None and tmp_name:
+                    observation.live_top_up = "view_fallback"
+            elif observation is not None:
+                observation.live_top_up = "unverified"
             _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
             _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
             if tmp_name:
@@ -1636,8 +1693,12 @@ class QueryRunner:
                     # parquets but no live column and would BinderException the
                     # whole UNION ALL. A zero-row hour skips the 50+ grouping
                     # branches (~130ms of planning).
+                    if observation is not None and _n_live == 0:
+                        observation.live_top_up = "empty"
                     if _n_live > 0:
                         live_fields = [f for f in live_topn_fields if f in actual_cols]
+                        if observation is not None and not live_fields:
+                            observation.live_top_up = "missing_column"
                         if live_fields:
                             _t_lb = time.perf_counter()
                             live_res, _ = self.execute_top_n_batch(
@@ -1648,6 +1709,8 @@ class QueryRunner:
                                 limit=limit,
                                 per_field_limits=per_field_limits,
                             )
+                            if observation is not None and observation.live_top_up == "unverified":
+                                observation.live_top_up = "used"
                             _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
                 finally:
                     # Deferred to scope-exit when the shared active-hour scope
@@ -1656,6 +1719,8 @@ class QueryRunner:
         except duckdb.InterruptException:
             raise
         except Exception:
+            if observation is not None:
+                observation.live_top_up = "failed"
             _logger.exception("[top_n_rollups] live active hour query failed")
         return live_res, partial_rows
 
@@ -1668,6 +1733,8 @@ class QueryRunner:
         limit: int,
         per_field_limits: dict[str, int] | None,
         schema: _SchemaSeeds,
+        *,
+        observation: ReaderCoverage | None = None,
     ) -> list[tuple]:
         """Live top-N rows for closed hours the rollup writer has not covered.
 
@@ -1675,6 +1742,8 @@ class QueryRunner:
         active hour only), never a 500.
         """
         heal_res: list[tuple] = []
+        if observation is not None:
+            observation.closed_hour_heal = "unavailable"
         _now_mono = time.monotonic()
         _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
         _last_heal_warn = _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key)
@@ -1709,6 +1778,8 @@ class QueryRunner:
                             limit=limit,
                             per_field_limits=per_field_limits,
                         )
+                        if observation is not None:
+                            observation.closed_hour_heal = "used"
                 finally:
                     try:
                         self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
@@ -1718,6 +1789,8 @@ class QueryRunner:
         except duckdb.InterruptException:
             raise
         except Exception:
+            if observation is not None:
+                observation.closed_hour_heal = "failed"
             _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
         return heal_res
 
@@ -1829,11 +1902,16 @@ class QueryRunner:
 
         from backend.utils.date_utils import parse_iso_utc
 
+        observed = ReaderCoverage(reader="dashboard.time_series", eligible=False, outcome="ineligible")
+        self.reader_coverage.append(observed)
         if chart_metric not in self._TS_ROLLUP_METRIC_PARTS:
+            observed.eligibility_reason = "unsupported_metric"
             return None
         if interval not in self._TS_ROLLUP_INTERVALS:
+            observed.eligibility_reason = "unsupported_interval"
             return None
         if not start_time or not end_time:
+            observed.eligibility_reason = "bounds_missing"
             return None
         # parse_iso_utc is the project-standard helper — it always returns
         # tz-aware UTC, which is what the bundle directory names and the
@@ -1845,12 +1923,17 @@ class QueryRunner:
         st = parse_iso_utc(start_time)
         et = parse_iso_utc(end_time)
         if st is None or et is None:
+            observed.eligibility_reason = "invalid_window"
             return None
         if et <= st:
+            observed.eligibility_reason = "invalid_window"
             return None
-
+        observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
         if (et - st) > timedelta(days=366):
+            observed.eligibility_reason = "window_too_long"
             return None
+        observed.eligible, observed.eligibility_reason = True, "eligible"
+        observed.scalar_plan = ScalarRollupCoverage()
 
         # st is UTC (parse_iso_utc guarantees it). For multi-week windows
         # (7d–90d), prefer closed-day bundles (`day_bundled/day=D/time_series.parquet`,
@@ -1868,9 +1951,13 @@ class QueryRunner:
             can_use_overview=chart_metric == "requests" and interval in ("1 hour", "1 day"),
             coverage_mod=rollup_coverage,
             plan_hourly_read_fn=plan_hourly_read,
+            observation=observed.scalar_plan,
         )
         if wplan is None:
+            observed.outcome = "no_coverage"
             return None
+        observed.outcome = "unknown"
+        observed.live_top_up = "outside_window"
         rollup_paths = wplan.rollup_paths
         day_ov_paths = wplan.day_ov_paths
         crosses_active = wplan.crosses_active
@@ -1928,6 +2015,7 @@ class QueryRunner:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
+            observed.closed_hour_heal = "planned" if heal_base_table else "unavailable"
             if heal_base_table:
                 select_clauses.append(
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
@@ -1963,6 +2051,7 @@ class QueryRunner:
                 partial_total = 0
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
+            observed.live_start, observed.live_end = live_st_tz, live_et_tz
 
             # Fast path: read buffer + active hourly partition directly,
             # bypassing the bound iceberg view — same trick as the top-N
@@ -1996,6 +2085,7 @@ class QueryRunner:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
+            observed.live_top_up = "empty" if live_source is None else "unverified"
             if live_source is not None:
                 select_clauses.append(
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
@@ -2022,6 +2112,7 @@ class QueryRunner:
                 )
 
         if not select_clauses:
+            observed.outcome = "served"
             return []
 
         # Re-aggregate the UNION in an outer GROUP BY out_bucket. The rollup
@@ -2037,6 +2128,7 @@ class QueryRunner:
             value_expr = "ROUND(SUM(num) * 100.0 / NULLIF(SUM(den), 0), 2)"
 
         if not select_clauses:
+            observed.outcome = "served"
             return []
 
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
@@ -2050,6 +2142,10 @@ class QueryRunner:
 
         try:
             rows = self.execute(final_sql, params if live_needs_params else []).fetchall()
+            if observed.live_top_up == "unverified":
+                observed.live_top_up = "view_fallback" if live_needs_params else "used"
+            if observed.closed_hour_heal == "planned":
+                observed.closed_hour_heal = "used"
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:
@@ -2057,6 +2153,9 @@ class QueryRunner:
             # in older bundles, …) drops us to the raw path. Logged at
             # debug — the caller will produce a working result anyway.
             _logger.debug("[time_series_rollup] read failed, falling back to raw: %s", e)
+            observed.outcome = "read_failed"
+            if observed.closed_hour_heal == "planned":
+                observed.closed_hour_heal = "failed"
             return None
         finally:
             if direct_live_tmp is not None:
@@ -2072,6 +2171,7 @@ class QueryRunner:
                     "value": float(r[1]) if r[1] is not None else 0.0,
                 }
             )
+        observed.outcome = "served"
         return out
 
     def try_count_from_rollup(
@@ -2093,19 +2193,26 @@ class QueryRunner:
 
         from backend.utils.date_utils import parse_iso_utc
 
+        observed = ReaderCoverage(reader="dashboard.count", eligible=False, outcome="ineligible")
+        self.reader_coverage.append(observed)
         if not unfiltered_window:
+            observed.eligibility_reason = "filtered"
             return None
         if not start_time or not end_time:
+            observed.eligibility_reason = "bounds_missing"
             return None
 
         st = parse_iso_utc(start_time)
         et = parse_iso_utc(end_time)
-        if st is None or et is None:
+        if st is None or et is None or et <= st:
+            observed.eligibility_reason = "invalid_window"
             return None
-        if et <= st:
-            return None
+        observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
         if (et - st) > timedelta(days=366):
+            observed.eligibility_reason = "window_too_long"
             return None
+        observed.eligible, observed.eligibility_reason = True, "eligible"
+        observed.scalar_plan = ScalarRollupCoverage()
 
         from backend.repositories._rollup_planner import plan_time_series_rollup_window
 
@@ -2116,9 +2223,13 @@ class QueryRunner:
             can_use_overview=True,
             coverage_mod=rollup_coverage,
             plan_hourly_read_fn=plan_hourly_read,
+            observation=observed.scalar_plan,
         )
         if wplan is None:
+            observed.outcome = "no_coverage"
             return None
+        observed.outcome = "unknown"
+        observed.live_top_up = "outside_window"
         rollup_paths = wplan.rollup_paths
         day_ov_paths = wplan.day_ov_paths
         crosses_active = wplan.crosses_active
@@ -2160,6 +2271,7 @@ class QueryRunner:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
+            observed.closed_hour_heal = "planned" if heal_base_table else "unavailable"
             if heal_base_table:
                 select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where_sql}")
 
@@ -2173,6 +2285,7 @@ class QueryRunner:
             )
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
+            observed.live_start, observed.live_end = live_st_tz, live_et_tz
 
             if unfiltered_window:
                 try:
@@ -2192,6 +2305,7 @@ class QueryRunner:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
+            observed.live_top_up = "empty" if live_source is None else "unverified"
             if live_source is not None:
                 select_clauses.append(
                     f"SELECT COUNT(*) AS num "
@@ -2208,17 +2322,27 @@ class QueryRunner:
                 select_clauses.append(f"SELECT {partial_total} AS num")
 
         if not select_clauses:
+            observed.outcome = "served"
             return 0
 
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
         final_sql = f"SELECT {metric_expressions.sum_or_zero('num')} FROM ({unioned})"
 
         try:
-            return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
+            result = int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
+            if observed.live_top_up == "unverified":
+                observed.live_top_up = "view_fallback" if live_needs_params else "used"
+            observed.outcome = "served"
+            if observed.closed_hour_heal == "planned":
+                observed.closed_hour_heal = "used"
+            return result
         except duckdb.InterruptException:
             raise
         except Exception as e:
             _logger.debug("[count_rollup] read failed, falling back to raw: %s", e)
+            observed.outcome = "read_failed"
+            if observed.closed_hour_heal == "planned":
+                observed.closed_hour_heal = "failed"
             return None
         finally:
             if direct_live_tmp is not None:

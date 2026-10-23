@@ -9,11 +9,12 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Collection
-from typing import Any
+from typing import Any, Literal
 
 import duckdb
 
 from backend.models.common import FiltersDict
+from backend.models.reader_coverage import HistoryObservation, ReaderCoverage
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
@@ -30,7 +31,12 @@ from backend.repositories._base import (
 )
 from backend.repositories._sql import dashboard as SQL
 from backend.repositories.utils.filters import build_where_clause
-from backend.repositories.utils.response_cache import bucket_time_to_minute, cache_result, coalesced_cache_result
+from backend.repositories.utils.response_cache import (
+    bucket_time_to_minute,
+    cache_result,
+    coalesced_cache_result,
+    serialize_filters_for_key,
+)
 
 # ── In-memory caches ──────────────────────────────────────────────────────────
 # Bounded + actively-reaped: dashboard responses can be 30-240MB per entry,
@@ -41,6 +47,7 @@ from backend.repositories.utils.response_cache import bucket_time_to_minute, cac
 # 500 entries × ~30MB = ~15GB worst case; in practice the working set is
 # much smaller, but the cap is a hard backstop.
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -181,7 +188,7 @@ def _dashboard_cache_key(
         {
             "s": bucket_time_to_minute(start_time),
             "e": bucket_time_to_minute(end_time),
-            "f": {k: (v.mode, sorted(str(x) for x in v.values)) for k, v in sorted((filters or {}).items())},
+            "f": serialize_filters_for_key(filters),
             "ci": chart_interval,
             "cm": chart_metric,
             "fields": sorted(fields_filter) if fields_filter is not None else None,
@@ -454,7 +461,26 @@ def _compute_dashboard_aggregates(
     from backend.repositories.rollup_coverage import durable_serving_blocked
 
     _durable_blocked = durable_serving_blocked(src)
-    use_rollups = not filters and rollups_present(src) and not _durable_blocked
+    _rollups_present = rollups_present(src) if not filters else None
+    use_rollups = not filters and bool(_rollups_present) and not _durable_blocked
+    if not use_rollups:
+        refusal: Literal["filtered", "rollups_missing", "durable_unready"] = (
+            "filtered" if filters else "rollups_missing" if not _rollups_present else "durable_unready"
+        )
+        skipped = [ReaderCoverage(reader="dashboard.count", maximum_window_days=None)]
+        if include_top_n:
+            skipped.append(ReaderCoverage(reader="dashboard.top_n", maximum_window_days=None))
+        if include_time_series:
+            skipped.append(ReaderCoverage(reader="dashboard.time_series", maximum_window_days=None))
+        if include_conn_requests and "conn_requests" in actual_cols:
+            skipped.append(ReaderCoverage(reader="dashboard.conn_requests_histogram", maximum_window_days=None))
+        for observation in skipped:
+            observation.eligible, observation.eligibility_reason, observation.outcome = False, refusal, "ineligible"
+            observation.window_start, observation.window_end = (
+                safe_iso(parse_iso_utc(start_time)),
+                safe_iso(parse_iso_utc(end_time)),
+            )
+        runner.reader_coverage.extend(skipped)
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.
     #   - Fully-contained UTC days: served from the per-day compacted rollup.
@@ -560,6 +586,13 @@ def _compute_dashboard_aggregates(
         # factored into a closure so the view-lag self-heal can re-issue it
         # against the rebuilt view + temp table. ``field_totals`` is mutated
         # in place; the closure returns ``total_rows``.
+        history = HistoryObservation(
+            window_start=safe_iso(parse_iso_utc(start_time)),
+            window_end=safe_iso(parse_iso_utc(end_time)),
+            filters_requested=bool(filters),
+        )
+        runner.history = history
+
         def _compute_count(_table_name: str, _where: str, _params: list) -> int:
             if use_rollups:
                 # When the rollup fast-path is active, skip the wide per-column
@@ -608,15 +641,19 @@ def _compute_dashboard_aggregates(
                         actual_cols=actual_cols,
                     )
                     if rollup_count is not None:
+                        history.window_rows, history.window_count_source = rollup_count, "rollup"
                         return rollup_count
                 except Exception:
                     logger.debug("_compute_count: step failed (ignored)", exc_info=True)
 
                 try:
-                    return runner.execute(
+                    count = runner.execute(
                         f"SELECT {CANONICAL_METRICS['requests']} FROM {_table_name} WHERE {_where}", _params
                     ).fetchone()[0]
+                    history.window_rows, history.window_count_source = count, "raw"
+                    return count
                 except Exception:
+                    history.window_rows, history.window_count_source = None, "unknown"
                     return 0
             # Non-rollups path keeps the wide COUNT — we have the
             # filtered temp table loaded; one combined scan is cheaper
@@ -638,6 +675,7 @@ def _compute_dashboard_aggregates(
                 count_res = runner.execute(
                     f"SELECT {', '.join(count_cols)} FROM {_table_name} WHERE {_where}", _params
                 ).fetchone()
+                history.window_rows, history.window_count_source = count_res[0], "filtered_temp"
                 for i, field in enumerate(valid_fields):
                     field_totals[field] = count_res[i + 1]
                 return count_res[0]

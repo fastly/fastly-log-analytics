@@ -13,12 +13,13 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from backend.models.common import FilterSpec
-from backend.models.reader_coverage import ReaderCoverage
+from backend.models.query_observation import ClickHouseQueryObservation
+from backend.models.reader_coverage import HistoryObservation, ReaderCoverage
 
 _FILTERS = TypeAdapter(dict[str, FilterSpec])
 BUDGETS = json.loads(Path(__file__).with_name("performance_budgets.json").read_text())
 CACHE_STATES = frozenset({"hit", "miss", "bypass", "unknown"})
-SOURCES = frozenset({"rollup", "live", "projection", "fact", "projected_fact", "unknown"})
+SOURCES = frozenset({"rollup", "live", "projection", "fact", "projected_fact", "mixed", "unknown"})
 COMPONENTS = ("aggregates", "top_bots", "health", "quality", "pop_health", "transport", "shielding_analysis")
 QUEUE_SECTIONS = frozenset({"connection_acquire", "executor_wait", "admission_wait", "single_flight_wait"})
 OVERHEAD_SECTIONS = frozenset({"get_schema_cols", "build_where_clause", "request_setup", "response_assembly"})
@@ -69,25 +70,135 @@ def _section(row: Mapping[str, Any], cache_state: str) -> dict[str, Any]:
         "source": source,
         "source_evidence": source_evidence,
         "activity": activity,
+        "executor_dispatch": row.get("executor_dispatch")
+        if row.get("executor_dispatch") in ("inline", "thread_pool")
+        else "unknown",
+        "executor_wait_ms": _duration(row.get("executor_wait_ms")),
+        "timing_kind": row.get("timing_kind")
+        if row.get("timing_kind") in ("client_section_wall", "client_operation_wall")
+        else "unknown",
         "current_execution": current,
+        **{key: row[key] for key in _CORRELATION_FIELDS if _correlation_value(row.get(key))},
         "gaps": gaps,
     }
+
+
+_CORRELATION_FIELDS = (
+    "query_id",
+    "request_id",
+    "page_load_id",
+    "service_id",
+    "component",
+    "section_id",
+    "parent_section_id",
+)
+_CORRELATION_VALUE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _correlation_value(value: Any) -> bool:
+    return isinstance(value, str) and bool(_CORRELATION_VALUE.fullmatch(value))
+
+
+def _query_operations(raw: Any, reused: bool, state: str) -> tuple[list[dict[str, Any]], list[str]]:
+    operations: list[dict[str, Any]] = []
+    gaps: list[str] = []
+    if not isinstance(raw, list):
+        return operations, gaps
+    for row in raw[:256]:
+        if not isinstance(row, dict) or not isinstance(row.get("clickhouse"), dict):
+            continue
+        try:
+            parsed = ClickHouseQueryObservation.model_validate(row["clickhouse"], strict=True).model_dump(
+                exclude_unset=True
+            )
+            if any(
+                value is not None and not _correlation_value(value)
+                for key, value in parsed.items()
+                if key in _CORRELATION_FIELDS or key == "section"
+            ):
+                raise ValueError("Invalid correlation field")
+        except (ValidationError, ValueError):
+            gaps.append("query_operation_invalid")
+            continue
+        current = False if reused or row.get("is_cached") is True else True if state in {"miss", "bypass"} else None
+        operations.append({"observation": parsed, "current_observation": current})
+        gaps.append("server_cpu_unobserved")
+        if parsed.get("server_elapsed_ms") is None or parsed.get("server_elapsed_source") != "statistics.elapsed":
+            gaps.append("server_wall_time_unobserved")
+        if current is not True:
+            gaps.append("query_operation_historical_or_unknown")
+        if any(not parsed.get(key) for key in ("request_id", "service_id", "section_id", "section")):
+            gaps.append("query_correlation_incomplete")
+        if parsed["outcome"] != "success":
+            gaps.append("query_operation_failed")
+        elif any(parsed.get(key) is None for key in ("admission_wait_ms", "network_ms", "decode_ms")):
+            gaps.append("query_phase_unverified")
+    if len(raw) > 256:
+        gaps.append("query_operations_truncated")
+    return operations, gaps
 
 
 _COVERAGE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
 
 
+def _valid_evidence_timestamps(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            (item is None or isinstance(item, str) and bool(_COVERAGE_TIMESTAMP.fullmatch(item)))
+            if key
+            in {
+                "window_start",
+                "window_end",
+                "live_start",
+                "live_end",
+                "active_hour_start",
+                "trailing_start",
+                "earliest_event_at",
+                "latest_event_at",
+            }
+            else _valid_evidence_timestamps(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_valid_evidence_timestamps(item) for item in value)
+    return True
+
+
+def _history(raw: Any, reused: bool, state: str) -> tuple[dict[str, Any] | None, list[str]]:
+    if raw is None:
+        return None, ["history_evidence_missing"]
+    try:
+        parsed = HistoryObservation.model_validate(raw, strict=True).model_dump(exclude_unset=True)
+        if not _valid_evidence_timestamps(parsed):
+            raise ValueError("Invalid history timestamp")
+    except (ValidationError, ValueError):
+        return None, ["history_evidence_invalid"]
+    current = False if reused else True if state in {"miss", "bypass"} else None
+    gaps = ["history_continuity_unverified"]
+    if current is not True:
+        gaps.append("history_historical_or_unknown")
+    if (
+        parsed.get("extent_source") != "live_query"
+        or not parsed.get("earliest_event_at")
+        or not parsed.get("latest_event_at")
+    ):
+        gaps.append("history_extent_unverified")
+    if parsed.get("window_count_source") not in {"raw", "filtered_temp"} or parsed.get("window_rows") is None:
+        gaps.append("history_window_rows_unverified")
+    if parsed.get("window_rows") == 0:
+        gaps.append("history_empty_window")
+    return {"observation": parsed, "current_observation": current}, gaps
+
+
 def _reader_coverage(raw: Any, reused: bool, state: str) -> tuple[list[dict[str, Any]], list[str]]:
     if not isinstance(raw, list) or not raw:
-        return [], ["reader_coverage_missing", "history_evidence_missing"]
+        return [], ["reader_coverage_missing"]
     observations = []
-    gaps = ["history_evidence_missing"]
-    for row in raw[:2]:
+    gaps = []
+    for row in raw[:32]:
         try:
             parsed = ReaderCoverage.model_validate(row, strict=True).model_dump(exclude_unset=True)
-            timestamps = [parsed.get(key) for key in ("window_start", "window_end", "live_start", "live_end")]
-            timestamps.extend(attempt.get("active_hour_start") for attempt in parsed.get("attempts", []))
-            if any(value is not None and not _COVERAGE_TIMESTAMP.fullmatch(value) for value in timestamps):
+            if not _valid_evidence_timestamps(parsed):
                 raise ValueError("Invalid coverage timestamp")
         except (ValidationError, ValueError):
             gaps.append("reader_coverage_invalid")
@@ -96,11 +207,32 @@ def _reader_coverage(raw: Any, reused: bool, state: str) -> tuple[list[dict[str,
         observations.append({"observation": parsed, "current_observation": current})
         if current is not True:
             gaps.append("reader_coverage_historical_or_unknown")
-        if parsed.get("live_top_up") in {"failed", "unavailable", "missing_column"}:
+        if parsed.get("live_top_up") in {"failed", "unavailable", "missing_column", "unverified"}:
             gaps.append(f"reader_live_top_up_{parsed['live_top_up']}")
         if parsed.get("outcome") in {None, "unknown", "read_failed"}:
             gaps.append("reader_outcome_unverified")
-    if len(raw) > 2:
+        if parsed.get("closed_hour_heal") in {"failed", "unavailable"}:
+            gaps.append("reader_closed_hour_heal_incomplete")
+        if any(
+            attempt.get("reason") == "planned"
+            and attempt.get("coverage_fraction") is not None
+            and attempt["coverage_fraction"] < 1
+            for attempt in parsed.get("attempts", [])
+        ):
+            gaps.append("reader_closed_hours_uncovered")
+        scalar = parsed.get("scalar_plan") or {}
+        if scalar.get("reason") == "boundary_changed":
+            gaps.append("reader_coverage_boundary_changed")
+        if (scalar.get("trailing") or {}).get("missing_hours"):
+            gaps.append("reader_closed_hours_uncovered")
+        top_n = parsed.get("top_n_plan") or {}
+        if top_n:
+            gaps.append("reader_field_complete_coverage_unverified")
+            if top_n.get("rolled_read") == "failed":
+                gaps.append("reader_rolled_read_failed")
+            if top_n.get("outside_heal_horizon_hours"):
+                gaps.append("reader_older_hours_not_heal_checked")
+    if len(raw) > 32:
         gaps.append("reader_coverage_truncated")
     return observations, gaps
 
@@ -134,14 +266,25 @@ def describe_response(payload: Any) -> dict[str, Any]:
             for row in (raw if isinstance(raw, list) else [])
             if isinstance(row, dict) and isinstance(row.get("section"), str)
         ]
+        wrapper = any(isinstance(body.get(name), dict) for name in COMPONENTS)
         raw_readers = body.get("_reader_coverage", body.get("reader_coverage"))
         readers: list[dict[str, Any]]
-        if raw_readers is None and any(isinstance(body.get(name), dict) for name in COMPONENTS):
-            readers, reader_gaps = [], ["history_evidence_missing"]
+        reader_gaps: list[str]
+        if raw_readers is None and wrapper:
+            readers, reader_gaps = [], []
         else:
             readers, reader_gaps = _reader_coverage(raw_readers, cached_execution, state)
+        raw_history = body.get("_history", body.get("history"))
+        history, history_gaps = (
+            (None, []) if raw_history is None and wrapper else _history(raw_history, cached_execution, state)
+        )
         gaps = ["response_cache_conflict"] if conflict else []
         gaps.extend(reader_gaps)
+        gaps.extend(history_gaps)
+        queries, query_gaps = _query_operations(
+            body.get("_debug_queries", body.get("debug_queries")), cached_execution, state
+        )
+        gaps.extend(query_gaps)
         if state == "unknown":
             gaps.append("response_cache_unknown")
         if shared:
@@ -164,6 +307,8 @@ def describe_response(payload: Any) -> dict[str, Any]:
                 "lookup_current": not enclosing_hit and not shared,
                 "sections": sections,
                 "reader_coverage": readers,
+                "history": history,
+                "query_operations": queries,
                 "gaps": gaps,
             }
         )
@@ -176,6 +321,20 @@ def describe_response(payload: Any) -> dict[str, Any]:
     visit(payload, "response")
     gaps = {gap for component in components for gap in component["gaps"]}
     gaps.update(gap for component in components for section in component["sections"] for gap in section["gaps"])
+    query_sections = {
+        query["observation"].get("section_id")
+        for component in components
+        for query in component["query_operations"]
+        if query["current_observation"] is True and query["observation"].get("section_id")
+    }
+    for component in components:
+        for section in component["sections"]:
+            if (
+                section["source"] in {"fact", "projection", "projected_fact", "mixed"}
+                and section["current_execution"] is True
+                and section.get("section_id") not in query_sections
+            ):
+                gaps.add("section_query_correlation_missing")
     return {"components": components, "gaps": sorted(gaps)}
 
 

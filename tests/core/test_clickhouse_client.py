@@ -21,6 +21,7 @@ import pytest
 from backend import config
 from backend.core import clickhouse_client as ch
 from backend.core import clickhouse_metrics
+from backend.models.common import DebugQuery
 from backend.utils import telemetry
 
 
@@ -361,6 +362,103 @@ def test_statistics_are_recorded_without_values(clients, monkeypatch):
     assert telemetry.get_tracked_calls()[-1]["service"] == "ClickHouse"
 
 
+def test_client_phases_and_section_identity_are_measured_at_existing_seams(clients, monkeypatch):
+    from backend.core.high_scale_sections import HighScaleSections
+    from backend.core.query_attribution import Attribution, current_attribution
+
+    clock = [0.0]
+    captured = []
+    registered = []
+    transmitted = []
+    monkeypatch.setattr(ch.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(ch, "_record_operation", lambda **stats: captured.append(stats))
+    monkeypatch.setattr(ch.query_registry, "register", lambda *a, **kw: registered.append(kw) or -1)
+
+    class Slots:
+        def acquire(self, **kwargs):
+            clock[0] += 0.02
+            return True
+
+        def release(self):
+            pass
+
+    def handler(request):
+        transmitted.append(request.url.params["query_id"])
+        clock[0] += 0.05
+        result = response()
+        decode = result.json
+
+        def json_body():
+            clock[0] += 0.03
+            payload = decode()
+            payload["statistics"]["elapsed"] = 0.004
+            return payload
+
+        result.json = json_body
+        return result
+
+    client = clients(handler)
+    client._slots = Slots()
+    token = current_attribution.set(Attribution(kind="admin", request_id="request-test"))
+    try:
+        sections = HighScaleSections("service-test", "dashboard")
+        result = sections.run("summary", lambda: client.execute("SELECT 1"), source="projection")
+    finally:
+        current_attribution.reset(token)
+    assert result == [{"ok": 1}]
+    stats = captured[0]
+    assert stats["service_id"] == registered[0]["service_id"] == "service-test"
+    assert stats["request_id"] == "request-test"
+    assert stats["section"] == "dashboard.summary"
+    assert stats["section_id"] == sections.timings()[0]["section_id"]
+    assert stats["admission_wait_ms"] == pytest.approx(20)
+    assert stats["network_ms"] == pytest.approx(50)
+    assert stats["decode_ms"] == pytest.approx(30)
+    assert stats["client_elapsed_ms"] == pytest.approx(100)
+    assert stats["server_cpu_ms"] is None
+    assert stats["server_elapsed_ms"] == pytest.approx(4)
+    assert stats["server_elapsed_source"] == "statistics.elapsed"
+    assert stats["query_id"] == transmitted[0]
+    observation = DebugQuery.model_validate(telemetry.get_queries()[-1]).clickhouse
+    assert observation.query_id == transmitted[0]
+    assert observation.section_id == stats["section_id"]
+    assert observation.server_elapsed_ms == pytest.approx(4)
+
+
+@pytest.mark.parametrize("value", [None, True, "1", -1, float("nan"), float("inf"), 10**500])
+def test_invalid_server_elapsed_is_unknown_without_breaking_query(value):
+    assert ch._server_elapsed_ms(value) is None
+
+
+def test_server_elapsed_preserves_measured_zero_and_uses_seconds():
+    assert ch._server_elapsed_ms(0) == 0
+    assert ch._server_elapsed_ms(0.005) == pytest.approx(5)
+
+
+def test_pool_rejection_records_wait_without_inventing_network_or_decode(clients, monkeypatch):
+    clock = [0.0]
+    captured = []
+    monkeypatch.setattr(ch.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(ch, "_record_operation", lambda **stats: captured.append(stats))
+
+    class Slots:
+        def acquire(self, **kwargs):
+            clock[0] += 0.02
+            return False
+
+        def release(self):
+            raise AssertionError("unacquired slot must not be released")
+
+    client = clients(lambda request: pytest.fail("network must not be attempted"))
+    client._slots = Slots()
+    with pytest.raises(ch.ClickHouseError, match="timeout"):
+        client.execute("SELECT 1")
+    assert captured[0]["admission_wait_ms"] == pytest.approx(20)
+    assert captured[0]["network_ms"] is None
+    assert captured[0]["decode_ms"] is None
+    assert captured[0]["server_cpu_ms"] is None
+
+
 def test_telemetry_failure_does_not_break_success(clients, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("telemetry failed")
@@ -519,15 +617,27 @@ def test_close_wraps_transport_failure(settings):
 def test_otel_metric_reuses_instrument_and_avoids_high_cardinality(clients, monkeypatch):
     clickhouse_metrics._instrument.cache_clear()
     meter = MagicMock()
+    instruments = {}
+    meter.create_histogram.side_effect = lambda name, **kwargs: instruments.setdefault(name, MagicMock())
     monkeypatch.setattr(clickhouse_metrics, "get_meter", lambda: meter)
     try:
         client = clients(lambda _: response())
         client.execute("SELECT 1")
         client.execute("SELECT 1")
-        assert meter.create_histogram.call_count == 1
-        records = meter.create_histogram.return_value.record.call_args_list
-        assert len(records) == 2
-        assert records[0].args[1] == {"outcome": "success"}
+        assert meter.create_histogram.call_count == 4
+        assert set(instruments) == {
+            "app.clickhouse_query_duration_ms",
+            "app.clickhouse_admission_wait_ms",
+            "app.clickhouse_network_ms",
+            "app.clickhouse_decode_ms",
+        }
+        for name, instrument in instruments.items():
+            records = instrument.record.call_args_list
+            assert len(records) == 2
+            expected = {"outcome": "success"}
+            if name != "app.clickhouse_query_duration_ms":
+                expected["operation"] = "execute"
+            assert all(record.args[1] == expected for record in records)
     finally:
         clickhouse_metrics._instrument.cache_clear()
 

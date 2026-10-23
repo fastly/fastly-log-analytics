@@ -1,8 +1,10 @@
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
+from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
@@ -207,12 +209,18 @@ def origin_shielding_analysis(
     """Serve ``/api/origin/shielding-analysis`` from ClickHouse with the Network card's query."""
     end = _range_value(end_time) or datetime.now(UTC)
     start = _range_value(start_time) or (end - timedelta(days=1))
-    analysis = _shielding_analysis(service, start, end, getattr(req, "filters", None))
+    trace = HighScaleSections(service.service_id, "origin")
+    analysis = trace.run(
+        "shielding_analysis",
+        lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+        source="fact",
+    )
     limit = int(getattr(req, "limit", 50) or 50)
     rows = analysis.rows[:limit]
     truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
     return OriginShieldingAnalysisResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
+        section_timings=trace.timings(),
         has_data=analysis.has_data,
         requires_fields=analysis.requires_fields or [],
         edge_only=bool(analysis.edge_only),
@@ -234,12 +242,20 @@ def network_health(
     map_asn = str(getattr(req, "map_asn", "all") or "all")
     sections = getattr(req, "sections", None)
 
+    trace = HighScaleSections(service.service_id, "network.health")
     shielding = None
     if _want_shielding(sections):
-        shielding = _shielding_analysis(service, start, end, getattr(req, "filters", None))
+        shielding = trace.run(
+            "shielding_analysis",
+            lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+            source="fact",
+        )
     if not _want_core(sections):
         return NetworkHealthResponse.with_telemetry(
-            **cache_result({}, state="bypass", prewarmer=False), available=True, shielding_analysis=shielding
+            **cache_result({}, state="bypass", prewarmer=False),
+            available=True,
+            shielding_analysis=shielding,
+            section_timings=trace.timings(),
         )
 
     # Coarsen for wide windows exactly like the standard path (network.py:348)
@@ -328,9 +344,15 @@ def network_health(
         WHERE {rtt_where} AND {_ASN} IS NOT NULL
         GROUP BY asn
     """
-    sql_batch = [heatmap_sql, map_sql, metro_sql, speed_sql, pct_sql]
+    sql_batch = [
+        ("heatmap", heatmap_sql),
+        ("map", map_sql),
+        ("metro", metro_sql),
+        ("speed", speed_sql),
+        ("percentiles", pct_sql),
+    ]
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-health") as pool:
-        futs = [pool.submit(contextvars.copy_context().run, _run, q) for q in sql_batch]
+        futs = [trace.submit(pool, name, partial(_run, q), source="fact") for name, q in sql_batch]
         heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = [f.result() for f in futs]
 
     # ── Derive top ASNs by request volume ───────────────────────────────────
@@ -629,6 +651,7 @@ def network_health(
         **cache_result({}, state="bypass", prewarmer=False),
         available=True,
         has_data=bool(heatmap_rows),
+        section_timings=trace.timings(),
         metric="health_score",
         bucket_seconds=bs,
         buckets=all_buckets,
@@ -697,17 +720,18 @@ def network_quality(
         LIMIT {_SCATTER_SAMPLE}
         """
 
+    trace = HighScaleSections(service.service_id, "network.quality")
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-quality") as pool:
-        f_country = pool.submit(contextvars.copy_context().run, _bar, "country")
-        f_asn = pool.submit(contextvars.copy_context().run, _bar, _ASN)
-        f_region = pool.submit(
-            contextvars.copy_context().run,
-            _bar,
-            "custom_fields['region']",
-            " AND country = {region_country:String}",
+        f_country = trace.submit(pool, "country", lambda: _bar("country"), source="fact")
+        f_asn = trace.submit(pool, "asn", lambda: _bar(_ASN), source="fact")
+        f_region = trace.submit(
+            pool,
+            "region",
+            lambda: _bar("custom_fields['region']", " AND country = {region_country:String}"),
+            source="fact",
         )
-        f_pop = pool.submit(contextvars.copy_context().run, _bar, "custom_fields['pop']")
-        f_scatter = pool.submit(contextvars.copy_context().run, service.client.execute, scatter_sql, params)
+        f_pop = trace.submit(pool, "pop", lambda: _bar("custom_fields['pop']"), source="fact")
+        f_scatter = trace.submit(pool, "scatter", lambda: service.client.execute(scatter_sql, params), source="fact")
         by_country, by_asn, by_region, by_pop, scatter_rows = [
             f.result() for f in (f_country, f_asn, f_region, f_pop, f_scatter)
         ]
@@ -732,6 +756,7 @@ def network_quality(
     return NetworkQualityResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
         available=True,
+        section_timings=trace.timings(),
         by_country=by_country,
         by_asn=by_asn,
         by_region=by_region,
@@ -751,8 +776,11 @@ def get_pop_health(
         start = start.replace(tzinfo=UTC)
     if end.tzinfo is None:
         end = end.replace(tzinfo=UTC)
-    rows = service.client.execute(
-        f"""
+    trace = HighScaleSections(service.service_id, "network")
+    rows = trace.run(
+        "pop_health",
+        lambda: service.client.execute(
+            f"""
         SELECT
             custom_fields['pop'] AS pop,
             count() AS requests,
@@ -766,7 +794,9 @@ def get_pop_health(
         GROUP BY pop
         ORDER BY requests DESC
         """,
-        {"service_id": service.service_id, "start": start, "end": end},
+            {"service_id": service.service_id, "start": start, "end": end},
+        ),
+        source="fact",
     )
     data = []
     for r in rows:
@@ -784,7 +814,7 @@ def get_pop_health(
                 bandwidth_bytes=int(r["bandwidth_bytes"] or 0),
             )
         )
-    return PopHealthListResponse.with_telemetry(data=data)
+    return PopHealthListResponse.with_telemetry(data=data, section_timings=trace.timings())
 
 
 def get_transport_metrics(
@@ -836,9 +866,10 @@ def get_transport_metrics(
         GROUP BY proto_clean
         ORDER BY reqs DESC
     """
+    trace = HighScaleSections(service.service_id, "network.transport")
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-transport") as pool:
-        f_main = pool.submit(contextvars.copy_context().run, service.client.execute, sql, params)
-        f_proto = pool.submit(contextvars.copy_context().run, service.client.execute, proto_sql, params)
+        f_main = trace.submit(pool, "summary", lambda: service.client.execute(sql, params), source="fact")
+        f_proto = trace.submit(pool, "protocols", lambda: service.client.execute(proto_sql, params), source="fact")
         rows = f_main.result()
         p_rows = f_proto.result()
 
@@ -879,6 +910,7 @@ def get_transport_metrics(
 
     return TransportMetrics(
         **cache_result({}, state="bypass", prewarmer=False),
+        section_timings=trace.timings(),
         has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
         tcp_rtt_p50_ms=tcp_rtt_p50,
         tcp_rtt_p90_ms=tcp_rtt_p90,
@@ -929,7 +961,7 @@ def network_bundle(
         f_pop = (
             pool.submit(
                 contextvars.copy_context().run,
-                lambda: get_pop_health(service, _range_value(start_time), _range_value(end_time)).data,
+                lambda: get_pop_health(service, _range_value(start_time), _range_value(end_time)),
             )
             if want_pop
             else None
@@ -943,12 +975,14 @@ def network_bundle(
         )
         health_resp = f_health.result() if f_health else None
         quality_resp = f_quality.result() if f_quality else None
-        pop_health = f_pop.result() if f_pop else None
+        pop_response = f_pop.result() if f_pop else None
+        pop_health = pop_response.data if pop_response is not None else None
         transport_resp = f_transport.result() if f_transport else None
 
     return NetworkBundleResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
         available=True,
+        section_timings=pop_response.section_timings if pop_response is not None else [],
         health=health_resp,
         quality=quality_resp,
         pop_health=pop_health,

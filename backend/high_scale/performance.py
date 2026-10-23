@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._filters import (
     build_published_facts_where as _facts_where,
 )
@@ -273,7 +274,6 @@ def performance_aggregates(
     sections: set[str] | None = None,
 ) -> PerformanceAggregatesResponse:
     import concurrent.futures
-    import contextvars
 
     wanted = _ALL_SECTIONS if sections is None else sections
     filters = _active_filters(req)
@@ -306,6 +306,7 @@ def performance_aggregates(
     if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
         facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
 
+    trace = HighScaleSections(service.service_id, "performance")
     tasks: list[tuple[str, Any]] = []
 
     if "top_urls" in wanted:
@@ -373,16 +374,22 @@ def performance_aggregates(
 
     if len(tasks) == 1:
         k, fn = tasks[0]
-        result[k] = fn()
+        result[k] = trace.run(k, fn, source="fact" if filters else "projection")
     elif tasks:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
+            futs = [
+                (
+                    k,
+                    trace.submit(pool, k, fn, source="fact" if filters else "projection"),
+                )
+                for k, fn in tasks
+            ]
             for k, fut in futs:
                 result[k] = fut.result()
 
     # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
     # are exact ClickHouse quantiles over the matching facts.
-    payload = {**result, "_approx": not filters}
+    payload = {**result, "_approx": not filters, "section_timings": trace.timings()}
     if cache_key is not None:
         _memo.put(cache_key, payload)
     return PerformanceAggregatesResponse.with_telemetry(

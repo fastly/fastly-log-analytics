@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.models.reader_coverage import HourlyRollupCoverage, ScalarRollupCoverage
+
 
 @dataclass(frozen=True)
 class TimeSeriesRollupWindowPlan:
@@ -29,6 +31,23 @@ class ClosedHourFieldRollupWindow:
     active_end_dt: datetime
 
 
+def _finalize_scalar_coverage(observation: ScalarRollupCoverage) -> None:
+    trailing = observation.trailing
+    if (
+        trailing is not None
+        and trailing.active_hour_start is not None
+        and trailing.active_hour_start != observation.active_hour_start
+    ):
+        observation.reason = "boundary_changed"
+        return
+    trailing_covered = trailing.covered_hours if trailing is not None else 0
+    if trailing_covered is not None:
+        observation.covered_hours = observation.prefix_hours + trailing_covered
+        observation.coverage_fraction = (
+            observation.covered_hours / observation.closed_hours if observation.closed_hours else None
+        )
+
+
 def plan_time_series_rollup_window(
     src: dict[str, Any],
     st: datetime,
@@ -37,6 +56,7 @@ def plan_time_series_rollup_window(
     can_use_overview: bool = True,
     coverage_mod: Any = None,
     plan_hourly_read_fn: Any = None,
+    observation: ScalarRollupCoverage | None = None,
 ) -> TimeSeriesRollupWindowPlan | None:
     """Plan closed-day prefix + trailing hourly bundles for time_series/count rollup reads."""
     from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME
@@ -53,6 +73,10 @@ def plan_time_series_rollup_window(
     day_ov_paths: list[str] = []
     trailing_st = st
     cov = rollup_coverage.CoverageIndex.build(st, et)
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
+        observation.closed_hours = len(cov.closed_hours)
+        observation.active_hour_start = cov.active_dt.isoformat()
     if timedelta(days=6) < (et - st) <= timedelta(days=90) and not rollup_coverage.durable_serving_blocked(src):
         day_root = _day_bundled_root(src)
         covered_until_hour: str | None = None
@@ -74,10 +98,18 @@ def plan_time_series_rollup_window(
                 covered_until_hour = day_hours[-1]
             else:
                 break
+            if observation is not None:
+                observation.prefix_hours += len(day_hours)
         if covered_until_hour is not None:
             trailing_st = parse_hour_key_strict(covered_until_hour) + timedelta(hours=1)
 
+    if observation is not None:
+        observation.trailing_start = trailing_st.isoformat()
+        observation.day_time_series_files = len(day_ts_paths)
+        observation.day_overview_files = len(day_ov_paths)
     if trailing_st < et:
+        if observation is not None:
+            observation.trailing = HourlyRollupCoverage()
         plan = plan_hourly_read(
             src,
             trailing_st,
@@ -85,8 +117,12 @@ def plan_time_series_rollup_window(
             TIME_SERIES_BUNDLE_FILENAME,
             allow_all_fields_coverage=True,
             heal=True,
+            **({"observation": observation.trailing} if observation is not None else {}),
         )
         if plan is None:
+            if observation is not None:
+                observation.reason = "trailing_unavailable"
+                _finalize_scalar_coverage(observation)
             return None
         rollup_paths = day_ts_paths + list(plan.paths)
         crosses_active = plan.crosses_active
@@ -100,6 +136,9 @@ def plan_time_series_rollup_window(
         missing_hours = []
         heal_where_sql = ""
 
+    if observation is not None:
+        observation.reason = "planned"
+        _finalize_scalar_coverage(observation)
     return TimeSeriesRollupWindowPlan(
         rollup_paths=rollup_paths,
         day_ov_paths=day_ov_paths,

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import concurrent.futures
-import contextvars
 import os
 from datetime import datetime
+from functools import partial
 from typing import Any
 
+from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
@@ -370,7 +371,8 @@ def _filtered_aggregates(
 ):
     start = _range_value(start_time)
     end = _range_value(end_time)
-    request_watermark = service.watermark_for("request")
+    trace = HighScaleSections(service.service_id, "dashboard")
+    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     want_time_series, want_map, want_top_n = _panels(req)
 
     if not req.filters:
@@ -406,10 +408,14 @@ def _filtered_aggregates(
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        futs = [ex.submit(contextvars.copy_context().run, fetch_field, f) for f in fields_to_query]
+        futs = [trace.submit(ex, f"top_n.{f}", partial(fetch_field, f), source="fact") for f in fields_to_query]
         field_results = dict(f.result() for f in futs)
 
-    total_rows_result = service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params)
+    total_rows_result = trace.run(
+        "count",
+        lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
+        source="fact",
+    )
     total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
 
     data = {
@@ -424,14 +430,18 @@ def _filtered_aggregates(
 
     norm_interval = _normalize_chart_interval(req.chart_interval)
     time_series = (
-        _facts_time_series(
-            service,
-            start_time,
-            end_time,
-            norm_interval,
-            req.chart_metric or "requests",
-            where_clause,
-            params,
+        trace.run(
+            "time_series",
+            lambda: _facts_time_series(
+                service,
+                start_time,
+                end_time,
+                norm_interval,
+                req.chart_metric or "requests",
+                where_clause,
+                params,
+            ),
+            source="fact",
         )
         if want_time_series
         else []
@@ -442,6 +452,7 @@ def _filtered_aggregates(
         time_series=time_series,
         map_data=map_data,
         where_clause="high-scale ClickHouse (filtered)",
+        section_timings=trace.timings(),
         interval=norm_interval,
         metric=req.chart_metric,
         total_rows=total_count,
@@ -489,6 +500,7 @@ def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> Aggregat
                 "total_rows_total": resp.total_rows_total,
                 "earliest_log_at": resp.earliest_log_at,
                 "latest_log_at": resp.latest_log_at,
+                "section_timings": resp.section_timings,
             },
         )
     resp.response_cache = ResponseCacheObservation.model_validate(
@@ -530,18 +542,23 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         resp = _filtered_aggregates(service, req, start_time, end_time)
         return _cache_agg_resp(cache_key, resp)
 
+    trace = HighScaleSections(service.service_id, "dashboard")
     want_time_series, want_map, want_top_n = _panels(req)
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
-    request_watermark = service.watermark_for("request")
+    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     all_fields_to_query = list(fields_to_query)
     if "url" not in all_fields_to_query:
         all_fields_to_query.append("url")
-    responses = _aggregates_batch(
-        service,
-        start_time=start_time,
-        end_time=end_time,
-        fields=all_fields_to_query,
-        watermark=request_watermark,
+    responses = trace.run(
+        "aggregates_batch",
+        lambda: _aggregates_batch(
+            service,
+            start_time=start_time,
+            end_time=end_time,
+            fields=all_fields_to_query,
+            watermark=request_watermark,
+        ),
+        source="projection",
     )
     total = responses["url"]
 
@@ -572,22 +589,29 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
             clauses.append("event_timestamp >= {start:DateTime64(3)}")
             clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
             params.update({"start": start, "end_upper": end_upper})
-        time_series = _facts_time_series(
-            service,
-            start_time,
-            end_time,
-            norm_interval,
-            req.chart_metric,
-            " AND ".join(clauses),
-            params,
+        time_series = trace.run(
+            "time_series",
+            lambda: _facts_time_series(
+                service,
+                start_time,
+                end_time,
+                norm_interval,
+                req.chart_metric,
+                " AND ".join(clauses),
+                params,
+            ),
+            source="fact",
         )
     else:
-        time_series = _time_series(service, start_time, end_time, norm_interval)
+        time_series = trace.run(
+            "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
+        )
     resp = AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
         map_data=map_data,
         where_clause="high-scale ClickHouse",
+        section_timings=trace.timings(),
         interval=norm_interval,
         metric=req.chart_metric,
         total_rows=total.request_count,

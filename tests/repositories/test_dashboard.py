@@ -19,6 +19,29 @@ def _src_without_table():
     return {"name": "nonexistent_service", "service_id": "nonexistent_service"}
 
 
+def test_filtered_dashboard_records_the_outer_rollup_refusal_and_actual_count(in_memory_duckdb, test_service_source):
+    logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
+    result = get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+    assert result["total_rows"] > 0
+    observations = {row["reader"]: row for row in result["reader_coverage"]}
+    for reader in ("dashboard.count", "dashboard.top_n", "dashboard.time_series"):
+        assert observations[reader]["eligibility_reason"] == "filtered"
+        assert observations[reader]["eligible"] is False
+        assert observations[reader]["outcome"] == "ineligible"
+    assert result["history"]["window_rows"] == result["total_rows"]
+    assert result["history"]["window_count_source"] == "filtered_temp"
+    assert result["history"]["filters_requested"] is True
+
+
 def test_get_aggregates_empty_table(in_memory_duckdb):
     """Returns correct empty structure when the table does not exist."""
     src = _src_without_table()

@@ -383,6 +383,9 @@ def record_telemetry_query(
     sql: str,
     duration_ms: float,
     service_id: str | None = None,
+    *,
+    request_id: str | None = None,
+    allow_active_service_fallback: bool = True,
 ) -> None:
     """Record a DuckDB or ClickHouse query into telemetry_queries when X-Page-Load-ID is active."""
     if _RECORDING_TELEMETRY.get():
@@ -393,7 +396,7 @@ def record_telemetry_query(
     token = _RECORDING_TELEMETRY.set(True)
     try:
         sid = service_id
-        if not sid:
+        if not sid and allow_active_service_fallback:
             from backend import config as svcconfig
 
             sid = svcconfig.get_active_service_id()
@@ -403,7 +406,7 @@ def record_telemetry_query(
             usage_log.log_telemetry_query(
                 service_id=sid,
                 page_load_id=plid,
-                request_id="unknown",
+                request_id=request_id or "unknown",
                 engine=engine,
                 sql=sql,
                 duration_ms=duration_ms,

@@ -20,8 +20,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
+from backend.core.high_scale_sections import HighScaleSections, clickhouse_source
 from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
@@ -134,10 +135,14 @@ def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time
 
 
 def _run(service: HighScaleService, scope: _Scope, tag: str, sql: str, **extra: Any) -> list[dict[str, Any]]:
-    return service.client.execute(
-        f"/* hs_security:{tag} */ {sql.replace(_WHERE, scope.where)}",
-        {**scope.params, **extra},
+    source: Literal["fact", "projection"] = (
+        "projection" if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts"} and not scope.filtered else "fact"
     )
+    with clickhouse_source(source):
+        return service.client.execute(
+            f"/* hs_security:{tag} */ {sql.replace(_WHERE, scope.where)}",
+            {**scope.params, **extra},
+        )
 
 
 def _iso(ts: Any) -> str | None:
@@ -542,10 +547,19 @@ def security_aggregates(
         if want("proxies"):
             tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
 
+        trace = HighScaleSections(service.service_id, "security")
+
+        def source_for(key: str) -> Literal["fact", "projection", "mixed", "unknown"]:
+            if key == "ngwaf_configured":
+                return "unknown"
+            if key == "_top_bots" and not scope.filtered:
+                return "mixed"
+            return "projection" if key.startswith("ngwaf_") and not scope.filtered else "fact"
+
         res: dict[str, Any] = {}
         if len(tasks) == 1:
             k, fn = tasks[0]
-            val = fn()
+            val = trace.run(k, fn, source=source_for(k), activity="overhead" if k == "ngwaf_configured" else "compute")
             if k == "_top_bots":
                 res["bots"] = val["bots"]
                 res["ngwaf_bots"] = val["ngwaf_bots"]
@@ -555,7 +569,19 @@ def security_aggregates(
                 res[k] = val
         elif tasks:
             with ThreadPoolExecutor(max_workers=min(8, len(tasks)), thread_name_prefix="hs-sec") as pool:
-                futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, fn in tasks]
+                futs = [
+                    (
+                        k,
+                        trace.submit(
+                            pool,
+                            k,
+                            fn,
+                            source=source_for(k),
+                            activity="overhead" if k == "ngwaf_configured" else "compute",
+                        ),
+                    )
+                    for k, fn in tasks
+                ]
                 for k, fut in futs:
                     val = fut.result()
                     if k == "_top_bots":
@@ -565,6 +591,7 @@ def security_aggregates(
                         res.update(val)
                     else:
                         res[k] = val
+        res["section_timings"] = trace.timings()
         _memo.put(memo_key, dict(res))
         return res
 
@@ -596,8 +623,11 @@ def top_bots(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityTopBotsResponse:
     scope = _scope(service, req, start_time, end_time)
+    trace = HighScaleSections(service.service_id, "security")
+    result = trace.run("top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "mixed")
     return SecurityTopBotsResponse.with_telemetry(
-        **cache_result(_top_bots(service, scope), state="bypass", prewarmer=False)
+        **cache_result(result, state="bypass", prewarmer=False),
+        section_timings=trace.timings(),
     )
 
 
@@ -761,7 +791,9 @@ def get_proxies_data(
     mask_ips: bool = False,
 ) -> SecurityProxiesResponse:
     scope = _scope(service, req, start_time, end_time)
-    return SecurityProxiesResponse.with_telemetry(**_proxies(service, scope, mask_ips))
+    trace = HighScaleSections(service.service_id, "security")
+    result = trace.run("proxies", lambda: _proxies(service, scope, mask_ips), source="fact")
+    return SecurityProxiesResponse.with_telemetry(**result, section_timings=trace.timings())
 
 
 def get_security_threat_intel(

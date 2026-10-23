@@ -66,11 +66,124 @@ unknown. Bundle wrappers do not invent missing-reader gaps for observations
 owned by their children. Absent or malformed leaf-reader metadata remains a
 gap. Observations cannot clear `history_evidence_missing` or certify a window.
 
-This slice does not instrument dashboard top-N, count/time-series or UA bot
-coverage, prove actual event-time extents/window rows, or cover High-Scale.
-Skipped/filtered branches that do not invoke these readers have no observation;
-absence is not evidence of an eligible or covered reader. The full prerequisite
-gate stays closed until those gaps and deployed verification are resolved.
+Standard dashboard top-N and UA-bot reads also expose their selected tier counts,
+any-field hour presence, bounded heal candidates and older unexamined hours.
+These readers have no blanket minimum-window or 50% acceptance gate. Any-field
+presence is not all-field completeness: bundle membership remains unverified,
+and a compacted boundary day can suppress healing without serving that entire
+boundary. Their live/heal/read outcomes stay separate from file presence.
+
+Count and time-series readers retain the original window and denominator, daily
+prefix hours/files, trailing-hour subwindow, verified-empty sentinels, heal gaps
+and refusal reason. They use their own fail-closed/bounded-heal policy, not the
+tolerant leaderboard threshold. A composite-query failure leaves live execution
+unverified rather than declaring its live branch successful or independently
+identifying which branch failed.
+
+Optional `_history` records reuse the existing extent/count work and distinguish
+status-cache extents, live count/min/max, count-only fallback and unavailable
+observations. Failed observations retain null counts even where a legacy response
+returns zero. Window rows identify raw, materialized-temp or rollup provenance.
+Cached extents and rolled counts do not establish current exact history; even a
+live extent query does not establish continuous retained coverage. No new scan
+is added merely to populate these fields.
+
+Skipped/filtered branches that do not invoke a rollup reader have no rollup
+observation; absence is not evidence of eligibility or coverage. These are
+instrumentation capabilities, not verified deployed history. The full
+prerequisite gate remains closed.
+
+## High-Scale section and query correlation
+
+The dashboard, Security, Origin, Performance, Network and CMCD readers instrument
+existing task boundaries through `backend/core/high_scale_sections.py`. Each
+copied worker context carries the real service, request/page-load identity,
+component, section and unique section ID. Nested scopes restore their parent.
+Source declarations follow actual projection/fact dispatch; mixed bot components
+report `mixed` while their individual queries retain concrete sources. CMCD
+explicitly reports `projected_fact`, not a preaggregated rollup. Named task
+submission records executor queue wait separately from task execution wall time;
+inline execution declares that no executor queue was used. The Network bundle retains
+PoP query timing while preserving its list-shaped PoP payload. Cache hits and
+single-flight followers do not create fresh execution sections.
+
+`ClickHouseClient._request` correlates the transmitted query ID and records:
+
+- `admission_wait_ms`: the existing bounded client semaphore acquisition;
+- `network_ms`: the HTTP exchange wall time, including server work, transfer and
+  possible HTTPX connection/pool wait—not pure wire latency;
+- `decode_ms`: JSON parsing and response validation;
+- `client_elapsed_ms`: total client operation wall time;
+- `server_elapsed_ms`: optional server-reported `statistics.elapsed`, converted
+  from seconds, with `server_elapsed_source="statistics.elapsed"`. Invalid or
+  absent values remain unknown. This is server wall time, not CPU.
+
+Unattempted phases remain null. Attempted failed phases retain their elapsed
+observation. These phases and overlapping sections are never summed into server
+compute. Server CPU remains explicitly unobserved, not estimated from client RTT.
+ClickHouse documents `statistics.elapsed` in its [JSON format](https://clickhouse.com/docs/interfaces/formats/JSON);
+its [JSON writer](https://github.com/ClickHouse/ClickHouse/blob/master/src/Formats/JSONUtils.cpp)
+emits `Stopwatch.elapsedSeconds()`. No extra server query is made to obtain it.
+Phase histograms use operation/outcome labels only; correlation IDs stay in logs
+and the existing debug-gated `_debug_queries[].clickhouse` envelope. Persistence
+uses the scoped service/request identity; an unscoped ClickHouse call does not
+fall back to whichever service is globally active.
+
+Both reporters retain only allowlisted correlation IDs, outcomes and timings,
+never raw SQL, URLs or response data. Cached query records and component/follower
+reuse remain historical; missing query/section links and server CPU observations
+stay explicit gaps. Existing debug permissions are unchanged. This instrumentation
+alone is not deployed correlation evidence or performance certification.
+
+## Disposable Analyst Path B fixture
+
+`scripts/lib/analyst_fixture.cjs` exports `withAnalystUsers(options, work)` and
+`recoverOwnedInvites(options)`. This is a Chromium fixture, not a sharing setup
+routine or permission to run a performance sweep. It requires explicit target
+service and exact HTTPS administrator/analyst origins. Administrator identity
+comes from the existing exact-origin mTLS configuration. Sharing must already be
+active at the expected analyst endpoint, passcode login enabled, and capacity
+available. It never starts sharing, changes settings, enrolls trust or changes
+TOS policy.
+
+Each requested user gets a distinct random, one-hour passcode invite scoped to
+only that service with an explicit masking mode. The analyst context has no
+administrator certificate, storage state or injected trust headers; TLS errors
+are not ignored. The provided page uses Chromium Fetch interception to deny
+cross-origin requests, including redirect hops, before credentials are filled.
+Document origin is independently checked before credential/TOS interaction.
+Playwright credential-logging/debug modes are refused. No HAR, trace or storage
+state is recorded. Use the provided pages; additional pages are outside this
+fixture's guarded-page contract.
+
+The normal form and TOS UI perform login/acknowledgment. The fixture verifies
+secure HttpOnly session cookies, pending-cookie removal and TOS session rotation,
+then requires a target-only read-only bootstrap with the expected masking flag,
+an administrator denial and an other-service analytical denial. This verifies
+lifecycle and declared scope—not actual real-data masking, SSR payload privacy,
+filter correctness, retained history or browser completion.
+
+`journalPath` is a new owner-only append-only JSONL ownership journal. It contains
+run markers, owned invite identifiers and non-secret scope metadata, never
+passcodes, cookie values, hashes or raw responses. Fixture and recovery hold the
+same exclusive `.lock` for their entire lifecycle; recovery cannot truncate an
+active journal. A lock left by an interrupted process is not automatically
+reaped: confirm the owning PID has terminated before removing that run's lock
+and invoking recovery. Never remove a live run's lock.
+
+Cleanup attempts logout and independently deletes only ownership-verified invites,
+checks linked sessions by invite ID, closes every owned context and reports all
+cleanup failures. A timed-out create with no observed durable row remains
+`create_completion_unresolved`; two empty snapshots do not certify that a late
+server commit cannot happen. Recovery can settle it only after observing the
+matching durable invite and verifying its removal. Expiry is a backstop, not
+proof of cleanup. The journal supports interrupted recovery; neither SIGKILL nor
+network loss can be promised automatic cleanup.
+
+Offline tests include real intercepted Chromium login/redirect cases and fake
+transport failures. No deployed lifecycle is verified by those tests. The old
+`verify_page_e2e.ts::setupAnalystSession` remains unsuitable for this protocol and
+must not be used as qualification evidence.
 
 ## Repeated samples
 
@@ -99,7 +212,7 @@ No live request is made without a reviewed prerequisite report matching the sele
 - `analyst_lifecycle`
 - `live_traffic`
 
-The gate checks evidence presence, not the truth of arbitrary JSON claims. Do not manufacture a report to bypass unresolved prerequisites. This reporting foundation does not provide the missing backend instrumentation or verification evidence.
+The gate checks evidence presence, not the truth of arbitrary JSON claims. Do not manufacture a report to bypass unresolved prerequisites. Partial instrumentation does not itself verify deployed history, correlation or browser evidence.
 
 The CLI also requires a fixed anchor, supported windows, and two active filter dimensions. Filter syntax validation does not prove the fields are supported by every endpoint, match real rows, or constrain results. Those properties require scenario-specific evidence before sampling. No HTTP cache-control header, URL nonce or first/repeat convention establishes a controlled response-cache miss. Shared caches must not be flushed and environments must not be restarted for this purpose.
 
@@ -111,6 +224,22 @@ After the entire gate is genuinely verified, the required order is Remote Standa
 
 This is diagnostic reporting, not page certification. The verifier still reports missing history, coverage, attribution, page-ready and interaction evidence. A populated chart and a short request duration cannot clear those gaps. Its existing deployment/authentication behavior is unchanged; do not run the deployment verifier merely to obtain benchmark samples.
 
+The standalone scope check is explicit and does not run a performance sweep:
+
+```bash
+node scripts/dev/check_analyst_lifecycle.cjs \
+  --environment "${MEASUREMENT_ENVIRONMENT:?}" \
+  --admin-origin "${ADMIN_ORIGIN:?}" \
+  --analyst-origin "${ANALYST_ORIGIN:?}" \
+  --service-id "${FASTLY_SERVICE_ID:?}" \
+  --role masked --users 2 --journal "${OWNERSHIP_JOURNAL:?}"
+```
+
+Run unmasked scope separately with `--role unmasked`. The command creates a new
+owner-only evidence file with `qualification: incomplete` and explicit remaining
+gaps; it does not generate a reviewed prerequisite artifact. Recovery uses the
+same environment/origins/service plus `--recover --journal <private-jsonl>`.
+
 ## Offline verification
 
 The Python tests below intentionally do not load the application's database fixtures: these reporting tests have no database dependency. Browser-recorder verification can use fully intercepted fixture requests without contacting any deployed environment.
@@ -119,7 +248,9 @@ The Python tests below intentionally do not load the application's database fixt
 uv run python -m pytest --confcutdir=tests/scripts -n 0 \
   tests/scripts/test_section_measurements.py tests/scripts/test_section_sweep.py \
   tests/scripts/test_cache_sampling.py tests/scripts/test_admin_json_deadline.py
-node --test tests/scripts/section_measurements.test.cjs tests/scripts/cache_observations.test.cjs
+node --test --test-timeout=45000 tests/scripts/section_measurements.test.cjs \
+  tests/scripts/cache_observations.test.cjs tests/scripts/analyst_fixture.test.cjs \
+  tests/scripts/analyst_lifecycle_cli.test.cjs
 uv run ruff check scripts/dev/section_sweep.py scripts/lib/section_measurements.py \
   tests/scripts/test_section_sweep.py tests/scripts/test_section_measurements.py
 uv run ruff format --check scripts/dev/section_sweep.py scripts/lib/section_measurements.py \

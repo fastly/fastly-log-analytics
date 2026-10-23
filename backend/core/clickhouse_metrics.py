@@ -23,6 +23,12 @@ def record_operation(stats: dict) -> None:
         _instrument("insert_duration_ms" if insert else "query_duration_ms", "histogram", "ms").record(
             stats["duration_ms"], {"outcome": stats["outcome"]}
         )
+        for phase in ("admission_wait_ms", "network_ms", "decode_ms", "server_elapsed_ms"):
+            value = stats.get(phase)
+            if value is not None:
+                _instrument(phase, "histogram", "ms").record(
+                    value, {"operation": stats["operation"], "outcome": stats["outcome"]}
+                )
         if not insert:
             _instrument("queries_total", "counter").add(1, {"outcome": stats["outcome"]})
         elif stats["outcome"] == "success":

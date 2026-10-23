@@ -35,7 +35,7 @@ from backend.core.rollups._common import (
     _hour_bundled_root,
     _rollups_root,
 )
-from backend.models.reader_coverage import ReaderCoverage, RollupPathCoverage
+from backend.models.reader_coverage import HourlyRollupCoverage, ReaderCoverage, RollupPathCoverage
 from backend.utils.date_utils import parse_hour_key_strict, parse_window
 
 ALL_FIELDS_FILENAME = "all_fields.parquet"
@@ -430,6 +430,7 @@ def plan_hourly_read(
     *,
     allow_all_fields_coverage: bool = False,
     heal: bool = False,
+    observation: HourlyRollupCoverage | None = None,
 ) -> HourlyReadPlan | None:
     """Plan a rollup read of ``bundle_filename`` over ``[st, et)``, or ``None``.
 
@@ -443,20 +444,38 @@ def plan_hourly_read(
     window whose gaps are not all within that cap is refused rather than
     served truncated.
     """
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
+        observation.heal_horizon_hours = MISSING_HOUR_HEAL_CAP if heal else None
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
+        if observation is not None:
+            observation.reason = "no_bundled_root"
         return None
     if durable_serving_blocked(src):
+        if observation is not None:
+            observation.reason = "durable_unready"
         return None
 
     index = CoverageIndex.build(st, et)
+    if observation is not None:
+        observation.closed_hours = len(index.closed_hours)
+        observation.active_hour_start = index.active_dt.isoformat()
     probe = BundleProbe(bundled_root)
     paths = _walk_hourly_bundles(src, index, probe, bundle_filename, allow_all_fields_coverage)
     if paths is None:
+        if observation is not None:
+            observation.reason = "writer_behind"
         return None
+    if observation is not None:
+        observation.bundle_hours = len(paths)
     if not paths and not index.crosses_active:
+        if observation is not None:
+            observation.reason = "no_paths"
         return None
     if not heal:
+        if observation is not None:
+            observation.reason = "planned"
         return HourlyReadPlan(index, paths, [])
 
     # An hour is covered by its bundle or by a verified-empty all_fields
@@ -464,13 +483,24 @@ def plan_hourly_read(
     # live-queried, so a window with an older gap is refused rather than
     # served truncated.
     gaps = _missing_hours(index, probe, bundle_filename, ALL_FIELDS_FILENAME)
+    if observation is not None:
+        observation.missing_hours = len(gaps)
+        observation.verified_empty_hours = len(index.closed_hours) - len(paths) - len(gaps)
+        observation.covered_hours = len(index.closed_hours) - len(gaps)
+        observation.coverage_fraction = (
+            observation.covered_hours / len(index.closed_hours) if index.closed_hours else None
+        )
     heal_floor = max(
         index.st.replace(minute=0, second=0, microsecond=0), index.active_dt - timedelta(hours=MISSING_HOUR_HEAL_CAP)
     )
     heal_floor_key = heal_floor.strftime("%Y-%m-%d-%H")
     missing = [hour for hour in gaps if hour >= heal_floor_key]
     if len(missing) < len(gaps):
+        if observation is not None:
+            observation.reason = "old_gaps"
         return None
+    if observation is not None:
+        observation.reason = "planned"
     return HourlyReadPlan(index, paths, missing)
 
 

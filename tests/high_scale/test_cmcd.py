@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale.cmcd import cmcd_aggregates
 from backend.models.cmcd import CmcdAggregatesResponse, CmcdRequest
@@ -47,10 +48,12 @@ _PRESENT = {
 class _Client:
     def __init__(self, probe: dict[str, Any] | None = None) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.scopes: list[dict] = []
         self._probe = probe if probe is not None else _PRESENT
 
     def execute(self, sql: str, params: dict | None = None) -> list[dict]:
         self.calls.append((sql, params or {}))
+        self.scopes.append(current_clickhouse_scope())
         if "cmcd:probe" in sql:
             return [self._probe]
         if "cmcd:overview_peak" in sql:
@@ -119,10 +122,35 @@ def _asn_names(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hs_cmcd, "_asn_names", lambda service_id, asns: {7922: "Comcast Cable Communications"})
 
 
+def test_probe_and_multicall_overview_share_explicit_projected_fact_ownership() -> None:
+    client = _Client()
+    result = _run(client, sections={"overview"})
+    assert len(client.calls) == 4
+    assert [row["section"] for row in client.scopes] == [
+        "cmcd.probe",
+        "cmcd.overview",
+        "cmcd.overview",
+        "cmcd.overview",
+    ]
+    assert all(row["source"] == "projected_fact" and row["service_id"] == "svc" for row in client.scopes)
+    assert len({row["section_id"] for row in client.scopes[1:]}) == 1
+    assert len(result["section_timings"]) == 2
+    assert result["section_timings"][0]["section"] == "cmcd.probe"
+    hit = _run(client, sections={"overview"})
+    assert len(client.calls) == 4
+    assert hit["_response_cache"]["state"] == "hit"
+    assert hit["section_timings"] == result["section_timings"]
+
+
 def test_no_cmcd_events_in_the_window_reports_no_data_after_a_single_probe() -> None:
     client = _Client(probe={**_PRESENT, "events": 0, "sessions": 0})
 
     result = _run(client)
+    timings = result.pop("section_timings")
+    assert len(timings) == 1
+    assert timings[0]["section"] == "cmcd.probe"
+    assert timings[0]["source"] == "projected_fact"
+    assert timings[0]["outcome"] == "success"
 
     assert result == {
         "available": True,

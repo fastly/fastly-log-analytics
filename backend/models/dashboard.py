@@ -15,7 +15,7 @@ from backend.models.common import (
     PaginationMixin,
     RangeKeyedRequest,
 )
-from backend.models.reader_coverage import ReaderCoverage
+from backend.models.reader_coverage import HistoryObservation, ReaderCoverage
 from backend.models.security import SecurityTopBotsResponse
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
@@ -95,6 +95,12 @@ class MapPoint(BaseModel):
 
 
 class AggregatesResponse(BaseResponse, LogExtentsMixin):
+    history: HistoryObservation | None = Field(
+        default=None,
+        validation_alias=AliasChoices("history", "_history"),
+        serialization_alias="_history",
+        exclude_if=lambda value: value is None,
+    )
     reader_coverage: list[ReaderCoverage] | None = Field(
         default=None,
         validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),

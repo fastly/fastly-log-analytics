@@ -11,6 +11,7 @@ import duckdb
 
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
+from backend.models.reader_coverage import ReaderCoverage
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
@@ -666,6 +667,18 @@ def get_top_bots(
     use_rollups = not filters
     if use_rollups:
         runner.begin_shared_active_hour_temps()
+    else:
+        skipped = []
+        if "ua" in actual_cols:
+            skipped.append(ReaderCoverage(reader="dashboard.ua_bots", maximum_window_days=None))
+        if "waf_req_id" in actual_cols:
+            skipped.append(ReaderCoverage(reader="dashboard.ngwaf_bots", maximum_window_days=None))
+        window = parse_window(start_time, end_time)
+        for observation in skipped:
+            observation.eligible, observation.eligibility_reason, observation.outcome = False, "filtered", "ineligible"
+            if window is not None:
+                observation.window_start, observation.window_end = window[0].isoformat(), window[1].isoformat()
+        runner.reader_coverage.extend(skipped)
 
     try:
         # ── Arcjet UA matching ──────────────────────────────────────────
@@ -688,6 +701,7 @@ def get_top_bots(
                     limit=_BOT_UA_CLASSIFY_LIMIT,
                     per_field_limits={"ua": _BOT_UA_CLASSIFY_LIMIT},
                     actual_cols=actual_cols,
+                    _coverage_reader="dashboard.ua_bots",
                 )
                 timer.mark("top_bots:ua_rollup_query", _t)
                 ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]

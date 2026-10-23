@@ -9,6 +9,7 @@ path planning and SQL assembly live next to them as they are extracted.
 from __future__ import annotations
 
 import heapq
+import math
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from backend.core.rollups._common import quote_path_list
+from backend.models.reader_coverage import TopNRollupCoverage
 from backend.repositories.rollup_coverage import CoverageIndex, cached_listdir
 from backend.utils.date_utils import parse_day_key_strict
 from backend.utils.sql_validator import escape_sql_literal
@@ -457,7 +459,14 @@ def _day_has_real_rollup(plan: TopNPlan, safe_fields: list[str], day: str) -> bo
     return False
 
 
-def find_unrolled_hours(plan: TopNPlan, win: TopNWindow, safe_fields: list[str], heal_cap: int) -> list[str]:
+def find_unrolled_hours(
+    plan: TopNPlan,
+    win: TopNWindow,
+    safe_fields: list[str],
+    heal_cap: int,
+    *,
+    observation: TopNRollupCoverage | None = None,
+) -> list[str]:
     """Closed in-window hours with no rollup coverage, which the caller live-queries.
 
     Looks back at most ``heal_cap`` hours from the active hour. An hour is
@@ -473,6 +482,12 @@ def find_unrolled_hours(plan: TopNPlan, win: TopNWindow, safe_fields: list[str],
     candidates = CoverageIndex.build(floor, win.et_dt or win.active_dt, now=win.active_dt).closed_hours
     day_compacted: dict[str, bool] = {}
     missing: list[str] = []
+    compacted_skips = 0
+    if observation is not None:
+        observation.heal_horizon_hours = heal_cap
+        observation.heal_candidates = len(candidates)
+        if observation.closed_hours is not None:
+            observation.outside_heal_horizon_hours = max(0, observation.closed_hours - len(candidates))
     for hour in candidates:
         if hour in plan.bundled_hours or hour in plan.per_field_hours_seen:
             continue
@@ -481,12 +496,22 @@ def find_unrolled_hours(plan: TopNPlan, win: TopNWindow, safe_fields: list[str],
             if day not in day_compacted:
                 day_compacted[day] = _day_has_real_rollup(plan, safe_fields, day)
             if day_compacted[day]:
+                compacted_skips += 1
                 continue
         missing.append(hour)
+    if observation is not None:
+        observation.heal_missing_hours = len(missing)
+        observation.compacted_hours_skipped = compacted_skips
     return missing
 
 
-def plan_top_n_paths(cache_dir: str, safe_fields: list[str], win: TopNWindow) -> TopNPlan:
+def plan_top_n_paths(
+    cache_dir: str,
+    safe_fields: list[str],
+    win: TopNWindow,
+    *,
+    observation: TopNRollupCoverage | None = None,
+) -> TopNPlan:
     """Enumerate the exact parquet files a top-N read needs for ``win``.
 
     Preference per day: bundled day file, else per-field day files, else the
@@ -507,4 +532,20 @@ def plan_top_n_paths(cache_dir: str, safe_fields: list[str], win: TopNWindow) ->
     )
     paths = TopNPaths(bundled_hour_paths=bundled_hour_paths, bundled_day_paths=bundled_day_paths)
     hours_seen = _per_field_files(safe_fields, day_root, hour_root, win, bundled_days, bundled_hours, paths)
+    if observation is not None:
+        observation.active_hour_start = win.active_dt.isoformat()
+        observation.bundled_day_files = len(paths.bundled_day_paths)
+        observation.bundled_hour_files = len(paths.bundled_hour_paths)
+        observation.per_field_day_files = len(paths.day_paths)
+        observation.per_field_hour_files = len(paths.hour_paths)
+        selected_days = bundled_days | {
+            os.path.basename(os.path.dirname(path)).removeprefix("day=") for path in paths.day_paths
+        }
+        observation.any_field_covered_hours = len(selected_days) * 24 + len(
+            {hour for hour in bundled_hours | hours_seen if hour[:10] not in selected_days}
+        )
+        if win.st_dt is not None and win.et_dt is not None:
+            start = win.st_dt.replace(minute=0, second=0, microsecond=0)
+            end = min(win.et_dt, win.active_dt)
+            observation.closed_hours = max(0, math.ceil((end - start).total_seconds() / 3600))
     return TopNPlan(paths, bundled_hours, bundled_days, days_with_day_files_any, hours_seen, day_root, bundled_day_root)

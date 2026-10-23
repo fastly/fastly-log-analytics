@@ -345,6 +345,37 @@ class _RecordingClient(FakeClient):
         return super().execute(sql, params)
 
 
+@pytest.mark.parametrize("filtered", [False, True])
+def test_dashboard_attributes_projection_and_fact_dispatch_and_reuses_historical_cache(monkeypatch, filtered):
+    from backend.core.high_scale_sections import current_clickhouse_scope
+
+    client = _RecordingClient()
+    service = replace(_service_with_watermark(), client=client)
+    scopes = []
+    execute = client.execute
+
+    def observed_execute(sql, params=None):
+        scopes.append(current_clickhouse_scope())
+        return execute(sql, params)
+
+    monkeypatch.setattr(client, "execute", observed_execute)
+    req = AggregatesRequest(
+        fields=["url"], filters={"host": {"mode": "include", "values": ["example.com"]}} if filtered else {}
+    )
+    response = aggregates(service, req, *_WINDOW)
+    assert scopes
+    assert len(scopes) == len(client.calls)
+    assert all(
+        scope["service_id"] == "svc" and scope["source"] == ("fact" if filtered else "projection") for scope in scopes
+    )
+    assert all(scope["section_id"] in {row["section_id"] for row in response.section_timings} for scope in scopes)
+    calls_before = len(client.calls)
+    hit = aggregates(service, req, *_WINDOW)
+    assert hit.response_cache.state == "hit"
+    assert len(client.calls) == calls_before
+    assert hit.section_timings == response.section_timings
+
+
 def _recording_service() -> tuple[HighScaleService, _RecordingClient]:
     client = _RecordingClient()
     return replace(_service_with_watermark(), client=client), client

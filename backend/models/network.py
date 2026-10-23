@@ -255,6 +255,11 @@ class TransportProtocolShare(BaseModel):
 
 
 class TransportMetrics(BaseModel):
+    section_timings: list[dict] | None = Field(
+        default=None,
+        serialization_alias="_section_timings",
+        exclude_if=lambda value: value is None,
+    )
     response_cache: ResponseCacheObservation | None = Field(
         default=None,
         validation_alias=AliasChoices("response_cache", "_response_cache"),

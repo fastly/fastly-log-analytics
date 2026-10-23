@@ -236,6 +236,81 @@ def test_python_and_browser_reporters_agree_on_evidence() -> None:
         {},
         {"_is_cached": False},
         {
+            "_response_cache": {"state": "miss"},
+            "_debug_queries": [
+                {
+                    "sql": "PRIVATE",
+                    "clickhouse": {
+                        "query_id": "query-test",
+                        "section_id": "section-test",
+                        "request_id": "request-test",
+                        "service_id": "service-test",
+                        "section": "cmcd.overview",
+                        "source": "projected_fact",
+                        "outcome": "success",
+                        "client_elapsed_ms": 100,
+                        "network_ms": 50,
+                        "admission_wait_ms": 20,
+                        "decode_ms": 30,
+                        "server_cpu_ms": None,
+                    },
+                }
+            ],
+            "_section_timings": [
+                {
+                    "section": "cmcd.overview",
+                    "section_id": "section-test",
+                    "time_ms": 110,
+                    "source": "projected_fact",
+                    "current_execution": True,
+                }
+            ],
+        },
+        {
+            "_debug_queries": [
+                {"clickhouse": {"query_id": "PRIVATE VALUE", "outcome": "success", "client_elapsed_ms": 5}}
+            ]
+        },
+        {
+            "_response_cache": {"state": "miss"},
+            "_reader_coverage": [
+                {
+                    "reader": "dashboard.count",
+                    "minimum_window_hours": None,
+                    "closed_hour_heal": "used",
+                    "scalar_plan": {
+                        "reason": "planned",
+                        "closed_hours": 168,
+                        "prefix_hours": 144,
+                        "trailing_start": "2026-01-07T00:00:00+00:00",
+                        "trailing": {"reason": "planned", "closed_hours": 24, "bundle_hours": 24},
+                    },
+                }
+            ],
+            "_history": {
+                "extent_source": "live_query",
+                "extent_rows": 10,
+                "window_rows": 5,
+                "window_count_source": "raw",
+                "earliest_event_at": "2026-01-01T00:00:00+00:00",
+                "latest_event_at": "2026-01-08T00:00:00+00:00",
+            },
+        },
+        {
+            "_reader_coverage": [
+                {
+                    "reader": "dashboard.top_n",
+                    "top_n_plan": {
+                        "coverage_scope": "any_field_file_presence",
+                        "field_complete_hours": None,
+                        "any_field_covered_hours": 1,
+                        "heal_missing_hours": 0,
+                    },
+                }
+            ]
+        },
+        {"_history": {"extent_source": "status_cache", "earliest_event_at": "PRIVATE"}},
+        {
             "_reader_coverage": [
                 {
                     "reader": "dashboard.ngwaf_bots",
@@ -322,6 +397,93 @@ def test_reader_coverage_keeps_planning_distinct_from_history_and_execution(cach
     assert "reader_live_top_up_failed" in report["gaps"]
     assert "PRIVATE" not in json.dumps(report)
     assert "reader_coverage" not in observation
+
+
+def test_clickhouse_observations_keep_safe_correlation_and_client_phases_only() -> None:
+    operation = {
+        "query_id": "query-test",
+        "request_id": "request-test",
+        "service_id": "service-test",
+        "section_id": "section-test",
+        "section": "cmcd.overview",
+        "source": "projected_fact",
+        "outcome": "success",
+        "client_elapsed_ms": 100,
+        "admission_wait_ms": 20,
+        "network_ms": 50,
+        "decode_ms": 30,
+        "server_cpu_ms": None,
+        "sql": "PRIVATE",
+        "url": "PRIVATE",
+    }
+    report = describe_response(
+        {
+            "_response_cache": {"state": "miss"},
+            "_debug_queries": [{"sql": "PRIVATE", "clickhouse": operation}],
+            "_section_timings": [
+                {
+                    "section": "cmcd.overview",
+                    "section_id": "section-test",
+                    "time_ms": 105,
+                    "source": "projected_fact",
+                    "current_execution": True,
+                }
+            ],
+        }
+    )
+    query = report["components"][0]["query_operations"][0]
+    assert query["observation"]["query_id"] == "query-test"
+    assert query["observation"]["network_ms"] == 50
+    assert query["observation"]["server_cpu_ms"] is None
+    assert query["current_observation"] is True
+    assert report["components"][0]["sections"][0]["section_id"] == "section-test"
+    assert "PRIVATE" not in json.dumps(report)
+    assert "server_cpu_unobserved" in report["gaps"]
+    hit = describe_response(
+        {"_response_cache": {"state": "bypass"}, "_debug_queries": [{"is_cached": True, "clickhouse": operation}]}
+    )
+    assert hit["components"][0]["query_operations"][0]["current_observation"] is False
+
+
+def test_history_retains_provenance_without_certifying_cached_or_rolled_counts() -> None:
+    for state, source in [("hit", "live_query"), ("miss", "status_cache"), ("miss", "live_query")]:
+        report = describe_response(
+            {
+                "_response_cache": {"state": state},
+                "_history": {
+                    "extent_source": source,
+                    "extent_rows": 5,
+                    "window_rows": 5,
+                    "window_count_source": "rollup",
+                    "earliest_event_at": "2026-01-01T00:00:00+00:00",
+                    "latest_event_at": "2026-01-02T00:00:00+00:00",
+                    "sql": "PRIVATE",
+                },
+            }
+        )
+        history = report["components"][0]["history"]
+        assert history["observation"]["extent_rows"] == 5
+        assert history["current_observation"] is (state == "miss")
+        assert "history_window_rows_unverified" in report["gaps"]
+        assert "history_continuity_unverified" in report["gaps"]
+        assert "PRIVATE" not in json.dumps(report)
+        if source == "status_cache":
+            assert "history_extent_unverified" in report["gaps"]
+
+
+def test_reader_observation_limit_does_not_truncate_normal_multi_reader_payload() -> None:
+    rows = [
+        {"reader": reader, "minimum_window_hours": None}
+        for reader in (
+            "dashboard.top_n",
+            "dashboard.count",
+            "dashboard.time_series",
+            "dashboard.conn_requests_histogram",
+        )
+    ]
+    report = describe_response({"_reader_coverage": rows})
+    assert len(report["components"][0]["reader_coverage"]) == 4
+    assert "reader_coverage_truncated" not in report["gaps"]
 
 
 def test_bundle_wrapper_does_not_claim_missing_coverage_owned_by_children() -> None:
