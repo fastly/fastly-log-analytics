@@ -304,4 +304,154 @@ function collectResponseMeasurements(page, { maxRecords = 256 } = {}) {
   };
 }
 
-module.exports = { budgets, describeResponse, collectResponseMeasurements };
+async function measurePaintedAction(page, options, action) {
+  const { target, feedback, results, eventType = 'click', timeoutMs = 5000 } = options;
+  const markers = [feedback, ...(Array.isArray(results) ? results : [])];
+  if (typeof target !== 'string' || !target || !['click', 'keydown'].includes(eventType)
+    || !Array.isArray(results) || !results.length || results.length > 32
+    || markers.some(row => !isObject(row) || typeof row.selector !== 'string' || !row.selector
+      || typeof row.text !== 'string' || !row.text.trim())
+    || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) {
+    throw new Error('Explicit action target, meaningful text markers and bounded timeout are required');
+  }
+  const key = `__phase4bPaint${require('node:crypto').randomUUID().replaceAll('-', '')}`;
+  await page.evaluate(({ key, target, markers, eventType, timeoutMs }) => {
+    const visible = element => {
+      const rect = element.getBoundingClientRect();
+      return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0
+        && rect.top < innerHeight && rect.left < innerWidth;
+    };
+    const matches = marker => [...document.querySelectorAll(marker.selector)]
+      .filter(element => element.childElementCount === 0 && element.textContent.trim() === marker.text && visible(element));
+    document.querySelector(target);
+    if (markers.some(marker => matches(marker).length)) throw new Error('A requested marker is already visible');
+    const state = {
+      event: null, inputDelay: null, paints: markers.map(() => null),
+      supported: PerformanceObserver.supportedEntryTypes.includes('element'),
+      visibilitySupported: 'IntersectionObserver' in window
+        && 'isVisible' in IntersectionObserverEntry.prototype, finished: false,
+    };
+    const tagged = new Map();
+    const painted = markers.map(() => null);
+    const visibility = new WeakMap();
+    const pendingPaints = new Map();
+    let observer;
+    let events;
+    let timer;
+    const visibilityObserver = state.visibilitySupported ? new IntersectionObserver(entries => {
+      for (const entry of entries) visibility.set(entry.target, entry);
+      scan();
+      recordPaints();
+    }, { trackVisibility: true, delay: 100 }) : null;
+    state.visibilitySupported = visibilityObserver?.trackVisibility === true;
+    const mutations = new MutationObserver(scan);
+    function recordPaints() {
+      for (const [element, entry] of pendingPaints) {
+        const index = markers.findIndex((_, i) => entry.identifier === `${key}:${i}`);
+        const seen = visibility.get(element);
+        if (index < 0 || state.event === null || entry.renderTime <= 0 || entry.renderTime < state.event
+          || !seen?.isVisible || seen.time > entry.renderTime
+          || tagged.get(element) !== entry.identifier
+          || element.childElementCount !== 0
+          || element.textContent.trim() !== markers[index].text || !visible(element)) continue;
+        state.paints[index] ??= entry.renderTime;
+        painted[index] = element;
+      }
+      if (state.paints.every(value => value !== null)) state.finished = true;
+    }
+    function scan() {
+      if (state.event === null) return;
+      markers.forEach((marker, index) => {
+        const candidates = matches(marker);
+        if (index > 0 && state.paints[index] !== null && (!candidates.includes(painted[index])
+          || !visibility.get(painted[index])?.isVisible)) state.paints[index] = null;
+        for (const element of candidates) {
+          if (element.hasAttribute('elementtiming') || tagged.has(element)) continue;
+          const identifier = `${key}:${index}`;
+          tagged.set(element, identifier);
+          element.setAttribute('elementtiming', identifier);
+          visibilityObserver?.observe(element);
+        }
+      });
+    }
+    const onEvent = event => {
+      if (!event.isTrusted || state.event !== null || !event.composedPath()
+        .some(node => node instanceof Element && node.matches(target))) return;
+      if (!Number.isFinite(event.timeStamp) || event.timeStamp < 0 || event.timeStamp > performance.now()) return;
+      state.event = event.timeStamp;
+      scan();
+    };
+    if (state.supported) {
+      observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          if (entry.element) pendingPaints.set(entry.element, entry);
+        }
+        recordPaints();
+      });
+      observer.observe({ type: 'element', buffered: false });
+    }
+    if (PerformanceObserver.supportedEntryTypes.includes('event')) {
+      events = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          if (state.event !== null && entry.name === eventType && Math.abs(entry.startTime - state.event) < 1) {
+            state.inputDelay = entry.processingStart - entry.startTime;
+          }
+        }
+      });
+      events.observe({ type: 'event', durationThreshold: 16 });
+    }
+    mutations.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
+    document.addEventListener(eventType, onEvent, true);
+    timer = setTimeout(() => { state.finished = true; }, timeoutMs);
+    window[key] = {
+      state,
+      snapshot() { scan(); return state; },
+      cleanup() {
+        clearTimeout(timer);
+        observer?.disconnect();
+        visibilityObserver?.disconnect();
+        events?.disconnect();
+        mutations.disconnect();
+        document.removeEventListener(eventType, onEvent, true);
+        for (const [element, identifier] of tagged) {
+          if (element.getAttribute('elementtiming') === identifier) element.removeAttribute('elementtiming');
+        }
+        delete window[key];
+      },
+    };
+  }, { key, target, markers, eventType, timeoutMs });
+  try {
+    await action();
+    await page.waitForFunction(key => !window[key] || window[key].state.finished, key, { timeout: timeoutMs + 1000 });
+    const state = await page.evaluate(key => window[key]?.snapshot() ?? null, key);
+    const event = state?.event ?? null;
+    const paints = state?.paints ?? markers.map(() => null);
+    const feedbackMs = event !== null && paints[0] !== null ? paints[0] - event : null;
+    const allResults = paints.slice(1).every(value => value !== null);
+    const resultsMs = event !== null && allResults ? Math.max(...paints.slice(1)) - event : null;
+    const gaps = ['repeated_samples_unverified', 'scenario_correctness_unverified', 'cache_population_unverified'];
+    if (!state) gaps.push('observation_document_changed');
+    if (!state?.supported) gaps.push('element_timing_unavailable');
+    if (!state?.visibilitySupported) gaps.push('paint_visibility_unavailable');
+    if (event === null) gaps.push('trusted_event_unobserved');
+    if (state?.inputDelay == null) gaps.push('input_delay_breakdown_unobserved');
+    if (feedbackMs === null) gaps.push('feedback_paint_unobserved');
+    if (resultsMs === null) gaps.push('visible_results_paint_unobserved');
+    return {
+      qualification: 'incomplete', measure: budgets.interaction_feedback_measure,
+      event_arrival_ms: event, input_delay_ms: state?.inputDelay ?? null,
+      feedback: { status: feedbackMs === null ? 'unobserved' : 'observed', source: 'element_timing', elapsed_ms: feedbackMs },
+      results: { status: resultsMs === null ? 'unobserved' : 'observed', source: 'element_timing',
+        elapsed_ms: resultsMs, panels_observed: paints.slice(1).filter(value => value !== null).length,
+        panels_required: results.length },
+      feedback_acceptance_p95_ms: budgets.interaction_feedback_p95_ms,
+      feedback_target_p95_ms: budgets.interaction_feedback_target_p95_ms,
+      whole_request_budget_policy: budgets.whole_request_budget_policy, gaps,
+    };
+  } finally {
+    if (!page.isClosed()) await page.evaluate(key => window[key]?.cleanup(), key);
+  }
+}
+
+module.exports = { budgets, describeResponse, collectResponseMeasurements, measurePaintedAction };

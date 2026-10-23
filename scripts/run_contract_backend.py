@@ -17,6 +17,10 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 
 def _maybe_redirect_config_paths() -> None:
@@ -70,8 +74,18 @@ def main() -> int:
 
     import uvicorn
 
+    app: str | FastAPI = "backend.main:app"
+    if os.environ.get("CONTRACT_STREAMING_FIXTURES") == "1":
+        if not os.environ.get("CONTRACT_CONFIGS_DIR") or not os.environ.get("CONTRACT_DATA_DIR"):
+            raise ValueError("Streaming fixtures require an isolated contract sandbox")
+        from backend.main import app as backend_app
+        from scripts.lib.streaming_e2e_fixture import install_streaming_fixture
+
+        install_streaming_fixture(backend_app)
+        app = backend_app
+
     uvicorn.run(
-        "backend.main:app",
+        app,
         host=args.host,
         port=args.port,
         log_level="warning",

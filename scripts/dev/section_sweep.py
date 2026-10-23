@@ -227,6 +227,7 @@ def sweep_one(
         "samples": [],
         "visible_results_budget_ms": budget,
         "whole_request_budget_ms": BUDGETS["whole_request_p95_ms"],
+        "whole_request_budget_policy": BUDGETS["whole_request_budget_policy"],
         "qualification": "incomplete",
         "gaps": [
             "history_unverified",

@@ -2,8 +2,9 @@
  * E2E Page Contract Test: CMCD Streaming Analytics (/streaming)
  *
  * Implements the verification checklist in docs/pages/streaming.md. The e2e
- * backend has no CMCD columns, so the aggregates endpoint is stubbed with
- * page.route; real CMCD data is verified live by scripts/verify_dashboard.js.
+ * backend has no CMCD columns, so a cookie-scoped backend fixture serves the
+ * same response to SSR and browser fetches. page.route cannot intercept SSR.
+ * Real CMCD data is verified live by scripts/verify_dashboard.js.
  *
  * 1. Route accessibility, environment footer, and the request contract.
  * 2. Headline cards and charts render from a populated response.
@@ -48,26 +49,37 @@ function populatedPayload() {
   }
 }
 
-async function stubAggregates(page: Page, payload: unknown): Promise<{ bodies: Array<Record<string, unknown>> }> {
-  const seen: { bodies: Array<Record<string, unknown>> } = { bodies: [] }
-  await page.route('**/api/cmcd/aggregates', async (route) => {
-    seen.bodies.push(route.request().postDataJSON() as Record<string, unknown>)
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(payload) })
-  })
-  return seen
+const fixturePath = '/api/__e2e__/streaming-fixture'
+
+async function stubAggregates(page: Page, payload: unknown) {
+  const response = await page.request.post(fixturePath, { data: payload })
+  expect(response.ok()).toBe(true)
+  return {
+    bodies: async (): Promise<Array<Record<string, unknown>>> => {
+      const response = await page.request.get(fixturePath)
+      expect(response.ok()).toBe(true)
+      return (await response.json()).bodies
+    },
+  }
 }
 
 test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
+  test.afterEach(async ({ page }) => {
+    const response = await page.request.delete(fixturePath)
+    expect(response.ok()).toBe(true)
+  })
+
   test('1. Route accessibility, environment indicator and request contract', async ({ page }) => {
     const seen = await stubAggregates(page, populatedPayload())
-    await page.goto('/streaming')
+    const response = await page.goto('/streaming')
+    expect(await response?.text()).toContain('1,234')
     await expect(page.getByRole('heading', { name: 'Streaming' })).toBeVisible({ timeout: 30_000 })
 
     const footerText = await page.locator('footer').innerText()
     expect(footerText).toMatch(/Admin View|Analyst View/i)
 
-    await expect.poll(() => seen.bodies.length, { timeout: 15_000 }).toBeGreaterThan(0)
-    expect(seen.bodies[0]).toMatchObject({ bucket_seconds: 300, top_n: 30 })
+    await expect.poll(async () => (await seen.bodies()).length, { timeout: 15_000 }).toBeGreaterThan(0)
+    expect((await seen.bodies())[0]).toMatchObject({ bucket_seconds: 300, top_n: 30 })
   })
 
   test('2. Headline cards and charts render from a populated response', async ({ page }) => {

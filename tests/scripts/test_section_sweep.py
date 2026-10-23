@@ -128,6 +128,8 @@ def test_repeated_sampling_keeps_exact_payload_errors_and_independent_cache_stat
     assert "PRIVATE" not in str(result)
     assert result["qualification"] == "incomplete"
     assert result["visible_results_budget_ms"] == 10000
+    assert result["whole_request_budget_policy"] == "diagnostic_only"
+    assert result["whole_request_budget_ms"] is None
     assert "page_ready_unmeasured" in result["gaps"]
     assert not any("cold" in key or "warm" in key for key in result)
 

@@ -671,6 +671,12 @@ Cross-browser matrix: chromium + firefox + webkit, all blocking on PR. Mock back
 
 SSE-stream specs MUST split on the multi-separator regex `/\r\n\r\n|\n\n|\r\r/` — `sse-starlette` emits `\r\n\r\n`, so the naive `\n\n` parser returns zero messages (see commit `0368868`). Mirrors the production `useServiceStream` regex.
 
+SSR-seeded route fixtures must cover server and browser requests. Streaming's
+isolated contract backend uses a per-browser cookie fixture, enabled only by
+`CONTRACT_STREAMING_FIXTURES=1` with sandbox paths in `run_contract_backend.py`;
+the production app never installs it. Browser `page.route` cannot override a
+fresh SSR seed. Keep fixture cleanup per test and preserve populated assertions.
+
 ### Hot-path micro-benchmarks ([tests/perf/test_benchmarks_micro.py](tests/perf/test_benchmarks_micro.py))
 
 Per-call cost benches for HyperLogLog + SQL utility paths. Auto-disabled under `xdist` (assertions still run as smoke); for real numbers:

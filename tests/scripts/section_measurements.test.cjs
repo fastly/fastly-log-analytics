@@ -79,7 +79,10 @@ test('approved budgets are shared with the sweep and not mislabeled as request b
   assert.equal(budgets.visible_results_p95_ms['24h'].unfiltered, 2000);
   assert.equal(budgets.visible_results_p95_ms['30d'].filtered, 30000);
   assert.equal(budgets.whole_request_p95_ms, null);
-  assert.equal(budgets.interaction_feedback_p95_ms, null);
+  assert.equal(budgets.whole_request_budget_policy, 'diagnostic_only');
+  assert.equal(budgets.interaction_feedback_p95_ms, 200);
+  assert.equal(budgets.interaction_feedback_target_p95_ms, 100);
+  assert.equal(budgets.interaction_feedback_measure, 'event_arrival_to_meaningful_paint');
 });
 
 function response(path, payload, status = 200) {

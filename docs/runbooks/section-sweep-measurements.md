@@ -12,9 +12,17 @@ Both serving modes use the same initial p95 limits at their respective qualified
 | 3d / 7d | 5 seconds | 10 seconds |
 | 30d | 10 seconds | 30 seconds |
 
-The machine-readable source is [`scripts/lib/performance_budgets.json`](../../scripts/lib/performance_budgets.json), approved on 2026-10-22. Acceptance limits are not optimization stopping points. These limits include transport and rendering until requested visible results are usable; an API response alone cannot establish success. Request, section, render and interaction timings remain separate. Independent whole-request and immediate-feedback limits are not yet declared in that file and must not be invented by the reporter.
+The machine-readable source is [`scripts/lib/performance_budgets.json`](../../scripts/lib/performance_budgets.json); the visible-results matrix was approved on 2026-10-22. Acceptance limits are not optimization stopping points. These limits include transport and rendering until requested visible results are usable; an API response alone cannot establish success. Request, section, render and interaction timings remain separate.
+
+On 2026-10-23, the operator approved immediate-feedback acceptance at **p95 <=200 ms**, with **p95 <=100 ms** as an optimization target. Measure browser event arrival, including input delay, through the first meaningful painted acknowledgment: a selected filter, pending label, stale-results indication or navigation skeleton. A JavaScript state update alone is not a painted acknowledgment. Do not wait for the network or heavy chart processing before acknowledging an action. Feedback does not establish results completion and is not an INP certification.
+
+Whole-request HTTP/API duration is explicitly **diagnostic-only**, approved on 2026-10-23. The null `whole_request_p95_ms` is intentional under `whole_request_budget_policy: diagnostic_only`, not a missing API deadline. Keep reporting request durations for attribution and optimization; use the approved end-to-end visible-results matrix for results-completion pass/fail. This policy supplies no missing browser observations and does not waive other qualification prerequisites.
 
 The 500 ms section threshold is a triage trigger. With a 10-second logging period, the initial peak freshness target is p95 event-to-queryable lag <=20 seconds; this is not a query-response-time limit. Request and RUM freshness are distinct measurements. None of these targets establishes that the current hardware can meet the proposed ingest volume or retention.
+
+### Future load-testing safety
+
+Actual client HTTP traffic is capped at **2,500 RPS aggregate** to protect the Compute scorer; this supersedes the earlier 10k ceiling. Use real traffic at or below the ceiling. An authorized run must ramp gradually: 100, 500, 1,000, 1,500, 2,000 and at most 2,500 RPS, with at least five minutes and a health/freshness/backlog review at each stage. Reduce or stop on degradation; do not advance automatically just because time elapsed. Above 2,500 events/sec, tests write synthetic logs directly to FOS using `scripts/load_test/generate_synthetic_traffic.py --target fos`, not higher-rate edge requests or direct serving-table inserts. Report events/bytes/objects per second separately from client RPS; synthetic ingestion does not certify edge/VCL/Compute-scoring delivery or real event freshness and cannot substitute for missing retained history. This plan does not authorize load, uploads, seeding/backfill or infrastructure changes during prerequisite work.
 
 ## Response evidence
 
@@ -224,6 +232,52 @@ After the entire gate is genuinely verified, the required order is Remote Standa
 
 This is diagnostic reporting, not page certification. The verifier still reports missing history, coverage, attribution, page-ready and interaction evidence. A populated chart and a short request duration cannot clear those gaps. Its existing deployment/authentication behavior is unchanged; do not run the deployment verifier merely to obtain benchmark samples.
 
+### Painted action observations
+
+`scripts/lib/section_measurements.cjs::measurePaintedAction(page, options, action)`
+provides a bounded same-document action observation, independently of HTTP
+response timing. Supply the action target, a state-specific feedback selector
+with exact expected text, and one state-specific exact-text marker for **every**
+requested visible result panel. The markers must not already be visible before
+the action. Use the existing isolated analyst page when testing that role; the
+observer neither creates a browser context nor adds credentials or trust headers.
+
+The observer captures a trusted click or keydown's browser `event.timeStamp`,
+not the driver's click start or the JavaScript handler start. Chromium Element
+Timing supplies the text's `renderTime`; mutation/rAF callbacks, network-idle,
+state changes and canvas presence do not supply a paint timestamp. Thus the
+elapsed duration includes input queuing before dispatch. Event Timing can
+separately supply `processingStart - startTime` as the input-delay breakdown;
+short events may not emit it, which remains an explicit gap without removing
+input delay from the end-to-end measurement. This is not INP certification.
+
+Element Timing alone also reports text behind an opaque overlay. Chromium's
+visibility-tracking Intersection Observer must independently confirm an
+unoccluded marker at or before that paint; a later visibility confirmation
+cannot backdate a hidden paint. Missing visibility support remains a gap.
+Visibility callbacks validate paint; their delivery time is not substituted
+for the paint timestamp. Page adapters must use text-only marker elements
+without obscuring descendants or unrelated content.
+
+Feedback and results have separate timestamps. All requested result markers must
+have painted and still be simultaneously visible with their expected text;
+their latest paint determines the observed results duration. A page-specific
+adapter must establish that these markers represent the requested usable data,
+including completed chart processing, rather than a generic heading or a
+loading/empty state. Existing text without a new Element Timing entry, CSS-only
+selection, canvas/chart completion and cross-document navigation are not inferred:
+they remain unobserved until a suitable adapter supplies paint evidence.
+
+Only timing/count/status fields leave the page. Marker text, selectors, URLs,
+screenshots and response bodies are not recorded. Temporary `elementtiming`
+attributes, listeners, timers and observers are removed in `finally`, including
+failed actions. Unsupported paint observations, hidden or pre-paint-removed
+acknowledgments, synthetic events and document changes remain explicit gaps.
+The result is always `qualification: incomplete`: one local browser observation
+does not verify scenario correctness, cache populations, active-user/live-ingest
+conditions or the repeated-sample floor. The deployment verifier's page-ready
+and interaction gaps are deliberately unchanged; this helper is not a page sweep.
+
 The standalone scope check is explicit and does not run a performance sweep:
 
 ```bash
@@ -250,7 +304,7 @@ uv run python -m pytest --confcutdir=tests/scripts -n 0 \
   tests/scripts/test_cache_sampling.py tests/scripts/test_admin_json_deadline.py
 node --test --test-timeout=45000 tests/scripts/section_measurements.test.cjs \
   tests/scripts/cache_observations.test.cjs tests/scripts/analyst_fixture.test.cjs \
-  tests/scripts/analyst_lifecycle_cli.test.cjs
+  tests/scripts/analyst_lifecycle_cli.test.cjs tests/scripts/browser_paint.test.cjs
 uv run ruff check scripts/dev/section_sweep.py scripts/lib/section_measurements.py \
   tests/scripts/test_section_sweep.py tests/scripts/test_section_measurements.py
 uv run ruff format --check scripts/dev/section_sweep.py scripts/lib/section_measurements.py \

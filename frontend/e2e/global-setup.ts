@@ -222,6 +222,7 @@ async function globalSetup() {
     {
       cwd: repoRoot,
       env: {
+        CONTRACT_STREAMING_FIXTURES: '1',
         ...backendTestEnvironment(sandbox, {
           backendPort: E2E_BACKEND_PORT,
           frontendPort: E2E_FRONTEND_PORT,
