@@ -142,7 +142,7 @@ Output (one row per session): all columns produced by the
 
 SESSIONS_COUNT_WRAPPER = """
     {cte_prefix}
-    SELECT COUNT(*) FROM (SELECT ({flag_expr}) AS flagged FROM sessions_agg) sub
+    SELECT COUNT(*) FROM (SELECT *, ({flag_expr}) AS flagged FROM sessions_agg) sub
     {flagged_filter}
 """
 """Total session count (with optional flagged-only filter applied).

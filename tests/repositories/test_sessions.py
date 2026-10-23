@@ -1240,3 +1240,35 @@ def test_rollup_sessions_suffix_pruning_and_direct_buffer_active_hour(in_memory_
     assert [s["ip"] for s in out["sessions"]] == ["10.99.0.99", "10.99.0.5"]
     assert len(out["debug_queries"]) == 1
     assert hours[0].strftime("%Y-%m-%d-%H") not in out["debug_queries"][0]["sql"]
+
+
+def test_get_sessions_streaming_only_count_query_on_full_page(in_memory_duckdb, test_service_source):
+    """A full page triggers the count query, which must still see streaming_reqs."""
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=6, hours_ago=1)
+    now = datetime.now(UTC) - timedelta(minutes=5)
+    for i, log in enumerate(logs):
+        log["ip"] = f"10.0.0.{i}"
+        log["timestamp"] = (now + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    insert_mock_logs(in_memory_duckdb, table, logs)
+    in_memory_duckdb.execute(f"ALTER TABLE {table} ADD COLUMN cmcd_sid VARCHAR")
+    in_memory_duckdb.execute(f"UPDATE {table} SET cmcd_sid = 'sid-1' WHERE ip IN ('10.0.0.0', '10.0.0.1', '10.0.0.2')")
+    _clear_schema_cache()
+
+    result = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        page=1,
+        limit=2,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=False,
+        min_reqs_flag=None,
+        min_4xx_pct_flag=None,
+        streaming_only=True,
+    )
+    assert result["total"] == 3
+    assert all(s["is_streaming"] for s in result["sessions"])
