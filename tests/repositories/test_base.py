@@ -1965,8 +1965,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         assert rolled_queries, f"expected the rolled-parquet QUALIFY query to run. Captured: {captured_queries}"
         q = rolled_queries[0]
         assert "CASE field" in q, f"expected a per-field CASE cutoff, got: {q}"
-        assert "THEN 500" in q and "ELSE 10 END" in q, (
-            f"country's override (500) and the base limit (10) must both appear, distinctly scoped: {q}"
+        assert "THEN 500" in q and "ELSE 100 END" in q, (
+            f"country's override (500) and the pre-merge base limit (100) must both appear, distinctly scoped: {q}"
         )
         # The old bug applied a single collapsed scalar with no CASE at all —
         # guard against a regression that keeps the CASE keyword but still
