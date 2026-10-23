@@ -125,7 +125,7 @@ def test_rollup_compact_contract_full_lifecycle(contract_service_source, client,
     assert body["service_id"] == sid
     assert body["rebuilt"] >= 1
     assert body["bundled"] >= 1
-    assert body["retired_files"] == 48
+    assert body["retired_files"] == 24
 
     # 3. Verify day_bundle_YYYY-MM-DD.parquet is created
     day_bundled_root = os.path.join(cache_root, "rollups", "day_bundled")
@@ -152,12 +152,16 @@ def test_rollup_compact_contract_full_lifecycle(contract_service_source, client,
     finally:
         con.close()
 
-    # 4. Confirm all individual hourly bundle files are retired/unlinked
-    for p in constituent_files:
-        assert not os.path.exists(p), f"Hourly bundle should be retired: {p}"
+    # 4. Confirm standard hourly bundles are retired; IP bundles remain because
+    # this fixture does not create a day-level IP bundle.
     for h in range(24):
         hour_dir = os.path.join(hour_bundled_root, f"hour={target_day}-{h:02d}")
-        assert not os.path.exists(hour_dir), f"Hour dir should be removed: {hour_dir}"
+        assert not os.path.exists(os.path.join(hour_dir, "all_fields.parquet")), (
+            f"Hourly bundle should be retired: {hour_dir}/all_fields.parquet"
+        )
+        assert os.path.isfile(os.path.join(hour_dir, "all_fields_ip.parquet")), (
+            f"Hourly IP bundle should remain: {hour_dir}/all_fields_ip.parquet"
+        )
 
     # 5. Run a query covering the target day; confirm query reads the day bundle directly
     mem_db = duckdb.connect(":memory:")
