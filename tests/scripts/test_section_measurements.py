@@ -235,6 +235,36 @@ def test_python_and_browser_reporters_agree_on_evidence() -> None:
     payloads = [
         {},
         {"_is_cached": False},
+        {
+            "_reader_coverage": [
+                {
+                    "reader": "dashboard.ngwaf_bots",
+                    "minimum_window_hours": 2,
+                    "outcome": "served",
+                    "live_top_up": "unavailable",
+                    "attempts": [{"bundle": "ngwaf_bots", "reason": "planned", "closed_hours": 4, "covered_hours": 2}],
+                }
+            ]
+        },
+        {"_reader_coverage": [{"reader": "unknown", "minimum_window_hours": True}]},
+        {
+            "_reader_coverage": [
+                {"reader": "dashboard.ngwaf_bots", "minimum_window_hours": 2, "window_start": "PRIVATE"}
+            ]
+        },
+        {
+            "_response_cache": {"state": "hit"},
+            "aggregates": {
+                "_response_cache": {"state": "miss"},
+                "_reader_coverage": [
+                    {"reader": "dashboard.conn_requests_histogram", "minimum_window_hours": 2, "outcome": "served"}
+                ],
+            },
+        },
+        {
+            "_response_cache": {"state": "unknown", "single_flight": "follower"},
+            "_reader_coverage": [{"reader": "dashboard.ngwaf_bots", "minimum_window_hours": 2, "outcome": "served"}],
+        },
         {"_response_cache": {"state": "miss"}, "_is_cached": True},
         {
             "_response_cache": {"state": []},
@@ -261,6 +291,57 @@ def test_python_and_browser_reporters_agree_on_evidence() -> None:
         cwd=Path(__file__).resolve().parents[2],
     )
     assert json.loads(result.stdout) == [describe_response(payload) for payload in payloads]
+
+
+@pytest.mark.parametrize("cache", ["miss", "bypass", "hit", "unknown"])
+def test_reader_coverage_keeps_planning_distinct_from_history_and_execution(cache: str) -> None:
+    observation = {
+        "reader": "dashboard.conn_requests_histogram",
+        "minimum_window_hours": 2,
+        "eligible": True,
+        "eligibility_reason": "eligible",
+        "outcome": "served",
+        "live_top_up": "failed",
+        "attempts": [
+            {
+                "bundle": "security_conn_reuse",
+                "reason": "planned",
+                "closed_hours": 4,
+                "covered_hours": 2,
+                "coverage_fraction": 0.5,
+                "path": "PRIVATE",
+            }
+        ],
+        "sql": "PRIVATE",
+    }
+    report = describe_response({"_response_cache": {"state": cache}, "_reader_coverage": [observation]})
+    reader = report["components"][0]["reader_coverage"][0]
+    assert reader["observation"]["attempts"][0]["covered_hours"] == 2
+    assert reader["current_observation"] is (False if cache == "hit" else True if cache in {"miss", "bypass"} else None)
+    assert "history_evidence_missing" in report["gaps"]
+    assert "reader_live_top_up_failed" in report["gaps"]
+    assert "PRIVATE" not in json.dumps(report)
+    assert "reader_coverage" not in observation
+
+
+def test_bundle_wrapper_does_not_claim_missing_coverage_owned_by_children() -> None:
+    report = describe_response(
+        {
+            "aggregates": {
+                "_reader_coverage": [{"reader": "dashboard.conn_requests_histogram", "minimum_window_hours": 2}]
+            },
+            "top_bots": {"_reader_coverage": [{"reader": "dashboard.ngwaf_bots", "minimum_window_hours": 2}]},
+        }
+    )
+    assert "reader_coverage_missing" not in report["components"][0]["gaps"]
+    assert "reader_coverage_missing" not in report["gaps"]
+    assert "history_evidence_missing" in report["gaps"]
+
+
+def test_missing_reader_metadata_stays_a_gap() -> None:
+    report = describe_response({"_response_cache": {"state": "miss"}})
+    assert report["components"][0]["reader_coverage"] == []
+    assert "reader_coverage_missing" in report["gaps"]
 
 
 def test_duplicate_sample_ids_do_not_manufacture_repeatability() -> None:

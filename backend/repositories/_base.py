@@ -20,6 +20,7 @@ from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import quote_path_list
+from backend.models.reader_coverage import ReaderCoverage, RollupPathCoverage
 from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
@@ -667,6 +668,7 @@ class QueryRunner:
         self.con = con  # type: ignore[assignment]
         self.src = src
         self.debug_queries: list[dict] = []
+        self.reader_coverage: list[ReaderCoverage] = []
         self.actual_cols: set[str] = set()
         # Request-scoped sharing of the direct active-hour temps (see
         # begin_shared_active_hour_temps). None = sharing disabled: every
@@ -957,7 +959,10 @@ class QueryRunner:
 
     def telemetry(self) -> dict:
         """Return the standard debug telemetry dict for response construction."""
-        return {"debug_queries": self.debug_queries, "debug_calls": self.debug_calls}
+        result = {"debug_queries": self.debug_queries, "debug_calls": self.debug_calls}
+        if self.reader_coverage:
+            result["reader_coverage"] = [observation.model_dump() for observation in self.reader_coverage]
+        return result
 
     def create_filtered_temp_table(
         self,
@@ -2233,6 +2238,7 @@ class QueryRunner:
         has_filters: bool,
         require_top_asns: list[int] | None = None,
         min_hours: int | None = None,
+        observation: ReaderCoverage | None = None,
     ) -> tuple[datetime, datetime] | None:
         """Shared eligibility preamble for the ``try_*_from_rollup`` readers.
 
@@ -2254,6 +2260,7 @@ class QueryRunner:
             has_filters=has_filters,
             require_top_asns=require_top_asns,
             min_hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS,
+            observation=observation,
         )
 
     def try_slow_urls_from_rollup(
@@ -2370,6 +2377,7 @@ class QueryRunner:
         *,
         skip_partial_start: bool = True,
         allow_empty_with_done: bool = False,
+        observation: RollupPathCoverage | None = None,
     ) -> list[str] | None:
         """Collect day-prefer / hour-fallback rollup parquet paths for ``[st, et)``.
 
@@ -2397,6 +2405,7 @@ class QueryRunner:
             bundle_filename,
             skip_partial_start=skip_partial_start,
             allow_empty_with_done=allow_empty_with_done,
+            observation=observation,
         )
 
     def try_origin_summary_from_rollup(
@@ -3881,18 +3890,28 @@ class QueryRunner:
 
         from backend.core.rollups._common import SECURITY_CONN_REUSE_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=2)
+        observed = ReaderCoverage(reader="dashboard.conn_requests_histogram", minimum_window_hours=2)
+        self.reader_coverage.append(observed)
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, min_hours=2, observation=observed
+        )
         if win is None:
+            observed.outcome = "ineligible"
             return None
         st, et = win
 
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
+        attempt = RollupPathCoverage(bundle="security_conn_reuse")
+        observed.attempts.append(attempt)
+        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME, observation=attempt)
         use_all_fields = rollup_paths is None
         if use_all_fields:
             from backend.core.rollups._common import DAY_BUNDLE_FILENAME
 
-            rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+            attempt = RollupPathCoverage(bundle="all_fields")
+            observed.attempts.append(attempt)
+            rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME, observation=attempt)
             if rollup_paths is None:
+                observed.outcome = "no_coverage"
                 return None
         if rollup_paths is None:
             raise RuntimeError("rollup_paths is unexpectedly None")
@@ -3912,8 +3931,10 @@ class QueryRunner:
             raise
         except duckdb.Error as e:
             _logger.debug("[conn_requests_hist_rollup] read failed, falling back: %s", e)
+            observed.outcome = "read_failed"
             return None
         if not rows:
+            observed.outcome = "empty_result"
             return None
 
         counts: dict[str, int] = {}
@@ -3934,12 +3955,16 @@ class QueryRunner:
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(active_dt, st)
         live_end = min(active_dt + timedelta(hours=1), et)
+        observed.live_top_up = "outside_window"
         if live_start < live_end:
+            observed.live_start, observed.live_end = live_start.isoformat(), live_end.isoformat()
+            observed.live_top_up = "missing_column"
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if "conn_requests" in cols:
                 tmp = self._create_active_hour_temp_direct(["conn_requests"], cols, live_start, live_end)
+                observed.live_top_up = "unavailable"
                 if tmp == "__empty__":
-                    pass
+                    observed.live_top_up = "empty"
                 elif tmp is not None:
                     try:
                         from backend.repositories._sql import dashboard as _dash_sql
@@ -3951,7 +3976,9 @@ class QueryRunner:
                         )
                         for bucket, cnt in self.execute(live_q).fetchall():
                             counts[bucket] = counts.get(bucket, 0) + int(cnt or 0)
+                        observed.live_top_up = "used"
                     except duckdb.Error as e:
+                        observed.live_top_up = "failed"
                         _logger.debug("[conn_requests_hist_rollup] live top-up failed (skipped): %s", e)
                     finally:
                         self.release_active_direct_temp(tmp)
@@ -3961,6 +3988,7 @@ class QueryRunner:
         # their counts stay visible instead of silently vanishing.
         extras = [b for b in counts if b not in self._CONN_REQUESTS_BUCKET_ORDER]
         top = [{"value": b, "count": counts[b]} for b in known + extras]
+        observed.outcome = "served"
         return {"top": top, "total": sum(counts.values())}
 
     def try_virtual_field_top_n_from_rollup(
@@ -4079,13 +4107,21 @@ class QueryRunner:
 
         from backend.core.rollups._common import NGWAF_BOTS_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=2)
+        observed = ReaderCoverage(reader="dashboard.ngwaf_bots", minimum_window_hours=2)
+        self.reader_coverage.append(observed)
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, min_hours=2, observation=observed
+        )
         if win is None:
+            observed.outcome = "ineligible"
             return None
         st, et = win
 
-        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_BUNDLE_FILENAME)
+        attempt = RollupPathCoverage(bundle="ngwaf_bots")
+        observed.attempts.append(attempt)
+        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_BUNDLE_FILENAME, observation=attempt)
         if rollup_paths is None:
+            observed.outcome = "no_coverage"
             return None
 
         paths_sql = quote_path_list(rollup_paths)
@@ -4100,6 +4136,7 @@ class QueryRunner:
             raise
         except duckdb.Error as e:
             _logger.debug("[ngwaf_bots_rollup] read failed, falling back: %s", e)
+            observed.outcome = "read_failed"
             return None
 
         counts: dict[tuple[str, str], int] = {}
@@ -4112,12 +4149,16 @@ class QueryRunner:
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(active_dt, st)
         live_end = min(active_dt + timedelta(hours=1), et)
+        observed.live_top_up = "outside_window"
         if live_start < live_end:
+            observed.live_start, observed.live_end = live_start.isoformat(), live_end.isoformat()
+            observed.live_top_up = "missing_column"
             cols = self.get_schema_cols()
             if "waf_req_id" in cols:
                 tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
+                observed.live_top_up = "unavailable"
                 if tmp == "__empty__":
-                    pass
+                    observed.live_top_up = "empty"
                 elif tmp is not None:
                     try:
                         live_q = (
@@ -4130,12 +4171,15 @@ class QueryRunner:
                         for bot_name, category, cnt in self.execute(live_q).fetchall():
                             key = (bot_name, category)
                             counts[key] = counts.get(key, 0) + int(cnt or 0)
+                        observed.live_top_up = "used"
                     except duckdb.Error as e:
+                        observed.live_top_up = "failed"
                         _logger.debug("[ngwaf_bots_rollup] live top-up failed (skipped): %s", e)
                     finally:
                         self.release_active_direct_temp(tmp)
 
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
+        observed.outcome = "served"
         return [{"name": bn, "category": cat, "request_count": c} for (bn, cat), c in ranked]
 
     def try_ngwaf_verified_bots_from_rollup(

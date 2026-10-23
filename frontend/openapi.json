@@ -52845,6 +52845,20 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "_reader_coverage": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ReaderCoverage"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reader Coverage"
+          },
           "data": {
             "additionalProperties": {
               "$ref": "#/components/schemas/FieldAggregate"
@@ -81851,6 +81865,139 @@
         ],
         "title": "RdnsStatsResponse"
       },
+      "ReaderCoverage": {
+        "properties": {
+          "reader": {
+            "type": "string",
+            "enum": [
+              "dashboard.conn_requests_histogram",
+              "dashboard.ngwaf_bots"
+            ],
+            "title": "Reader"
+          },
+          "minimum_window_hours": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Minimum Window Hours"
+          },
+          "maximum_window_days": {
+            "type": "integer",
+            "title": "Maximum Window Days",
+            "default": 366
+          },
+          "eligible": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eligible"
+          },
+          "eligibility_reason": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "filtered",
+              "bounds_missing",
+              "top_asns_empty",
+              "invalid_window",
+              "window_too_short",
+              "window_too_long",
+              "eligible"
+            ],
+            "title": "Eligibility Reason",
+            "default": "unknown"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/RollupPathCoverage"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "title": "Attempts"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "ineligible",
+              "no_coverage",
+              "read_failed",
+              "empty_result",
+              "served"
+            ],
+            "title": "Outcome",
+            "default": "unknown"
+          },
+          "live_top_up": {
+            "type": "string",
+            "enum": [
+              "not_attempted",
+              "outside_window",
+              "missing_column",
+              "unavailable",
+              "empty",
+              "used",
+              "failed"
+            ],
+            "title": "Live Top Up",
+            "default": "not_attempted"
+          },
+          "live_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Start"
+          },
+          "live_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live End"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reader",
+          "minimum_window_hours"
+        ],
+        "title": "ReaderCoverage"
+      },
       "RealtimeSeedResponse": {
         "properties": {
           "ticks": {
@@ -82969,6 +83116,139 @@
         "type": "object",
         "title": "RollupHealResponse",
         "description": "Result from POST /admin/rollup-heal/{service_id}."
+      },
+      "RollupPathCoverage": {
+        "properties": {
+          "bundle": {
+            "type": "string",
+            "enum": [
+              "security_conn_reuse",
+              "all_fields",
+              "ngwaf_bots"
+            ],
+            "title": "Bundle"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "durable_unready",
+              "no_bundled_root",
+              "no_paths",
+              "below_coverage_floor",
+              "planned"
+            ],
+            "title": "Reason",
+            "default": "unknown"
+          },
+          "minimum_coverage_fraction": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Minimum Coverage Fraction",
+            "default": 0.5
+          },
+          "active_hour_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Hour Start"
+          },
+          "closed_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed Hours"
+          },
+          "covered_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered Hours"
+          },
+          "coverage_fraction": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Fraction"
+          },
+          "partial_start_skipped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partial Start Skipped"
+          },
+          "day_files": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day Files"
+          },
+          "hour_files": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hour Files"
+          },
+          "done_markers": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Done Markers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bundle"
+        ],
+        "title": "RollupPathCoverage"
       },
       "RollupStatusResponse": {
         "properties": {
@@ -88339,6 +88619,20 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "_reader_coverage": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ReaderCoverage"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reader Coverage"
           },
           "bots": {
             "items": {

@@ -45,6 +45,36 @@ test('response output excludes queries credentials and data', () => {
   for (const secret of ['SENSITIVE', 'BEARER', '192.0.2.1']) assert.equal(text.includes(secret), false);
 });
 
+test('reader observations stay component-owned and inherited hits are historical', () => {
+  const observation = { reader: 'dashboard.conn_requests_histogram', minimum_window_hours: 2, outcome: 'served', live_top_up: 'failed', attempts: [{ bundle: 'security_conn_reuse', reason: 'planned', closed_hours: 4, covered_hours: 2, path: 'PRIVATE' }], sql: 'PRIVATE' };
+  const report = describeResponse({
+    _response_cache: { state: 'hit' },
+    aggregates: { _response_cache: { state: 'miss' }, _reader_coverage: [observation] },
+    top_bots: { _reader_coverage: [{ reader: 'dashboard.ngwaf_bots', minimum_window_hours: 2, outcome: 'served' }] },
+  });
+  const aggregate = report.components.find(row => row.component === 'aggregates');
+  assert.equal(aggregate.reader_coverage[0].current_observation, false);
+  assert.equal(aggregate.reader_coverage[0].observation.attempts[0].covered_hours, 2);
+  assert.ok(report.gaps.includes('reader_live_top_up_failed'));
+  assert.ok(report.gaps.includes('history_evidence_missing'));
+  assert.equal(report.gaps.includes('reader_coverage_missing'), false);
+  assert.equal(JSON.stringify(report).includes('PRIVATE'), false);
+  assert.equal(observation.attempts[0].path, 'PRIVATE');
+});
+
+test('malformed reader observations cannot become current coverage or leak arbitrary timestamps', () => {
+  for (const raw of [
+    [{ reader: 'dashboard.ngwaf_bots', minimum_window_hours: true }],
+    [{ reader: 'dashboard.ngwaf_bots', minimum_window_hours: 2, window_start: 'PRIVATE' }],
+    [{ reader: 'dashboard.ngwaf_bots', minimum_window_hours: 2, attempts: [{ bundle: 'ngwaf_bots', covered_hours: -1 }] }],
+  ]) {
+    const report = describeResponse({ _response_cache: { state: 'miss' }, _reader_coverage: raw });
+    assert.deepEqual(report.components[0].reader_coverage, []);
+    assert.ok(report.gaps.includes('reader_coverage_invalid'));
+    assert.equal(JSON.stringify(report).includes('PRIVATE'), false);
+  }
+});
+
 test('approved budgets are shared with the sweep and not mislabeled as request budgets', () => {
   assert.equal(budgets.visible_results_p95_ms['24h'].unfiltered, 2000);
   assert.equal(budgets.visible_results_p95_ms['30d'].filtered, 30000);

@@ -35,6 +35,7 @@ from backend.core.rollups._common import (
     _hour_bundled_root,
     _rollups_root,
 )
+from backend.models.reader_coverage import ReaderCoverage, RollupPathCoverage
 from backend.utils.date_utils import parse_hour_key_strict, parse_window
 
 ALL_FIELDS_FILENAME = "all_fields.parquet"
@@ -113,29 +114,50 @@ def eligible_window(
     has_filters: bool,
     require_top_asns: list[int] | None = None,
     min_hours: int,
+    observation: ReaderCoverage | None = None,
 ) -> tuple[datetime, datetime] | None:
     """Parse and gate a request window shared by the rollup readers.
 
     Returns the UTC ``(st, et)`` when every guard passes, else ``None``.
     Guards, in order: unfiltered only; both bounds present; optional non-empty
     ``require_top_asns``; both bounds parse with ``et > st``; the window spans
-    at least ``min_hours`` and at most 366 days. Every guard is a
-    side-effect-free ``return None``.
+    at least ``min_hours`` and at most 366 days. Optional observations record
+    the first failing guard without evaluating later guards or doing I/O.
     """
+    if observation is not None:
+        observation.minimum_window_hours = min_hours
+        observation.eligible = False
     if has_filters:
+        if observation is not None:
+            observation.eligibility_reason = "filtered"
         return None
     if not start_time or not end_time:
+        if observation is not None:
+            observation.eligibility_reason = "bounds_missing"
         return None
     if require_top_asns is not None and not require_top_asns:
+        if observation is not None:
+            observation.eligibility_reason = "top_asns_empty"
         return None
     window = parse_window(start_time, end_time)
     if window is None:
+        if observation is not None:
+            observation.eligibility_reason = "invalid_window"
         return None
     st, et = window
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
     if (et - st) < timedelta(hours=min_hours):
+        if observation is not None:
+            observation.eligibility_reason = "window_too_short"
         return None
     if (et - st) > timedelta(days=366):
+        if observation is not None:
+            observation.eligibility_reason = "window_too_long"
         return None
+    if observation is not None:
+        observation.eligible = True
+        observation.eligibility_reason = "eligible"
     return st, et
 
 
@@ -474,6 +496,7 @@ def collect_day_prefer_paths(
     *,
     skip_partial_start: bool = True,
     allow_empty_with_done: bool = False,
+    observation: RollupPathCoverage | None = None,
 ) -> list[str] | None:
     """Day-prefer / hour-fallback rollup paths for ``[st, et)``, or ``None``.
 
@@ -482,17 +505,24 @@ def collect_day_prefer_paths(
     on any eligibility miss — no bundled root, no paths, or less than
     ``MIN_CLOSED_HOUR_COVERAGE`` of the closed hours covered.
     """
+    if observation is not None:
+        observation.minimum_coverage_fraction = MIN_CLOSED_HOUR_COVERAGE
     if durable_serving_blocked(src):
+        if observation is not None:
+            observation.reason = "durable_unready"
         return None
 
     hour_root = _hour_bundled_root(src)
     day_root = _day_bundled_root(src)
     if not os.path.isdir(hour_root) and not os.path.isdir(day_root):
+        if observation is not None:
+            observation.reason = "no_bundled_root"
         return None
 
     index = CoverageIndex.build(st, et, skip_partial_start=skip_partial_start)
     paths: list[str] = []
     covered_hours = 0
+    day_files = hour_files = done_markers = 0
     for day, hours_in_day in sorted(index.by_day().items()):
         chosen_day = _day_bundle_file(day_root, day, bundle_filename)
         # The per-day file is only valid when the window spans the ENTIRE UTC
@@ -500,19 +530,35 @@ def collect_day_prefer_paths(
         if len(hours_in_day) == 24 and chosen_day:
             paths.append(chosen_day)
             covered_hours += 24
+            day_files += 1
         else:
             for hour in hours_in_day:
                 path = os.path.join(hour_root, f"hour={hour}", bundle_filename)
                 if os.path.isfile(path):
                     paths.append(path)
                     covered_hours += 1
+                    hour_files += 1
                 elif allow_empty_with_done and os.path.isfile(f"{path}.done"):
                     covered_hours += 1
+                    done_markers += 1
 
+    if observation is not None:
+        observation.active_hour_start = index.active_dt.isoformat()
+        observation.closed_hours = len(index.closed_hours)
+        observation.covered_hours = covered_hours
+        observation.coverage_fraction = covered_hours / len(index.closed_hours) if index.closed_hours else None
+        observation.partial_start_skipped = skip_partial_start and st > st.replace(minute=0, second=0, microsecond=0)
+        observation.day_files, observation.hour_files, observation.done_markers = day_files, hour_files, done_markers
     if not paths and not (allow_empty_with_done and covered_hours > 0):
+        if observation is not None:
+            observation.reason = "no_paths"
         return None
     if not meets_coverage_floor(covered_hours, len(index.closed_hours)):
+        if observation is not None:
+            observation.reason = "below_coverage_floor"
         return None
+    if observation is not None:
+        observation.reason = "planned"
     return paths
 
 

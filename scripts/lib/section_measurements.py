@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import statistics
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from backend.models.common import FilterSpec
+from backend.models.reader_coverage import ReaderCoverage
 
 _FILTERS = TypeAdapter(dict[str, FilterSpec])
 BUDGETS = json.loads(Path(__file__).with_name("performance_budgets.json").read_text())
@@ -72,6 +74,37 @@ def _section(row: Mapping[str, Any], cache_state: str) -> dict[str, Any]:
     }
 
 
+_COVERAGE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
+
+
+def _reader_coverage(raw: Any, reused: bool, state: str) -> tuple[list[dict[str, Any]], list[str]]:
+    if not isinstance(raw, list) or not raw:
+        return [], ["reader_coverage_missing", "history_evidence_missing"]
+    observations = []
+    gaps = ["history_evidence_missing"]
+    for row in raw[:2]:
+        try:
+            parsed = ReaderCoverage.model_validate(row, strict=True).model_dump(exclude_unset=True)
+            timestamps = [parsed.get(key) for key in ("window_start", "window_end", "live_start", "live_end")]
+            timestamps.extend(attempt.get("active_hour_start") for attempt in parsed.get("attempts", []))
+            if any(value is not None and not _COVERAGE_TIMESTAMP.fullmatch(value) for value in timestamps):
+                raise ValueError("Invalid coverage timestamp")
+        except (ValidationError, ValueError):
+            gaps.append("reader_coverage_invalid")
+            continue
+        current = False if reused else True if state in {"miss", "bypass"} else None
+        observations.append({"observation": parsed, "current_observation": current})
+        if current is not True:
+            gaps.append("reader_coverage_historical_or_unknown")
+        if parsed.get("live_top_up") in {"failed", "unavailable", "missing_column"}:
+            gaps.append(f"reader_live_top_up_{parsed['live_top_up']}")
+        if parsed.get("outcome") in {None, "unknown", "read_failed"}:
+            gaps.append("reader_outcome_unverified")
+    if len(raw) > 2:
+        gaps.append("reader_coverage_truncated")
+    return observations, gaps
+
+
 def describe_response(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"components": [], "gaps": ["response_not_object"]}
@@ -101,7 +134,14 @@ def describe_response(payload: Any) -> dict[str, Any]:
             for row in (raw if isinstance(raw, list) else [])
             if isinstance(row, dict) and isinstance(row.get("section"), str)
         ]
+        raw_readers = body.get("_reader_coverage", body.get("reader_coverage"))
+        readers: list[dict[str, Any]]
+        if raw_readers is None and any(isinstance(body.get(name), dict) for name in COMPONENTS):
+            readers, reader_gaps = [], ["history_evidence_missing"]
+        else:
+            readers, reader_gaps = _reader_coverage(raw_readers, cached_execution, state)
         gaps = ["response_cache_conflict"] if conflict else []
+        gaps.extend(reader_gaps)
         if state == "unknown":
             gaps.append("response_cache_unknown")
         if shared:
@@ -123,6 +163,7 @@ def describe_response(payload: Any) -> dict[str, Any]:
                 "execution_reused": cached_execution,
                 "lookup_current": not enclosing_hit and not shared,
                 "sections": sections,
+                "reader_coverage": readers,
                 "gaps": gaps,
             }
         )

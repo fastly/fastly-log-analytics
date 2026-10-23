@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import AliasChoices, Field
+
 from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
+from backend.models.reader_coverage import ReaderCoverage
 
 
 class ActiveClientItem(WireSafeModel):
@@ -172,6 +175,12 @@ class SecurityAggregatesResponse(BaseResponse):
 
 
 class SecurityTopBotsResponse(BaseResponse):
+    reader_coverage: list[ReaderCoverage] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
+        serialization_alias="_reader_coverage",
+        exclude_if=lambda value: value is None,
+    )
     bots: list[SecurityBotRow] = []
     ngwaf_bots: list[SecurityBotRow] = []
 

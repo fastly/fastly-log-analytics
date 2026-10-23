@@ -38,6 +38,40 @@ Single-flight is not a response cache. A leader that computes after a failed loo
 
 Controlled-miss sampling uses normal TTL expiry, with a bounded wait and unchanged request payloads. The initial response is a baseline even when it misses: a qualifying request must start after at least its configured TTL has elapsed following that baseline's completion. It then requires explicit backend miss and subsequent hit observations for each applicable component; bypass components are recorded separately. Historical child observations inherited from a cached subtree or a single-flight follower cannot establish either side of the pair. Concurrent repopulation, unknown state, failed requests or an exhausted bound leave evidence incomplete. The operator selected best-practice behavior and clarified that concurrent users are not the norm; this does not waive the approved two-user qualification or separate five-user stress case. No bypass API, shared-cache invalidation or key-changing trick is authorized.
 
+## Reader coverage observations — partial implementation
+
+Standard dashboard aggregates and top bots can carry component-owned
+`_reader_coverage` records for the connection-request histogram and NGWAF bot
+rollup readers. Each records its actual eligibility reason, resolved bounds,
+2-hour minimum and 366-day maximum, followed by each day-prefer/hour-fallback
+attempt. The histogram records its specialized-bundle and all-fields attempts
+separately. Both use the existing 50% closed-hour coverage floor.
+
+The existing planning walk supplies the closed/covered hour counts, fraction,
+active-hour boundary, partial-leading-hour exclusion and selected day/hour file
+counts. Done markers are counted separately where supported. A pre-walk refusal
+keeps unobserved counts null, not zero. These observations add no SQL or file
+probes and contain no paths, SQL, filter values or exception text.
+
+A `planned` attempt does not prove a successful read. Reader outcome and live
+active-hour top-up are separate: a read can fall back, while an unavailable,
+failed or missing-column top-up can leave the existing closed-hour result in
+place. `served` is not a completeness claim. File presence does not verify the
+rows or field membership inside an all-fields bundle, and a 50%-covered window
+is not complete history.
+
+Both reporters retain only allowlisted typed observations, separate current
+observations from historical cache/follower reuse, and keep unknown cache state
+unknown. Bundle wrappers do not invent missing-reader gaps for observations
+owned by their children. Absent or malformed leaf-reader metadata remains a
+gap. Observations cannot clear `history_evidence_missing` or certify a window.
+
+This slice does not instrument dashboard top-N, count/time-series or UA bot
+coverage, prove actual event-time extents/window rows, or cover High-Scale.
+Skipped/filtered branches that do not invoke these readers have no observation;
+absence is not evidence of an eligible or covered reader. The full prerequisite
+gate stays closed until those gaps and deployed verification are resolved.
+
 ## Repeated samples
 
 [`scripts/dev/section_sweep.py`](../../scripts/dev/section_sweep.py) keeps request order separate from cache state. It records exact request payloads, a page-load correlation ID per sample, environment, role, window, independent component observations and request wall time. It retains errors as failed samples without printing credential-bearing exception text.

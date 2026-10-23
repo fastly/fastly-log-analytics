@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from backend.models._base import ScalarCell
 from backend.models.common import (
@@ -15,6 +15,7 @@ from backend.models.common import (
     PaginationMixin,
     RangeKeyedRequest,
 )
+from backend.models.reader_coverage import ReaderCoverage
 from backend.models.security import SecurityTopBotsResponse
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
@@ -94,6 +95,12 @@ class MapPoint(BaseModel):
 
 
 class AggregatesResponse(BaseResponse, LogExtentsMixin):
+    reader_coverage: list[ReaderCoverage] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
+        serialization_alias="_reader_coverage",
+        exclude_if=lambda value: value is None,
+    )
     data: dict[str, FieldAggregate]
     time_series: list[TimeSeriesPoint]
     map_data: list[MapPoint]

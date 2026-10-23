@@ -76,6 +76,7 @@ The system supports three distinct operational personas across the Dashboard:
 - **Rollup & Fallback Strategy:**
   - For long-horizon windows (`7d` and `30d`), the backend queries precomputed Top-N Parquet rollups (`rollups/` directory) first for maximum speed.
   - If rollups are not yet compiled, missing, or partially behind, the backend **transparently falls back to scanning raw Parquet buffers and DuckLake tables**, logging an attributed notice in `telemetry_queries` without failing or interrupting the user experience.
+- **Reader Coverage Evidence (partial):** Optional component-owned `_reader_coverage` records expose the connection-request histogram and NGWAF bot readers' actual 2-hour eligibility floor, 50% closed-hour planning threshold, selected day/hour coverage and live-top-up outcome. A planned read, a served result or file presence is not proof of complete retained history. Cached observations are historical; missing top-N/count/time-series/UA evidence stays incomplete. See [the measurement contract](../runbooks/section-sweep-measurements.md#reader-coverage-observations--partial-implementation).
 - **Stale View Handling:** Uses `execute_with_stale_view_retry` to recover from transient file swaps during active ingestion. Displays calm "Preparing your data" status rather than error toasts.
 
 ### High-Scale Architecture (Elevation K8s)

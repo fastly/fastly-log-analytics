@@ -177,6 +177,44 @@ def stub_top_bots(monkeypatch):
     return stub
 
 
+def test_bundle_preserves_component_owned_reader_coverage(client, stub_aggregates, stub_top_bots, monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    aggregate_observation = {
+        "reader": "dashboard.conn_requests_histogram",
+        "minimum_window_hours": 2,
+        "eligible": False,
+        "eligibility_reason": "window_too_short",
+        "outcome": "ineligible",
+    }
+    bot_observation = {
+        "reader": "dashboard.ngwaf_bots",
+        "minimum_window_hours": 2,
+        "eligible": True,
+        "eligibility_reason": "eligible",
+        "outcome": "served",
+        "attempts": [{"bundle": "ngwaf_bots", "reason": "planned", "closed_hours": 4, "covered_hours": 2}],
+    }
+    stub_aggregates.return_value["reader_coverage"] = [aggregate_observation]
+    stub_top_bots.return_value["reader_coverage"] = [bot_observation]
+    response = client.post("/api/dashboard/bundle", json={"filters": {}})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["aggregates"]["_reader_coverage"][0]["reader"] == "dashboard.conn_requests_histogram"
+    assert body["top_bots"]["_reader_coverage"][0]["reader"] == "dashboard.ngwaf_bots"
+    assert body["top_bots"]["_reader_coverage"][0]["attempts"][0]["covered_hours"] == 2
+    assert "_reader_coverage" not in body
+    assert "_debug_queries" not in body["aggregates"]
+    assert "_debug_queries" not in body["top_bots"]
+
+
+def test_bundle_omits_unobserved_reader_coverage(client, stub_aggregates, stub_top_bots):
+    response = client.post("/api/dashboard/bundle", json={"filters": {}})
+    assert response.status_code == 200
+    body = response.json()
+    assert "_reader_coverage" not in body["aggregates"]
+    assert "_reader_coverage" not in body["top_bots"]
+
+
 # ── /api/dashboard/bundle ─────────────────────────────────────────────────────
 
 

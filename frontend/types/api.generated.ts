@@ -6697,6 +6697,8 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
+            /** Reader Coverage */
+            _reader_coverage?: components["schemas"]["ReaderCoverage"][] | null;
             /** Data */
             data: {
                 [key: string]: components["schemas"]["FieldAggregate"];
@@ -17000,6 +17002,51 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ReaderCoverage */
+        ReaderCoverage: {
+            /**
+             * Reader
+             * @enum {string}
+             */
+            reader: "dashboard.conn_requests_histogram" | "dashboard.ngwaf_bots";
+            /** Minimum Window Hours */
+            minimum_window_hours: number;
+            /**
+             * Maximum Window Days
+             * @default 366
+             */
+            maximum_window_days: number;
+            /** Eligible */
+            eligible?: boolean | null;
+            /**
+             * Eligibility Reason
+             * @default unknown
+             * @enum {string}
+             */
+            eligibility_reason: "unknown" | "filtered" | "bounds_missing" | "top_asns_empty" | "invalid_window" | "window_too_short" | "window_too_long" | "eligible";
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Attempts */
+            attempts?: components["schemas"]["RollupPathCoverage"][];
+            /**
+             * Outcome
+             * @default unknown
+             * @enum {string}
+             */
+            outcome: "unknown" | "ineligible" | "no_coverage" | "read_failed" | "empty_result" | "served";
+            /**
+             * Live Top Up
+             * @default not_attempted
+             * @enum {string}
+             */
+            live_top_up: "not_attempted" | "outside_window" | "missing_column" | "unavailable" | "empty" | "used" | "failed";
+            /** Live Start */
+            live_start?: string | null;
+            /** Live End */
+            live_end?: string | null;
+        };
         /** RealtimeSeedResponse */
         RealtimeSeedResponse: {
             /** Ticks */
@@ -17375,6 +17422,41 @@ export interface components {
             error_message?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** RollupPathCoverage */
+        RollupPathCoverage: {
+            /**
+             * Bundle
+             * @enum {string}
+             */
+            bundle: "security_conn_reuse" | "all_fields" | "ngwaf_bots";
+            /**
+             * Reason
+             * @default unknown
+             * @enum {string}
+             */
+            reason: "unknown" | "durable_unready" | "no_bundled_root" | "no_paths" | "below_coverage_floor" | "planned";
+            /**
+             * Minimum Coverage Fraction
+             * @default 0.5
+             */
+            minimum_coverage_fraction: number;
+            /** Active Hour Start */
+            active_hour_start?: string | null;
+            /** Closed Hours */
+            closed_hours?: number | null;
+            /** Covered Hours */
+            covered_hours?: number | null;
+            /** Coverage Fraction */
+            coverage_fraction?: number | null;
+            /** Partial Start Skipped */
+            partial_start_skipped?: boolean | null;
+            /** Day Files */
+            day_files?: number | null;
+            /** Hour Files */
+            hour_files?: number | null;
+            /** Done Markers */
+            done_markers?: number | null;
         };
         /**
          * RollupStatusResponse
@@ -19087,6 +19169,8 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
+            /** Reader Coverage */
+            _reader_coverage?: components["schemas"]["ReaderCoverage"][] | null;
             /**
              * Bots
              * @default []
