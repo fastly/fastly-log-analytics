@@ -23,6 +23,7 @@ from backend.models.share_auth import (
 from backend.utils.analyst_session import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
+    analyst_cookie_is_secure,
     safe_audit_email,
     set_analyst_session_cookies,
 )
@@ -151,7 +152,7 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         response,
         session.session_id,
         tos_pending=tos_pending,
-        secure=request.url.scheme == "https",
+        secure=analyst_cookie_is_secure(request, mgr.public_url()),
         samesite="strict",
     )
 
@@ -230,7 +231,7 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
         key=COOKIE_NAME,
         value=new_sid,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=analyst_cookie_is_secure(request, mgr.public_url()),
         samesite="strict",
         max_age=24 * 60 * 60,
         path="/",

@@ -69,7 +69,9 @@ def test_login_success_sets_cookie_and_returns_session(client):
     assert "session_id" not in body  # L1: sid is the bearer token, cookie-only
     assert body["service_ids"] == ["svcA"]
     # cookie set
-    assert "analyst_session_id" in r.headers.get("set-cookie", "")
+    cookie = r.headers.get("set-cookie", "")
+    assert "analyst_session_id" in cookie
+    assert "secure" in cookie.lower()
 
 
 def test_login_wrong_passcode_returns_401(client):

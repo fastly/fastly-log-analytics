@@ -32,10 +32,11 @@ from backend.core.oauth import registry as oauth_registry
 from backend.core.oauth.client import OIDCError
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.analyst_session import (
-    safe_audit_email as _safe_audit_email,
+    analyst_cookie_is_secure,
+    set_analyst_session_cookies,
 )
 from backend.utils.analyst_session import (
-    set_analyst_session_cookies,
+    safe_audit_email as _safe_audit_email,
 )
 from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
@@ -377,7 +378,7 @@ def oauth_callback(
         resp,
         session.session_id,
         tos_pending=tos_pending,
-        secure=request.url.scheme == "https",
+        secure=analyst_cookie_is_secure(request, mgr.public_url()),
         samesite="lax",
     )
     resp.delete_cookie(flow_state.COOKIE_NAME, path=flow_state.COOKIE_PATH)

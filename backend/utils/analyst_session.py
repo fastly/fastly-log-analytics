@@ -9,14 +9,28 @@ independent of each other (the import-linter "Routers are independent" contract)
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import Response
+from fastapi import Request, Response
 
 # The analyst bearer-token cookie names. While TOS is pending the session id
 # lives in the PENDING cookie; `/api/share/acknowledge` upgrades it to the full
 # cookie (and rotates the id). Both share routers follow this two-cookie protocol.
 ANALYST_SESSION_COOKIE = "analyst_session_id"
 ANALYST_PENDING_SESSION_COOKIE = "analyst_pending_session_id"
+
+
+def analyst_cookie_is_secure(request: Request, public_url: str | None) -> bool:
+    """Keep analyst bearer cookies secure when TLS terminates at a proxy."""
+    if request.url.scheme.lower() == "https":
+        return True
+    if not public_url:
+        return False
+    try:
+        parsed = urlsplit(public_url)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "https" and bool(parsed.netloc)
 
 
 def set_analyst_session_cookies(
