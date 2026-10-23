@@ -186,7 +186,7 @@ def test_new_city_traffic_renders_and_pins_placeholders():
 def test_ua_monoculture_renders_and_pins_placeholders():
     rendered = SQL.UA_MONOCULTURE.format(table_name="t_logs")
     assert 'FROM t_logs GROUP BY "ua"' in rendered
-    assert rendered.count("?") == 4
+    assert rendered.count("?") == 2
     assert _placeholders(SQL.UA_MONOCULTURE) == ["table_name"]
 
 
@@ -203,10 +203,8 @@ def test_new_probe_urls_bakes_regex_and_pins_placeholders():
 
 
 def test_waf_signal_spikes_renders_and_pins_placeholders():
-    # Reads from {waf_table} — the insights repo materialises a
-    # second TEMP TABLE that pre-unnests "waf_sig" once per request
-    # (see `repository.py` build_insights). The unnest+trim+filter
-    # logic lives there, not in this template.
+    # Reads from {waf_table} (hydrated with table_name in repository.py)
+    # and groups distinct waf_sig combinations before unnesting.
     rendered = SQL.WAF_SIGNAL_SPIKES.format(waf_table="insights_waf_1", baseline_hours=24, window_hours=1)
     assert "FROM insights_waf_1" in rendered
     assert "GROUP BY signal" in rendered
@@ -218,15 +216,15 @@ def test_proxy_surge_renders_and_pins_placeholders():
     rendered = SQL.PROXY_SURGE.format(table_name="t_logs")
     assert 'FROM t_logs WHERE "p_type" IS NOT NULL' in rendered
     assert "totals AS" in rendered
-    assert rendered.count("?") == 4
+    assert rendered.count("?") == 2
     assert _placeholders(SQL.PROXY_SURGE) == ["table_name"]
 
 
 def test_asn_concentration_renders_and_pins_placeholders():
     rendered = SQL.ASN_CONCENTRATION.format(table_name="t_logs")
     assert 'GROUP BY "asn"' in rendered
-    assert "g.w_cnt * 1.0 / t.w_total >= 0.20" in rendered
-    assert rendered.count("?") == 4
+    assert "w_cnt * 1.0 / w_total >= 0.20" in rendered
+    assert rendered.count("?") == 2
     assert _placeholders(SQL.ASN_CONCENTRATION) == ["table_name"]
 
 
@@ -303,8 +301,8 @@ def test_connection_abuse_renders_and_pins_placeholders():
 
 def test_region_latency_renders_and_pins_placeholders():
     rendered = SQL.REGION_LATENCY.format(table_name="t_logs")
-    assert "region_stats AS" in rendered
-    assert "origin_stats AS" in rendered
+    assert "stats AS" in rendered
+    assert "ottfb_p95" in rendered
     assert rendered.count("?") == 2
     assert _placeholders(SQL.REGION_LATENCY) == ["table_name"]
 
@@ -319,7 +317,7 @@ def test_cache_ttl_mismatch_renders_and_pins_placeholders():
 
 def test_image_optimization_opportunities_renders_and_pins_placeholders():
     rendered = SQL.IMAGE_OPTIMIZATION_OPPORTUNITIES.format(table_name="t_logs", ua_mobile_sel="0")
-    assert 'WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND "status" = 200' in rendered
+    assert 'WHERE t.timestamp >= CAST(? AS TIMESTAMPTZ) AND t."status" = 200' in rendered
     assert "(0) AS mobile_ratio" in rendered
     assert "%.jpg%" in rendered
     assert rendered.count("?") == 1
@@ -380,7 +378,7 @@ def test_coalesced_city_aggregates_renders_and_pins_placeholders():
     )
     assert "FROM t_logs" in rendered
     assert 'WHERE "city" IS NOT NULL' in rendered
-    assert "GROUP BY ALL" in rendered
+    assert 'GROUP BY "city", region, country' in rendered
     assert "w_lat_total" in rendered
     assert "b_lat_total" in rendered
     assert rendered.count("?") == 2
@@ -400,6 +398,33 @@ def test_coalesced_url_aggregates_renders_and_pins_placeholders():
     assert 'GROUP BY "url"' in rendered
     assert rendered.count("?") == 2
     assert _placeholders(SQL.COALESCED_URL_AGGREGATES) == ["table_name"]
+
+
+def test_coalesced_asn_and_scalar_aggregates_render_and_pin_placeholders():
+    asn_rendered = SQL.COALESCED_ASN_AGGREGATES.format(
+        table_name="t_logs",
+        ploss_sel='"ploss"',
+        rtt_var_sel='"rtt_var"',
+        retrans_sel='"retrans"',
+        p_type_sel='"p_type"',
+    )
+    assert "FROM t_logs" in asn_rendered
+    assert "GROUP BY asn" in asn_rendered
+    assert asn_rendered.count("?") == 2
+    assert _placeholders(SQL.COALESCED_ASN_AGGREGATES) == sorted(
+        ["table_name", "ploss_sel", "rtt_var_sel", "retrans_sel", "p_type_sel"]
+    )
+
+    scalar_rendered = SQL.COALESCED_SCALAR_AGGREGATES.format(
+        table_name="t_logs",
+        transport_sel='"transport"',
+        cache_sel='"cache"',
+    )
+    assert "FROM t_logs" in scalar_rendered
+    assert "w_quic" in scalar_rendered
+    assert "w_cacheable" in scalar_rendered
+    assert scalar_rendered.count("?") == 2
+    assert _placeholders(SQL.COALESCED_SCALAR_AGGREGATES) == sorted(["table_name", "transport_sel", "cache_sel"])
 
 
 # ── NEW_PROBE_REGEX sanity ────────────────────────────────────────────────────

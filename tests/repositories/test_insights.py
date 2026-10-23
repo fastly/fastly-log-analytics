@@ -2159,3 +2159,71 @@ def test_get_insights_coalesced_city_task_exception_does_not_break_others(
     assert "content_discovery" in by_id
     cd_labels = {item["label"] for item in by_id["content_discovery"]["items"]}
     assert "10.0.0.3" in cd_labels
+
+
+def test_coalesced_asn_and_scalar_paths_match_per_insight_scan_output(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    """Parity test: `_coalesced_asn_aggregates` and `_coalesced_scalar_aggregates`
+    must produce items identical to the standalone SQL templates for all 6
+    coalesced insights (asn_concentration, new_asn_traffic, network_asn_health,
+    asn_hosting_shift, http3_fallback, cache_hit_cliff)."""
+    from backend.repositories.insights import repository as insights_repo
+
+    table_name = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        '"timestamp" TIMESTAMPTZ, "asn" UINTEGER, "ploss" DOUBLE, "rtt_var" DOUBLE, '
+        '"retrans" DOUBLE, "p_type" VARCHAR, "transport" VARCHAR, "cache" VARCHAR)'
+    )
+    now = datetime.now(UTC)
+    window_ts = (now - timedelta(minutes=20)).isoformat()
+    baseline_ts = (now - timedelta(hours=24, minutes=20)).isoformat()
+
+    # Baseline: 500 rows on AS15169 + 100 rows on AS13335, healthy network, corporate p_type, QUIC, HIT
+    in_memory_duckdb.executemany(
+        f"INSERT INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(baseline_ts, 15169, 0.001, 2000.0, 0.05, "corporate", "quic", "HIT") for _ in range(500)]
+        + [(baseline_ts, 13335, 0.001, 2000.0, 0.05, "corporate", "quic", "HIT") for _ in range(100)],
+    )
+    # Window:
+    # - AS13335: 60 rows (degraded network health + hosting shift + concentration)
+    # - AS99999: 45 rows (new_asn_traffic + concentration)
+    # - Overall transport: TCP (http3_fallback vs QUIC baseline)
+    # - Overall cache: MISS (cache_hit_cliff vs HIT baseline)
+    in_memory_duckdb.executemany(
+        f"INSERT INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(window_ts, 13335, 0.05, 50000.0, 1.5, "hosting", "tcp", "MISS") for _ in range(60)]
+        + [(window_ts, 99999, 0.001, 2000.0, 0.05, "corporate", "tcp", "MISS") for _ in range(45)],
+    )
+
+    target_ids = (
+        "asn_concentration",
+        "new_asn_traffic",
+        "network_asn_health",
+        "asn_hosting_shift",
+        "http3_fallback",
+        "cache_hit_cliff",
+    )
+
+    _insights_cache.clear()
+    fast = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    fast_map = {i["id"]: i for i in fast["insights"] if i["id"] in target_ids}
+
+    _insights_cache.clear()
+    monkeypatch.setattr(insights_repo, "_coalesced_asn_aggregates", lambda *a, **k: {})
+    monkeypatch.setattr(insights_repo, "_coalesced_scalar_aggregates", lambda *a, **k: {})
+    slow = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    slow_map = {i["id"]: i for i in slow["insights"] if i["id"] in target_ids}
+
+    assert set(fast_map.keys()) == set(target_ids)
+    assert set(slow_map.keys()) == set(target_ids)
+
+    def _strip_rolling_ts(items):
+        return [{k: v for k, v in item.items() if k != "investigate_url"} for item in items]
+
+    for insight_id in target_ids:
+        fast_items = _strip_rolling_ts(fast_map[insight_id]["items"])
+        slow_items = _strip_rolling_ts(slow_map[insight_id]["items"])
+        assert fast_items, f"{insight_id}: coalesced path produced no items"
+        assert fast_items == slow_items, f"{insight_id} mismatch:\nfast={fast_items}\nslow={slow_items}"

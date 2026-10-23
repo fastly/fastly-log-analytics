@@ -9,7 +9,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,9 +17,12 @@ from typing import Any
 import duckdb
 
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
+from backend.repositories._sql import insights as _insights_sql
 from backend.repositories._sql.insights import (
+    COALESCED_ASN_AGGREGATES,
     COALESCED_CITY_AGGREGATES,
     COALESCED_IP_SECURITY_AGGREGATES,
+    COALESCED_SCALAR_AGGREGATES,
     COALESCED_URL_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
@@ -500,6 +503,195 @@ def _coalesced_ip_security_aggregates(
     }
 
 
+def _coalesced_asn_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    actual_cols: Collection[str],
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+) -> dict[str, list[tuple]]:
+    """Coalesce the 4 ASN-keyed insights (asn_concentration, new_asn_traffic,
+    network_asn_health, asn_hosting_shift) into ONE ``GROUP BY asn`` pass over
+    ``table_name``.
+    """
+    has_health = "ploss" in actual_cols and "rtt_var" in actual_cols and "retrans" in actual_cols
+    has_ptype = "p_type" in actual_cols
+    sql = COALESCED_ASN_AGGREGATES.format(
+        table_name=table_name,
+        ploss_sel='"ploss"' if "ploss" in actual_cols else "NULL::DOUBLE",
+        rtt_var_sel='"rtt_var"' if "rtt_var" in actual_cols else "NULL::DOUBLE",
+        retrans_sel='"retrans"' if "retrans" in actual_cols else "NULL::DOUBLE",
+        p_type_sel='"p_type"' if "p_type" in actual_cols else "NULL::VARCHAR",
+    )
+    if shadow_cursor is not None and debug_lock is not None:
+        rows = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchall()
+    else:
+        rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+
+    w_total_all = sum(int(r[1] or 0) for r in rows)
+    b_total_all = sum(int(r[2] or 0) for r in rows)
+
+    concentration: list[tuple] = []
+    new_asn: list[tuple] = []
+    health: list[tuple] = []
+    hosting_shift: list[tuple] = []
+
+    for r in rows:
+        (
+            asn,
+            w_cnt,
+            b_cnt,
+            w_ploss,
+            b_ploss,
+            w_jitter,
+            b_jitter,
+            w_retrans,
+            b_retrans,
+            w_hosting,
+            w_pt_total,
+            b_hosting,
+            b_pt_total,
+        ) = r
+        if asn is None:
+            continue
+
+        w_cnt_i = int(w_cnt or 0)
+        b_cnt_i = int(b_cnt or 0)
+
+        # asn_concentration
+        if w_total_all > 0:
+            w_share = w_cnt_i / w_total_all
+            if w_share >= 0.20 and (b_total_all == 0 or w_share >= (b_cnt_i / b_total_all) * 3 + 0.10):
+                concentration.append((asn, w_cnt_i, b_cnt_i, b_total_all, w_total_all))
+
+        # new_asn_traffic
+        if w_cnt_i >= 20 and b_cnt_i == 0:
+            new_asn.append((asn, w_cnt_i, b_cnt_i))
+
+        # network_asn_health
+        if has_health and w_cnt_i >= 50 and b_cnt_i >= 100:
+            w_ploss_f = float(w_ploss or 0.0)
+            b_ploss_f = float(b_ploss or 0.0)
+            w_retrans_f = float(w_retrans or 0.0)
+            b_retrans_f = float(b_retrans or 0.0)
+            ploss_bad = w_ploss_f >= 0.02 and w_ploss_f >= b_ploss_f * 2 + 0.005
+            jitter_bad = (
+                w_jitter is not None
+                and b_jitter is not None
+                and w_jitter >= b_jitter * 2
+                and (w_jitter - b_jitter) >= 20000
+            )
+            retrans_bad = w_retrans_f >= b_retrans_f * 2 + 0.5
+            if ploss_bad or jitter_bad or retrans_bad:
+                health.append(
+                    (
+                        asn,
+                        w_ploss,
+                        b_ploss,
+                        w_jitter,
+                        b_jitter,
+                        w_retrans,
+                        b_retrans,
+                        w_cnt_i,
+                        b_cnt_i,
+                    )
+                )
+
+        # asn_hosting_shift
+        if has_ptype:
+            w_pt_i = int(w_pt_total or 0)
+            b_pt_i = int(b_pt_total or 0)
+            w_host_i = int(w_hosting or 0)
+            b_host_i = int(b_hosting or 0)
+            if w_pt_i >= 50:
+                w_hr = w_host_i / w_pt_i
+                if w_hr >= 0.3 and (b_pt_i == 0 or w_hr >= (b_host_i / b_pt_i) * 3 + 0.10):
+                    hosting_shift.append((asn, w_host_i, w_pt_i, b_host_i, b_pt_i))
+
+    concentration.sort(key=lambda x: -(x[1] or 0))
+    new_asn.sort(key=lambda x: -(x[1] or 0))
+    health.sort(
+        key=lambda x: (
+            -(x[1] or 0.0),
+            -(x[3] if x[3] is not None else float("-inf")),
+        )
+    )
+    hosting_shift.sort(key=lambda x: -(x[1] or 0))
+
+    res: dict[str, list[tuple]] = {
+        "asn_concentration": concentration[:10],
+        "new_asn_traffic": new_asn[:20],
+    }
+    if has_health:
+        res["network_asn_health"] = health[:15]
+    if has_ptype:
+        res["asn_hosting_shift"] = hosting_shift[:15]
+    return res
+
+
+def _coalesced_scalar_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    actual_cols: Collection[str],
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+) -> dict[str, list[tuple]]:
+    """Coalesce the 2 ungrouped service-wide scalar insights (http3_fallback,
+    cache_hit_cliff) into ONE pass over ``table_name``.
+    """
+    has_transport = "transport" in actual_cols
+    has_cache = "cache" in actual_cols
+    if not (has_transport or has_cache):
+        return {}
+    sql = COALESCED_SCALAR_AGGREGATES.format(
+        table_name=table_name,
+        transport_sel='"transport"' if has_transport else "NULL::VARCHAR",
+        cache_sel='"cache"' if has_cache else "NULL::VARCHAR",
+    )
+    if shadow_cursor is not None and debug_lock is not None:
+        row = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchone()
+    else:
+        row = runner.execute(sql, [window_start_s, window_start_s]).fetchone()
+
+    res: dict[str, list[tuple]] = {}
+    if not row:
+        if has_transport:
+            res["http3_fallback"] = []
+        if has_cache:
+            res["cache_hit_cliff"] = []
+        return res
+
+    w_quic, w_tr_total, b_quic, b_tr_total, w_hits, w_cacheable, b_hits, b_cacheable = (int(v or 0) for v in row)
+
+    if has_transport:
+        if (
+            w_tr_total >= 100
+            and b_tr_total >= 100
+            and (b_quic / b_tr_total) >= 0.30
+            and (w_quic / w_tr_total) <= (b_quic / b_tr_total) - 0.20
+        ):
+            res["http3_fallback"] = [(w_quic, w_tr_total, b_quic, b_tr_total)]
+        else:
+            res["http3_fallback"] = []
+
+    if has_cache:
+        if (
+            w_cacheable >= 100
+            and b_cacheable >= 200
+            and (b_hits / b_cacheable) >= 0.40
+            and (w_hits / w_cacheable) <= (b_hits / b_cacheable) - 0.15
+        ):
+            res["cache_hit_cliff"] = [(w_hits, w_cacheable, b_hits, b_cacheable)]
+        else:
+            res["cache_hit_cliff"] = []
+
+    return res
+
+
 def _build_insights_cache_key(
     source_name: str,
     window_hours: float = 24,
@@ -780,16 +972,7 @@ def get_insights(
                 cleaned = cleaned[6:].strip()
             if cleaned and cleaned != "1=1":
                 extra_filter_sql = f" AND ({cleaned})"
-    pruning_clauses: list[str] = []
-    if "dt" in actual_cols:
-        pruning_clauses.append(f"dt >= '{baseline_start.strftime('%Y-%m-%d')}' AND dt <= '{now.strftime('%Y-%m-%d')}'")
-    if "timestamp_hour" in actual_cols:
-        pruning_clauses.append(
-            f"timestamp_hour >= '{baseline_start.strftime('%Y-%m-%d-%H')}' AND timestamp_hour <= '{now.strftime('%Y-%m-%d-%H')}'"
-        )
-    pruning_sql = (" AND " + " AND ".join(pruning_clauses)) if pruning_clauses else ""
-
-    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){pruning_sql}{extra_filter_sql}"
+    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){extra_filter_sql}"
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
@@ -948,30 +1131,6 @@ def get_insights(
         # swallows its own exception exactly as the sequential code did —
         # falling back to ``{}`` / ``None`` never breaks the other 3 tasks or
         # the page.
-        def _task_waf() -> str | None:
-            if not (temp_created and "waf_sig" in actual_cols):
-                return None
-            waf_temp = f"{scratch_alias}.insights_waf_{uuid.uuid4().hex[:12]}"
-            waf_create_q = (
-                f"CREATE TABLE {waf_temp} AS "
-                f"SELECT timestamp, trim(signal) AS signal "
-                f"FROM (SELECT timestamp, unnest(string_split(\"waf_sig\", ',')) AS signal "
-                f"      FROM {temp_table} "
-                f'      WHERE "waf_sig" IS NOT NULL AND "waf_sig" != \'\') '
-                f"WHERE trim(signal) != '' AND trim(signal) != 'BOT-ANALYSIS'"
-            )
-            try:
-                cur = runner.con.cursor()
-                _execute_on_cursor(runner, _debug_lock, cur, waf_create_q)
-                return waf_temp
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[insights] WAF unnest temp create failed, skipping waf_signal_spikes: %s", e
-                )
-                return None
-
         def _task_city() -> dict[str, list[tuple]]:
             # Only fires when ALL 4 city-based insights are eligible (city +
             # status + elapsed + timestamp all in schema). When a service is
@@ -1054,28 +1213,66 @@ def get_insights(
                 )
                 return {}
 
-        max_coalesce_workers = max(1, min(max_workers, 4))
+        def _task_asn() -> dict[str, list[tuple]]:
+            if not ("asn" in actual_cols and "timestamp" in actual_cols):
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_asn_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("[insights] coalesced ASN aggregates failed, falling back: %s", e)
+                return {}
+
+        def _task_scalar() -> dict[str, list[tuple]]:
+            if not ("timestamp" in actual_cols and ("transport" in actual_cols or "cache" in actual_cols)):
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_scalar_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[insights] coalesced scalar aggregates failed, falling back: %s", e
+                )
+                return {}
+
+        max_coalesce_workers = max(1, min(max_workers, 5))
         with ThreadPoolExecutor(
             max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
         ) as _coalesce_pool:
-            _fut_waf = _coalesce_pool.submit(contextvars.copy_context().run, _task_waf)
             _fut_city = _coalesce_pool.submit(contextvars.copy_context().run, _task_city)
             _fut_url = _coalesce_pool.submit(contextvars.copy_context().run, _task_url)
             _fut_ip = _coalesce_pool.submit(contextvars.copy_context().run, _task_ip)
-            waf_table = _fut_waf.result()
+            _fut_asn = _coalesce_pool.submit(contextvars.copy_context().run, _task_asn)
+            _fut_scalar = _coalesce_pool.submit(contextvars.copy_context().run, _task_scalar)
             city_precomputed = _fut_city.result()
             url_precomputed = _fut_url.result()
             ip_security_precomputed = _fut_ip.result()
+            asn_precomputed = _fut_asn.result()
+            scalar_precomputed = _fut_scalar.result()
 
         for definition in registry.get_all():
             # Check if all required fields are present
             if not all(col in actual_cols for col in definition.required_fields):
                 continue
-            # waf_signal_spikes reads from the pre-unnested insights_waf temp.
-            # If we couldn't materialise it (main temp create failed earlier)
-            # skip rather than crash: the SQL template references a "signal"
-            # column that only exists on the materialised temp.
-            if definition.id == "waf_signal_spikes" and waf_table is None:
+            if definition.id == "waf_signal_spikes" and not temp_created:
                 continue
 
             def _make_task(d=definition):
@@ -1107,17 +1304,23 @@ def get_insights(
                     # coalesced aggregates instead of issuing their own SELECT.
                     # Row schema is constructed to match each insight's existing
                     # `# row schema: [...]` processor contract.
-                    if d.id in city_precomputed:
+                    default_sql = getattr(_insights_sql, d.id.upper(), None)
+                    is_default_template = default_sql is None or d.sql_template == default_sql
+                    if is_default_template and d.id in city_precomputed:
                         rows = city_precomputed[d.id]
-                    elif d.id in url_precomputed:
+                    elif is_default_template and d.id in url_precomputed:
                         rows = url_precomputed[d.id]
-                    elif d.id in ip_security_precomputed:
+                    elif is_default_template and d.id in ip_security_precomputed:
                         rows = ip_security_precomputed[d.id]
+                    elif is_default_template and d.id in asn_precomputed:
+                        rows = asn_precomputed[d.id]
+                    elif is_default_template and d.id in scalar_precomputed:
+                        rows = scalar_precomputed[d.id]
                     else:
                         try:
                             sql = d.sql_template.format(
                                 table_name=table_name,
-                                waf_table=waf_table or table_name,
+                                waf_table=table_name,
                                 window_hours=window_hours,
                                 baseline_hours=baseline_hours,
                                 fp_col=fp_col,
