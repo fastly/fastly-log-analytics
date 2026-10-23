@@ -6697,6 +6697,7 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
+            _history?: components["schemas"]["HistoryObservation"] | null;
             /** Reader Coverage */
             _reader_coverage?: components["schemas"]["ReaderCoverage"][] | null;
             /** Data */
@@ -8375,6 +8376,56 @@ export interface components {
             /** Coverage Age Seconds */
             coverage_age_seconds: number;
         };
+        /** ClickHouseQueryObservation */
+        ClickHouseQueryObservation: {
+            /** Query Id */
+            query_id: string;
+            /** Request Id */
+            request_id?: string | null;
+            /** Page Load Id */
+            page_load_id?: string | null;
+            /** Service Id */
+            service_id?: string | null;
+            /** Component */
+            component?: string | null;
+            /** Section */
+            section?: string | null;
+            /** Section Id */
+            section_id?: string | null;
+            /** Parent Section Id */
+            parent_section_id?: string | null;
+            /**
+             * Source
+             * @default unknown
+             * @enum {string}
+             */
+            source: "fact" | "projection" | "projected_fact" | "mixed" | "unknown";
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "success" | "error" | "timeout";
+            /** Client Elapsed Ms */
+            client_elapsed_ms: number;
+            /** Admission Wait Ms */
+            admission_wait_ms?: number | null;
+            /** Network Ms */
+            network_ms?: number | null;
+            /** Decode Ms */
+            decode_ms?: number | null;
+            /** Server Elapsed Ms */
+            server_elapsed_ms?: number | null;
+            /** Server Elapsed Source */
+            server_elapsed_source?: "statistics.elapsed" | null;
+            /** Server Cpu Ms */
+            server_cpu_ms?: null;
+            /**
+             * Timing Kind
+             * @default client_operation_wall
+             * @constant
+             */
+            timing_kind: "client_operation_wall";
+        };
         /** ClickHouseReplayErrorResponse */
         ClickHouseReplayErrorResponse: {
             /** Debug Queries */
@@ -9742,6 +9793,7 @@ export interface components {
         };
         /** DebugQuery */
         DebugQuery: {
+            clickhouse?: components["schemas"]["ClickHouseQueryObservation"] | null;
             /** Sql */
             sql: string;
             /** Time Ms */
@@ -10794,6 +10846,64 @@ export interface components {
             metadata: components["schemas"]["QueryResponseMetadataResponse"];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /** HistoryObservation */
+        HistoryObservation: {
+            /**
+             * Extent Source
+             * @default unknown
+             * @enum {string}
+             */
+            extent_source: "unknown" | "status_cache" | "live_query" | "count_only_query" | "unavailable";
+            /** Extent Rows */
+            extent_rows?: number | null;
+            /** Earliest Event At */
+            earliest_event_at?: string | null;
+            /** Latest Event At */
+            latest_event_at?: string | null;
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Filters Requested */
+            filters_requested?: boolean | null;
+            /** Window Rows */
+            window_rows?: number | null;
+            /**
+             * Window Count Source
+             * @default unknown
+             * @enum {string}
+             */
+            window_count_source: "unknown" | "rollup" | "raw" | "filtered_temp";
+        };
+        /** HourlyRollupCoverage */
+        HourlyRollupCoverage: {
+            /**
+             * Reason
+             * @default unknown
+             * @enum {string}
+             */
+            reason: "unknown" | "no_bundled_root" | "durable_unready" | "writer_behind" | "no_paths" | "old_gaps" | "planned";
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Active Hour Start */
+            active_hour_start?: string | null;
+            /** Closed Hours */
+            closed_hours?: number | null;
+            /** Bundle Hours */
+            bundle_hours?: number | null;
+            /** Verified Empty Hours */
+            verified_empty_hours?: number | null;
+            /** Missing Hours */
+            missing_hours?: number | null;
+            /** Covered Hours */
+            covered_hours?: number | null;
+            /** Coverage Fraction */
+            coverage_fraction?: number | null;
+            /** Heal Horizon Hours */
+            heal_horizon_hours?: number | null;
         };
         /** Http3FallbackInsightCard */
         Http3FallbackInsightCard: {
@@ -17008,14 +17118,22 @@ export interface components {
              * Reader
              * @enum {string}
              */
-            reader: "dashboard.conn_requests_histogram" | "dashboard.ngwaf_bots";
+            reader: "dashboard.conn_requests_histogram" | "dashboard.ngwaf_bots" | "dashboard.count" | "dashboard.time_series" | "dashboard.top_n" | "dashboard.ua_bots";
             /** Minimum Window Hours */
-            minimum_window_hours: number;
+            minimum_window_hours?: number | null;
             /**
              * Maximum Window Days
              * @default 366
              */
-            maximum_window_days: number;
+            maximum_window_days: number | null;
+            scalar_plan?: components["schemas"]["ScalarRollupCoverage"] | null;
+            top_n_plan?: components["schemas"]["TopNRollupCoverage"] | null;
+            /**
+             * Closed Hour Heal
+             * @default not_attempted
+             * @enum {string}
+             */
+            closed_hour_heal: "not_attempted" | "planned" | "used" | "unavailable" | "failed";
             /** Eligible */
             eligible?: boolean | null;
             /**
@@ -17023,7 +17141,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            eligibility_reason: "unknown" | "filtered" | "bounds_missing" | "top_asns_empty" | "invalid_window" | "window_too_short" | "window_too_long" | "eligible";
+            eligibility_reason: "unknown" | "filtered" | "bounds_missing" | "top_asns_empty" | "invalid_window" | "window_too_short" | "window_too_long" | "eligible" | "unsupported_metric" | "unsupported_interval" | "unsafe_fields" | "unsafe_service" | "durable_unready" | "rollups_missing";
             /** Window Start */
             window_start?: string | null;
             /** Window End */
@@ -17041,7 +17159,7 @@ export interface components {
              * @default not_attempted
              * @enum {string}
              */
-            live_top_up: "not_attempted" | "outside_window" | "missing_column" | "unavailable" | "empty" | "used" | "failed";
+            live_top_up: "not_attempted" | "outside_window" | "missing_column" | "unavailable" | "empty" | "used" | "failed" | "view_fallback" | "unverified";
             /** Live Start */
             live_start?: string | null;
             /** Live End */
@@ -17904,6 +18022,45 @@ export interface components {
             created_at?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** ScalarRollupCoverage */
+        ScalarRollupCoverage: {
+            /**
+             * Reason
+             * @default unknown
+             * @enum {string}
+             */
+            reason: "unknown" | "trailing_unavailable" | "boundary_changed" | "planned";
+            /** Window Start */
+            window_start?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Active Hour Start */
+            active_hour_start?: string | null;
+            /** Closed Hours */
+            closed_hours?: number | null;
+            /**
+             * Prefix Hours
+             * @default 0
+             */
+            prefix_hours: number;
+            /**
+             * Day Time Series Files
+             * @default 0
+             */
+            day_time_series_files: number;
+            /**
+             * Day Overview Files
+             * @default 0
+             */
+            day_overview_files: number;
+            /** Trailing Start */
+            trailing_start?: string | null;
+            trailing?: components["schemas"]["HourlyRollupCoverage"] | null;
+            /** Covered Hours */
+            covered_hours?: number | null;
+            /** Coverage Fraction */
+            coverage_fraction?: number | null;
         };
         /** SchemaColumn */
         SchemaColumn: {
@@ -20627,6 +20784,62 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** TopNRollupCoverage */
+        TopNRollupCoverage: {
+            /**
+             * Coverage Scope
+             * @default any_field_file_presence
+             * @constant
+             */
+            coverage_scope: "any_field_file_presence";
+            /** Active Hour Start */
+            active_hour_start?: string | null;
+            /** Closed Hours */
+            closed_hours?: number | null;
+            /** Any Field Covered Hours */
+            any_field_covered_hours?: number | null;
+            /** Field Complete Hours */
+            field_complete_hours?: number | null;
+            /**
+             * Bundled Day Files
+             * @default 0
+             */
+            bundled_day_files: number;
+            /**
+             * Bundled Hour Files
+             * @default 0
+             */
+            bundled_hour_files: number;
+            /**
+             * Per Field Day Files
+             * @default 0
+             */
+            per_field_day_files: number;
+            /**
+             * Per Field Hour Files
+             * @default 0
+             */
+            per_field_hour_files: number;
+            /**
+             * Heal Horizon Hours
+             * @default 48
+             */
+            heal_horizon_hours: number;
+            /** Heal Candidates */
+            heal_candidates?: number | null;
+            /** Heal Missing Hours */
+            heal_missing_hours?: number | null;
+            /** Compacted Hours Skipped */
+            compacted_hours_skipped?: number | null;
+            /** Outside Heal Horizon Hours */
+            outside_heal_horizon_hours?: number | null;
+            /**
+             * Rolled Read
+             * @default not_attempted
+             * @enum {string}
+             */
+            rolled_read: "not_attempted" | "used" | "failed";
+        };
         /**
          * TosAckPayload
          * @description Body for ``POST /api/share/acknowledge`` — the TOS version the analyst
@@ -20655,6 +20868,10 @@ export interface components {
         };
         /** TransportMetrics */
         TransportMetrics: {
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[] | null;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /**
              * Has Transport Data

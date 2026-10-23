@@ -52845,6 +52845,16 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "_history": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "_reader_coverage": {
             "anyOf": [
               {
@@ -57562,6 +57572,194 @@
         ],
         "title": "ClickHouseActiveGeneration"
       },
+      "ClickHouseQueryObservation": {
+        "properties": {
+          "query_id": {
+            "type": "string",
+            "title": "Query Id"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "page_load_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Load Id"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "component": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "parent_section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Section Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fact",
+              "projection",
+              "projected_fact",
+              "mixed",
+              "unknown"
+            ],
+            "title": "Source",
+            "default": "unknown"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "success",
+              "error",
+              "timeout"
+            ],
+            "title": "Outcome"
+          },
+          "client_elapsed_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Client Elapsed Ms"
+          },
+          "admission_wait_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admission Wait Ms"
+          },
+          "network_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Ms"
+          },
+          "decode_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decode Ms"
+          },
+          "server_elapsed_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Elapsed Ms"
+          },
+          "server_elapsed_source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "statistics.elapsed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Elapsed Source"
+          },
+          "server_cpu_ms": {
+            "type": "null",
+            "title": "Server Cpu Ms"
+          },
+          "timing_kind": {
+            "type": "string",
+            "const": "client_operation_wall",
+            "title": "Timing Kind",
+            "default": "client_operation_wall"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query_id",
+          "outcome",
+          "client_elapsed_ms"
+        ],
+        "title": "ClickHouseQueryObservation"
+      },
       "ClickHouseReplayErrorResponse": {
         "properties": {
           "_debug_queries": {
@@ -61175,6 +61373,16 @@
       },
       "DebugQuery": {
         "properties": {
+          "clickhouse": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClickHouseQueryObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sql": {
             "type": "string",
             "title": "Sql"
@@ -64030,6 +64238,252 @@
           "next_cursor"
         ],
         "title": "HighScaleRumFactResponse"
+      },
+      "HistoryObservation": {
+        "properties": {
+          "extent_source": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "status_cache",
+              "live_query",
+              "count_only_query",
+              "unavailable"
+            ],
+            "title": "Extent Source",
+            "default": "unknown"
+          },
+          "extent_rows": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extent Rows"
+          },
+          "earliest_event_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Event At"
+          },
+          "latest_event_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Event At"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "filters_requested": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters Requested"
+          },
+          "window_rows": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Rows"
+          },
+          "window_count_source": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "rollup",
+              "raw",
+              "filtered_temp"
+            ],
+            "title": "Window Count Source",
+            "default": "unknown"
+          }
+        },
+        "type": "object",
+        "title": "HistoryObservation"
+      },
+      "HourlyRollupCoverage": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "no_bundled_root",
+              "durable_unready",
+              "writer_behind",
+              "no_paths",
+              "old_gaps",
+              "planned"
+            ],
+            "title": "Reason",
+            "default": "unknown"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "active_hour_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Hour Start"
+          },
+          "closed_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed Hours"
+          },
+          "bundle_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Hours"
+          },
+          "verified_empty_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Empty Hours"
+          },
+          "missing_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Missing Hours"
+          },
+          "covered_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered Hours"
+          },
+          "coverage_fraction": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Fraction"
+          },
+          "heal_horizon_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heal Horizon Hours"
+          }
+        },
+        "type": "object",
+        "title": "HourlyRollupCoverage"
       },
       "Http3FallbackInsightCard": {
         "properties": {
@@ -81871,19 +82325,70 @@
             "type": "string",
             "enum": [
               "dashboard.conn_requests_histogram",
-              "dashboard.ngwaf_bots"
+              "dashboard.ngwaf_bots",
+              "dashboard.count",
+              "dashboard.time_series",
+              "dashboard.top_n",
+              "dashboard.ua_bots"
             ],
             "title": "Reader"
           },
           "minimum_window_hours": {
-            "type": "integer",
-            "minimum": 0.0,
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Minimum Window Hours"
           },
           "maximum_window_days": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Maximum Window Days",
             "default": 366
+          },
+          "scalar_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScalarRollupCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_n_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TopNRollupCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed_hour_heal": {
+            "type": "string",
+            "enum": [
+              "not_attempted",
+              "planned",
+              "used",
+              "unavailable",
+              "failed"
+            ],
+            "title": "Closed Hour Heal",
+            "default": "not_attempted"
           },
           "eligible": {
             "anyOf": [
@@ -81906,7 +82411,13 @@
               "invalid_window",
               "window_too_short",
               "window_too_long",
-              "eligible"
+              "eligible",
+              "unsupported_metric",
+              "unsupported_interval",
+              "unsafe_fields",
+              "unsafe_service",
+              "durable_unready",
+              "rollups_missing"
             ],
             "title": "Eligibility Reason",
             "default": "unknown"
@@ -81963,7 +82474,9 @@
               "unavailable",
               "empty",
               "used",
-              "failed"
+              "failed",
+              "view_fallback",
+              "unverified"
             ],
             "title": "Live Top Up",
             "default": "not_attempted"
@@ -81993,8 +82506,7 @@
         },
         "type": "object",
         "required": [
-          "reader",
-          "minimum_window_hours"
+          "reader"
         ],
         "title": "ReaderCoverage"
       },
@@ -84551,6 +85063,132 @@
         ],
         "title": "SavedViewRecord",
         "description": "Wire-safe read shape for ``GET /api/views/{service_id}`` rows.\n\nDistinct from the strict ``SavedView`` request body: ``id`` is guaranteed\nnon-null on persisted rows; ``extra=\"allow\"`` + ``response_model_exclude_unset``\nis inherited from ``SavedView`` (``WireSafeModel``)."
+      },
+      "ScalarRollupCoverage": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "trailing_unavailable",
+              "boundary_changed",
+              "planned"
+            ],
+            "title": "Reason",
+            "default": "unknown"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "active_hour_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Hour Start"
+          },
+          "closed_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed Hours"
+          },
+          "prefix_hours": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Prefix Hours",
+            "default": 0
+          },
+          "day_time_series_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Day Time Series Files",
+            "default": 0
+          },
+          "day_overview_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Day Overview Files",
+            "default": 0
+          },
+          "trailing_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trailing Start"
+          },
+          "trailing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HourlyRollupCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "covered_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered Hours"
+          },
+          "coverage_fraction": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Fraction"
+          }
+        },
+        "type": "object",
+        "title": "ScalarRollupCoverage"
       },
       "SchemaColumn": {
         "properties": {
@@ -92868,6 +93506,153 @@
         "type": "object",
         "title": "TopIpHeaderRow"
       },
+      "TopNRollupCoverage": {
+        "properties": {
+          "coverage_scope": {
+            "type": "string",
+            "const": "any_field_file_presence",
+            "title": "Coverage Scope",
+            "default": "any_field_file_presence"
+          },
+          "active_hour_start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Hour Start"
+          },
+          "closed_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed Hours"
+          },
+          "any_field_covered_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Any Field Covered Hours"
+          },
+          "field_complete_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Complete Hours"
+          },
+          "bundled_day_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Bundled Day Files",
+            "default": 0
+          },
+          "bundled_hour_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Bundled Hour Files",
+            "default": 0
+          },
+          "per_field_day_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Per Field Day Files",
+            "default": 0
+          },
+          "per_field_hour_files": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Per Field Hour Files",
+            "default": 0
+          },
+          "heal_horizon_hours": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Heal Horizon Hours",
+            "default": 48
+          },
+          "heal_candidates": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heal Candidates"
+          },
+          "heal_missing_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heal Missing Hours"
+          },
+          "compacted_hours_skipped": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compacted Hours Skipped"
+          },
+          "outside_heal_horizon_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outside Heal Horizon Hours"
+          },
+          "rolled_read": {
+            "type": "string",
+            "enum": [
+              "not_attempted",
+              "used",
+              "failed"
+            ],
+            "title": "Rolled Read",
+            "default": "not_attempted"
+          }
+        },
+        "type": "object",
+        "title": "TopNRollupCoverage"
+      },
       "TosAckPayload": {
         "properties": {
           "version": {
@@ -92921,6 +93706,21 @@
       },
       "TransportMetrics": {
         "properties": {
+          "_section_timings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Timings"
+          },
           "_response_cache": {
             "anyOf": [
               {
