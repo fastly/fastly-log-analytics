@@ -425,7 +425,7 @@ def _acquire_ducklake_con(source: dict, con=None) -> tuple[Any, bool, bool, set[
         try:
             fresh_con.close()
         except Exception:
-            pass
+            logger.debug("_acquire_ducklake_con: fresh_con.close failed (ignored)", exc_info=True)
         raise
     return fresh_con, attached, True, None
 

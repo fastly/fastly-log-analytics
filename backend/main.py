@@ -580,11 +580,10 @@ async def _application_lifespan(app: FastAPI):
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
     # or silently switch engines when this startup probe fails.
-    if svcconfig.is_high_scale_mode():
-        clickhouse = clickhouse_client.get_clickhouse_client()
-        if clickhouse is not None:
-            await asyncio.to_thread(clickhouse.health)
-            clickhouse_observer.start_clickhouse_observer()
+    clickhouse = clickhouse_client.get_clickhouse_client()
+    if clickhouse is not None:
+        await asyncio.to_thread(clickhouse.health)
+        clickhouse_observer.start_clickhouse_observer()
         registered_high_scale = register_high_scale_services_from_environment(
             get_high_scale_service_registry(),
             client=clickhouse,

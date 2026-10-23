@@ -408,6 +408,69 @@ def test_backfill_missing_hour_bundles_detects_gaps_via_view(tmp_path, monkeypat
     assert result["missing"] == 1, f"expected 1 missing; got {result}"
 
 
+def test_backfill_missing_hour_bundles_heals_partial_bundle_missing_core_fields(tmp_path, monkeypatch):
+    """An existing hour bundle that only contains a subset of core fields (e.g.
+    only ``url`` after a partial bundle overwrite) must be detected as
+    incomplete and included in the ``missing`` set for recompute."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-partial-heal", "service_id": "svc-partial-heal"}
+
+    # Complete bundle for 10:00 (has ip, status, method, pop).
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-10",
+        [
+            {"field": "ip", "value": "107.170.164.220", "count": 100},
+            {"field": "status", "value": "200", "count": 100},
+            {"field": "method", "value": "GET", "count": 100},
+            {"field": "pop", "value": "IAD", "count": 100},
+        ],
+    )
+    # Partial bundle for 09:00 (missing ip, status, method, pop — only has url).
+    _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-09",
+        [{"field": "url", "value": "/only-url", "count": 120}],
+    )
+
+    def _fake_update_iceberg_view(con, _src):
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_svc_partial_heal AS SELECT * FROM (VALUES "
+            "(TIMESTAMP '2026-06-04 09:30:00+00', '107.170.164.220', 200, 'GET', 'IAD'), "
+            "(TIMESTAMP '2026-06-04 10:15:00+00', '107.170.164.220', 200, 'GET', 'IAD')"
+            ") AS t(timestamp, ip, status, method, pop)"
+        )
+
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+
+    from datetime import UTC, datetime
+
+    class _FrozenNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+
+    monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
+
+    captured_hours: list[set[str]] = []
+
+    def _fake_recompute(_sid, _src, hours):
+        captured_hours.append(set(hours))
+
+    monkeypatch.setattr("backend.core.rollups.recompute.recompute_touched_hours", _fake_recompute)
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result = rollups.backfill_missing_hour_bundles("svc-partial-heal", src, lookback_days=2)
+
+    assert captured_hours == [{"2026-06-04-09"}], f"partial bundle must be healed; got {captured_hours}"
+    assert result["missing"] == 1
+    partial_path = cache_root / "rollups" / "hour_bundled" / "hour=2026-06-04-09" / "all_fields.parquet"
+    assert os.path.getmtime(partial_path) == 0.0, "incomplete bundle mtime must be reset so bundle_hours rebuilds it"
+
+
 def test_backfill_ignores_rum_child_views_when_finding_request_view(tmp_path, monkeypatch):
     from backend.core import rollups
 

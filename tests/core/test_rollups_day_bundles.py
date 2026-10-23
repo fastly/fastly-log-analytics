@@ -83,9 +83,9 @@ def test_bundle_days_top_k_truncation_with_other_synthetic_row(tmp_path):
     src = {"name": "svc-topk"}
     day = _past_day(2)
 
-    # DAY_BUNDLE_TOP_K = 100. Write 150 values with counts (i+1) so
+    # Write DAY_BUNDLE_TOP_K + 50 values with counts (i+1) so
     # the bottom 50 collapse into __other__.
-    rows = [(f"v{i}", i + 1) for i in range(150)]
+    rows = [(f"v{i}", i + 1) for i in range(DAY_BUNDLE_TOP_K + 50)]
     _write_per_field_day(str(cache_root), "url", day, rows)
 
     with (
@@ -102,11 +102,43 @@ def test_bundle_days_top_k_truncation_with_other_synthetic_row(tmp_path):
     assert len(other) == 1, "exactly one __other__ row expected"
     non_other = [r for r in records if r["value"] != "__other__"]
     assert len(non_other) == DAY_BUNDLE_TOP_K, f"top-K must be exactly {DAY_BUNDLE_TOP_K}"
-    # __other__ must equal SUM of the bottom 50 counts (those ranked
-    # 101..150, value counts (51..100) in sort-desc order). The total
-    # sum 1..150 = 11_325; top-100 by count = sum(51..150) = 10_050;
-    # __other__ = sum(1..50) = 1_275.
+    # __other__ must equal SUM of the bottom 50 counts (1..50 = 1_275).
     assert other[0]["count"] == sum(range(1, 51))
+
+
+def test_bundle_days_preserves_unmodified_fields_from_existing_bundle(tmp_path):
+    """When only one field's per-day parquet is rewritten after the initial
+    day bundle swept per-field files, untouched fields in the existing bundle
+    must be preserved rather than dropped."""
+    from backend.core.rollups import day_bundles
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-day-preserve"}
+    day = _past_day(2)
+
+    _write_per_field_day(str(cache_root), "ip", day, [("107.170.164.220", 500)])
+    _write_per_field_day(str(cache_root), "url", day, [("/old", 100)])
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+    ):
+        assert day_bundles.bundle_days("svc-day-preserve", src, [day]) == 1
+
+        # Rewrite ONLY url (ip's per-field file was swept on the first bundle pass)
+        new_p = _write_per_field_day(str(cache_root), "url", day, [("/new", 250)])
+        future = time.time() + 60
+        os.utime(new_p, (future, future))
+
+        assert day_bundles.bundle_days("svc-day-preserve", src, [day]) == 1
+
+    bundle = cache_root / "rollups" / "day_bundled" / f"day={day}" / "all_fields.parquet"
+    t = pq.read_table(str(bundle))
+    rows = set(zip(t["field"].to_pylist(), t["value"].to_pylist(), t["count"].to_pylist()))
+    assert ("ip", "107.170.164.220", 500) in rows
+    assert ("url", "/new", 250) in rows
+    assert ("url", "/old", 100) not in rows
 
 
 def test_bundle_days_skips_active_day(tmp_path):

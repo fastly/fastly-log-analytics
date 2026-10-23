@@ -90,7 +90,7 @@ def test_cmcd_response_cache_key_is_byte_stable():
 
     key = _response_cache_key({"name": "svc"}, "2026-01-01T00:00:12Z", None, {}, 300, 30, {"b", "a"}, True)
     expected = _sha(
-        {"s": "2026-01-01T00:00", "e": None, "f": {}, "bs": 300, "tn": 30, "sec": ["a", "b"], "mi": True},
+        {"s": "2026-01-01T00:00", "e": None, "f": {}, "bs": 300, "tn": 30, "sec": ["a", "b"]},
         "svc",
     )
     assert key == expected

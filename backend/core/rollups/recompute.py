@@ -40,6 +40,7 @@ from ._common import (
     _save_markers,
     acquire_rollup_connection_and_cols,
     parse_hour_token,
+    quote_path_list,
     shared_rollup_session,
 )
 from .hour_bundles import bundle_hours, bundle_hours_ip_spread
@@ -349,6 +350,69 @@ def backfill_missing_hour_bundles(
         except _ddb.Error as e:
             logger.warning("[rollups] %s: backfill_missing_hour_bundles view query failed: %s", service_id, e)
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
+
+        # Detect partial/incomplete bundles: if an existing hour bundle is
+        # missing core fields that are present in the view (e.g. ``ip``,
+        # ``status``, ``method``, ``pop`` — which happened when a single-field
+        # per-hour write + bundle pass wiped previously bundled fields), treat
+        # that hour as missing so ``recompute_touched_hours`` rebuilds all
+        # configured fields for it.
+        in_window_with_data = {h for h, _ in rows if h < active}
+        candidate_existing = sorted(existing & in_window_with_data)
+        if candidate_existing:
+            try:
+                view_cols = {
+                    r[0]
+                    for r in con.execute(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                        [view_name],
+                    ).fetchall()
+                }
+            except _ddb.Error:
+                view_cols = set()
+            required_bundle_fields = sorted(view_cols & {"ip", "status", "method", "pop"})
+            if required_bundle_fields:
+                bundle_paths: list[str] = []
+                candidate_hours: list[str] = []
+                for h in candidate_existing:
+                    bp = os.path.join(bundled_root, f"hour={h}", "all_fields.parquet")
+                    if os.path.isfile(bp):
+                        bundle_paths.append(bp)
+                        candidate_hours.append(h)
+                if bundle_paths:
+                    try:
+                        paths_sql = quote_path_list(bundle_paths)
+                        req_in = ", ".join(f"'{f}'" for f in required_bundle_fields)
+                        complete_rows = con.execute(
+                            f"SELECT regexp_extract(filename, 'hour=([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}-[0-9]{{2}})', 1) AS h "
+                            f"FROM read_parquet([{paths_sql}], filename=true, hive_partitioning=0) "
+                            f"WHERE field IN ({req_in}) "
+                            f"GROUP BY 1 "
+                            f"HAVING COUNT(DISTINCT field) >= {len(required_bundle_fields)}"
+                        ).fetchall()
+                        complete_hours = {r[0] for r in complete_rows if r and r[0]}
+                        incomplete_hours = set(candidate_hours) - complete_hours
+                        if incomplete_hours:
+                            logger.info(
+                                "[rollups] %s: backfill_missing_hour_bundles found %d incomplete hour bundle(s) missing core fields %s: %s",
+                                service_id,
+                                len(incomplete_hours),
+                                required_bundle_fields,
+                                sorted(incomplete_hours)[:10],
+                            )
+                            for inc_h in incomplete_hours:
+                                inc_path = os.path.join(bundled_root, f"hour={inc_h}", "all_fields.parquet")
+                                try:
+                                    os.utime(inc_path, (0, 0))
+                                except OSError:
+                                    pass
+                            existing -= incomplete_hours
+                    except _ddb.Error as e:
+                        logger.debug(
+                            "[rollups] %s: backfill_missing_hour_bundles completeness check skipped: %s",
+                            service_id,
+                            e,
+                        )
 
         missing = sorted(h for h, _ in rows if h < active and h not in existing)
         if max_missing_hours is not None:

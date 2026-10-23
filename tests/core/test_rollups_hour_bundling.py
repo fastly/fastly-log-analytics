@@ -208,6 +208,39 @@ def test_bundle_hours_rebuilds_when_source_files_newer(tmp_path):
     assert "/x" in values, "previous-bundle row that the per-field rewrite preserved must be present"
 
 
+def test_bundle_hours_preserves_unmodified_fields_from_existing_bundle(tmp_path):
+    """Regression test for the 2026-10-23 prod incident where hour=2026-10-23-01
+    lost ``field='ip'`` (and 29 other fields) because a single-field per-hour
+    write triggered ``bundle_hours`` after ``cleanup_per_field_after_bundle``
+    had already deleted the other 30 per-field parquets. Re-bundling when only
+    a subset of fields have fresh per-field parquets must preserve untouched
+    fields from the existing bundle."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-bundle-preserve"}
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        _write_per_field_hour(str(cache_root), "ip", "2026-05-15-10", [{"value": "107.170.164.220", "count": 120}])
+        _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/a", "count": 10}])
+        assert rollups.bundle_hours("svc-bundle-preserve", src, ["2026-05-15-10"]) == 1
+
+        # Now only url is rewritten (ip's per-field file was swept by the first bundle pass)
+        new_p = _write_per_field_hour(str(cache_root), "url", "2026-05-15-10", [{"value": "/b", "count": 25}])
+        future = time.time() + 10
+        os.utime(new_p, (future, future))
+
+        assert rollups.bundle_hours("svc-bundle-preserve", src, ["2026-05-15-10"]) == 1
+
+    bundle = cache_root / "rollups" / "hour_bundled" / "hour=2026-05-15-10" / "all_fields.parquet"
+    t = pq.read_table(str(bundle))
+    rows = set(zip(t["field"].to_pylist(), t["value"].to_pylist(), t["count"].to_pylist()))
+    assert ("ip", "107.170.164.220", 120) in rows, "untouched field 'ip' must be preserved from existing bundle"
+    assert ("url", "/b", 25) in rows, "updated field 'url' must reflect new per-field parquet"
+    assert ("url", "/a", 10) not in rows, "updated field 'url' old rows must be replaced"
+
+
 def test_reader_uses_bundle_when_available_skipping_per_field_files(tmp_path):
     """When a bundled file exists for an hour, the reader's enumeration
     must skip the per-field parquets for that hour (since the bundle

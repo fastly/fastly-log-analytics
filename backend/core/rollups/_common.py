@@ -505,12 +505,12 @@ def rollups_present(source: dict) -> bool:
 DAY_BUNDLE_FILENAME = "all_fields.parquet"
 
 # Per-(field, day) row cap inside the bundled-day parquet. The
-# dashboard top-N panel renders 10 values; 100 gives generous headroom
-# for the global top-10 to be visible in at least one day across a
-# 30-day window. Anything beyond rank 100 in a single day is
-# aggregated into a single synthetic ``__other__`` row so
-# field totals stay correct.
-DAY_BUNDLE_TOP_K = 100
+# dashboard top-N panel renders 10 values; 500 gives generous headroom
+# for the global top-10 to be visible across a 30-day window without
+# losing steady medium-volume values to per-day truncation. Anything
+# beyond rank 500 in a single day is aggregated into a single synthetic
+# ``__other__`` row so field totals stay correct.
+DAY_BUNDLE_TOP_K = 500
 
 
 # Filename for the per-hour 1-minute time-series rollup. Kept as a constant

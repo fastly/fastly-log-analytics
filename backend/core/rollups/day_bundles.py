@@ -136,25 +136,33 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
                 continue
 
             per_field_paths: list[str] = []
+            updated_fields: set[str] = set()
             max_src_mtime = 0.0
             try:
                 for field_entry in os.listdir(day_per_field_root):
                     if not field_entry.startswith("field="):
                         continue
+                    field_name = field_entry[len("field=") :]
+                    if not _is_safe_ident(field_name):
+                        continue
                     day_dir = os.path.join(day_per_field_root, field_entry, f"day={day}")
                     if not os.path.isdir(day_dir):
                         continue
+                    field_has_files = False
                     for fname in os.listdir(day_dir):
                         if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
                             continue
                         p = os.path.join(day_dir, fname)
                         per_field_paths.append(p)
+                        field_has_files = True
                         try:
                             mt = os.path.getmtime(p)
                             if mt > max_src_mtime:
                                 max_src_mtime = mt
                         except OSError:
                             pass
+                    if field_has_files:
+                        updated_fields.add(field_name)
             except OSError:
                 continue
 
@@ -180,12 +188,13 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
             os.makedirs(bundle_dir, exist_ok=True)
             tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             paths_sql = quote_path_list(per_field_paths)
+
             # Truncate to top-K per field at bundle-write time, plus an
             # ``__other__`` synthetic row that aggregates everything
             # beyond the cut. The dashboard top-N panel renders 10
-            # values; keeping top-100 per (field, day) gives generous
+            # values; keeping top-K per (field, day) gives generous
             # headroom for the global top-10 across a 30-day window
-            # while cutting bundle row count by ~10x — most of the
+            # while cutting bundle row count — most of the
             # ``top_n_rollups:rolled_res`` cost on prod 30d.
             #
             # __other__ keeps ``field_totals[field]`` correct (the
@@ -195,28 +204,57 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
             # The reader filters ``value = '__other__'`` from the
             # displayed top-N rows but includes its count in the
             # field totals — see execute_top_n_rollups.
-            query = (
-                f"COPY ("
-                f"  WITH src AS (SELECT field, value, CAST(count AS BIGINT) AS count "
-                f"               FROM read_parquet([{paths_sql}])), "
-                f"       ranked AS (SELECT field, value, count, "
-                f"                  ROW_NUMBER() OVER (PARTITION BY field ORDER BY count DESC) AS rn "
-                f"                  FROM src) "
-                f"  SELECT field, value, count FROM ranked WHERE rn <= {DAY_BUNDLE_TOP_K} "
-                f"  UNION ALL "
-                f"  SELECT field, '__other__' AS value, SUM(count) AS count "
-                f"  FROM ranked WHERE rn > {DAY_BUNDLE_TOP_K} "
-                f"  GROUP BY field "
-                f"  HAVING SUM(count) > 0"
-                f") "
-                f"{parquet_zstd_target(tmp_path)}"
-            )
+            #
+            # Also preserve existing bundle rows for fields NOT in
+            # ``updated_fields`` — because ``_cleanup_per_field_day_after_bundle``
+            # sweeps per-field files after bundling, a partial per-field
+            # update would otherwise drop every untouched field from the
+            # bundle.
+            def _build_day_bundle_query(src_union_sql: str = "") -> str:
+                return (
+                    f"COPY ("
+                    f"  WITH src AS (SELECT field, value, CAST(count AS BIGINT) AS count "
+                    f"               FROM read_parquet([{paths_sql}]){src_union_sql}), "
+                    f"       ranked AS (SELECT field, value, count, "
+                    f"                  ROW_NUMBER() OVER (PARTITION BY field ORDER BY count DESC) AS rn "
+                    f"                  FROM src) "
+                    f"  SELECT field, value, count FROM ranked WHERE rn <= {DAY_BUNDLE_TOP_K} "
+                    f"  UNION ALL "
+                    f"  SELECT field, '__other__' AS value, SUM(count) AS count "
+                    f"  FROM ranked WHERE rn > {DAY_BUNDLE_TOP_K} "
+                    f"  GROUP BY field "
+                    f"  HAVING SUM(count) > 0"
+                    f") "
+                    f"{parquet_zstd_target(tmp_path)}"
+                )
+
+            plain_query = _build_day_bundle_query()
+            if os.path.isfile(bundle_path) and updated_fields:
+                esc_bundle = escape_sql_literal(bundle_path)
+                safe_in = ", ".join(f"'{escape_sql_literal(f)}'" for f in sorted(updated_fields))
+                preserve_sql = (
+                    f" UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count "
+                    f"FROM read_parquet('{esc_bundle}', hive_partitioning=0) "
+                    f"WHERE field NOT IN ({safe_in})"
+                )
+                query = _build_day_bundle_query(preserve_sql)
+            else:
+                query = plain_query
             try:
                 con.execute(query)
             except duckdb.Error as e:
-                logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e)
-                unlink_quiet(tmp_path)
-                continue
+                if query != plain_query:
+                    unlink_quiet(tmp_path)
+                    try:
+                        con.execute(plain_query)
+                    except duckdb.Error as e2:
+                        logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e2)
+                        unlink_quiet(tmp_path)
+                        continue
+                else:
+                    logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e)
+                    unlink_quiet(tmp_path)
+                    continue
 
             with _get_service_lock(lock_key):
                 os.replace(tmp_path, bundle_path)

@@ -12,10 +12,13 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from backend.utils.sql_validator import escape_sql_literal
+
 from ._common import (
     IP_SPREAD_BUNDLE_FILENAME,
     _hour_bundled_root,
     _ip_spread_root,
+    _is_safe_ident,
     _rollups_root,
     cleanup_per_field_after_bundle,
     parquet_zstd_target,
@@ -66,25 +69,33 @@ def _bundle_per_field_hours_impl(
                 continue
 
             per_field_paths: list[str] = []
+            updated_fields: set[str] = set()
             max_src_mtime = 0.0
             try:
                 for field_entry in os.listdir(per_field_root):
                     if not field_entry.startswith("field="):
                         continue
+                    field_name = field_entry[len("field=") :]
+                    if not _is_safe_ident(field_name):
+                        continue
                     hour_dir = os.path.join(per_field_root, field_entry, f"hour={hour}")
                     if not os.path.isdir(hour_dir):
                         continue
+                    field_has_files = False
                     for fname in os.listdir(hour_dir):
                         if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
                             continue
                         p = os.path.join(hour_dir, fname)
                         per_field_paths.append(p)
+                        field_has_files = True
                         try:
                             mt = os.path.getmtime(p)
                             if mt > max_src_mtime:
                                 max_src_mtime = mt
                         except OSError:
                             pass
+                    if field_has_files:
+                        updated_fields.add(field_name)
             except OSError:
                 continue
 
@@ -104,13 +115,44 @@ def _bundle_per_field_hours_impl(
             os.makedirs(bundle_dir, exist_ok=True)
             tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             paths_sql = quote_path_list(per_field_paths)
-            query = f"COPY ({select_columns_sql} FROM read_parquet([{paths_sql}])) {parquet_zstd_target(tmp_path)}"
+            # Preserve existing bundle rows for fields NOT in updated_fields —
+            # because cleanup_fn deletes per-field parquets after bundling, a
+            # partial per-field write (e.g. a single-field recompute or crashed
+            # worker) would otherwise overwrite all_fields.parquet with ONLY the
+            # newly written field(s) and permanently drop every untouched field.
+            plain_query = (
+                f"COPY ({select_columns_sql} FROM read_parquet([{paths_sql}])) {parquet_zstd_target(tmp_path)}"
+            )
+            if os.path.isfile(bundle_path) and updated_fields:
+                esc_bundle = escape_sql_literal(bundle_path)
+                safe_in = ", ".join(f"'{escape_sql_literal(f)}'" for f in sorted(updated_fields))
+                query = (
+                    f"COPY ("
+                    f"{select_columns_sql} FROM read_parquet([{paths_sql}]) "
+                    f"UNION ALL "
+                    f"{select_columns_sql} FROM read_parquet('{esc_bundle}', hive_partitioning=0) "
+                    f"WHERE field NOT IN ({safe_in})"
+                    f") {parquet_zstd_target(tmp_path)}"
+                )
+            else:
+                query = plain_query
             try:
                 con.execute(query)
             except duckdb.Error as e:
-                logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e)
-                unlink_quiet(tmp_path)
-                continue
+                if query != plain_query:
+                    # If the existing bundle is unreadable/corrupt, fall back
+                    # to writing from the fresh per-field parquets alone.
+                    unlink_quiet(tmp_path)
+                    try:
+                        con.execute(plain_query)
+                    except duckdb.Error as e2:
+                        logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e2)
+                        unlink_quiet(tmp_path)
+                        continue
+                else:
+                    logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e)
+                    unlink_quiet(tmp_path)
+                    continue
 
             with _get_service_lock(lock_key):
                 os.replace(tmp_path, bundle_path)

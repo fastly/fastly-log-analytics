@@ -1,36 +1,62 @@
 {
  "_sql": {
+  "0a92357d4982": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<12 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status') UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<2 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "13461382e011": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<144 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "1749db5de8f3": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<9 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "187dfc18b39c": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<12 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status') UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<2 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "1dda89332dd4": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "1e492ec848d2": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<204 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "1fd462f39223": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<357 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "21fc8804e54b": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "2310d4894baa": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<36 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "2605ef1e9fc9": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<213 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "29a9b55ad589": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'country' THEN 5 ELSE 3 END",
+  "2e51fb89db00": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'city' THEN 100 ELSE 100 END",
+  "2ee0251955d5": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "2f7953f8a416": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<66 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "3ba54c6917dd": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'country' THEN 3 ELSE 2 END",
+  "3f0bb5247c2c": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<2 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "4c4ce3799017": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "5b3328267e8a": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<213 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "5b9f76af1072": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "5e172ae5096c": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<108 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<36 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "5eaefa2dd722": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<246 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "6246236bcf9f": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<144 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "635f7d1bd55a": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 1",
   "6a97921256c5": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "6e023f392d8f": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<144 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "6e65a0b5a17e": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<108 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<36 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "70ce91934256": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "7e97ee576441": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=0) WHERE field IN ('country')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "8af0a8d84201": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<69 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "8e179624f65f": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<204 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "9021a81da71d": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "9258ccfee05f": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'country' THEN 100 WHEN 'city' THEN 100 WHEN 'status' THEN 100 ELSE 100 END",
+  "955a18ba5535": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "95ec25cfc687": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "99388f345e03": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<9 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "a19949be680a": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "a58923264f00": "SELECT COUNT(*) FROM \"tmp_livefb\"",
   "a8188707884a": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "aa5091dc9330": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<357 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "ba3e8608e250": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "c335df0c2599": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<213 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
   "c4433bd5c8d8": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<2 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "c46ccbc6d489": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=0) WHERE field IN ('city')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "c806c1f132cb": "SELECT COUNT(*) FROM \"tmp_live\"",
   "cdbf076699dc": "DROP TABLE IF EXISTS \"tmp_heal\"",
+  "cf19359280d8": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<66 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "d003309ec5f6": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'city' THEN 1 ELSE 2 END",
+  "d5a4ea7772cc": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<6 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<36 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "dd32831a611a": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field IN ('country', 'city', 'status')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "dee43799f7fb": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=0) WHERE field IN ('city')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "e13957d8a5ec": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<213 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "e150621c9a09": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<3 paths>], hive_partitioning=1) UNION ALL SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<144 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
+  "e1604daf8584": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<246 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 100",
   "e98b9ba7b3b9": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'country' THEN 4 WHEN 'city' THEN 3 WHEN 'status' THEN 1 ELSE 2 END",
   "fbfd9aef3b0e": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<72 paths>], hive_partitioning=0) WHERE field IN ('country')) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
-  "fcd3577d2cb9": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<69 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10"
+  "fcd3577d2cb9": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<69 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= 10",
+  "fd2ea1ff4255": "SELECT field, value, SUM(count) AS c FROM (SELECT field, value, CAST(count AS BIGINT) AS count FROM read_parquet([<216 paths>], hive_partitioning=1)) GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= CASE field WHEN 'country' THEN 100 ELSE 100 END"
  },
  "bdays_active_day_ignored": {
   "batch": [
@@ -41,7 +67,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -233,7 +259,7 @@
    "types": 1
   },
   "sql": [
-   "5eaefa2dd722",
+   "e1604daf8584",
    "c806c1f132cb"
   ]
  },
@@ -384,7 +410,7 @@
    "types": 0
   },
   "sql": [
-   "187dfc18b39c"
+   "0a92357d4982"
   ]
  },
  "bdays_flat_alt": {
@@ -396,7 +422,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -572,7 +598,7 @@
    "types": 1
   },
   "sql": [
-   "95ec25cfc687",
+   "21fc8804e54b",
    "cdbf076699dc"
   ]
  },
@@ -585,7 +611,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -761,7 +787,7 @@
    "types": 1
   },
   "sql": [
-   "95ec25cfc687",
+   "21fc8804e54b",
    "cdbf076699dc"
   ]
  },
@@ -905,7 +931,7 @@
    "types": 0
   },
   "sql": [
-   "95ec25cfc687"
+   "21fc8804e54b"
   ]
  },
  "bdays_plus_perfield_days": {
@@ -1048,7 +1074,7 @@
    "types": 0
   },
   "sql": [
-   "95ec25cfc687"
+   "21fc8804e54b"
   ]
  },
  "bdays_plus_perfield_hours": {
@@ -1198,7 +1224,7 @@
    "types": 0
   },
   "sql": [
-   "c4433bd5c8d8"
+   "3f0bb5247c2c"
   ]
  },
  "bdays_single_field": {
@@ -1289,7 +1315,7 @@
    "types": 0
   },
   "sql": [
-   "dee43799f7fb"
+   "c46ccbc6d489"
   ]
  },
  "bdays_std": {
@@ -1432,7 +1458,7 @@
    "types": 0
   },
   "sql": [
-   "95ec25cfc687"
+   "21fc8804e54b"
   ]
  },
  "bdays_std_and_alt_same_day": {
@@ -1573,7 +1599,7 @@
    "types": 0
   },
   "sql": [
-   "a8188707884a"
+   "dd32831a611a"
   ]
  },
  "days_active_day_ignored": {
@@ -1585,7 +1611,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -1776,7 +1802,7 @@
    "types": 1
   },
   "sql": [
-   "5eaefa2dd722",
+   "e1604daf8584",
    "c806c1f132cb"
   ]
  },
@@ -1789,7 +1815,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -1968,7 +1994,7 @@
   "probes": {
    "isdir": 12,
    "isfile": 1,
-   "listdir": 81
+   "listdir": 78
   },
   "raised": null,
   "released": [],
@@ -2044,7 +2070,7 @@
    "types": 0
   },
   "sql": [
-   "2f7953f8a416"
+   "cf19359280d8"
   ]
  },
  "days_boundary_mid_hour_start": {
@@ -2118,7 +2144,7 @@
   "probes": {
    "isdir": 13,
    "isfile": 2,
-   "listdir": 88
+   "listdir": 84
   },
   "raised": null,
   "released": [],
@@ -2194,7 +2220,7 @@
    "types": 0
   },
   "sql": [
-   "6a97921256c5"
+   "955a18ba5535"
   ]
  },
  "days_boundary_start_partial": {
@@ -2268,7 +2294,7 @@
   "probes": {
    "isdir": 13,
    "isfile": 2,
-   "listdir": 52
+   "listdir": 48
   },
   "raised": null,
   "released": [],
@@ -2344,7 +2370,7 @@
    "types": 0
   },
   "sql": [
-   "2310d4894baa"
+   "d5a4ea7772cc"
   ]
  },
  "days_empty_dirs_no_hours_heal": {
@@ -2356,7 +2382,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -2535,7 +2561,7 @@
   ],
   "probes": {
    "isdir": 11,
-   "listdir": 240
+   "listdir": 231
   },
   "raised": null,
   "released": [],
@@ -2611,7 +2637,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "days_perfield": {
@@ -2685,7 +2711,7 @@
   "probes": {
    "isdir": 10,
    "isfile": 2,
-   "listdir": 8
+   "listdir": 6
   },
   "raised": null,
   "released": [],
@@ -2767,7 +2793,7 @@
   "probes": {
    "isdir": 10,
    "isfile": 2,
-   "listdir": 7
+   "listdir": 5
   },
   "raised": null,
   "released": [],
@@ -2848,7 +2874,7 @@
   ],
   "probes": {
    "isdir": 11,
-   "listdir": 154
+   "listdir": 151
   },
   "raised": null,
   "released": [],
@@ -2924,7 +2950,7 @@
    "types": 0
   },
   "sql": [
-   "6e023f392d8f"
+   "e150621c9a09"
   ]
  },
  "days_perfield_plus_hours": {
@@ -2998,7 +3024,7 @@
   "probes": {
    "isdir": 13,
    "isfile": 2,
-   "listdir": 20
+   "listdir": 15
   },
   "raised": null,
   "released": [],
@@ -3074,7 +3100,7 @@
    "types": 0
   },
   "sql": [
-   "1749db5de8f3"
+   "99388f345e03"
   ]
  },
  "days_perfield_residual_hours": {
@@ -3148,7 +3174,7 @@
   "probes": {
    "isdir": 12,
    "isfile": 1,
-   "listdir": 87
+   "listdir": 84
   },
   "raised": null,
   "released": [],
@@ -3224,7 +3250,7 @@
    "types": 0
   },
   "sql": [
-   "6a97921256c5"
+   "955a18ba5535"
   ]
  },
  "days_tmp_only": {
@@ -3236,7 +3262,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -3316,7 +3342,7 @@
   "probes": {
    "isdir": 14,
    "isfile": 2,
-   "listdir": 18
+   "listdir": 12
   },
   "raised": null,
   "released": [],
@@ -3515,7 +3541,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "heal_boom": {
@@ -3684,7 +3710,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9"
+   "e13957d8a5ec"
   ]
  },
  "heal_gap_beyond_cap": {
@@ -3833,7 +3859,7 @@
    "types": 0
   },
   "sql": [
-   "1fd462f39223"
+   "aa5091dc9330"
   ]
  },
  "heal_gap_bounded_by_start": {
@@ -3982,7 +4008,7 @@
    "types": 0
   },
   "sql": [
-   "2605ef1e9fc9"
+   "e13957d8a5ec"
   ]
  },
  "heal_gap_consecutive": {
@@ -3994,7 +4020,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -4176,7 +4202,7 @@
    "types": 1
   },
   "sql": [
-   "8e179624f65f",
+   "1e492ec848d2",
    "cdbf076699dc"
   ]
  },
@@ -4327,7 +4353,7 @@
    "types": 0
   },
   "sql": [
-   "c335df0c2599"
+   "5b3328267e8a"
   ]
  },
  "heal_gap_in_bundled_compacted_day": {
@@ -4339,7 +4365,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -4515,7 +4541,7 @@
    "types": 1
   },
   "sql": [
-   "95ec25cfc687",
+   "21fc8804e54b",
    "cdbf076699dc"
   ]
  },
@@ -4528,7 +4554,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -4620,7 +4646,7 @@
   "probes": {
    "isdir": 13,
    "isfile": 2,
-   "listdir": 20
+   "listdir": 15
   },
   "raised": null,
   "released": [],
@@ -4711,7 +4737,7 @@
    "types": 1
   },
   "sql": [
-   "1749db5de8f3",
+   "99388f345e03",
    "cdbf076699dc"
   ]
  },
@@ -4724,7 +4750,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -4816,7 +4842,7 @@
   "probes": {
    "isdir": 14,
    "isfile": 1,
-   "listdir": 84
+   "listdir": 78
   },
   "raised": null,
   "released": [],
@@ -4907,7 +4933,7 @@
    "types": 1
   },
   "sql": [
-   "fcd3577d2cb9",
+   "8af0a8d84201",
    "cdbf076699dc"
   ]
  },
@@ -4920,7 +4946,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -5095,7 +5121,7 @@
    "types": 1
   },
   "sql": [
-   "5b9f76af1072",
+   "4c4ce3799017",
    "cdbf076699dc"
   ]
  },
@@ -5108,7 +5134,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -5120,7 +5146,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -5338,7 +5364,7 @@
    "types": 1
   },
   "sql": [
-   "fcd3577d2cb9",
+   "8af0a8d84201",
    "c806c1f132cb",
    "cdbf076699dc"
   ]
@@ -5352,7 +5378,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -5534,7 +5560,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9",
+   "e13957d8a5ec",
    "cdbf076699dc"
   ]
  },
@@ -5547,7 +5573,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -5729,7 +5755,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9",
+   "e13957d8a5ec",
    "cdbf076699dc"
   ]
  },
@@ -5742,7 +5768,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -5924,7 +5950,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9",
+   "e13957d8a5ec",
    "cdbf076699dc"
   ]
  },
@@ -5937,7 +5963,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -5949,7 +5975,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -6167,7 +6193,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9",
+   "e13957d8a5ec",
    "c806c1f132cb",
    "cdbf076699dc"
   ]
@@ -6334,7 +6360,7 @@
    "types": 1
   },
   "sql": [
-   "2605ef1e9fc9"
+   "e13957d8a5ec"
   ]
  },
  "heal_schema_boom": {
@@ -6492,7 +6518,7 @@
    "types": 0
   },
   "sql": [
-   "2605ef1e9fc9"
+   "e13957d8a5ec"
   ]
  },
  "heal_whole_window_empty": {
@@ -6504,7 +6530,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -6620,7 +6646,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -6736,7 +6762,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -6918,7 +6944,7 @@
    "types": 0
   },
   "sql": [
-   "2605ef1e9fc9",
+   "e13957d8a5ec",
    "cdbf076699dc"
   ]
  },
@@ -6931,7 +6957,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -7123,7 +7149,7 @@
    "types": 1
   },
   "sql": [
-   "9021a81da71d",
+   "ba3e8608e250",
    "c806c1f132cb"
   ]
  },
@@ -7274,7 +7300,7 @@
    "types": 0
   },
   "sql": [
-   "9021a81da71d"
+   "ba3e8608e250"
   ]
  },
  "hours_bundled_plus_perfield_disjoint": {
@@ -7424,7 +7450,7 @@
    "types": 0
   },
   "sql": [
-   "5e172ae5096c"
+   "6e65a0b5a17e"
   ]
  },
  "hours_bundled_plus_perfield_overlap": {
@@ -7574,7 +7600,7 @@
    "types": 0
   },
   "sql": [
-   "5e172ae5096c"
+   "6e65a0b5a17e"
   ]
  },
  "hours_bundled_single_field_filter": {
@@ -7692,7 +7718,7 @@
    "types": 0
   },
   "sql": [
-   "fbfd9aef3b0e"
+   "7e97ee576441"
   ]
  },
  "hours_nonparquet_files": {
@@ -7704,7 +7730,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -7958,7 +7984,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "hours_perfield_partial_fields": {
@@ -8107,7 +8133,7 @@
    "types": 0
   },
   "sql": [
-   "1dda89332dd4"
+   "2ee0251955d5"
   ]
  },
  "hours_tmp_files_perfield": {
@@ -8256,7 +8282,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "hours_window_1h": {
@@ -8398,7 +8424,7 @@
    "types": 0
   },
   "sql": [
-   "5b9f76af1072"
+   "4c4ce3799017"
   ]
  },
  "hours_window_mid_hour": {
@@ -8547,7 +8573,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "hours_window_single_hour_bundled": {
@@ -8688,7 +8714,7 @@
    "types": 0
   },
   "sql": [
-   "a8188707884a"
+   "dd32831a611a"
   ]
  },
  "live_direct_none_fallback": {
@@ -8700,7 +8726,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_livefb",
     "types": 8
@@ -8902,7 +8928,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "a58923264f00"
   ]
  },
@@ -9077,7 +9103,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "live_limits_pfl": {
@@ -9089,9 +9115,9 @@
      "city",
      "status"
     ],
-    "limit": 2,
+    "limit": 100,
     "per_field_limits": {
-     "country": 3
+     "country": 100
     },
     "table": "tmp_live",
     "types": 8
@@ -9247,7 +9273,7 @@
    "types": 1
   },
   "sql": [
-   "3ba54c6917dd",
+   "fd2ea1ff4255",
    "c806c1f132cb"
   ]
  },
@@ -9260,7 +9286,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_livefb",
     "types": 8
@@ -9467,7 +9493,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "a58923264f00"
   ]
  },
@@ -9480,7 +9506,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -9676,7 +9702,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "c806c1f132cb"
   ]
  },
@@ -9689,7 +9715,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -9880,7 +9906,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "c806c1f132cb"
   ]
  },
@@ -9893,7 +9919,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -10084,7 +10110,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "c806c1f132cb"
   ]
  },
@@ -10239,7 +10265,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "live_window_ends_at_active_start": {
@@ -10388,7 +10414,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "live_window_mid_active_hour": {
@@ -10400,7 +10426,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -10791,7 +10817,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "c806c1f132cb"
   ]
  },
@@ -10804,7 +10830,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -10920,7 +10946,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_heal",
     "types": 8
@@ -11120,7 +11146,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "rolled_boom_live": {
@@ -11132,7 +11158,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -11273,7 +11299,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256",
+   "a19949be680a",
    "c806c1f132cb"
   ]
  },
@@ -11446,7 +11472,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "shape_custom_fields_live": {
@@ -11457,7 +11483,7 @@
      "country",
      "edge_custom"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -11627,7 +11653,7 @@
    "types": 1
   },
   "sql": [
-   "1dda89332dd4",
+   "2ee0251955d5",
    "c806c1f132cb"
   ]
  },
@@ -11771,7 +11797,7 @@
    "types": 0
   },
   "sql": [
-   "1dda89332dd4"
+   "2ee0251955d5"
   ]
  },
  "shape_limit1": {
@@ -11870,7 +11896,7 @@
    "types": 0
   },
   "sql": [
-   "635f7d1bd55a"
+   "a19949be680a"
   ]
  },
  "shape_no_bounds": {
@@ -12044,7 +12070,7 @@
    "types": 1
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "shape_no_end": {
@@ -12056,7 +12082,7 @@
      "city",
      "status"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -12247,7 +12273,7 @@
    "types": 1
   },
   "sql": [
-   "1dda89332dd4",
+   "2ee0251955d5",
    "c806c1f132cb"
   ]
  },
@@ -12356,7 +12382,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "shape_no_start": {
@@ -12505,7 +12531,7 @@
    "types": 0
   },
   "sql": [
-   "70ce91934256"
+   "a19949be680a"
   ]
  },
  "shape_pfl_all_fields": {
@@ -12629,7 +12655,7 @@
    "types": 0
   },
   "sql": [
-   "e98b9ba7b3b9"
+   "9258ccfee05f"
   ]
  },
  "shape_pfl_unrequested_field": {
@@ -12738,7 +12764,7 @@
    "types": 0
   },
   "sql": [
-   "d003309ec5f6"
+   "2e51fb89db00"
   ]
  },
  "shape_single_field": {
@@ -12855,7 +12881,7 @@
    "types": 0
   },
   "sql": [
-   "1dda89332dd4"
+   "2ee0251955d5"
   ]
  },
  "shape_skip_fields_live": {
@@ -12865,7 +12891,7 @@
     "fields": [
      "country"
     ],
-    "limit": 10,
+    "limit": 100,
     "per_field_limits": null,
     "table": "tmp_live",
     "types": 8
@@ -13035,7 +13061,7 @@
    "types": 1
   },
   "sql": [
-   "1dda89332dd4",
+   "2ee0251955d5",
    "c806c1f132cb"
   ]
  },
@@ -13175,7 +13201,7 @@
    "types": 0
   },
   "sql": [
-   "29a9b55ad589"
+   "fd2ea1ff4255"
   ]
  },
  "shape_unsafe_mixed": {
@@ -13319,7 +13345,7 @@
    "types": 0
   },
   "sql": [
-   "13461382e011"
+   "6246236bcf9f"
   ]
  }
 }

@@ -1501,8 +1501,18 @@ class QueryRunner:
         _phase("dir_enum:n_bundled_hour_files", float(len(bundled_hour_paths)))
         _phase("dir_enum:n_bundled_day_files", float(len(bundled_day_paths)))
 
+        # Widen the per-sub-source candidate limit before merging across
+        # rolled (day/hour parquets), live active hour, and missing-hour heal
+        # so values ranked just outside top-N in individual sub-sources (e.g.
+        # rank 11-100 in rolled, rank 1-10 in live) still have their counts
+        # summed across all sub-sources before final _truncate_top_n.
+        pre_merge_limit = max(limit * 10, 100) if limit > 0 else limit
+        pre_merge_per_field_limits = (
+            {k: max(v, pre_merge_limit) for k, v in per_field_limits.items()} if per_field_limits else None
+        )
+
         _t_rolled = time.perf_counter()
-        rolled_q = _build_rolled_sql(plan.paths, safe_fields, limit, per_field_limits)
+        rolled_q = _build_rolled_sql(plan.paths, safe_fields, pre_merge_limit, pre_merge_per_field_limits)
         rolled_res: list = []
         if rolled_q is not None:
             try:
@@ -1523,7 +1533,14 @@ class QueryRunner:
         # Live active hour: the rollup tree never holds it.
         _t_live = time.perf_counter()
         live_res, partial_rows = self._top_n_live_active_hour(
-            win, safe_fields, base_table, limit, per_field_limits, schema, _phase, observation=observed
+            win,
+            safe_fields,
+            base_table,
+            pre_merge_limit,
+            pre_merge_per_field_limits,
+            schema,
+            _phase,
+            observation=observed,
         )
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
@@ -1545,7 +1562,14 @@ class QueryRunner:
         )
         heal_res = (
             self._top_n_heal_hours(
-                missing_hours, win, safe_fields, base_table, limit, per_field_limits, schema, observation=observed
+                missing_hours,
+                win,
+                safe_fields,
+                base_table,
+                pre_merge_limit,
+                pre_merge_per_field_limits,
+                schema,
+                observation=observed,
             )
             if missing_hours
             else []
