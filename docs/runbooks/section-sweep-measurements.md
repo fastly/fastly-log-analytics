@@ -189,9 +189,10 @@ proof of cleanup. The journal supports interrupted recovery; neither SIGKILL nor
 network loss can be promised automatic cleanup.
 
 Offline tests include real intercepted Chromium login/redirect cases and fake
-transport failures. No deployed lifecycle is verified by those tests. The old
-`verify_page_e2e.ts::setupAnalystSession` remains unsuitable for this protocol and
-must not be used as qualification evidence.
+transport failures. No deployed lifecycle is verified by those tests. The
+section-sweep browser evidence and the guarded analyst fixture are the only
+qualification paths; ad-hoc page-wide waterfall scripts are not part of the
+protocol.
 
 ## Repeated samples
 
