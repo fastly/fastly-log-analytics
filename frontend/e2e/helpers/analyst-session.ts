@@ -66,13 +66,16 @@ export async function seedPasscodeAnalystInvite(
 export async function revokeAnalystInvite(
   request: APIRequestContext,
   inviteId: string | null | undefined,
-  options?: { logout?: boolean },
+  options?: { logout?: boolean; stopShare?: boolean },
 ): Promise<void> {
   if (options?.logout) {
     await request.post('/api/share/logout').catch(() => {})
   }
   if (inviteId) {
     await request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
+  }
+  if (options?.stopShare ?? options?.logout) {
+    await request.post('/api/admin/share/stop').catch(() => {})
   }
 }
 

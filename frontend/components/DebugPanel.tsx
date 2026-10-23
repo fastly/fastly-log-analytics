@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/debugStore'
+import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
 import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2, Copy, Check } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -54,6 +55,8 @@ function CopyButton({ text }: CopyButtonProps) {
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const services = useServiceStore((s) => s.services)
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
@@ -151,7 +154,14 @@ export function DebugPanel() {
     const sameQueries = (a: DebugQuery[], b: DebugQuery[]) => {
       if (a.length !== b.length) return false
       for (let i = 0; i < a.length; i++) {
-        if (a[i].sql !== b[i].sql || a[i].time_ms !== b[i].time_ms || a[i].is_cached !== b[i].is_cached) return false
+        if (
+          a[i].sql !== b[i].sql ||
+          a[i].time_ms !== b[i].time_ms ||
+          a[i].is_cached !== b[i].is_cached ||
+          a[i].engine !== b[i].engine
+        ) {
+          return false
+        }
       }
       return true
     }
@@ -290,8 +300,19 @@ export function DebugPanel() {
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
+  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
+  const isHighScaleService = Boolean(activeService?.is_high_scale)
+  const defaultEngine = isHighScaleService ? 'ClickHouse' : 'DuckDB'
+  const queryEngines = Array.from(
+    new Set(
+      queries
+        .map((q) => q.engine)
+        .filter((e): e is string => Boolean(e) && (isHighScaleService || e !== 'ClickHouse')),
+    ),
+  )
+  const engineLabel = queryEngines.length > 0 ? queryEngines.join(' / ') : defaultEngine
 
-  const duckDbCopyText = `Data Queries (DuckDB/ClickHouse) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+  const duckDbCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
 ${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
@@ -311,7 +332,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-primary/10 p-1.5 rounded-md">
                 <Database className="h-4 w-4 text-primary" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries (DuckDB / ClickHouse)</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries ({engineLabel})</h3>
               <Button
                 variant="ghost"
                 size="sm"

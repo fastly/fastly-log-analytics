@@ -23,6 +23,7 @@ import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
+import { useServiceStore } from '@/stores/serviceStore'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import { server } from '@/__tests__/helpers/msw/server'
 
@@ -268,6 +269,32 @@ describe('DebugPanel — dedup + lifecycle', () => {
     await waitFor(() => {
       // Component returns null when both flags are off.
       expect(screen.queryByRole('button', { name: /queries/i })).not.toBeInTheDocument()
+    })
+  })
+
+  test('dynamically labels query engine as DuckDB in Standard mode and ClickHouse in High-Scale mode', async () => {
+    act(() => {
+      useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
+      useServiceStore.setState({
+        activeServiceId: 'std-svc',
+        services: [{ id: 'std-svc', name: 'Standard Service', is_high_scale: false } as never],
+      })
+    })
+    const qc = makeClient()
+    renderWith(qc)
+
+    expect(screen.getByText('Data Queries (DuckDB)')).toBeInTheDocument()
+    expect(screen.queryByText(/ClickHouse/i)).not.toBeInTheDocument()
+
+    act(() => {
+      useServiceStore.setState({
+        activeServiceId: 'hs-svc',
+        services: [{ id: 'hs-svc', name: 'High-Scale Service', is_high_scale: true } as never],
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Data Queries (ClickHouse)')).toBeInTheDocument()
     })
   })
 })

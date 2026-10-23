@@ -61,6 +61,7 @@ def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
                 "sql": _compact_sql_for_debug(sql.strip()),
                 "time_ms": round((_time.monotonic() - t0) * 1000, 2),
                 "rows": len(result),
+                "engine": "DuckDB",
             }
         )
         return result

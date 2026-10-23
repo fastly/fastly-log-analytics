@@ -39,6 +39,7 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
   })
 
   it('renders route-level loading skeleton with pre-allocated zero-CLS reservation containers', () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
     render(<Loading />)
     expect(screen.getByTestId('admin-clickhouse-loading')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-toolbar')).toBeInTheDocument()
@@ -47,6 +48,12 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     expect(screen.getByTestId('admin-clickhouse-replay-reservation')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'true')
     expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('triggers notFound() for the route-level loading shell in Standard deployment mode', () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
+    expect(() => render(<Loading />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
+    expect(notFoundMock).toHaveBeenCalled()
   })
 
   it('keeps notice reservations mounted while status changes and exposes only the applicable notice', () => {

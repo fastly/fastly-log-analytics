@@ -449,7 +449,7 @@ export function AppLayout({
     (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))) ||
     ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
-  const needsWizard = !isAnalyst && !hasServices && !pathname.startsWith('/admin')
+  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin')
   // Derived from the same conditions the redirect effect below acts on (precedence included),
   // so the announcement is never out of step with the redirect it describes.
   const redirectAnnouncement = isLoading

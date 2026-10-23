@@ -3,6 +3,7 @@ import React from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Label } from '@/components/ui/label'
 import { useBootstrap } from '@/hooks/useBootstrap'
+import { useServiceStore } from '@/stores/serviceStore'
 import { client, extractApiError } from '@/lib/api'
 import {
   Select,
@@ -56,6 +57,10 @@ export function DiagnosticsPanel() {
 
   // Backend gate check
   const { data: bootstrapData } = useBootstrap()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const services = useServiceStore((s) => s.services)
+  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
+  const queryEngineLabel = activeService?.is_high_scale ? 'ClickHouse' : 'DuckDB'
   const debugState = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state
   const debugBackendOn = debugState?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn
@@ -68,7 +73,7 @@ export function DiagnosticsPanel() {
         <div className="min-w-0 space-y-0.5">
           <Label id="diag-query-debug-label" className="text-sm font-medium">Query debugging panel</Label>
           <p className="text-xs text-muted-foreground">
-            Bottom-of-screen panel with DuckDB SQL queries and execution times.
+            Bottom-of-screen panel with {queryEngineLabel} SQL queries and execution times.
           </p>
           {!debugBackendOn && (
             <p className="text-[11px] text-amber-500" title={debugDisabledTooltip}>

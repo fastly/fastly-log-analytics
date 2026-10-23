@@ -15,6 +15,10 @@ import { revokeAnalystInvite, seedPasscodeAnalystInvite } from '../helpers/analy
 import { getFirstServiceId } from './helpers'
 
 test.describe('Analyst Share Login Page Contract (/share-login)', () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post('/api/admin/share/stop').catch(() => {})
+  })
+
   test('1. Route accessibility, card layout mounting & footer environment indicator', async ({ page }) => {
     await page.goto('/share-login')
     await expect(page.getByRole('heading', { name: /Analyst sign-in/i })).toBeVisible({ timeout: 30_000 })

@@ -20,6 +20,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { partial } from '../helpers/partial'
 import type { BootstrapResponse } from '@/types/api'
+import { usePathname, useRouter } from 'next/navigation'
 import React from 'react'
 
 // AppLayout now calls useQueryClient() to implement the navigation-cancel
@@ -75,6 +76,7 @@ type BootstrapData = BootstrapResponse
 // Real store for the test
 beforeEach(async () => {
   vi.clearAllMocks()
+  vi.mocked(usePathname).mockReturnValue('/dashboard')
 
   vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
     data: partial<BootstrapData>({ services: [{ service_id: 'test-svc', name: 'Test Service' }] }),
@@ -159,4 +161,26 @@ test('renders analyst watermark when bootstrap reports remote analyst', async ()
 test('does not render watermark for non-analyst users', () => {
   renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
   expect(screen.queryByTestId('analyst-watermark')).not.toBeInTheDocument()
+})
+
+test('keeps anonymous visitors on sign-in before the analyst role hydrates', async () => {
+  vi.mocked(usePathname).mockReturnValue('/share-login')
+  const replace = vi.fn()
+  vi.mocked(useRouter).mockReturnValue({ ...useRouter(), replace })
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({
+      services: [],
+      settings: { is_remote_analyst: true, needs_login: true },
+    }),
+    isSuccess: true,
+    isLoading: false,
+  }))
+  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  vi.mocked(useIsAnalyst).mockReturnValue(false)
+
+  renderWithQueryClient(<AppLayout><div>Analyst sign-in</div></AppLayout>)
+
+  expect(screen.getByText('Analyst sign-in')).toBeInTheDocument()
+  expect(replace).not.toHaveBeenCalled()
+  expect(screen.queryByText('No services configured yet. Redirecting to the admin setup page.')).not.toBeInTheDocument()
 })

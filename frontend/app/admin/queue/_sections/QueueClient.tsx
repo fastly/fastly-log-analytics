@@ -770,7 +770,7 @@ export function QueueClient() {
               <ul className="list-disc pl-5 space-y-2">
                 <li><strong>DISCOVERED:</strong> Found in FOS, waiting to be claimed by a worker.</li>
                 <li><strong>CLAIMED:</strong> Currently being downloaded, transformed, or queued for commit.</li>
-                <li><strong>COMMITTED:</strong> Fully ingested into the long-term DuckLake / ClickHouse table.</li>
+                <li><strong>COMMITTED:</strong> Fully ingested into the long-term {data?.deployment_mode === 'high_scale' ? 'ClickHouse' : 'DuckLake'} table.</li>
                 <li><strong>QUARANTINED:</strong> Skipped due to corruption or parsing errors.</li>
                 <li><strong>DEAD_LETTER:</strong> Failed all retries and needs operator attention.</li>
               </ul>
