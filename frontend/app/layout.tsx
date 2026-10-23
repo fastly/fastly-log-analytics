@@ -167,8 +167,8 @@ export default async function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* world.geojson preload + plotly modulepreload both moved out of
-            this root layout. world.geojson lives in <AppLayout> (emits
+        {/* world.topo.json preload + plotly modulepreload both moved out of
+            this root layout. world.topo.json lives in <AppLayout> (emits
             only on map-using routes /dashboard, /network); plotly chunk
             loads on-demand via <PlotlyPrewarm> on chart-bearing routes.
             Removing the always-on global emits saves ~400KB raw / ~150KB

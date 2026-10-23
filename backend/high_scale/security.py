@@ -71,9 +71,12 @@ _REQ_HEADER_LAST = ">32KB"
 _CONN_REUSE_BUCKETS = ((1, "1 (None)"), (5, "2-5"), (20, "6-20"), (100, "21-100"))
 _CONN_REUSE_LAST = ">100"
 
-# Same fixed POP coordinates as the standard GET_PROXY_STATS / GET_ACTIVE_PROXY_CLIENTS
+from backend.high_scale._scope import visible_publication_fence_sql
+from backend.utils.pop_utils import _effective_pop_lat_lon_map
+
+# Same POP coordinates as the standard GET_PROXY_STATS / GET_ACTIVE_PROXY_CLIENTS
 # templates, so a service reports identical distance verdicts in either mode.
-_POP_COORDS = (("SJC", 37.3382, -121.8863), ("IAD", 38.9531, -77.4565), ("NRT", 35.7720, 140.3929))
+_POP_COORDS = tuple((code, lat, lon) for code, (lat, lon) in sorted(_effective_pop_lat_lon_map().items()))
 _POP_DEFAULT = (38.0, -97.0)
 
 _IS_IPV6 = "lower(custom_fields['is_ipv6']) IN ('1', 'true', 't', 'yes')"
@@ -118,7 +121,7 @@ def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time
     start = _range_value(start_time) or (end - timedelta(days=1))
     filter_sql, filter_params = _build_clickhouse_filters(getattr(req, "filters", None) or {})
     where = (
-        "service_id={service_id:String} AND publication_state='visible' "
+        f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
         "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)} "
         f"AND {filter_sql}"
     )
@@ -296,7 +299,7 @@ def _verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: 
 # NGWAF bot rows. An unfiltered request reads the per-minute ``ngwaf_bot`` projection;
 # a filtered one reads the ``ngwaf_bot*`` keys persisted on request_facts at ingest.
 _NGWAF_PROJECTION_WHERE = (
-    "service_id={service_id:String} AND publication_state='visible' AND dimension='ngwaf_bot' "
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request_aggregate')} AND dimension='ngwaf_bot' "
     "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)}"
 )
 

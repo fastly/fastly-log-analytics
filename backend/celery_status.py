@@ -151,58 +151,35 @@ def standard_ingest_summary() -> dict[str, int]:
         from backend.config import list_configs
         from backend.core.metadata.base import get_con
 
-        seen: set[str] = set()
-        for svc in list_configs():
-            sid = svc.get("service_id") or svc.get("name")
-            if not sid or sid in seen:
-                continue
-            seen.add(sid)
-            svc_ingested = 0
+        sids = list(dict.fromkeys(sid for svc in list_configs() if (sid := (svc.get("service_id") or svc.get("name")))))
+        if sids:
+            placeholders = ", ".join("?" for _ in sids)
+            con = get_con(sids[0])
+            cur = con.cursor()
             try:
-                con = get_con(sid)
-                cur = con.cursor()
                 cur.execute(
-                    "SELECT COALESCE(SUM(file_count), 0) FROM ingested_files_summary WHERE source_name = ?",
-                    (sid,),
+                    f"SELECT COALESCE(SUM(file_count), 0) FROM ingested_files_summary WHERE source_name IN ({placeholders})",
+                    tuple(sids),
                 )
                 rows = cur.fetchall()
                 if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                    svc_ingested = int(rows[0][0])
+                    ingested_files = int(rows[0][0])
             except Exception:
                 pass
-            if svc_ingested == 0:
+            if ingested_files == 0:
                 for col in ("source_name", "service_id"):
                     try:
-                        con = get_con(sid)
-                        cur = con.cursor()
                         cur.execute(
-                            f"SELECT count(*) FROM ingested_files WHERE {col} = ?",
-                            (sid,),
+                            f"SELECT count(*) FROM ingested_files WHERE {col} IN ({placeholders})",
+                            tuple(sids),
                         )
                         rows = cur.fetchall()
                         if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                            svc_ingested = int(rows[0][0])
-                            if svc_ingested > 0:
+                            ingested_files = int(rows[0][0])
+                            if ingested_files > 0:
                                 break
                     except Exception:
                         continue
-            ingested_files += svc_ingested
-
-            svc_quarantined = 0
-            for tbl in ("quarantine_evidence", "quarantined_files", "ingest_quarantine"):
-                try:
-                    con = get_con(sid)
-                    cur = con.cursor()
-                    cur.execute(
-                        f"SELECT count(*) FROM {tbl} WHERE service_id = ?",
-                        (sid,),
-                    )
-                    rows = cur.fetchall()
-                    if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                        svc_quarantined += int(rows[0][0])
-                except Exception:
-                    continue
-            quarantined_items += svc_quarantined
     except Exception as e:
         logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
     return {

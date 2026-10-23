@@ -966,15 +966,18 @@ def get_sessions(
 
     asn_names = _build_asn_label_map(sessions, src)
 
-    if not rows and offset > 0:
+    if (not rows and offset > 0) or len(sessions) == limit:
         _t = time.perf_counter()
         count_sql = SQL.SESSIONS_COUNT_WRAPPER.format(
             cte_prefix=cte_prefix,
             flag_expr=flag_expr,
             flagged_filter=flagged_filter,
         )
-        total = runner.execute(count_sql, params).fetchone()[0]
+        c_row = runner.execute(count_sql, params).fetchone()
+        total = int(c_row[0]) if c_row and c_row[0] is not None else (offset + len(sessions))
         timer.mark("count_query", _t)
+    elif rows and offset > 0:
+        total = offset + len(sessions)
 
     res = {
         "sessions": sessions,

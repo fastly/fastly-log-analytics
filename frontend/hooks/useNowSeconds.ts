@@ -59,10 +59,20 @@ function _getServerSnapshot(): number {
   return 0
 }
 
+const _noopUnsubscribe = () => {}
+function _noopSubscribe(): () => void {
+  return _noopUnsubscribe
+}
+
 /**
  * Returns Date.now()-equivalent value that updates once per second.
- * All consumers share a single underlying timer.
+ * All consumers share a single underlying timer. Pass `enabled = false`
+ * to pause subscription so the global timer can stop when all callers are idle.
  */
-export function useNowMs(): number {
-  return useSyncExternalStore(_subscribe, _getSnapshot, _getServerSnapshot)
+export function useNowMs(enabled = true): number {
+  return useSyncExternalStore(
+    enabled ? _subscribe : _noopSubscribe,
+    _getSnapshot,
+    _getServerSnapshot,
+  )
 }

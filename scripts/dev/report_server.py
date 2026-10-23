@@ -55,7 +55,10 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import validate_credentials as vc  # noqa: E402
+try:
+    import validate_credentials as vc  # noqa: E402
+except ImportError:
+    vc = None  # type: ignore[assignment]
 
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 
@@ -185,6 +188,8 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(_CRED_CACHE[2], _CRED_CACHE[1])
                 return
             try:
+                if vc is None:
+                    raise RuntimeError("validate_credentials module not available")
                 body = json.dumps(vc.compute_all(), indent=2).encode("utf-8")
                 status = 200
             except Exception as exc:  # pragma: no cover - defensive, keep the report alive

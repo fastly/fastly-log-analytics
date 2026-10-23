@@ -170,28 +170,30 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
     try:
         # read_only: ATTACH + SELECT only, no writes.
         con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=True)
-        from backend.repositories._base import attach_ngwaf_cache
+        try:
+            from backend.repositories._base import attach_ngwaf_cache
 
-        # We don't have actual_cols handy, but we know waf_req_id is required
-        # so we pass it explicitly to force the attachment.
-        with attach_ngwaf_cache(con, ["waf_req_id"], alias="_ngwaf_oldest") as attached:
-            if attached:
-                row = con.execute(f"""
-                    SELECT MIN(t.timestamp)
-                    FROM {table_name} t
-                    LEFT JOIN temp._ngwaf_oldest_ngwaf_bots nb USING (waf_req_id)
-                    WHERE t.waf_req_id IS NOT NULL
-                      AND t.waf_req_id != ''
-                      AND t.waf_sig LIKE '%VERIFIED-BOT%'
-                      AND nb.waf_req_id IS NULL
-                """).fetchone()
-                ts = row[0] if row and row[0] else None
-                if ts:
-                    # DuckDB returns a datetime object for timestamp columns
-                    if hasattr(ts, "strftime"):
-                        return iso_z(ts)
-                    return str(ts)
-        con.close()
+            # We don't have actual_cols handy, but we know waf_req_id is required
+            # so we pass it explicitly to force the attachment.
+            with attach_ngwaf_cache(con, ["waf_req_id"], alias="_ngwaf_oldest") as attached:
+                if attached:
+                    row = con.execute(f"""
+                        SELECT MIN(t.timestamp)
+                        FROM {table_name} t
+                        LEFT JOIN temp._ngwaf_oldest_ngwaf_bots nb USING (waf_req_id)
+                        WHERE t.waf_req_id IS NOT NULL
+                          AND t.waf_req_id != ''
+                          AND t.waf_sig LIKE '%VERIFIED-BOT%'
+                          AND nb.waf_req_id IS NULL
+                    """).fetchone()
+                    ts = row[0] if row and row[0] else None
+                    if ts:
+                        # DuckDB returns a datetime object for timestamp columns
+                        if hasattr(ts, "strftime"):
+                            return iso_z(ts)
+                        return str(ts)
+        finally:
+            con.close()
     except Exception:
         logger.debug("oldest_unenriched_timestamp: con.close failed (ignored)", exc_info=True)
 

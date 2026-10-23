@@ -13,7 +13,6 @@ Not in CI — depends on a live Fastly API key per service.
 """
 
 import os
-import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -55,15 +54,7 @@ def run_comparison():
             continue
 
         # 1. Local Data (usage_log)
-        # usage_log.timestamp has three historical formats coexisting:
-        #   - 'YYYY-MM-DDTHH:MM:SSZ'             (current iso_z_now())
-        #   - 'YYYY-MM-DDTHH:MM:SS.uuuuuu+00:00' (pre-iso_z_now legacy)
-        #   - 'YYYY-MM-DDTHH:MM:SS'              (fastly.edge synthetic, no tz)
-        # SQLite's datetime() parses all three to canonical 'YYYY-MM-DD HH:MM:SS',
-        # which sorts correctly. Lexicographic >= on the raw column drops legacy
-        # rows because '.' < 'Z' in the encoded comparison.
         con = metadata_db.get_con(sid)
-        con.row_factory = sqlite3.Row
         cur = con.execute(
             """
             SELECT
@@ -72,13 +63,15 @@ def run_comparison():
                 sum(coalesce(bytes, 0)) as total_bytes
             FROM usage_log
             WHERE service_id = ?
-              AND datetime(timestamp) >= datetime(?)
-              AND datetime(timestamp) <= datetime(?)
+              AND timestamp::timestamptz >= ?::timestamptz
+              AND timestamp::timestamptz <= ?::timestamptz
             GROUP BY 1
         """,
             (sid, start_str, end_str),
         )
-        local_usage = {row["operation_class"]: dict(row) for row in cur.fetchall()}
+        local_usage = {
+            row[0]: {"operation_class": row[0], "count": row[1], "total_bytes": row[2]} for row in cur.fetchall()
+        }
 
         # 2. Fastly Stats
         # FOS ops (account-wide via /stats/aggregate)

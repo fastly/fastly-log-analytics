@@ -170,6 +170,19 @@ describe('NetworkMap empty-state', () => {
     expect(screen.getByText('No map data available')).toBeInTheDocument()
     expect(screen.queryByTestId('playback-controls')).not.toBeInTheDocument()
   })
+
+  it('UX-3: shows a distinct error state, not "No map data available", when error is set', () => {
+    render(<NetworkMap {...baseProps({ data: undefined, error: new Error('map boom') })} />)
+    expect(screen.getByRole('alert')).toHaveTextContent(/failed to load map data/i)
+    expect(screen.queryByText('No map data available')).toBeNull()
+  })
+
+  it('UX-8: renders the empty state without throwing when buckets are absent', () => {
+    expect(() =>
+      render(<NetworkMap {...baseProps({ data: {}, error: null })} />),
+    ).not.toThrow()
+    expect(screen.getByText('No map data available')).toBeInTheDocument()
+  })
 })
 
 describe('NetworkMap with data', () => {

@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from backend.high_scale._scope import visible_publication_fence_sql
 from backend.high_scale.aggregates import AggregateRequest, AggregateResponse
 from backend.high_scale.archive_models import ServingWatermark
 
@@ -50,7 +51,7 @@ def query_clickhouse_aggregate(
     clauses = [
         "service_id={service_id:String}",
         "dimension={dimension:String}",
-        "publication_state='visible'",
+        visible_publication_fence_sql(f"{request.domain}_aggregate"),
     ]
     params: dict[str, Any] = {
         "service_id": request.service_id,
@@ -147,7 +148,7 @@ def query_clickhouse_aggregates_batch(
     clauses = [
         "service_id={service_id:String}",
         f"dimension IN ({', '.join(dim_placeholders)})",
-        "publication_state='visible'",
+        visible_publication_fence_sql(f"{domain}_aggregate"),
     ]
     if start is not None and end is not None:
         start_utc = start.astimezone(UTC)

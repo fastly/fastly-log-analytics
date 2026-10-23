@@ -1309,7 +1309,6 @@ def scoring_evaluation(
     """
     from backend.scoring import labels as _labels
 
-    label_rows = _labels.list_labels(service_id)
     counts = _labels.counts_by_label(service_id)
     n_good = counts.get("good", 0)
     n_bad = counts.get("bad", 0)
@@ -1348,6 +1347,7 @@ def scoring_evaluation(
                 "and no FOS copy). Run scripts/scoring/train.py to produce one.",
             }
 
+        label_rows = _labels.list_labels(service_id)
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         # If most labeled sids haven't landed in DuckDB yet (fresh label
         # → ingest lag), evaluate against what we have but flag the gap.

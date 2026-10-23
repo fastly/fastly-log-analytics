@@ -64,8 +64,10 @@ _PLOSS = "toFloat64OrNull(custom_fields['ploss'])"
 _STATUS = "toInt32OrZero(custom_fields['status'])"
 _ASN = "toInt32OrNull(custom_fields['asn'])"
 
+from backend.high_scale._scope import visible_publication_fence_sql
+
 _BASE_WHERE = (
-    "service_id={service_id:String} AND publication_state='visible' "
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
     "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}"
 )
 # RTT filter mirrors the standard: only rows with a real TCP RTT contribute to

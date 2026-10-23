@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { copyToClipboard } from '@/lib/clipboard'
 
 /**
  * Copy a string to the clipboard and surface a "just copied" flag that
@@ -21,13 +22,10 @@ export function useCopyToClipboard(resetMs: number = 1500) {
 
   const copy = useCallback(
     async (value: string) => {
-      try {
-        await navigator.clipboard.writeText(value)
+      if (await copyToClipboard(value)) {
         setCopied(true)
         window.clearTimeout(timer.current)
         timer.current = window.setTimeout(() => setCopied(false), resetMs)
-      } catch {
-        // ignore — common in non-secure contexts and on permission denial
       }
     },
     [resetMs],

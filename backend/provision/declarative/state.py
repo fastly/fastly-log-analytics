@@ -319,12 +319,24 @@ class FeatureState:
                             "vcl_log_expression": vcl_expr,
                             "collection_stage": "deliver",
                             "duckdb_type": "VARCHAR"
-                            if "compliance" in field_name or "reason" in field_name or "version" in field_name
+                            if (
+                                "compliance" in field_name
+                                or "reason" in field_name
+                                or "version" in field_name
+                                or "sid" in field_name
+                            )
                             else "INTEGER",
                             "value_type": "string"
-                            if "compliance" in field_name or "reason" in field_name or "version" in field_name
+                            if (
+                                "compliance" in field_name
+                                or "reason" in field_name
+                                or "version" in field_name
+                                or "sid" in field_name
+                            )
                             else "numeric",
-                            "bytes_estimate": 60 if "reason" in field_name or "version" in field_name else 10,
+                            "bytes_estimate": 96
+                            if "sid" in field_name
+                            else (60 if "reason" in field_name or "version" in field_name else 10),
                             "enabled": True,
                         }
                     )

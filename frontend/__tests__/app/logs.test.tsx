@@ -88,7 +88,7 @@ vi.mock('@/app/logs/_sections/QuickActionsBar', () => ({ QuickActionsBar: () => 
 vi.mock('@/app/logs/_sections/CronTab', () => ({ CronTab: () => <div data-testid="cron-tab" /> }))
 vi.mock('@/app/logs/_sections/ServiceHistoryTab', () => ({ ServiceHistoryTab: () => null }))
 vi.mock('@/app/logs/_sections/IngestionTab', () => ({ IngestionTab: () => null }))
-vi.mock('@/app/logs/_sections/SSEModal', () => ({ SSEModal: () => null }))
+vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null }))
 vi.mock('@/components/SyncFromCloudModal/SyncFromCloudModal', () => ({
   SyncFromCloudModal: () => null,
 }))

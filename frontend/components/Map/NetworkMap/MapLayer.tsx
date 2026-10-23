@@ -90,7 +90,7 @@ interface UseMapInitArgs {
  */
 import { rafThrottle } from '@/components/Map/ShieldingMap'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer, createBaseMap, type MapFillColor } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
 import { observeMapResize } from '@/components/Map/useMapResize'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
@@ -237,6 +237,14 @@ export function useMapInit({
       stopResizeObserver?.()
       map.current?.remove()
       map.current = null
+    }
+  }, [dmaDataRef, isDarkRef, mapContainer, onMapError, setTooltip])
+
+  useEffect(() => {
+    if (!map.current) return
+    updateCountryBaseLayerTheme(map.current, isDark)
+    if (map.current.getLayer('city-scatter')) {
+      map.current.setPaintProperty('city-scatter', 'circle-stroke-color', isDark ? '#18181b' : '#ffffff')
     }
   }, [isDark])
   return map

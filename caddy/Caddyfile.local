@@ -44,7 +44,7 @@
 	# /api/* → backend (loopback in the shared netns). flush_interval -1 keeps
 	# SSE streams (e.g. /api/cron-runs/stream) unbuffered; the timeouts cover
 	# the occasional slow analytics query.
-	@api path /api/*
+	@api path /api/* /js/* /rum-beacon
 	reverse_proxy @api 127.0.0.1:8000 {
 		# Pin X-Forwarded-For to loopback. uvicorn trusts XFF from its loopback
 		# peer (default --proxy-headers --forwarded-allow-ips=127.0.0.1), and

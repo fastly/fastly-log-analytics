@@ -78,12 +78,9 @@ dependencies = [
     "opentelemetry-instrumentation-botocore>=0.48b0",
     "opentelemetry-instrumentation-aiohttp-client>=0.48b0",
     "structlog>=24.4",
-    # v2.0 Phase 1.4a: aiodns + aiosqlite implement concurrent reverse DNS
-    # with FCrDNS verification and a single-transaction bulk SQLite write.
-    # aiosqlite is scoped to
-    # rdns_cache.py only — every other SQLite call site stays sync.
+    # v2.0 Phase 1.4a: aiodns implements concurrent reverse DNS with FCrDNS
+    # verification.
     "aiodns>=3.2",
-    "aiosqlite>=0.20",
     # v2.0 Phase 3: tenacity provides standardized declarative retry
     # decorators replacing fragile custom try/except loops in
     # provision/fastly_api.py + utils/ngwaf.py + SQLite write paths.
@@ -211,7 +208,7 @@ extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
 #   pytz:            DuckDB ICU loads it at runtime for TIMESTAMP TZ
 #                    (regression of the 2026-05 dedup; do NOT drop)
 #   python-multipart: FastAPI form-data parser, never imported directly
-DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart"]
+DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio"]
 # DEP003 — direct import of a transitive dep. The codebase imports
 # these on purpose; they're guaranteed by the listed first-class deps:
 #   botocore:  via boto3

@@ -30,7 +30,7 @@ import { QuickActionsBar } from './QuickActionsBar'
 import { CronTab } from './CronTab'
 import { ServiceHistoryTab } from './ServiceHistoryTab'
 import { IngestionTab } from './IngestionTab'
-import { SSEModal } from './SSEModal'
+import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 
 // Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
 // are the default landing tabs; the four below only matter when the

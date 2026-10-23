@@ -145,3 +145,47 @@ test('performance page displays empty states and approximate badge appropriately
   // Approximate badge is visible when _approx: true
   expect(screen.getByText('Approximate')).toBeInTheDocument()
 })
+
+class Boundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (this.state.error) {
+      return <div data-testid="route-crashed">{this.state.error.message}</div>
+    }
+    return this.props.children
+  }
+}
+
+test('UX-2: /performance survives a dirty scatter row with cache=null', async () => {
+  mockPost.mockImplementation(async (_path: string, opts?: unknown) => {
+    const sections: string[] = (opts as { body?: { sections?: string[] } })?.body?.sections ?? []
+    if (sections.includes('scatter')) {
+      return {
+        data: {
+          available: true,
+          scatter: [{ cache: null, origin: 10, edge: 5 }],
+          waterfall: { avg: { edge_processing: 1, origin_wait: 2 } },
+          top_urls: [],
+          top_asns: [],
+        },
+      }
+    }
+    return { data: { available: true, ttl_dist: [] } }
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <Boundary>
+        <PerformanceClient />
+      </Boundary>
+    </QueryClientProvider>,
+  )
+  await screen.findByText('End-to-End Latency Waterfall (Average)')
+  expect(screen.queryByTestId('route-crashed')).toBeNull()
+})

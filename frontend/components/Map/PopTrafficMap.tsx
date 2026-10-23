@@ -10,7 +10,7 @@ import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
 import { useMapResize } from '@/components/Map/useMapResize'
-import { addCountryBaseLayer, createBaseMap, removeMapTabStops, type MapFillColor } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 type CoordTree = number | CoordTree[]
@@ -59,6 +59,8 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const { theme } = useTheme()
+  const isDarkRef = useRef(theme === 'dark')
+  useEffect(() => { isDarkRef.current = theme === 'dark' }, [theme])
   const geoMap = usePopGeoStore((s) => s.map)
   const locations = usePopGeoStore((s) => s.locations)
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
@@ -137,7 +139,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         map.current = createBaseMap(maplibregl, mapContainer.current, {
           renderWorldCopies: false,
           zoom: 0.5,
-          background: theme === 'dark' ? '#1a1b23' : '#f0f4fa',
+          background: isDarkRef.current ? '#1a1b23' : '#f0f4fa',
           lockRotation: true,
           showCompass: false,
           cooperativeGestures: true,
@@ -152,7 +154,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
           removeMapTabStops(mapContainer.current)
 
-          addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
+          addCountryBaseLayer(map.current, { isDark: isDarkRef.current })
 
           map.current.addSource('pop-markers', {
             type: 'geojson',
@@ -219,13 +221,18 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       map.current?.remove()
       map.current = null
     }
-  }, [theme])
+  }, [])
 
   useEffect(() => {
     if (!map.current) return
 
     const updateLayers = () => {
       if (!map.current) return
+
+      if (map.current.getLayer('background')) {
+        map.current.setPaintProperty('background', 'background-color', theme === 'dark' ? '#1a1b23' : '#f0f4fa')
+      }
+      updateCountryBaseLayerTheme(map.current, theme === 'dark')
 
       const src = map.current.getSource('pop-markers') as maplibregl.GeoJSONSource | undefined
       if (src) {

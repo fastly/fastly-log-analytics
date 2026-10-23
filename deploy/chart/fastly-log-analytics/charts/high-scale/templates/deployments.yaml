@@ -87,9 +87,13 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
             - name: HIGH_SCALE_WORKER_ID
+              {{- if $root.Values.workerId }}
+              value: {{ $root.Values.workerId | quote }}
+              {{- else }}
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+              {{- end }}
           {{- if or $root.Values.secret.existingName $root.Values.secret.create }}
           envFrom:
             - secretRef:

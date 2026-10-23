@@ -1,5 +1,6 @@
 'use client'
 
+import { useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 
@@ -14,12 +15,19 @@ import { queryKeys } from '@/lib/query-keys'
  * IP-family filter from a masking analyst); this hook only drives the UX so
  * the user isn't offered a control that would 403.
  *
- * Reads the seeded bootstrap query cache, mirroring {@link useIsAnalyst}.
+ * Subscribes reactively to the seeded bootstrap query cache, mirroring
+ * {@link useIsAnalyst}.
  */
 export function useMaskIps(): boolean {
   const queryClient = useQueryClient()
-  const bootstrapData = queryClient.getQueryData<{ settings?: { mask_ips?: boolean } }>(
-    queryKeys.bootstrap(),
+  return useSyncExternalStore(
+    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    () => {
+      const bootstrapData = queryClient.getQueryData<{ settings?: { mask_ips?: boolean } }>(
+        queryKeys.bootstrap(),
+      )
+      return bootstrapData?.settings?.mask_ips === true
+    },
+    () => false,
   )
-  return bootstrapData?.settings?.mask_ips === true
 }

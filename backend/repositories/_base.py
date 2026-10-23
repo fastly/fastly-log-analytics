@@ -3036,7 +3036,9 @@ class QueryRunner:
             rollup_paths = self._collect_rollup_paths(st, et, filename)
             if not rollup_paths:
                 return None
-            paths_sql = ", ".join(f"'{p}'" for p in rollup_paths)
+            from backend.core.rollups._common import quote_path_list
+
+            paths_sql = quote_path_list(rollup_paths)
 
             sql = (
                 f"SELECT dim_val as label, "
@@ -3406,7 +3408,7 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_GEO_BUNDLE_FILENAME
 
-        if bucket_seconds != 3600:
+        if int(bucket_seconds) > 3600:
             return None
 
         if map_asn != "all":

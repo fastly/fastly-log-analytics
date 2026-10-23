@@ -429,3 +429,35 @@ class TestIngestLedgerInspectorEndpoints:
         finally:
             cur.execute("DELETE FROM ingest_ledger WHERE service_id = ?", (sid,))
             con.commit()
+
+
+def test_task_routes_match_registered_tasks():
+    """Every task_routes key must correspond to a registered task (or a
+    prefix pattern that matches at least one)."""
+    import importlib
+
+    from backend.celery_app import app
+
+    for mod in app.conf.include:
+        importlib.import_module(mod)
+
+    registered = set(app.tasks.keys())
+    for pattern in app.conf.task_routes:
+        if pattern.endswith("*"):
+            prefix = pattern[:-1]
+            assert any(t.startswith(prefix) for t in registered), (
+                f"task_routes pattern {pattern!r} matches no registered task"
+            )
+        else:
+            assert pattern in registered, f"task_routes key {pattern!r} is not a registered task"
+
+
+def test_worker_queues_cover_all_routed_queues():
+    """The queues KNOWN_QUEUES advertises must cover every queue task_routes
+    can route to, plus the default queue."""
+    from backend.celery_app import app
+    from backend.celery_status import KNOWN_QUEUES
+
+    routed = {spec["queue"] for spec in app.conf.task_routes.values()}
+    routed.add(app.conf.task_default_queue or "celery")
+    assert routed <= set(KNOWN_QUEUES), f"queues {routed - set(KNOWN_QUEUES)} not covered by KNOWN_QUEUES"

@@ -679,7 +679,7 @@ def cmcd_facts(
     )
     metadata = page.metadata
     return HighScaleRequestFactResponse.with_telemetry(
-        rows=[dict(row) for row in page.rows],
+        rows=_mask_client_ip_rows([dict(row) for row in page.rows], ctx),
         next_cursor=page.next_cursor,
         metadata=QueryResponseMetadataResponse(
             status=metadata.status,

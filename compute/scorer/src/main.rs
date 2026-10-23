@@ -295,7 +295,7 @@ fn score_request(req: &Request) -> Response {
             path: s.prev_route_path.clone(),
             // L2 transition lookup only uses path; category is unused.
             // Leaving empty avoids re-running the full normalize() pass.
-            category: String::new(),
+            category: "",
         });
     // The skip-gram anchor is treated exactly like prev_route above: it is
     // NOT taken from the unauthenticated X-Edge-Prev-Anchor header. A client
@@ -415,7 +415,7 @@ fn score_request(req: &Request) -> Response {
     if debug {
         let current_dt_secs = state
             .as_ref()
-            .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
+            .map(|s| now_secs.saturating_sub(s.last_ts))
             .unwrap_or(0);
 
         dbg_log(&format!(
@@ -763,6 +763,24 @@ fn session_expired(s: &cookie::SessionState, now_secs: u32) -> bool {
     idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S
 }
 
+fn fresh_session_state(
+    score: u8,
+    prev_route_path: String,
+    now_secs: u32,
+) -> cookie::SessionState {
+    cookie::SessionState {
+        v: cookie::SCHEMA_VERSION,
+        sid: new_random_sid(),
+        seq: 1,
+        sum_dt: 0,
+        sum_dt_sq: 0,
+        last_ts: now_secs,
+        score,
+        issued_at: now_secs,
+        prev_route_path,
+    }
+}
+
 fn update_state(
     prev: Option<cookie::SessionState>,
     result: &scorer::ScoreResult,
@@ -779,25 +797,13 @@ fn update_state(
             // their window) and a data-hygiene feature (long-running
             // sessions stop biasing the variance estimator).
             if session_expired(&s, now_secs) {
-                return cookie::SessionState {
-                    v: cookie::SCHEMA_VERSION,
-                    sid: new_random_sid(),
-                    seq: 1,
-                    sum_dt: 0,
-                    sum_dt_sq: 0,
-                    last_ts: now_secs,
-                    score: result.score,
-                    issued_at: now_secs,
-                    prev_route_path,
-                };
+                return fresh_session_state(result.score, prev_route_path, now_secs);
             }
             let new_seq = s.seq.saturating_add(1);
-            // Δt since the previous request in this session. Clamp at a
-            // 1-hour ceiling to bound the impact of long-idle sessions
-            // on the variance estimator (the L2 transition matrix
-            // already discounts inactivity differently). saturating_sub
-            // protects against clock skew where last_ts > now_secs.
-            let dt_secs: u32 = idle.min(3600);
+            // Δt since the previous request in this session. `session_expired`
+            // above already bounds `idle <= SESSION_IDLE_EXPIRE_S` (1800s).
+            // `saturating_sub` protects against clock skew where last_ts > now_secs.
+            let dt_secs: u32 = idle;
             let dt64 = u64::from(dt_secs);
             let new_sum_dt = s.sum_dt.saturating_add(dt_secs);
             let new_sum_dt_sq = s.sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
@@ -813,17 +819,7 @@ fn update_state(
                 prev_route_path,
             }
         }
-        None => cookie::SessionState {
-            v: cookie::SCHEMA_VERSION,
-            sid: new_random_sid(),
-            seq: 1,
-            sum_dt: 0,
-            sum_dt_sq: 0,
-            last_ts: now_secs,
-            score: result.score,
-            issued_at: now_secs,
-            prev_route_path,
-        },
+        None => fresh_session_state(result.score, prev_route_path, now_secs),
     }
 }
 

@@ -360,15 +360,15 @@ async function run() {
   });
 
   // Track request timings and responses
-  const requestStartTimes = new Map<string, number>();
+  const requestStartTimes = new WeakMap<object, number>();
 
   page.on('request', (req) => {
-    requestStartTimes.set(req.url(), performance.now());
+    requestStartTimes.set(req, performance.now());
   });
 
   page.on('response', async (res) => {
     const url = res.url();
-    const start = requestStartTimes.get(url) || performance.now();
+    const start = requestStartTimes.get(res.request()) ?? performance.now();
     const durationMs = Math.round(performance.now() - start);
     const status = res.status();
     const contentType = res.headers()['content-type'] || '';

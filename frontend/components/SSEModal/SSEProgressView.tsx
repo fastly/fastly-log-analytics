@@ -26,6 +26,7 @@ export function SSEProgressView({
   onStart,
   renderLine,
   className,
+  progressLabel,
   doneMessage = "Process completed successfully."
 }: SSEProgressViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -152,7 +153,11 @@ export function SSEProgressView({
         <div className="p-4 bg-muted/50 border-t shrink-0">
           <div className="flex justify-between items-end text-xs text-muted-foreground mb-2 font-sans font-medium">
             <div className="flex flex-col gap-1">
-              {currentStepMessage && <span className="text-foreground font-semibold truncate max-w-[400px]">{currentStepMessage}</span>}
+              {(currentStepMessage || progressLabel) && (
+                <span className="text-foreground font-semibold truncate max-w-[400px]">
+                  {currentStepMessage || progressLabel}
+                </span>
+              )}
             </div>
             <span className="mb-1">{progressPercent}%</span>
           </div>

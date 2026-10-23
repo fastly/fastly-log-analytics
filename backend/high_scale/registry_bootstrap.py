@@ -158,13 +158,16 @@ def _watermark(
     *,
     owner_epoch: int,
 ) -> ServingWatermark:
+    from backend.high_scale._scope import visible_publication_fence_sql
+
     table = _WATERMARK_TABLES[domain]
+    fence_sql = visible_publication_fence_sql(domain)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
     rows = client.execute(
         f"SELECT min(event_timestamp) AS coverage_start, "
         f"max(event_timestamp) AS coverage_end "
         f"FROM {table} "
-        "WHERE service_id={service_id:String} AND publication_state='visible'",
+        f"WHERE service_id={{service_id:String}} AND {fence_sql}",
         {"service_id": service_id},
     )
     row = rows[0] if rows else {}
@@ -175,7 +178,7 @@ def _watermark(
             f"SELECT toString({event_id_column}) AS last_visible_event_id "
             f"FROM {table} "
             "WHERE service_id={service_id:String} "
-            "AND publication_state='visible' "
+            f"AND {fence_sql} "
             "AND event_timestamp={coverage_end:DateTime64(3)} "
             f"ORDER BY {event_id_column} DESC LIMIT 1",
             {"service_id": service_id, "coverage_end": coverage_end},

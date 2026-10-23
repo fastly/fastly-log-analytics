@@ -119,7 +119,7 @@ const ICEBERG_MUTATING_TASKS = new Set([
 // the correct live trigger — no dedicated backend stream needed. `sync`
 // and `full_sync` add ingested files; most lifecycle tasks append an
 // audit entry, so audit invalidation is unconditional-on-complete below.
-const SCHEMA_AFFECTING_TASKS = new Set(['sync', 'full_sync', 'commit'])
+const SCHEMA_AFFECTING_TASKS = new Set(['sync', 'log_discovery', 'full_sync', 'commit'])
 
 type InvalidationKey =
   | 'table'

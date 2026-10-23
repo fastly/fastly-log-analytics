@@ -413,6 +413,7 @@ _PER_TEST_RESET_TABLES = (
     "invite_services",
     "remote_invites",
     "remote_share_audit_logs",
+    "share_settings",
 )
 
 
@@ -554,25 +555,6 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     _usage_log_db.close_all_connections()
     _share_db_connection.close_all_connections()
 
-    # Reset the shared Postgres schema state between tests. Every test in
-    # this worker reuses the SAME schema (created once in
-    # ``_pg_worker_schema``), so without this a row written by one test
-    # would leak into the next — the isolation the old per-test ``tmp_path``
-    # SQLite file gave us for free.
-    _pg_schema_name, _pg_admin_conn = _pg_worker_schema
-    _tables = [
-        r[0]
-        for r in _pg_admin_conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname = %s", (_pg_schema_name,)
-        ).fetchall()
-    ]
-    if _tables:
-        _qualified = ", ".join(f'"{_pg_schema_name}"."{t}"' for t in _tables)
-        _pg_admin_conn.execute(f"TRUNCATE TABLE {_qualified} RESTART IDENTITY CASCADE")
-        from backend.core.metadata.pg_schema import _SEED_INITIAL_TOS_DDL
-
-        _pg_admin_conn.execute(_SEED_INITIAL_TOS_DDL)
-
 
 @pytest.fixture(autouse=True)
 def _reset_module_caches():
@@ -653,6 +635,48 @@ def override_request_context(*, source, con=None, _con_override=None, session=No
         )
 
     return _override
+
+
+class FakeTelemetry:
+    """Lightweight RequestTelemetry stub for unit tests that build RequestContext directly."""
+
+    def __init__(self, request_method: str = "POST", request_path: str = "/test") -> None:
+        self.request_method = request_method
+        self.request_path = request_path
+        self.calls: list[dict] = []
+        self.cache_state: str = "MISS"
+
+    def set_cache_state(self, state: str) -> None:
+        self.cache_state = state
+
+    def finalize_log(self, **_kwargs) -> dict:
+        return {"calls": list(self.calls), "cache": self.cache_state}
+
+
+def make_test_request_context(
+    con=None,
+    *,
+    service_id: str = "test-service-id",
+    source: dict | None = None,
+    session=None,
+    read_only: bool = True,
+    path: str = "/test",
+    time_bounds=None,
+):
+    """Construct a RequestContext for direct repository/router handler unit tests."""
+    from backend.core.request_context import RequestContext
+    from backend.core.request_telemetry import RequestTelemetry
+
+    resolved_source = source or {"name": "test_service", "service_id": service_id}
+    return RequestContext(
+        service_id=resolved_source.get("service_id", service_id),
+        source=resolved_source,
+        _con_override=con,
+        telemetry=RequestTelemetry(request_method="POST", request_path=path),
+        analyst_session=session,
+        read_only=read_only,
+        time_bounds=time_bounds,
+    )
 
 
 @pytest.fixture

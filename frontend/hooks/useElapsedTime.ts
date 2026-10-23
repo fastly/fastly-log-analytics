@@ -15,10 +15,7 @@ import { useNowMs } from '@/hooks/useNowSeconds'
  * a paused timer still re-renders at 1 Hz, but on the single shared interval.
  */
 export function useElapsedTime(startedAt: string | null | undefined): number {
-  // Always call the hook (React rules of hooks) — but ignore the value
-  // when there's no startedAt so we don't pin a subscription for a
-  // paused timer.
-  const nowMs = useNowMs()
+  const nowMs = useNowMs(Boolean(startedAt))
   if (!startedAt) return 0
   return Math.max(0, (nowMs - new Date(startedAt).getTime()) / 1000)
 }

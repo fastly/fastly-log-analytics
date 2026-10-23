@@ -9,6 +9,7 @@ setup-state.json
 # ignored by the blanket rule above.
 !/configs/.gitkeep
 /data/*
+!/data/.gitkeep
 /data/system/*
 __pycache__/
 *.pyc
@@ -19,6 +20,7 @@ dist/
 *.log
 *.cron.lock
 /cache/*
+!/cache/.gitkeep
 .claude/*
 !.claude/commands/
 .agents/

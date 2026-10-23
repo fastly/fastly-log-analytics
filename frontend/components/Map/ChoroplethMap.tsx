@@ -9,7 +9,7 @@ import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
 import { countryFill } from '@/components/Map/colors'
 import { useMapResize } from '@/components/Map/useMapResize'
-import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
 const alpha3ToAlpha2: Record<string, string> = {}
 Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
@@ -44,6 +44,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const { theme } = useTheme()
+  const isDarkRef = useRef(theme === 'dark')
+  useEffect(() => { isDarkRef.current = theme === 'dark' }, [theme])
 
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
   // WebGL-unavailable fallback (headless / locked-down browser). MapLibre's
@@ -96,7 +98,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
         removeMapTabStops(mapContainer.current)
 
-        addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
+        addCountryBaseLayer(map.current, { isDark: isDarkRef.current })
 
         // Hover events. Previously wrapped in a rAF-throttle helper, but
         // Turbopack's minifier was inlining the throttle's closures as
@@ -153,10 +155,12 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current?.remove()
       map.current = null
     }
-  }, [theme])
+  }, [])
 
   useEffect(() => {
-    if (!map.current || !data) return
+    if (!map.current) return
+    updateCountryBaseLayerTheme(map.current, theme === 'dark')
+    if (!data) return
 
     // Update data map for hover lookups + reverse map for click-to-code.
     const newDataMap = new Map<string, number>()

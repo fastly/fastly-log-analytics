@@ -13,7 +13,7 @@ import type { Map as MapLibreMap } from 'maplibre-gl'
  * Mirrors PlotlyPrewarm. The cold-init cost of MapLibre is real:
  *   - ~1MB JS chunk parse + compile (~300-800ms)
  *   - WebGL context creation + first paint (~200-400ms)
- *   - world.geojson fetch (~251KB) + parse + initial country fills
+ *   - world.topo.json fetch (~70KB) + parse + initial country fills
  *
  * The choropleth's ChoroplethMap component is dynamically imported
  * by the dashboard page — its loader only fires when the dashboard

@@ -162,11 +162,10 @@ def main() -> int:
     num_rows = _resolve_num_rows()
     scale_key = _scale_key_for(num_rows)
     print(f"[perf-emit] generating {num_rows:,}-row synthetic dataset (scale={scale_key})...", flush=True)
-    con = duckdb.connect(":memory:")
-    _generate_seed_data(con, num_rows)
 
     # Cold-path proxy: run NUM_RUNS_COLD times, take p95.
     cold_samples: list[int] = []
+    con: duckdb.DuckDBPyConnection | None = None
     for i in range(NUM_RUNS_COLD):
         # New connection per run to defeat statement / catalog caching.
         run_con = duckdb.connect(":memory:")
@@ -174,8 +173,12 @@ def main() -> int:
         ms = _time_query_ms(run_con, _AGG_QUERY)
         cold_samples.append(ms)
         print(f"  cold run {i + 1}/{NUM_RUNS_COLD}: {ms} ms", flush=True)
-        run_con.close()
+        if i == NUM_RUNS_COLD - 1:
+            con = run_con
+        else:
+            run_con.close()
 
+    assert con is not None
     # p95 across the cold samples — with N=5 that's max() since 5 * 0.95 = 4.75.
     cold_samples.sort()
     cold_p95 = cold_samples[-1]
@@ -183,6 +186,7 @@ def main() -> int:
     # Warm-path proxy: repeat against the SAME connection so DuckDB's
     # statement cache / metadata cache stays warm. Take p50.
     warm_samples = [_time_query_ms(con, _AGG_QUERY) for _ in range(NUM_RUNS_WARM)]
+    con.close()
     print(f"  warm samples: {warm_samples}", flush=True)
     warm_p50 = int(statistics.median(warm_samples))
 

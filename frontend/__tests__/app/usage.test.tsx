@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import UsagePage from '@/app/usage/page'
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -24,8 +24,10 @@ vi.mock('@/hooks/useIsDataReady', () => ({
   useIsDataReady: vi.fn(() => true),
 }))
 
+const mockGet = vi.fn()
+
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), POST: vi.fn().mockResolvedValue({ data: {} }), use: vi.fn() },
+  client: { GET: (path: string) => mockGet(path), POST: vi.fn().mockResolvedValue({ data: {} }), use: vi.fn() },
   extractApiError: vi.fn((e) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
@@ -59,6 +61,7 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 beforeEach(() => {
   queryClient.clear()
+  mockGet.mockReset()
   errorSpy = spyOnConsoleError()
 })
 
@@ -74,4 +77,22 @@ test('usage page mounts and renders title', () => {
   )
   expect(screen.getByText('System Usage')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flagged partial on a storage 5xx', async () => {
+  mockGet.mockImplementation(async (path: string) => {
+    if (path === '/api/usage/current-storage') throw new Error('storage boom')
+    return undefined
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <UsagePage />
+    </QueryClientProvider>,
+  )
+  await waitFor(() => {
+    expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument()
+  })
+  expect(screen.queryByText(/GB-hrs/)).toBeNull()
+  expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
 })

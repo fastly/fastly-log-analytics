@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTrafficData, type BuildTrafficDataParams } from "../traffic-chart";
+import { buildTrafficData, type BuildTrafficDataParams } from "@/lib/traffic-chart";
 
 function makeBaseParams(overrides: Partial<BuildTrafficDataParams> = {}): BuildTrafficDataParams {
   return {

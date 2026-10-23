@@ -73,14 +73,23 @@ def benchmark_endpoint(
     warmup: int,
     concurrency: int,
     timeout: float,
+    method: str = "GET",
+    json_body: dict[str, Any] | None = None,
 ) -> EndpointBenchmarkResult:
     url = f"{base_url.rstrip('/')}{endpoint}"
-    print(f"\nBenchmarking [{endpoint}] (iterations={iterations}, warmup={warmup}, concurrency={concurrency})...")
+    print(
+        f"\nBenchmarking [{method} {endpoint}] (iterations={iterations}, warmup={warmup}, concurrency={concurrency})..."
+    )
+
+    def _call() -> httpx.Response:
+        if method.upper() == "POST":
+            return client.post(url, params=params, json=json_body or {}, timeout=timeout)
+        return client.get(url, params=params, timeout=timeout)
 
     # Warmup phase
     for _ in range(warmup):
         try:
-            client.get(url, params=params, timeout=timeout)
+            _call()
         except Exception:
             pass
 
@@ -92,7 +101,7 @@ def benchmark_endpoint(
     def _make_request() -> tuple[bool, float, int]:
         req_start = time.perf_counter()
         try:
-            resp = client.get(url, params=params, timeout=timeout)
+            resp = _call()
             dur = (time.perf_counter() - req_start) * 1000.0
             if resp.status_code < 400:
                 return True, dur, len(resp.content)
@@ -142,7 +151,7 @@ def benchmark_endpoint(
 
     return EndpointBenchmarkResult(
         route=endpoint,
-        method="GET",
+        method=method.upper(),
         iterations=iterations,
         successful_requests=successful,
         failed_requests=failures,
@@ -213,21 +222,26 @@ def main() -> int:
             service_id = configs[0].get("service_id")
             print(f"Using default discovered service: {service_id}")
 
-    endpoints_to_test = [
-        ("/api/health", {}),
-        ("/api/bootstrap", {}),
+    endpoints_to_test: list[tuple[str, str, dict[str, Any], dict[str, Any] | None]] = [
+        ("GET", "/api/health", {}, None),
+        ("GET", "/api/bootstrap", {}, None),
     ]
 
     if service_id:
         endpoints_to_test.extend(
             [
-                ("/api/services/status", {"service_id": service_id}),
-                ("/api/services/schema", {"service_id": service_id}),
-                ("/api/dashboard", {"service_id": service_id, "sections": "core,topten", "chart_metric": "requests"}),
-                ("/api/security", {"service_id": service_id}),
-                ("/api/network", {"service_id": service_id}),
-                ("/api/origin", {"service_id": service_id}),
-                ("/api/performance", {"service_id": service_id}),
+                ("GET", "/api/services/status", {"service_id": service_id}, None),
+                ("GET", "/api/services/schema", {"service_id": service_id}, None),
+                (
+                    "POST",
+                    "/api/dashboard/aggregates",
+                    {"service_id": service_id},
+                    {"sections": ["core", "topten"], "chart_metric": "requests"},
+                ),
+                ("POST", "/api/security/aggregates", {"service_id": service_id}, {}),
+                ("POST", "/api/network/bundle", {"service_id": service_id}, {}),
+                ("POST", "/api/origin/aggregates", {"service_id": service_id}, {}),
+                ("POST", "/api/performance/aggregates", {"service_id": service_id}, {}),
             ]
         )
 
@@ -242,7 +256,7 @@ def main() -> int:
     print(f"  Iterations:  {args.iterations} (Warmup: {args.warmup})")
     print("============================================================")
 
-    for route, params in endpoints_to_test:
+    for method, route, params, json_body in endpoints_to_test:
         res = benchmark_endpoint(
             client=client,
             base_url=args.url,
@@ -252,6 +266,8 @@ def main() -> int:
             warmup=args.warmup,
             concurrency=args.concurrency,
             timeout=args.timeout,
+            method=method,
+            json_body=json_body,
         )
         results.append(res)
 

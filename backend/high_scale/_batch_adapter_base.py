@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,7 @@ from backend.core.clickhouse_client import ClickHouseClient as HttpClickHouseCli
 if TYPE_CHECKING:
     from backend.high_scale.publication import HighScaleBatch, InsertReceipt
 
+_MAX_CACHED_BATCH_LOCKS = 1024
 _PUBLICATION_TABLE = "high_scale_batch_publications"
 _PUBLICATION_COLUMNS = (
     "batch_id",
@@ -33,7 +35,7 @@ class BaseClickHouseBatchAdapter:
 
     def __init__(self, client: HttpClickHouseClient) -> None:
         self._client = client
-        self._batch_locks: dict[str, threading.Lock] = {}
+        self._batch_locks: OrderedDict[str, threading.Lock] = OrderedDict()
         self._batch_locks_guard = threading.Lock()
 
     def delete_batch_rows(self, table: str, batch_id: str) -> None:
@@ -41,7 +43,15 @@ class BaseClickHouseBatchAdapter:
 
     def _batch_lock(self, batch_uuid: str) -> threading.Lock:
         with self._batch_locks_guard:
-            return self._batch_locks.setdefault(batch_uuid, threading.Lock())
+            lock = self._batch_locks.get(batch_uuid)
+            if lock is not None:
+                self._batch_locks.move_to_end(batch_uuid)
+                return lock
+            lock = threading.Lock()
+            self._batch_locks[batch_uuid] = lock
+            while len(self._batch_locks) > _MAX_CACHED_BATCH_LOCKS:
+                self._batch_locks.popitem(last=False)
+            return lock
 
     def _publish_table_rows(
         self,

@@ -529,7 +529,7 @@ export function AppLayout({
     )
   }
 
-  // Hint the browser to fetch world.geojson early on routes that actually
+  // Hint the browser to fetch world.topo.json early on routes that actually
   // mount a map (dashboard's "Requests by Country" choropleth, /network's
   // choropleth). Previously this was a global <link rel="preload"> in
   // app/layout.tsx, which fired on every page (including /share-login)

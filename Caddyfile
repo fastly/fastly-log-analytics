@@ -80,11 +80,7 @@
 	}
 }
 
-:80 {
-	# Public ingress must never accept either admin credential from a client.
-	# Keep X-Remote-Analyst intact: it is the legitimate analyst marker.
-	request_header -X-Admin-Gateway-Token
-	request_header -X-Admin-Token
+(compressible_encode) {
 	# Compress responses, but NOT Server-Sent Events (SSE) or other streaming/POST progress streams.
 	# Compressing SSE/streaming responses corrupts chunk boundaries and causes ERR_INVALID_CHUNKED_ENCODING.
 	@compressible {
@@ -100,6 +96,28 @@
 		not path_regexp cmcd_disable /cmcd/disable$
 	}
 	encode @compressible zstd gzip
+}
+
+(redacted_log) {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
+		level INFO
+	}
+}
+
+:80 {
+	# Public ingress must never accept either admin credential from a client.
+	# Keep X-Remote-Analyst intact: it is the legitimate analyst marker.
+	request_header -X-Admin-Gateway-Token
+	request_header -X-Admin-Token
+	import compressible_encode
 	request_body {
 		max_size 25MB
 	}
@@ -375,17 +393,7 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	#   docker compose -f ... logs -f caddy
 	# Filter to errors:
 	#   docker compose -f ... logs caddy | jq 'select(.status >= 400)'
-	log {
-		output stdout
-		format filter {
-			wrap json
-			fields {
-				request>headers>X-Admin-Gateway-Token delete
-				request>headers>X-Admin-Token delete
-			}
-		}
-		level INFO
-	}
+	import redacted_log
 }
 
 # Loopback HTTPS block on port 8443 for secure direct SSH-tunnel admin connections.
@@ -407,7 +415,7 @@ https://localhost:8443, https://127.0.0.1:8443 {
 
 	tls internal
 
-	encode zstd gzip
+	import compressible_encode
 	request_body {
 		max_size 25MB
 	}
@@ -432,15 +440,5 @@ https://localhost:8443, https://127.0.0.1:8443 {
 	# Everything else → Next.js frontend. No flush_interval: see main block comment.
 	reverse_proxy 127.0.0.1:3000
 
-	log {
-		output stdout
-		format filter {
-			wrap json
-			fields {
-				request>headers>X-Admin-Gateway-Token delete
-				request>headers>X-Admin-Token delete
-			}
-		}
-		level INFO
-	}
+	import redacted_log
 }

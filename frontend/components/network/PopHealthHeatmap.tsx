@@ -20,7 +20,30 @@ import {
 
 const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
 
+export const POP_HEALTH_THRESHOLDS = {
+  degradedErrorPct: 2.0,
+  criticalErrorPct: 5.0,
+  degradedTtfbMs: 400,
+  criticalTtfbMs: 800,
+} as const
+
 export type PopHealthItem = components['schemas']['PopHealthItem']
+
+function classifyPopHealth(pop: PopHealthItem): 'critical' | 'degraded' | 'healthy' {
+  if (
+    pop.error_rate > POP_HEALTH_THRESHOLDS.criticalErrorPct ||
+    Boolean(pop.p95_ttfb_ms && pop.p95_ttfb_ms > POP_HEALTH_THRESHOLDS.criticalTtfbMs)
+  ) {
+    return 'critical'
+  }
+  if (
+    pop.error_rate > POP_HEALTH_THRESHOLDS.degradedErrorPct ||
+    Boolean(pop.p95_ttfb_ms && pop.p95_ttfb_ms > POP_HEALTH_THRESHOLDS.degradedTtfbMs)
+  ) {
+    return 'degraded'
+  }
+  return 'healthy'
+}
 
 interface PopHealthHeatmapProps {
   serviceId: string
@@ -140,15 +163,15 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         <TooltipProvider delay={100}>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
             {items.map((pop) => {
-              const hasHighErrors = pop.error_rate > 5.0
-              const hasHighLatency = !!(pop.p95_ttfb_ms && pop.p95_ttfb_ms > 400)
-              const isCritical = pop.error_rate > 15.0
+              const healthState = classifyPopHealth(pop)
+              const isCritical = healthState === 'critical'
+              const isDegraded = healthState === 'degraded'
 
               let borderClass = 'border-green-500/20 dark:border-green-400/10'
               let bgClass = 'bg-green-500/5 hover:bg-green-500/10 text-green-700 dark:text-green-400'
               let dotClass = 'bg-green-500'
 
-              if (hasHighErrors || hasHighLatency) {
+              if (isDegraded) {
                 borderClass = 'border-amber-500/30 dark:border-amber-400/20'
                 bgClass = 'bg-amber-500/5 hover:bg-amber-500/10 text-amber-700 dark:text-amber-400'
                 dotClass = 'bg-amber-500'
@@ -198,7 +221,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         <span className="font-bold text-sm tracking-wider uppercase font-mono">{pop.pop}</span>
                       </div>
                       <Badge variant="outline" className="text-[10px] py-0 px-1.5 uppercase bg-background font-semibold">
-                        {isCritical ? 'Critical' : (hasHighErrors || hasHighLatency) ? 'Degraded' : 'Healthy'}
+                        {isCritical ? 'Critical' : isDegraded ? 'Degraded' : 'Healthy'}
                       </Badge>
                     </div>
                     <div className="p-3 text-xs space-y-2">
@@ -270,9 +293,9 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                       <span
                         className={cn(
                           'h-2.5 w-2.5 rounded-full animate-pulse',
-                          selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                          classifyPopHealth(selectedPop) === 'critical'
                             ? 'bg-red-500'
-                            : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                            : classifyPopHealth(selectedPop) === 'degraded'
                             ? 'bg-amber-500'
                             : 'bg-green-500'
                         )}
@@ -285,16 +308,16 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                       variant="outline"
                       className={cn(
                         'font-bold py-0.5 px-2.5 uppercase font-sans text-xs',
-                        selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                        classifyPopHealth(selectedPop) === 'critical'
                           ? 'border-red-500/30 bg-red-500/5 text-red-500'
-                          : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                          : classifyPopHealth(selectedPop) === 'degraded'
                           ? 'border-amber-500/30 bg-amber-500/5 text-amber-500'
                           : 'border-green-500/30 bg-green-500/5 text-green-500'
                       )}
                     >
-                      {selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                      {classifyPopHealth(selectedPop) === 'critical'
                         ? 'Critical'
-                        : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                        : classifyPopHealth(selectedPop) === 'degraded'
                         ? 'Degraded'
                         : 'Healthy'}
                     </Badge>
@@ -420,11 +443,11 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     Regional Edge Diagnostic Health
                   </span>
                   <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
-                    {selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800) ? (
+                    {classifyPopHealth(selectedPop) === 'critical' ? (
                       <span className="text-destructive font-semibold">
                         CRITICAL: High error rates or excessive latency detected. This POP is experiencing degraded local connectivity or origin shield failures. Prompt diagnostic investigation is recommended.
                       </span>
-                    ) : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400) ? (
+                    ) : classifyPopHealth(selectedPop) === 'degraded' ? (
                       <span className="text-amber-500 font-semibold">
                         DEGRADED: Regional metrics indicate slow-downs. Handshake times or backend origin latency is higher than typical baseline averages. Continue to monitor alert channels.
                       </span>

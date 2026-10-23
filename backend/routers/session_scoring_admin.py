@@ -328,7 +328,7 @@ def scoring_retrain(
     if src is None:
         raise HTTPException(status_code=404, detail={"error": f"No service {service_id}"})
     cfg = svcconfig.load_config(service_id) or {}
-    matrix_version = version or _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d-r")
+    matrix_version = version or _matrix.default_version()
     start = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=int(since_days))
 
     # 1. Extract sessions from DuckDB. The extract function expects a
@@ -1652,7 +1652,6 @@ def scoring_evaluation_per_reason(
     from backend.scoring import labels as _labels
     from backend.scoring.evaluate import evaluate_per_reason
 
-    label_rows = _labels.list_labels(service_id)
     counts = _labels.counts_by_label(service_id)
     n_good = counts.get("good", 0)
     n_bad = counts.get("bad", 0)
@@ -1670,6 +1669,7 @@ def scoring_evaluation_per_reason(
                 "n_bad": n_bad,
                 "buckets": [],
             }
+        label_rows = _labels.list_labels(service_id)
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         result = evaluate_per_reason(labeled_sessions, min_per_class=_MIN_LABELS_PER_CLASS)
         result["has_min_samples_overall"] = True

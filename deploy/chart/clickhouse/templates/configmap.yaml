@@ -49,6 +49,14 @@ data:
       {{- range .Values.config.disableSystemLogs }}
       <{{ . }} remove="1"/>
       {{- end }}
+      {{- if .Values.config.systemLogsTtl }}
+      <query_log>
+        <ttl>{{ .Values.config.systemLogsTtl }}</ttl>
+      </query_log>
+      <metric_log>
+        <ttl>{{ .Values.config.systemLogsTtl }}</ttl>
+      </metric_log>
+      {{- end }}
     </clickhouse>
 
   {{- if or .Values.keeper.enabled (or (gt (int .Values.shards) 1) (gt (int .Values.replicas) 1)) }}

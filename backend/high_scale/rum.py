@@ -70,15 +70,17 @@ def _iso(value: Any) -> str:
 
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
+    from backend.high_scale._scope import visible_publication_fence_sql
+
     try:
         res = service.client.execute(
-            "SELECT sum(event_count) as c FROM rum_vitals_aggregates WHERE service_id = {service_id:String} AND dimension = 'metric_name' AND publication_state='visible'",
+            f"SELECT sum(event_count) as c FROM rum_vitals_aggregates WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
             {"service_id": service.service_id},
         )
         beacons = res[0].get("c", 0) if res and res[0].get("c") is not None else 0
     except Exception:
         res = service.client.execute(
-            "SELECT count() as c FROM rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
+            f"SELECT count() as c FROM rum_vitals_facts WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
             {"service_id": service.service_id},
         )
         beacons = res[0].get("c", 0) if res else 0

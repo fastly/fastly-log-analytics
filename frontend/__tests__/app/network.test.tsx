@@ -42,9 +42,10 @@ vi.mock('@/components/DataTable', () => ({
   ColumnVisibilityDropdown: () => null,
 }))
 vi.mock('@/components/AnalyticsCard', () => ({
-  AnalyticsCard: ({ title, children }: { title: ReactNode; children?: ReactNode }) => (
+  AnalyticsCard: ({ title, error, children }: { title: ReactNode; error?: unknown; children?: ReactNode }) => (
     <div data-testid="analytics-card">
       <h3>{title}</h3>
+      {error ? <div role="alert">card error</div> : null}
       {children}
     </div>
   ),
@@ -294,4 +295,20 @@ test('network health queries keep the range-wire key shape and request body afte
   expect(coreCall?.[1]).toMatchObject({
     body: { start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T01:00:00Z', range_token: null, anchor },
   })
+})
+
+test('UX-4: Network Quality section stays mounted with an error surface on a /network-quality 5xx', async () => {
+  mockGet.mockResolvedValue({ data: { data: [] } })
+  mockPost.mockImplementation(async (path: string) => {
+    if (path === '/api/network-quality') throw new Error('quality boom')
+    return { data: { available: true } }
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <NetworkPage />
+    </QueryClientProvider>,
+  )
+  expect(await screen.findByText('Network Quality')).toBeInTheDocument()
+  expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0)
 })
