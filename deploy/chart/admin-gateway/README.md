@@ -213,6 +213,27 @@ docker compose -f docker-compose.yml -f docker-compose.admin-mtls.yml config --q
 docker compose -f docker-compose.yml -f docker-compose.admin-mtls.yml up -d --build
 ```
 
+For a separate Local Standard analyst HTTPS endpoint, append
+`-f docker-compose.public-https.yml`. The default quickstart remains HTTP-only.
+Keep admin mTLS enforced (`ADMIN_GATEWAY_REQUIRED=1`) and set these in the
+operator-local `.env`:
+
+- `LOCAL_PUBLIC_HOST`: the exact public endpoint hostname or IP, without a scheme
+  or port. Its certificate must cover that name or IP SAN.
+- `LOCAL_PUBLIC_CERT_DIR`: an operator-owned directory containing `server.crt`
+  and `server.key`. Clients must already trust the issuing CA; never disable TLS
+  verification. An existing server bundle may be reused only if its SAN matches.
+- Optional `LOCAL_PUBLIC_LISTEN_IP` / `LOCAL_PUBLIC_PORT`: defaults are
+  `127.0.0.1` / `443`. Wider publication is an explicit operator decision.
+
+The overlay publishes TLS on the backend-owned shared network namespace and
+imports a separate public Caddy site. It strips admin credentials, preserves
+analyst markers, and never uses the HTTP site's loopback-as-admin forwarding.
+It returns 503 unless admin gateway required mode is enabled. This does not
+activate sharing or change its registered public endpoint. Recreate the stack
+through the canonical deployment procedure to activate changed port mappings;
+a Caddy reload alone cannot publish a Docker port.
+
 Single-host production topology (retain its memory caps, public rate-limit
 Caddy image and proxy-trust settings):
 

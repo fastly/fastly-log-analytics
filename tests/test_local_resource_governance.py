@@ -19,6 +19,10 @@ caps the pool to 4; this brings the local stack in line.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -164,3 +168,118 @@ def test_long_lived_backend_services_run_an_init(compose_rel: str, service: str)
         "without it a wedged child makes `docker stop`/force-recreate fail and "
         "aborts deploy_test_all.sh under set -e"
     )
+
+
+def test_local_public_https_is_opt_in_and_published_by_namespace_owner():
+    base = _load_compose("docker-compose.yml")["services"]
+    overlay = _load_compose("docker-compose.public-https.yml")["services"]
+    assert base["backend"]["ports"] == ["80:80"]
+    assert base["caddy"]["network_mode"] == "service:backend"
+    assert overlay["backend"]["ports"] == ["${LOCAL_PUBLIC_LISTEN_IP:-127.0.0.1}:${LOCAL_PUBLIC_PORT:-443}:443"]
+    assert "ports" not in overlay["caddy"]
+    assert "admin-gateway" in overlay["caddy"]["depends_on"]
+    assert "./caddy/local-public-https.caddy:/etc/caddy/public-https/listener.caddy:ro" in overlay["caddy"]["volumes"]
+    assert any(volume.endswith(":/certs/public:ro") for volume in overlay["caddy"]["volumes"])
+    assert (
+        "ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:?set 1 for enforced admin mTLS}"
+        in overlay["caddy"]["environment"]
+    )
+
+
+def test_local_public_https_compose_merge_preserves_admin_and_http():
+    if not shutil.which("docker"):
+        pytest.skip("Docker CLI unavailable for static Compose configuration")
+    env = {
+        **os.environ,
+        "ADMIN_GATEWAY_REQUIRED": "1",
+        "ADMIN_GATEWAY_SECRET": "test-compose-only-" + "x" * 32,
+        "ADMIN_GATEWAY_HOST": "admin.example.test",
+        "ADMIN_GATEWAY_CERT_DIR": "/tmp/example-admin-certs",
+        "ADMIN_GATEWAY_LISTEN_IP": "127.0.0.1",
+        "ADMIN_GATEWAY_PORT": "9443",
+        "LOCAL_HOSTS": "localhost,admin.example.test",
+        "LOCAL_PUBLIC_HOST": "127.0.0.1",
+        "LOCAL_PUBLIC_CERT_DIR": "/tmp/example-public-certs",
+        "LOCAL_PUBLIC_LISTEN_IP": "127.0.0.1",
+        "LOCAL_PUBLIC_PORT": "443",
+    }
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            os.devnull,
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.admin-mtls.yml",
+            "-f",
+            "docker-compose.public-https.yml",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    services = json.loads(result.stdout)["services"]
+    ports = services["backend"]["ports"]
+    assert {(p.get("host_ip"), p["published"], p["target"]) for p in ports} == {
+        (None, "80", 80),
+        ("127.0.0.1", "443", 443),
+        ("127.0.0.1", "9443", 8443),
+    }
+    for name in ("caddy", "frontend", "admin-gateway"):
+        assert services[name]["network_mode"] == "service:backend"
+        assert not services[name].get("ports")
+    assert services["backend"]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
+    assert services["frontend"]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
+    mounts = {volume["target"]: volume for volume in services["caddy"]["volumes"]}
+    assert mounts["/etc/caddy/Caddyfile"]["source"].endswith("/caddy/Caddyfile.local")
+    assert mounts["/etc/caddy/public-https/listener.caddy"]["source"].endswith("/caddy/local-public-https.caddy")
+    assert mounts["/certs/public"]["read_only"] is True
+    admin_mounts = {volume["target"]: volume for volume in services["admin-gateway"]["volumes"]}
+    assert admin_mounts["/certs"]["source"] == env["ADMIN_GATEWAY_CERT_DIR"]
+
+
+@pytest.mark.parametrize("required", ["1", "0"])
+def test_local_public_https_adapts_separately_from_http_admin(tmp_path, required):
+    if not shutil.which("caddy"):
+        pytest.skip("Caddy binary unavailable for static configuration adaptation")
+    local = (REPO_ROOT / "caddy/Caddyfile.local").read_text()
+    snippet = REPO_ROOT / "caddy/local-public-https.caddy"
+    # The real container uses an optional glob mount. Expand only that import
+    # for static adaptation; no server, certificate issuance, or listener starts.
+    config = tmp_path / "Caddyfile"
+    config.write_text(local.replace("/etc/caddy/public-https/*.caddy", str(snippet)))
+    result = subprocess.run(
+        ["caddy", "adapt", "--config", str(config), "--adapter", "caddyfile"],
+        env={**os.environ, "LOCAL_PUBLIC_HOST": "127.0.0.1", "ADMIN_GATEWAY_REQUIRED": required},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    adapted = json.loads(result.stdout)
+    servers = adapted["apps"]["http"]["servers"]
+    (public,) = [server for server in servers.values() if server["listen"] == [":443"]]
+    (http,) = [server for server in servers.values() if server["listen"] == [":80"]]
+    public_json = json.dumps(public)
+    http_json = json.dumps(http)
+    assert "127.0.0.1:8000" in public_json and "127.0.0.1:3000" in public_json
+    assert '"X-Proxied-By-Caddy": ["true"]' in public_json
+    assert '"X-Forwarded-For": ["{http.request.remote.host}"]' in public_json
+    assert '"delete": ["X-Admin-Gateway-Token"]' in public_json
+    assert '"delete": ["X-Admin-Token"]' in public_json
+    assert "X-Remote-Analyst" not in public_json
+    assert '"status_code": 503' in public_json
+    assert f'\\"{required}\\" != \\"1\\"' in public_json
+    assert "client_authentication" not in public_json
+    assert '"X-Forwarded-For": ["127.0.0.1"]' in http_json
+    assert "X-Proxied-By-Caddy" not in http_json
+    (certificate,) = adapted["apps"]["tls"]["certificates"]["load_files"]
+    assert certificate["certificate"] == "/certs/public/server.crt"
+    assert certificate["key"] == "/certs/public/server.key"

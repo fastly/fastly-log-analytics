@@ -69,3 +69,8 @@
 	# Everything else → Next.js frontend.
 	reverse_proxy 127.0.0.1:3000
 }
+
+# Empty unless the operator selects docker-compose.public-https.yml.
+# Keep the HTTP-only quickstart unchanged; the public TLS listener must not
+# inherit this site's loopback-as-admin forwarding.
+import /etc/caddy/public-https/*.caddy
