@@ -1,6 +1,8 @@
 # Imported only by the optional Local Standard public HTTPS overlay.
 # Explicit trusted certificates: no internal CA, ACME, or TLS-verification bypass.
-https://{$LOCAL_PUBLIC_HOST}:443 {
+# Hostless TLS keeps certificate selection independent of SNI (IP clients send
+# none). Restrict the HTTP Host below instead of creating an SNI-only policy.
+https://:443 {
 	tls /certs/public/server.crt /certs/public/server.key
 
 	# Never expose the base local loopback-as-admin trust model over this
@@ -8,18 +10,26 @@ https://{$LOCAL_PUBLIC_HOST}:443 {
 	@gateway_not_required expression `"{$ADMIN_GATEWAY_REQUIRED}" != "1"`
 	respond @gateway_not_required "Public HTTPS requires enforced admin mTLS" 503
 
-	request_header -X-Admin-Gateway-Token
-	request_header -X-Admin-Token
-	request_header X-Proxied-By-Caddy "true"
-	request_header X-Forwarded-For {http.request.remote.host}
+	@public_host host {$LOCAL_PUBLIC_HOST}
+	handle @public_host {
+		route {
+			request_header -X-Admin-Gateway-Token
+			request_header -X-Admin-Token
+			request_header X-Proxied-By-Caddy "true"
+			request_header X-Forwarded-For {http.request.remote.host}
 
-	@api path /api/* /js/* /rum-beacon
-	reverse_proxy @api 127.0.0.1:8000 {
-		flush_interval -1
-		transport http {
-			response_header_timeout 180s
-			read_timeout 180s
+			@api path /api/* /js/* /rum-beacon
+			reverse_proxy @api 127.0.0.1:8000 {
+				flush_interval -1
+				transport http {
+					response_header_timeout 180s
+					read_timeout 180s
+				}
+			}
+			reverse_proxy 127.0.0.1:3000
 		}
 	}
-	reverse_proxy 127.0.0.1:3000
+	handle {
+		abort
+	}
 }

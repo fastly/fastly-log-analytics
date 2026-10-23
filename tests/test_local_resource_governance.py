@@ -267,6 +267,12 @@ def test_local_public_https_adapts_separately_from_http_admin(tmp_path, required
     servers = adapted["apps"]["http"]["servers"]
     (public,) = [server for server in servers.values() if server["listen"] == [":443"]]
     (http,) = [server for server in servers.values() if server["listen"] == [":80"]]
+    # IP-origin TLS clients send no SNI. Every handshake must select the
+    # supplied certificate, not fall through an empty catch-all TLS policy.
+    (policy,) = public["tls_connection_policies"]
+    assert "match" not in policy
+    assert policy["certificate_selection"]["any_tag"]
+    assert '"host": ["127.0.0.1"]' in json.dumps(public)
     public_json = json.dumps(public)
     http_json = json.dumps(http)
     assert "127.0.0.1:8000" in public_json and "127.0.0.1:3000" in public_json
