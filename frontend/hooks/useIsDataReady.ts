@@ -1,9 +1,9 @@
 'use client'
 
-import { useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'next/navigation'
 
+import { useBootstrapCacheSelector } from '@/hooks/useBootstrap'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 
@@ -110,10 +110,8 @@ export function useBootstrapPending(): boolean {
  * server-side anyway.
  */
 export function useBootstrapSettled(): boolean {
-  const queryClient = useQueryClient()
-  return useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => queryClient.getQueryData(queryKeys.bootstrap()) !== undefined,
-    () => false,
+  return useBootstrapCacheSelector(
+    (bootstrapData) => bootstrapData !== undefined,
+    false,
   )
 }

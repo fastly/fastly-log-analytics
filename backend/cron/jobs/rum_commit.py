@@ -270,15 +270,9 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
             )
             logger.info("RUM commit complete: %s", summary)
 
-            try:
-                from backend.sync_status_publisher import publisher as _sync_status_publisher
-                from backend.sync_status_snapshot import compute_sync_status_cached
+            from backend.cron.jobs._common import publish_sync_status_safe
 
-                _snapshot = compute_sync_status_cached(service_id)
-                if _snapshot is not None:
-                    _sync_status_publisher.publish(service_id, _snapshot)
-            except Exception:
-                logger.exception("[rum_commit] %s: sync-status SSE publish failed", service_id)
+            publish_sync_status_safe(service_id, "rum_commit")
 
         finally:
             _BOTO3_CALLER_HINT.reset(boto3_token)

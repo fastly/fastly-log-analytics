@@ -8,11 +8,38 @@ independent of each other (the import-linter "Routers are independent" contract)
 
 from __future__ import annotations
 
+from typing import Literal
+
+from fastapi import Response
+
 # The analyst bearer-token cookie names. While TOS is pending the session id
 # lives in the PENDING cookie; `/api/share/acknowledge` upgrades it to the full
 # cookie (and rotates the id). Both share routers follow this two-cookie protocol.
 ANALYST_SESSION_COOKIE = "analyst_session_id"
 ANALYST_PENDING_SESSION_COOKIE = "analyst_pending_session_id"
+
+
+def set_analyst_session_cookies(
+    response: Response,
+    session_id: str,
+    *,
+    tos_pending: bool,
+    secure: bool,
+    samesite: Literal["strict", "lax"] = "strict",
+) -> None:
+    """Issue the active or TOS-pending analyst session cookie and clear the counterpart."""
+    target_cookie = ANALYST_PENDING_SESSION_COOKIE if tos_pending else ANALYST_SESSION_COOKIE
+    other_cookie = ANALYST_SESSION_COOKIE if tos_pending else ANALYST_PENDING_SESSION_COOKIE
+    response.set_cookie(
+        key=target_cookie,
+        value=session_id,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        max_age=24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(other_cookie, path="/")
 
 
 def safe_audit_email(email: str | None) -> str:

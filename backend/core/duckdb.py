@@ -652,8 +652,10 @@ def clear_initialization_state(db_path: str):
 
 
 def close_all_connections():
-    """No-op: connections are per-request and closed by callers."""
-    pass
+    """Close all per-service DuckDB connection pools."""
+    from backend.core.duckdb_pool import close_all_service_pools
+
+    close_all_service_pools()
 
 
 class DBBusyError(Exception):

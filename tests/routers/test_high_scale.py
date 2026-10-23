@@ -1,8 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from backend.core.request_context import RequestContext, build_request_context
-from backend.core.request_telemetry import RequestTelemetry
+from backend.core.request_context import build_request_context
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.exports import ExportManager, get_export_manager
 from backend.high_scale.registry import HighScaleService, HighScaleServiceRegistry
@@ -85,16 +84,18 @@ def _registry(service=None):
 
 
 def _analyst_context(source, con):
+    from tests.conftest import make_test_request_context
+
     session = SimpleNamespace(
         service_ids=[source["service_id"]],
         pii_policy={"mask_ips": True},
     )
-    return RequestContext(
+    return make_test_request_context(
+        con=con,
         service_id=source["service_id"],
         source=source,
-        _con_override=con,
-        telemetry=RequestTelemetry("POST", "/api/high-scale/services/{service_id}/request-facts"),
-        analyst_session=session,
+        session=session,
+        path="/api/high-scale/services/{service_id}/request-facts",
         time_bounds=TimeBounds(
             start=datetime(2026, 9, 11, 19, 0, tzinfo=UTC),
             end=datetime(2026, 9, 11, 21, 0, tzinfo=UTC),

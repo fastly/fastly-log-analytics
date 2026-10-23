@@ -79,18 +79,18 @@ def test_ducklake_receives_analyst_clamp_when_clickhouse_enabled(
     from datetime import UTC, datetime
     from types import SimpleNamespace
 
-    from backend.core.request_context import RequestContext, build_request_context
-    from backend.core.request_telemetry import RequestTelemetry
+    from backend.core.request_context import build_request_context
     from backend.main import app
     from backend.utils.remote_access import TimeBounds
+    from tests.conftest import make_test_request_context
 
     start, end = datetime(2026, 9, 1, 6, tzinfo=UTC), datetime(2026, 9, 1, 8, tzinfo=UTC)
-    ctx = RequestContext(
+    ctx = make_test_request_context(
+        con=in_memory_duckdb,
         service_id=test_service_source["service_id"],
         source=test_service_source,
-        _con_override=in_memory_duckdb,
-        telemetry=RequestTelemetry("POST", f"/api/dashboard/{endpoint}"),
-        analyst_session=SimpleNamespace(service_ids=[test_service_source["service_id"]]),
+        session=SimpleNamespace(service_ids=[test_service_source["service_id"]]),
+        path=f"/api/dashboard/{endpoint}",
         time_bounds=TimeBounds(start=start, end=end),
     )
     app.dependency_overrides[build_request_context] = lambda: ctx

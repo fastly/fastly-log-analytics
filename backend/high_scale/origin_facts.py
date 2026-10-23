@@ -136,14 +136,7 @@ def summary(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
     }
 
 
-_TIMESERIES_METRICS = {
-    ("ttfb", "p50"): ("latency_us", 0.5),
-    ("ttfb", "p95"): ("latency_us", 0.95),
-    ("ttfb", "p99"): ("latency_us", 0.99),
-    ("ttlb", "p50"): ("ottlb_us", 0.5),
-    ("ttlb", "p95"): ("ottlb_us", 0.95),
-    ("ttlb", "p99"): ("ottlb_us", 0.99),
-}
+from backend.high_scale._common import _TIMESERIES_METRICS
 
 
 def timeseries(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:

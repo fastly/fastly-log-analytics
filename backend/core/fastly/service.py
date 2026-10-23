@@ -4,26 +4,13 @@ from backend.core.fastly.client import fastly
 
 
 def get_active_version(service_id: str, token: str) -> int | None:
-    try:
-        active = fastly("GET", f"/service/{service_id}/version/active", token=token)
-        if isinstance(active, dict) and active.get("active"):
-            return int(active["number"])
-    except RuntimeError:
-        pass
-
-    # Fallback for backwards-compatibility / mock testing
-    try:
-        versions = fastly("GET", f"/service/{service_id}/version", token=token)
-        if isinstance(versions, list):
-            for v in versions:
-                if v.get("active"):
-                    return int(v["number"])
-    except RuntimeError:
-        pass
-    return None
+    info = get_active_version_info(service_id, token, timeout=None, max_retries=None)
+    return info["number"] if info else None
 
 
-def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, max_retries: int = 1) -> dict | None:
+def get_active_version_info(
+    service_id: str, token: str, *, timeout: int | None = 8, max_retries: int | None = 1
+) -> dict | None:
     """Return the active version's number + timestamps for a service.
 
     Like :func:`get_active_version` but keeps the activation timestamp so
@@ -33,10 +20,13 @@ def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, ma
     defaults (1 retry / 8s) because this is called from a polled status path.
     Returns ``None`` on any error or if no active version exists.
     """
+    extra_kwargs: dict[str, int] = {}
+    if timeout is not None:
+        extra_kwargs["timeout"] = timeout
+    if max_retries is not None:
+        extra_kwargs["max_retries"] = max_retries
     try:
-        v = fastly(
-            "GET", f"/service/{service_id}/version/active", token=token, timeout=timeout, max_retries=max_retries
-        )
+        v = fastly("GET", f"/service/{service_id}/version/active", token=token, **extra_kwargs)
         if isinstance(v, dict) and v.get("active"):
             return {
                 "number": int(v["number"]),
@@ -48,9 +38,7 @@ def get_active_version_info(service_id: str, token: str, *, timeout: int = 8, ma
 
     # Fallback for backwards-compatibility / mock testing
     try:
-        versions = fastly(
-            "GET", f"/service/{service_id}/version", token=token, timeout=timeout, max_retries=max_retries
-        )
+        versions = fastly("GET", f"/service/{service_id}/version", token=token, **extra_kwargs)
         if isinstance(versions, list):
             for v in versions:
                 if v.get("active"):

@@ -58,7 +58,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const popHealthQuery = useServiceQuery<PopHealthItem[]>(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
-      const { data } = await client.GET('/api/network/pop-health', {
+      const { data, error } = await client.GET('/api/network/pop-health', {
         signal,
         params: {
           query: {
@@ -67,6 +67,9 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
           },
         },
       })
+      if (error) {
+        throw new Error(typeof error === 'string' ? error : 'Failed to load PoP health data')
+      }
       return data?.data ?? []
     }
   )

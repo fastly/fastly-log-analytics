@@ -1,6 +1,7 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchAlertsServerSide } from '@/lib/ssr/alerts'
+import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import AlertsClient from './_sections/AlertsClient'
 
@@ -18,16 +19,26 @@ import AlertsClient from './_sections/AlertsClient'
 export const dynamic = 'force-dynamic'
 
 // Service id flows through the ?service= query param (FilterBar /
-// useUrlServiceSync writes it). When absent the fetcher hits
-// /api/alerts/ (all alerts in scope), matching AlertsClient's
-// useQuery fallback shape.
+// useUrlServiceSync writes it). When absent, fall back to the active
+// service from bootstrap so the SSR seed key matches AlertsClient's
+// useEffectiveServiceId() resolution on cold loads.
 export default async function AlertsPage({
   searchParams,
 }: {
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const serviceId = firstParam(params.service)
+  const urlServiceId = firstParam(params.service)
+  const bootstrap = urlServiceId ? null : await fetchBootstrapServerSide()
+  const firstSvcId =
+    typeof bootstrap?.services?.[0]?.id === 'string'
+      ? bootstrap.services[0].id
+      : undefined
+  const serviceId =
+    urlServiceId ??
+    bootstrap?.active_service_id ??
+    firstSvcId ??
+    undefined
 
   const alertsRes = await fetchAlertsServerSide(serviceId)
 

@@ -80,26 +80,46 @@ _DIMS = (
 )
 
 
+def _build_dim_bundles(
+    service_id: str,
+    source: dict,
+    hours: list[str],
+    *,
+    label: str,
+    filename: str,
+    req_cols: tuple[str, ...],
+    build_copy_sql,
+) -> int:
+    def eligibility(cols, table_ident, req_cols=req_cols):  # noqa: ARG001
+        for c in req_cols:
+            if c not in cols:
+                return None
+        return True
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=filename,
+        tmp_prefix=".tmp_nq_",
+        label=label,
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
 def build_network_quality_bundles(service_id: str, source: dict, hours: list[str]) -> int:
     written = 0
     for label, filename, req_cols, build_copy_sql in _DIMS:
-
-        def eligibility(cols, table_ident, req_cols=req_cols):
-            for c in req_cols:
-                if c not in cols:
-                    return None
-            return True
-
-        written += build_per_hour_bundles(
+        written += _build_dim_bundles(
             service_id,
             source,
             hours,
-            bundle_filename=filename,
-            tmp_prefix=".tmp_nq_",
             label=label,
-            eligibility=eligibility,
+            filename=filename,
+            req_cols=req_cols,
             build_copy_sql=build_copy_sql,
-            logger=logger,
         )
     return written
 
@@ -107,12 +127,33 @@ def build_network_quality_bundles(service_id: str, source: dict, hours: list[str
 def backfill_network_quality_bundles(service_id: str, source: dict) -> int:
     written = 0
     for label, filename, req_cols, build_copy_sql in _DIMS:
+
+        def _dim_builder(
+            sid: str,
+            src: dict,
+            hrs: list[str],
+            *,
+            _label: str = label,
+            _filename: str = filename,
+            _req_cols: tuple[str, ...] = req_cols,
+            _sql=build_copy_sql,
+        ) -> int:
+            return _build_dim_bundles(
+                sid,
+                src,
+                hrs,
+                label=_label,
+                filename=_filename,
+                req_cols=_req_cols,
+                build_copy_sql=_sql,
+            )
+
         written += backfill_missing_bundles(
             service_id,
             source,
             bundle_filename=filename,
             label=label,
-            builder=build_network_quality_bundles,
+            builder=_dim_builder,
             logger=logger,
         )
     return written

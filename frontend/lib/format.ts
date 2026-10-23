@@ -133,6 +133,9 @@ export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
   return formatCount(n)
 }
 
+const _defaultNumberFormat = new Intl.NumberFormat(undefined)
+const _optionsNumberFormatCache = new Map<string, Intl.NumberFormat>()
+
 /**
  * Locale-grouped number (e.g. 1234567 → "1,234,567"). Thin wrapper over
  * ``Intl.NumberFormat`` — byte-identical to ``n.toLocaleString()`` with the
@@ -143,7 +146,16 @@ export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
  * ``formatCount(n, { maximumFractionDigits: 1 })``.
  */
 export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
-  return new Intl.NumberFormat(undefined, options).format(n)
+  if (!options) {
+    return _defaultNumberFormat.format(n)
+  }
+  const key = JSON.stringify(options)
+  let fmt = _optionsNumberFormatCache.get(key)
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(undefined, options)
+    _optionsNumberFormatCache.set(key, fmt)
+  }
+  return fmt.format(n)
 }
 
 /**

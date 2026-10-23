@@ -32,6 +32,7 @@ import {
 import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
 import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
+import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import {
   normalizeTabKey,
   SECTION_LOADING_MESSAGES,
@@ -464,6 +465,7 @@ export default function InsightsClient({
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
   const defaults = useInsightsDefaults(activeServiceId)
+  const filterPayload = useDebouncedFilterPayload(true)
 
   const [selectedWindow, setSelectedWindow] = useState<string | null>(initialWindow ?? null)
   const [selectedBaseline, setSelectedBaseline] = useState<string | null>(initialBaseline ?? null)
@@ -536,18 +538,21 @@ export default function InsightsClient({
   const handleRescan = async () => {
     if (!activeServiceId || isRescanning) return
     setIsRescanning(true)
+    const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
     try {
       const { data } = await client.POST('/api/insights', {
         body: {
           window_size_hrs: parseFloat(appliedWindowHours),
           baseline_hours: parseFloat(appliedBaselineHours),
-          filters: {},
+          filters: filterPayload ?? {},
           force_refresh: true,
         },
       })
       if (data) {
         queryClient.setQueryData(
-          ['insights', activeServiceId, appliedWindowHours, appliedBaselineHours],
+          hasActiveFilters
+            ? ['insights', activeServiceId, appliedWindowHours, appliedBaselineHours, filterPayload]
+            : ['insights', activeServiceId, appliedWindowHours, appliedBaselineHours],
           data,
         )
       }

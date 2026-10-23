@@ -50,9 +50,9 @@ def cleanup_orphans(service_id: str):
 
     logger.info(f"Listing raw files in bucket '{bucket}' with prefix '{prefix}'...")
 
-    # 3. Retrieve all files currently marked as ingested in SQLite
+    # 3. Retrieve all files currently marked as ingested in metadata DB
     try:
-        rows = con.execute("SELECT file_name FROM ingested_files").fetchall()
+        rows = con.execute("SELECT filename FROM ingested_files WHERE service_id = ?", (service_id,)).fetchall()
         ingested_set = {row[0] for row in rows}
     finally:
         con.close()

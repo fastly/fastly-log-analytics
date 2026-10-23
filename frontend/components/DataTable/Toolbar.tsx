@@ -5,7 +5,7 @@ import type { Table } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 
 import { Input } from '@/components/ui/input'
-import { ColumnPicker } from './ColumnPicker'
+import { ColumnVisibilityDropdown } from './ColumnVisibilityDropdown'
 
 interface DataTableToolbarProps<TData> {
   table: Table<TData>
@@ -43,7 +43,7 @@ export const DataTableToolbar = <TData,>({
         </div>
       )}
       <div className="ml-auto flex items-center gap-2">
-        <ColumnPicker table={table} compact={compactToolbar} />
+        <ColumnVisibilityDropdown table={table} compact={compactToolbar} />
       </div>
     </div>
   )

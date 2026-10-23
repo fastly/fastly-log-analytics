@@ -69,6 +69,8 @@ export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProp
   )
 }
 
+export const GenericPageSkeleton = DashboardSkeleton
+
 /** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
 export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
   return (
@@ -164,18 +166,6 @@ export function AuthCardSkeleton({
           </div>
         </CardContent>
       </Card>
-    </div>
-  )
-}
-
-/** Generic single-column page — fallback for routes without a more
- *  specific layout. */
-export function GenericPageSkeleton() {
-  return (
-    <div className="space-y-4">
-      <Skeleton className="h-7 w-48" />
-      <Skeleton className="h-32 w-full" />
-      <Skeleton className="h-64 w-full" />
     </div>
   )
 }

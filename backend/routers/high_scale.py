@@ -51,12 +51,15 @@ from backend.models.high_scale import (
     ServingWatermarkResponse,
 )
 from backend.utils.auth import mask_ips_for
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.router_utils import make_error, query_errors
 
 router = APIRouter(prefix="/api/high-scale", tags=["high-scale"], responses=DEFAULT_ERROR_RESPONSES)
 
-_export_owners: dict[str, str] = {}
+_export_owners: BoundedTTLCache = BoundedTTLCache(maxsize=1024, ttl_seconds=3600.0)
+CacheRegistry.register("high_scale._export_owners", _export_owners)
 _export_owners_lock = threading.Lock()
 
 

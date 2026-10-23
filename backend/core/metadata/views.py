@@ -53,7 +53,7 @@ def save_view(service_id: str, view) -> dict:
 
 def delete_view(service_id: str, view_id: str) -> dict:
     con = get_con(service_id)
-    con.execute("DELETE FROM views WHERE id = ?", (view_id,))
+    con.execute("DELETE FROM views WHERE id = ? AND service_id = ?", (view_id, service_id))
     con.commit()
     return {"status": "success"}
 

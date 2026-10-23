@@ -30,9 +30,11 @@ import type { QueryClient } from '@tanstack/react-query'
 
 import { queryKeys } from '@/lib/query-keys'
 
-export function cronCacheBust(queryClient: QueryClient, serviceId?: string | null): void {
+export function cronCacheBust(queryClient: QueryClient, _serviceId?: string | null): void {
   // Cron history surfaces that ``useAdminEventStream (cron-runs channel)`` already targets.
   // These are the canonical destinations for "a cron run just changed".
+  // Note: React Query's invalidateQueries uses prefix matching by default,
+  // so domain-level prefixes cover all per-service keys under them.
   queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsAll() })
   queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecentAll() })
   queryClient.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() })
@@ -53,16 +55,4 @@ export function cronCacheBust(queryClient: QueryClient, serviceId?: string | nul
   // it so the next page navigation finds fresh seeds rather than stale
   // ones from the pre-cron snapshot.
   queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
-
-  // Per-service exact-prefix invalidation for keys that include the sid
-  // as a second segment. React Query's prefix match already covers
-  // these via the domain-only calls above, so this is a no-op in
-  // current shape but documents the per-sid contract for future readers.
-  if (serviceId) {
-    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) })
-    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })
-    queryClient.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
-    queryClient.invalidateQueries({ queryKey: ['log-extents', serviceId] })
-    queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(serviceId) })
-  }
 }

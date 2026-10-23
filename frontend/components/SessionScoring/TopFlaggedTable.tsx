@@ -19,6 +19,7 @@ import { useScoringLabels } from '@/hooks/useScoringLabels'
 
 import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
+import { SinceHoursPicker } from './SinceHoursPicker'
 import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
 import { columnIdOf } from '@/components/DataTable/columnId'
@@ -44,14 +45,6 @@ function complianceBadge(c?: string) {
   if (c === 'ok') return <Badge variant="secondary" className="text-emerald-700">ok</Badge>
   return <Badge variant="outline" className="text-rose-700 border-rose-300">{c}</Badge>
 }
-
-const TIME_WINDOWS: { label: string; hours: number }[] = [
-  { label: '1h', hours: 1 },
-  { label: '6h', hours: 6 },
-  { label: '24h', hours: 24 },
-  { label: '3d', hours: 72 },
-  { label: '7d', hours: 168 },
-]
 
 const COLUMN_LABELS: Record<string, string> = {
   timestamp: 'Time',
@@ -249,18 +242,7 @@ export function TopFlaggedTable({
       helpTitle="About Top Flagged Sessions"
       headerAction={
         <div className="flex items-center gap-2">
-          <Select value={String(effectiveHours)} onValueChange={(v) => v && setHours(parseInt(v, 10))}>
-            <SelectTrigger className="h-7 text-xs w-20">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TIME_WINDOWS.map((w) => (
-                <SelectItem key={w.hours} value={String(w.hours)} className="text-xs">
-                  {w.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SinceHoursPicker value={effectiveHours} onChange={setHours} compact />
           <Select value={complianceFilter} onValueChange={(v) => v && setComplianceFilter(v)}>
             <SelectTrigger className="h-7 text-xs w-32">
               <SelectValue placeholder="Cookie: any" />

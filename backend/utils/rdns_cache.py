@@ -22,9 +22,6 @@ short-circuits to the sync helper when it detects a ``unittest.mock`` patch.
 from __future__ import annotations
 
 import asyncio
-import bisect
-import functools
-import ipaddress
 import logging
 import socket
 import sys
@@ -69,61 +66,15 @@ _REAP_INTERVAL_S = 24 * 3600
 _last_reap_monotonic: float | None = None
 
 
-@functools.lru_cache(maxsize=512)
-def _compile_cidr_intervals(cidrs_key: tuple[str, ...]) -> tuple[list[int], list[int], list[int], list[int]]:
-    """Collapse CIDR strings into sorted disjoint ``(starts, ends)`` integer intervals per IP version."""
-    v4_nets: list[ipaddress.IPv4Network] = []
-    v6_nets: list[ipaddress.IPv6Network] = []
-    for raw in cidrs_key:
-        if not raw:
-            continue
-        try:
-            net = ipaddress.ip_network(raw, strict=False)
-        except ValueError:
-            continue
-        if net.version == 4:
-            v4_nets.append(net)  # type: ignore[arg-type]
-        else:
-            v6_nets.append(net)  # type: ignore[arg-type]
-    v4_starts: list[int] = []
-    v4_ends: list[int] = []
-    for net in ipaddress.collapse_addresses(v4_nets):
-        v4_starts.append(int(net.network_address))
-        v4_ends.append(int(net.broadcast_address))
-    v6_starts: list[int] = []
-    v6_ends: list[int] = []
-    for net in ipaddress.collapse_addresses(v6_nets):
-        v6_starts.append(int(net.network_address))
-        v6_ends.append(int(net.broadcast_address))
-    return v4_starts, v4_ends, v6_starts, v6_ends
-
-
-@functools.lru_cache(maxsize=16384)
-def _parse_ip_int_version(ip: str) -> tuple[int, int] | None:
-    """Parse an IP literal into ``(int(ip_obj), ip_obj.version)``, cached across lookups."""
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        return int(ip_obj), ip_obj.version
-    except ValueError:
-        return None
+from backend.utils.ip_ranges import (
+    ip_in_ranges,
+)
 
 
 def _is_ip_in_cidrs(ip: str, cidrs: list[str] | tuple[str, ...]) -> bool:
     """Return True if the IP address falls within any of the provided CIDR ranges."""
-    if not cidrs or not ip:
-        return False
     try:
-        parsed = _parse_ip_int_version(ip)
-        if parsed is None:
-            return False
-        ip_int, version = parsed
-        cidrs_key = cidrs if isinstance(cidrs, tuple) else tuple(cidrs)
-        v4_starts, v4_ends, v6_starts, v6_ends = _compile_cidr_intervals(cidrs_key)
-        starts, ends = (v4_starts, v4_ends) if version == 4 else (v6_starts, v6_ends)
-        if not starts:
-            return False
-        idx = bisect.bisect_right(starts, ip_int) - 1
-        return idx >= 0 and ip_int <= ends[idx]
+        return ip_in_ranges(ip, cidrs)
     except Exception:
         logger.debug("_is_ip_in_cidrs: step failed (ignored)", exc_info=True)
     return False

@@ -240,14 +240,8 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
             logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
 
-    try:
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-        from backend.sync_status_snapshot import compute_sync_status_cached
+    from backend.cron.jobs._common import publish_sync_status_safe
 
-        _snapshot = compute_sync_status_cached(service_id)
-        if _snapshot is not None:
-            _sync_status_publisher.publish(service_id, _snapshot)
-    except Exception:
-        logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
+    publish_sync_status_safe(service_id, "scheduler")
 
     logger.info("🏁  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)

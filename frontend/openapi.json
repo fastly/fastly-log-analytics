@@ -84550,7 +84550,7 @@
           "filters_json"
         ],
         "title": "SavedViewRecord",
-        "description": "Wire-safe read shape for ``GET /api/views/{service_id}`` rows.\n\nDistinct from the strict ``SavedView`` request body: all-Optional +\n``extra=\"allow\"`` so a partial row (or a future column) can never 500\nthe read path; ``response_model_exclude_unset`` keeps the emitted key\nset byte-identical to the producer's."
+        "description": "Wire-safe read shape for ``GET /api/views/{service_id}`` rows.\n\nDistinct from the strict ``SavedView`` request body: ``id`` is guaranteed\nnon-null on persisted rows; ``extra=\"allow\"`` + ``response_model_exclude_unset``\nis inherited from ``SavedView`` (``WireSafeModel``)."
       },
       "SchemaColumn": {
         "properties": {

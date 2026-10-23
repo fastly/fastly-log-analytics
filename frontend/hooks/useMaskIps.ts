@@ -1,8 +1,6 @@
 'use client'
 
-import { useSyncExternalStore } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/query-keys'
+import { useBootstrapCacheSelector } from '@/hooks/useBootstrap'
 
 /**
  * Whether the current session has client-IP PII masking enabled — i.e. an
@@ -19,15 +17,9 @@ import { queryKeys } from '@/lib/query-keys'
  * {@link useIsAnalyst}.
  */
 export function useMaskIps(): boolean {
-  const queryClient = useQueryClient()
-  return useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => {
-      const bootstrapData = queryClient.getQueryData<{ settings?: { mask_ips?: boolean } }>(
-        queryKeys.bootstrap(),
-      )
-      return bootstrapData?.settings?.mask_ips === true
-    },
-    () => false,
+  return useBootstrapCacheSelector(
+    (bootstrapData) =>
+      (bootstrapData?.settings as { mask_ips?: boolean } | undefined)?.mask_ips === true,
+    false,
   )
 }

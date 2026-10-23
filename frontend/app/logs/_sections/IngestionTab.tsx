@@ -4,7 +4,7 @@ import React from 'react'
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in.
 import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
-import { ColumnPicker } from '@/components/DataTable/ColumnPicker'
+import { ColumnVisibilityDropdown } from '@/components/DataTable/ColumnVisibilityDropdown'
 import { Input } from '@/components/ui/input'
 import { ColumnDef } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
@@ -37,7 +37,7 @@ export function IngestionTab({
               onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
               className="max-w-sm h-8"
             />
-            <ColumnPicker table={table} compact />
+            <ColumnVisibilityDropdown table={table} compact />
           </div>
         </div>
       )}

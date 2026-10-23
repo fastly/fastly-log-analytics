@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from backend.models._base import WireSafeModel
 from backend.models.common import (
@@ -81,7 +81,11 @@ class OriginDrilldownResponse(HasDataMixin, BaseResponse):
     rows: list[OriginDrilldownRow] = []
 
 
-class OriginSummaryResponse(HasDataMixin, BaseResponse):
+class _HasDataOnlyMixin(BaseModel):
+    has_data: bool = False
+
+
+class _OriginSummaryMetricsMixin(BaseModel):
     total_misses: int | None = None
     total_passes: int | None = None
     ottfb_p50_ms: float | None = None
@@ -93,6 +97,10 @@ class OriginSummaryResponse(HasDataMixin, BaseResponse):
     cdn_overhead_p50_ms: float | None = None
     origin_error_rate: float | None = None
     obytes_p50: float | None = None
+
+
+class OriginSummaryResponse(_OriginSummaryMetricsMixin, HasDataMixin, BaseResponse):
+    pass
 
 
 class OriginTimeseriesResponse(HasDataMixin, BaseResponse):
@@ -145,19 +153,7 @@ class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
 # description of the approximation so the UI never has to guess which method applies.
 
 
-class OriginSummarySection(WireSafeModel):
-    has_data: bool = False
-    total_misses: int | None = None
-    total_passes: int | None = None
-    ottfb_p50_ms: float | None = None
-    ottfb_p75_ms: float | None = None
-    ottfb_p95_ms: float | None = None
-    ottfb_p99_ms: float | None = None
-    ottlb_p50_ms: float | None = None
-    ottlb_p95_ms: float | None = None
-    cdn_overhead_p50_ms: float | None = None
-    origin_error_rate: float | None = None
-    obytes_p50: float | None = None
+class OriginSummarySection(_OriginSummaryMetricsMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 

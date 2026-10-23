@@ -1,8 +1,6 @@
 'use client'
 
-import { useSyncExternalStore } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/query-keys'
+import { useBootstrapCacheSelector } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/serviceStore'
 
 /**
@@ -17,14 +15,10 @@ import { useServiceStore } from '@/stores/serviceStore'
 export function useIsAnalyst(): boolean {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const services = useServiceStore(s => s.services)
-  const queryClient = useQueryClient()
-  const isRemoteAnalyst = useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => {
-      const bootstrapData = queryClient.getQueryData<{ settings?: Record<string, unknown> }>(queryKeys.bootstrap())
-      return bootstrapData?.settings?.is_remote_analyst === true
-    },
-    () => false,
+  const isRemoteAnalyst = useBootstrapCacheSelector(
+    (bootstrapData) =>
+      (bootstrapData?.settings as Record<string, unknown> | undefined)?.is_remote_analyst === true,
+    false,
   )
   const activeService = services.find(s => s.id === activeServiceId)
   return (

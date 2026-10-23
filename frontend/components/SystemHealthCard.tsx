@@ -117,7 +117,10 @@ export function SystemHealthCard() {
   const { data: snap, isLoading, isFetching, error } = useQuery({
     queryKey: queryKeys.admin.healthSnapshot(),
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/health-snapshot')
+      const { data, error } = await client.GET('/api/admin/health-snapshot')
+      if (error) {
+        throw new Error(typeof error === 'string' ? error : 'Failed to load system health snapshot')
+      }
       return data as HealthSnapshot
     },
     staleTime: 5_000,
@@ -131,7 +134,10 @@ export function SystemHealthCard() {
   const { data: trends } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } })
+      const { data, error } = await client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } })
+      if (error) {
+        throw new Error(typeof error === 'string' ? error : 'Failed to load metric history batch')
+      }
       return data as TrendBatch
     },
     staleTime: 60_000,

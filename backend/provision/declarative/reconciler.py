@@ -146,9 +146,12 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                 raise LockAcquisitionTimeout(service_id, elapsed)
 
             # Check if lock is stale (>5m old)
-            lock_mtime = lock_path.stat().st_mtime
-            if time.time() - lock_mtime > 300:
-                lock_path.unlink()
+            try:
+                lock_mtime = lock_path.stat().st_mtime
+                if time.time() - lock_mtime > 300:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
                 continue
 
             time.sleep(min(backoff, 1.0))

@@ -84,3 +84,49 @@ def finalize_cron_duration(
     except Exception as e:
         if not silent:
             logger.warning("Failed to update full cron duration: %s", e)
+
+
+def get_service_display_label(service_id: str, cfg: dict | None = None) -> str:
+    """Return ``"{name} ({service_id})"`` when the service name differs from ``service_id``."""
+    if cfg is None:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id)
+    svc_name = cfg.get("name", service_id) if cfg else service_id
+    return f"{svc_name} ({service_id})" if svc_name and svc_name != service_id else service_id
+
+
+def has_sufficient_disk_space(
+    path: str,
+    job_label: str,
+    service_id: str,
+    *,
+    min_free_bytes: int = 50 * 1024 * 1024,
+) -> tuple[bool, str]:
+    """Return ``(ok, msg)`` checking that ``path`` (or ``.``) has at least ``min_free_bytes`` free."""
+    import os
+    import shutil
+
+    check_dir = path if os.path.isdir(path) else "."
+    try:
+        free_bytes = shutil.disk_usage(check_dir).free
+        if free_bytes < min_free_bytes:
+            msg = f"Disk space critically low (< {min_free_bytes // (1024 * 1024)}MB free: {free_bytes / (1024 * 1024):.1f}MB)"
+            logger.warning("⚠️  [%s] %s: %s", job_label, service_id, msg)
+            return False, msg
+    except Exception as e:
+        logger.warning("[%s] %s: failed to check disk space: %s", job_label, service_id, e)
+    return True, ""
+
+
+def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> None:
+    """Compute and publish the cached sync-status SSE snapshot for ``service_id`` (best-effort)."""
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
+
+        snapshot = compute_sync_status_cached(service_id)
+        if snapshot is not None:
+            _sync_status_publisher.publish(service_id, snapshot)
+    except Exception:
+        logger.exception("[%s] %s: sync-status SSE publish failed", log_label, service_id)

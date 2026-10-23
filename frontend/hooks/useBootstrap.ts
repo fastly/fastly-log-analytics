@@ -7,8 +7,176 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { useDebugStore } from '@/stores/debugStore'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
-import { useEffect } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { toService } from '@/types/api'
+
+/**
+ * Subscribe to a derived slice of the React Query `['bootstrap']` cache entry
+ * via `useSyncExternalStore` without triggering network fetches.
+ */
+export function useBootstrapCacheSelector<T>(
+  selector: (data: Record<string, unknown> | undefined) => T,
+  serverFallback: T,
+): T {
+  const queryClient = useQueryClient()
+  return useSyncExternalStore(
+    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    () => selector(queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())),
+    () => serverFallback,
+  )
+}
+
+let _lastSyncedBootstrapData: unknown = null
+let _lastReconciledBootstrapState: {
+  data: unknown
+  isStale: boolean
+  activeServiceId: string | null
+} | null = null
+
+export function useBootstrapSyncEffects(
+  query: { data: unknown; isStale: boolean },
+  activeServiceId: string | null,
+) {
+  const data = query.data as
+    | {
+        services?: Parameters<typeof toService>[0][]
+        active_service_id?: string | null
+        pop_geo?: Parameters<ReturnType<typeof usePopGeoStore.getState>['setMap']>[0]
+        pops?: Record<string, [number | null, number | null]>
+        settings?: {
+          admin_token?: string | null
+          is_remote_analyst?: boolean
+        }
+        debug_state?: {
+          query_debug_visibility?: string
+          api_call_debug_visibility?: string
+        }
+      }
+    | undefined
+
+  useEffect(() => {
+    if (!data) return
+    if (_lastSyncedBootstrapData === data) return
+    _lastSyncedBootstrapData = data
+    const { setServices, setInitialized } = useServiceStore.getState()
+    setServices((data.services ?? []).map(toService))
+    setInitialized(true)
+
+    // Seed the PoP geo map for the shared <PopLabel> (city/state/country
+    // shown next to PoP codes everywhere). Parsed server-side from the
+    // /datacenters cache; empty when the cache isn't populated.
+    usePopGeoStore.getState().setMap(data.pop_geo ?? {})
+
+    const popsRaw = data.pops
+    if (popsRaw) {
+      const locations: Record<string, [number, number]> = {}
+      for (const [code, [lat, lon]] of Object.entries(popsRaw)) {
+        if (lat != null && lon != null) locations[code] = [lat, lon]
+      }
+      usePopGeoStore.getState().setLocations(locations)
+    }
+
+    // Phase Q + RSC race fix: the SSR HydrationBoundary pre-populates
+    // the bootstrap cache, which means useBootstrap's queryFn does NOT
+    // run on the first client mount (the cache hit short-circuits it).
+    // That left the setToken(...) call inside queryFn unreachable on
+    // every SSR-hydrated load, so the Zustand store stayed empty and
+    // every admin API call that fired before the next bootstrap
+    // refetch 401'd with admin_token_required (see ServicesTable +
+    // OperationsOverview cards on /admin).
+    //
+    // Mirror the token write here as well so it ALWAYS lands as soon
+    // as query.data is available, regardless of whether the data came
+    // from the network or from the SSR-hydrated cache. The queryFn
+    // copy stays as the first-render fast path for the no-SSR
+    // (pure-CSR) case.
+    const adminToken = data?.settings?.admin_token
+    useAdminTokenStore.getState().setToken(
+      typeof adminToken === 'string' && adminToken ? adminToken : null,
+    )
+    // Same SSR-hydrated-cache reasoning as the token above: the queryFn copy
+    // is skipped when the cache is pre-seeded, so mirror the role flag here
+    // too. See sessionRoleStore.
+    useSessionRoleStore.getState().setIsRemoteAnalyst(
+      data?.settings?.is_remote_analyst === true,
+    )
+
+    // Synchronize client-side debugStore with the backend-defined debug settings
+    const isAnalyst = data?.settings?.is_remote_analyst === true
+    const queryVis = data?.debug_state?.query_debug_visibility ?? 'disabled'
+    const apiVis = data?.debug_state?.api_call_debug_visibility ?? 'disabled'
+
+    const queryDebugEnabled = isAnalyst
+      ? (queryVis === 'analysts' || queryVis === 'both')
+      : (queryVis === 'admins' || queryVis === 'both')
+
+    const apiCallsDebugEnabled = isAnalyst
+      ? (apiVis === 'analysts' || apiVis === 'both')
+      : (apiVis === 'admins' || apiVis === 'both')
+
+    const debugStore = useDebugStore.getState()
+    if (debugStore.enabled !== queryDebugEnabled || debugStore.apiCallsEnabled !== apiCallsDebugEnabled) {
+      useDebugStore.setState({ enabled: queryDebugEnabled, apiCallsEnabled: apiCallsDebugEnabled })
+      const shouldAttach = queryDebugEnabled || apiCallsDebugEnabled
+      document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
+    }
+
+    // Note: views + log-fields-catalog cache seeding now happens
+    // inside the queryFn (synchronously after the fetch resolves) so
+    // dependent hooks gated on bootstrap status find data already in
+    // their target cache. Moving it here would re-introduce the race
+    // where dependent hooks re-render before useEffect runs.
+  }, [data])
+
+  // `isStale` gates the revert branch below. When true, query.data is a cached
+  // snapshot that may predate the live service set (a refetch hasn't yet
+  // replaced it — e.g. the 5-min staleTime window after a service was just
+  // added). Reverting a just-selected activeServiceId against a stale snapshot
+  // is the "Switch To a freshly-added service bounces back" bug.
+  const bootstrapIsStale = query.isStale
+
+  useEffect(() => {
+    if (!data) return
+    if (
+      _lastReconciledBootstrapState &&
+      _lastReconciledBootstrapState.data === data &&
+      _lastReconciledBootstrapState.isStale === bootstrapIsStale &&
+      _lastReconciledBootstrapState.activeServiceId === activeServiceId
+    ) {
+      return
+    }
+    _lastReconciledBootstrapState = {
+      data,
+      isStale: bootstrapIsStale,
+      activeServiceId,
+    }
+    const services = (data.services ?? []).map(toService)
+    const currentServiceExists = services.some(s => s.id === activeServiceId)
+
+    if (!activeServiceId && services.length > 0) {
+      const defaultId = data.active_service_id && services.some(s => s.id === data.active_service_id)
+        ? data.active_service_id
+        : services[0]?.id
+      if (defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
+    } else if (activeServiceId && !currentServiceExists) {
+      // HARDENING: only evict a selected service when the bootstrap snapshot is
+      // fresh (just fetched, not a stale cached copy). A stale snapshot can be
+      // missing a brand-new service the user just switched to — reverting off
+      // it bounces them back to the previous service (and AppLayout then to
+      // /admin). When stale, defer: the pending refetch lands a fresh list
+      // (this effect re-runs on query.data change) and reconciles correctly
+      // against real data. Switch-to call sites also invalidate bootstrap to
+      // trigger that refetch promptly.
+      if (bootstrapIsStale) return
+      const defaultId = services.length > 0 ? (
+        (data.active_service_id && services.some(s => s.id === data.active_service_id))
+          ? data.active_service_id
+          : services[0]?.id
+      ) : null
+      if (activeServiceId !== defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
+    }
+  }, [data, bootstrapIsStale, activeServiceId])
+}
 
 export function useBootstrap() {
   const queryClient = useQueryClient()
@@ -158,114 +326,7 @@ export function useBootstrap() {
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)
-
-  useEffect(() => {
-    if (!query.data) return
-    const { setServices, setInitialized } = useServiceStore.getState()
-    setServices((query.data.services ?? []).map(toService))
-    setInitialized(true)
-
-    // Seed the PoP geo map for the shared <PopLabel> (city/state/country
-    // shown next to PoP codes everywhere). Parsed server-side from the
-    // /datacenters cache; empty when the cache isn't populated.
-    usePopGeoStore.getState().setMap(query.data.pop_geo ?? {})
-
-    const popsRaw = query.data.pops
-    if (popsRaw) {
-      const locations: Record<string, [number, number]> = {}
-      for (const [code, [lat, lon]] of Object.entries(popsRaw)) {
-        if (lat != null && lon != null) locations[code] = [lat, lon]
-      }
-      usePopGeoStore.getState().setLocations(locations)
-    }
-
-    // Phase Q + RSC race fix: the SSR HydrationBoundary pre-populates
-    // the bootstrap cache, which means useBootstrap's queryFn does NOT
-    // run on the first client mount (the cache hit short-circuits it).
-    // That left the setToken(...) call inside queryFn unreachable on
-    // every SSR-hydrated load, so the Zustand store stayed empty and
-    // every admin API call that fired before the next bootstrap
-    // refetch 401'd with admin_token_required (see ServicesTable +
-    // OperationsOverview cards on /admin).
-    //
-    // Mirror the token write here as well so it ALWAYS lands as soon
-    // as query.data is available, regardless of whether the data came
-    // from the network or from the SSR-hydrated cache. The queryFn
-    // copy stays as the first-render fast path for the no-SSR
-    // (pure-CSR) case.
-    const adminToken = query.data?.settings?.admin_token
-    useAdminTokenStore.getState().setToken(
-      typeof adminToken === 'string' && adminToken ? adminToken : null,
-    )
-    // Same SSR-hydrated-cache reasoning as the token above: the queryFn copy
-    // is skipped when the cache is pre-seeded, so mirror the role flag here
-    // too. See sessionRoleStore.
-    useSessionRoleStore.getState().setIsRemoteAnalyst(
-      query.data?.settings?.is_remote_analyst === true,
-    )
-
-    // Synchronize client-side debugStore with the backend-defined debug settings
-    const isAnalyst = query.data?.settings?.is_remote_analyst === true
-    const queryVis = query.data?.debug_state?.query_debug_visibility ?? 'disabled'
-    const apiVis = query.data?.debug_state?.api_call_debug_visibility ?? 'disabled'
-
-    const queryDebugEnabled = isAnalyst
-      ? (queryVis === 'analysts' || queryVis === 'both')
-      : (queryVis === 'admins' || queryVis === 'both')
-
-    const apiCallsDebugEnabled = isAnalyst
-      ? (apiVis === 'analysts' || apiVis === 'both')
-      : (apiVis === 'admins' || apiVis === 'both')
-
-    const debugStore = useDebugStore.getState()
-    if (debugStore.enabled !== queryDebugEnabled || debugStore.apiCallsEnabled !== apiCallsDebugEnabled) {
-      useDebugStore.setState({ enabled: queryDebugEnabled, apiCallsEnabled: apiCallsDebugEnabled })
-      const shouldAttach = queryDebugEnabled || apiCallsDebugEnabled
-      document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
-    }
-
-    // Note: views + log-fields-catalog cache seeding now happens
-    // inside the queryFn (synchronously after the fetch resolves) so
-    // dependent hooks gated on bootstrap status find data already in
-    // their target cache. Moving it here would re-introduce the race
-    // where dependent hooks re-render before useEffect runs.
-  }, [query.data, queryClient])
-
-  // `isStale` gates the revert branch below. When true, query.data is a cached
-  // snapshot that may predate the live service set (a refetch hasn't yet
-  // replaced it — e.g. the 5-min staleTime window after a service was just
-  // added). Reverting a just-selected activeServiceId against a stale snapshot
-  // is the "Switch To a freshly-added service bounces back" bug.
-  const bootstrapIsStale = query.isStale
-
-  useEffect(() => {
-    if (!query.data) return
-    const services = (query.data.services ?? []).map(toService)
-    const currentServiceExists = services.some(s => s.id === activeServiceId)
-
-    if (!activeServiceId && services.length > 0) {
-      const defaultId = query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id)
-        ? query.data.active_service_id
-        : services[0]?.id
-      if (defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
-    } else if (activeServiceId && !currentServiceExists) {
-      // HARDENING: only evict a selected service when the bootstrap snapshot is
-      // fresh (just fetched, not a stale cached copy). A stale snapshot can be
-      // missing a brand-new service the user just switched to — reverting off
-      // it bounces them back to the previous service (and AppLayout then to
-      // /admin). When stale, defer: the pending refetch lands a fresh list
-      // (this effect re-runs on query.data change) and reconciles correctly
-      // against real data. Switch-to call sites also invalidate bootstrap to
-      // trigger that refetch promptly.
-      if (bootstrapIsStale) return
-      const defaultId = services.length > 0 ? (
-        (query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id))
-          ? query.data.active_service_id
-          : services[0]?.id
-      ) : null
-      if (activeServiceId !== defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
-    }
-  }, [query.data, bootstrapIsStale, activeServiceId])
+  useBootstrapSyncEffects(query, activeServiceId)
 
   return query
 }

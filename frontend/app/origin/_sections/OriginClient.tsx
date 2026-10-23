@@ -131,6 +131,9 @@ function OriginReportContent({
           ...rangeBody,
         },
       })
+      if (error) {
+        throw new Error(typeof error === 'string' ? error : 'Failed to load origin aggregates')
+      }
       return data
     },
   })

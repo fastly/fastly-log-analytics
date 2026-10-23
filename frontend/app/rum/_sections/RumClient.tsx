@@ -381,6 +381,152 @@ export function RumClient({
     );
   }, [analytics?.trends?.timestamps, timezone]);
 
+  const trendChartLayout = React.useMemo(
+    () => ({
+      margin: { t: 30, b: 40, l: 30, r: 10 },
+      legend: {
+        orientation: 'h' as const,
+        y: 1.08,
+        x: 0.5,
+        xanchor: 'center' as const,
+        yanchor: 'bottom' as const,
+      },
+    }),
+    [],
+  );
+
+  const stackedBarLayout = React.useMemo(
+    () => ({
+      barmode: 'stack' as const,
+      margin: { t: 30, b: 40, l: 30, r: 10 },
+      legend: {
+        orientation: 'h' as const,
+        y: 1.08,
+        x: 0.5,
+        xanchor: 'center' as const,
+        yanchor: 'bottom' as const,
+      },
+    }),
+    [],
+  );
+
+  const donutChartLayout = React.useMemo(
+    () => ({
+      height: 250,
+      margin: { t: 10, b: 10, l: 10, r: 10 },
+      showlegend: false,
+    }),
+    [],
+  );
+
+  const webVitalsTrendData = React.useMemo(
+    () => [
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.lcp || [],
+        name: 'LCP (s)',
+        type: 'scatter' as const,
+        mode: 'lines+markers' as const,
+        line: { color: CHART_COLORS.success },
+      },
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.cls || [],
+        name: 'CLS',
+        type: 'scatter' as const,
+        mode: 'lines+markers' as const,
+        line: { color: CHART_COLORS.info },
+      },
+    ],
+    [formattedTimestamps, analytics?.trends?.lcp, analytics?.trends?.cls],
+  );
+
+  const errorRateTrendData = React.useMemo(
+    () => [
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.error_rate || [],
+        name: 'Error Rate (%)',
+        type: 'scatter' as const,
+        mode: 'lines+markers' as const,
+        line: { color: '#f43f5e' },
+        fill: 'tozeroy' as const,
+      },
+    ],
+    [formattedTimestamps, analytics?.trends?.error_rate],
+  );
+
+  const browserPieData = React.useMemo(
+    () => [
+      {
+        labels: Object.keys(analytics?.environments?.browsers || {}),
+        values: Object.values(analytics?.environments?.browsers || {}),
+        type: 'pie' as const,
+        hole: 0.4,
+        textinfo: 'label+percent' as const,
+      },
+    ],
+    [analytics?.environments?.browsers],
+  );
+
+  const osPieData = React.useMemo(
+    () => [
+      {
+        labels: Object.keys(analytics?.environments?.os || {}),
+        values: Object.values(analytics?.environments?.os || {}),
+        type: 'pie' as const,
+        hole: 0.4,
+        textinfo: 'label+percent' as const,
+      },
+    ],
+    [analytics?.environments?.os],
+  );
+
+  const devicePieData = React.useMemo(
+    () => [
+      {
+        labels: Object.keys(analytics?.environments?.devices || {}),
+        values: Object.values(analytics?.environments?.devices || {}),
+        type: 'pie' as const,
+        hole: 0.4,
+        textinfo: 'label+percent' as const,
+      },
+    ],
+    [analytics?.environments?.devices],
+  );
+
+  const beaconsOverTimeData = React.useMemo(
+    () => [
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.pageviews || [],
+        name: 'Pageviews',
+        type: 'bar' as const,
+        marker: { color: CHART_COLORS.info },
+      },
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.interactions || [],
+        name: 'Interactions',
+        type: 'bar' as const,
+        marker: { color: CHART_COLORS.success },
+      },
+      {
+        x: formattedTimestamps,
+        y: analytics?.trends?.errors || [],
+        name: 'Errors',
+        type: 'bar' as const,
+        marker: { color: '#f43f5e' },
+      },
+    ],
+    [
+      formattedTimestamps,
+      analytics?.trends?.pageviews,
+      analytics?.trends?.interactions,
+      analytics?.trends?.errors,
+    ],
+  );
+
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
     queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
@@ -601,34 +747,8 @@ export function RumClient({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Web Vitals Trend" icon={<TrendingUp />}>
           <TimeSeriesChart
-            data={[
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.lcp,
-                name: 'LCP (s)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: CHART_COLORS.success },
-              },
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.cls,
-                name: 'CLS',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: CHART_COLORS.info },
-              },
-            ]}
-            layout={{
-              margin: { t: 30, b: 40, l: 30, r: 10 },
-              legend: {
-                orientation: 'h',
-                y: 1.08,
-                x: 0.5,
-                xanchor: 'center',
-                yanchor: 'bottom',
-              },
-            }}
+            data={webVitalsTrendData}
+            layout={trendChartLayout}
             startTime={startTime}
             endTime={endTime}
             timezone={timezone}
@@ -638,27 +758,8 @@ export function RumClient({
 
         <AnalyticsCard title="JS Error Rate Trend" icon={<TrendingUp className="text-rose-500" />}>
           <TimeSeriesChart
-            data={[
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.error_rate,
-                name: 'Error Rate (%)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#f43f5e' },
-                fill: 'tozeroy',
-              },
-            ]}
-            layout={{
-              margin: { t: 30, b: 40, l: 30, r: 10 },
-              legend: {
-                orientation: 'h',
-                y: 1.08,
-                x: 0.5,
-                xanchor: 'center',
-                yanchor: 'bottom',
-              },
-            }}
+            data={errorRateTrendData}
+            layout={trendChartLayout}
             startTime={startTime}
             endTime={endTime}
             timezone={timezone}
@@ -707,48 +808,24 @@ export function RumClient({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <AnalyticsCard title="Browser Distribution" icon={<PieChart />}>
           <PlotlyChart
-            data={[
-              {
-                labels: Object.keys(analytics.environments.browsers),
-                values: Object.values(analytics.environments.browsers),
-                type: 'pie',
-                hole: 0.4,
-                textinfo: 'label+percent',
-              },
-            ]}
-            layout={{ height: 250, margin: { t: 10, b: 10, l: 10, r: 10 }, showlegend: false }}
+            data={browserPieData}
+            layout={donutChartLayout}
             a11yTitle="Browser Distribution Donut Chart"
           />
         </AnalyticsCard>
 
         <AnalyticsCard title="OS Distribution" icon={<PieChart />}>
           <PlotlyChart
-            data={[
-              {
-                labels: Object.keys(analytics.environments.os),
-                values: Object.values(analytics.environments.os),
-                type: 'pie',
-                hole: 0.4,
-                textinfo: 'label+percent',
-              },
-            ]}
-            layout={{ height: 250, margin: { t: 10, b: 10, l: 10, r: 10 }, showlegend: false }}
+            data={osPieData}
+            layout={donutChartLayout}
             a11yTitle="OS Distribution Donut Chart"
           />
         </AnalyticsCard>
 
         <AnalyticsCard title="Device Distribution" icon={<PieChart />}>
           <PlotlyChart
-            data={[
-              {
-                labels: Object.keys(analytics.environments.devices),
-                values: Object.values(analytics.environments.devices),
-                type: 'pie',
-                hole: 0.4,
-                textinfo: 'label+percent',
-              },
-            ]}
-            layout={{ height: 250, margin: { t: 10, b: 10, l: 10, r: 10 }, showlegend: false }}
+            data={devicePieData}
+            layout={donutChartLayout}
             a11yTitle="Device Distribution Donut Chart"
           />
         </AnalyticsCard>
@@ -758,40 +835,8 @@ export function RumClient({
       <div className="mb-6">
         <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
           <TimeSeriesChart
-            data={[
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.pageviews || [],
-                name: 'Pageviews',
-                type: 'bar',
-                marker: { color: CHART_COLORS.info },
-              },
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.interactions || [],
-                name: 'Interactions',
-                type: 'bar',
-                marker: { color: CHART_COLORS.success },
-              },
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.errors || [],
-                name: 'Errors',
-                type: 'bar',
-                marker: { color: '#f43f5e' },
-              },
-            ]}
-            layout={{
-              barmode: 'stack',
-              margin: { t: 30, b: 40, l: 30, r: 10 },
-              legend: {
-                orientation: 'h',
-                y: 1.08,
-                x: 0.5,
-                xanchor: 'center',
-                yanchor: 'bottom',
-              },
-            }}
+            data={beaconsOverTimeData}
+            layout={stackedBarLayout}
             startTime={startTime}
             endTime={endTime}
             timezone={timezone}

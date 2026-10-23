@@ -16,8 +16,8 @@ recording it.
 **Bumping the baseline is a deliberate release act.** When you intentionally
 remove an endpoint, (1) add a bullet to the CHANGELOG ``### Breaking`` section
 naming the path, then (2) regenerate the baseline from the new surface
-(``cp frontend/openapi.json tests/contract/openapi_baseline.json``) as part of
-cutting the release. Do NOT bump it casually to silence this test.
+(``jq '{paths: (.paths | with_entries(.value = {}))}' frontend/openapi.json > tests/contract/openapi_baseline.json``)
+as part of cutting the release. Do NOT bump it casually to silence this test.
 
 Scope (v1): path-level removal detection only. Per-path HTTP-method changes
 (e.g. a GET→POST migration, or dropping a PATCH alias) are not auto-diffed
@@ -75,6 +75,6 @@ def test_removed_paths_are_noted_in_changelog():
         "These paths were removed from the OpenAPI surface but are not noted in "
         f"the CHANGELOG ### Breaking section: {missing}\n"
         "Add a Breaking bullet naming each path, then regenerate the baseline "
-        "(cp frontend/openapi.json tests/contract/openapi_baseline.json) as a "
-        "deliberate release step."
+        "(jq '{paths: (.paths | with_entries(.value = {}))}' frontend/openapi.json > tests/contract/openapi_baseline.json) "
+        "as a deliberate release step."
     )

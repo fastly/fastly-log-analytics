@@ -552,7 +552,7 @@ def sync_data(
             _core_mod._save_persistent_cache(source)
 
             # Invalidate the view SQL cache so it generates a new union with local paths
-            _core_mod._view_cache.pop(source_key, None)
+            _core_mod._view_cache.pop(cache_key, None)
 
     retries_logged = 0
 

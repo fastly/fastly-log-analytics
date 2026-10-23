@@ -26,3 +26,37 @@ export function resolveDefaultSsrRangeKey(
 } {
   return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
 }
+
+export async function fetchSsrRangePost(options: {
+  serviceId: string | undefined
+  path: string
+  logPrefix: string
+  now?: Date
+  logExtents?: unknown
+  timeoutMs?: number
+  body?: Record<string, unknown>
+}): Promise<SsrRangeSeed | null> {
+  const { rangeToken, anchor } = resolveDefaultSsrRangeKey(options.now, options.logExtents)
+  if (!options.serviceId) return null
+
+  const data = parseSsrJson(
+    await ssrUpstreamGet({
+      path: options.path,
+      logPrefix: options.logPrefix,
+      method: 'POST',
+      injectAdminToken: true,
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      body: {
+        filters: {},
+        ...options.body,
+        range_token: rangeToken,
+        anchor,
+      },
+      extraHeaders: { 'x-service-id': options.serviceId },
+    }),
+    options.logPrefix,
+  )
+
+  if (data == null) return null
+  return { data, rangeToken, anchor }
+}

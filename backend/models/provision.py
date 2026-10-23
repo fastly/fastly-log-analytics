@@ -222,11 +222,7 @@ class CustomFieldsExportFile(CustomFieldsImportBody):
 # telemetry envelope pass through byte-identically.
 
 
-class _ProvisionRead(PassthroughModel):
-    """Base for provision responses — passes undeclared keys through."""
-
-
-class ProvisionTokenInfo(_ProvisionRead):
+class ProvisionTokenInfo(PassthroughModel):
     id: str | None = None
     name: str | None = None
     user_id: str | None = None
@@ -234,7 +230,7 @@ class ProvisionTokenInfo(_ProvisionRead):
     type: Literal["user", "automation"] | None = None
 
 
-class ProvisionDefaults(_ProvisionRead):
+class ProvisionDefaults(PassthroughModel):
     endpoint_name: str | None = None
     fos_region: str | None = None
     fos_bucket_name: str | None = None
@@ -246,13 +242,13 @@ class ProvisionDefaults(_ProvisionRead):
     cdn_prefix: str | None = None
 
 
-class ProvisionValidateResponse(_ProvisionRead):
+class ProvisionValidateResponse(PassthroughModel):
     service_name: str | None = None
     token_info: ProvisionTokenInfo | None = None
     defaults: ProvisionDefaults | None = None
 
 
-class ProvisionCheckDomainResponse(_ProvisionRead):
+class ProvisionCheckDomainResponse(PassthroughModel):
     available: bool | None = None
     # Mutually exclusive by branch: ``reason`` when unavailable, ``note``
     # when available-with-caveat. exclude_unset keeps whichever was set.
@@ -260,19 +256,19 @@ class ProvisionCheckDomainResponse(_ProvisionRead):
     note: str | None = None
 
 
-class ProvisionCheckFosResponse(_ProvisionRead):
+class ProvisionCheckFosResponse(PassthroughModel):
     ok: bool | None = None
     error: str | None = None
 
 
-class ProvisionLakeInfoRange(_ProvisionRead):
+class ProvisionLakeInfoRange(PassthroughModel):
     """Earliest/latest row timestamps (ISO strings; ``None`` for an empty table)."""
 
     start: str | None = None
     end: str | None = None
 
 
-class ProvisionLakeInfoCalendarDay(_ProvisionRead):
+class ProvisionLakeInfoCalendarDay(PassthroughModel):
     """One calendar day. ``data_files`` is a row count on the DuckLake path (see
     ``get_snapshot_calendar``); ``size_bytes`` is ``0`` there."""
 
@@ -280,7 +276,7 @@ class ProvisionLakeInfoCalendarDay(_ProvisionRead):
     size_bytes: int
 
 
-class ProvisionLakeInfoTable(_ProvisionRead):
+class ProvisionLakeInfoTable(PassthroughModel):
     """``get_table_info`` block (keys absent from older ``table_summary.json`` files stay unset)."""
 
     table_name: str | None = None
@@ -296,7 +292,7 @@ class ProvisionLakeInfoTable(_ProvisionRead):
     max_timestamp: str | None = None
 
 
-class ProvisionLakeInfoResponse(_ProvisionRead):
+class ProvisionLakeInfoResponse(PassthroughModel):
     """``fetch_lake_info`` result. ``info`` / ``range`` / ``calendar`` are present
     only when the table exists."""
 
@@ -309,28 +305,28 @@ class ProvisionLakeInfoResponse(_ProvisionRead):
     range: ProvisionLakeInfoRange | None = None
 
 
-class ProvisionIngestResponse(_ProvisionRead):
+class ProvisionIngestResponse(PassthroughModel):
     ok: bool | None = None
     service_id: str | None = None
 
 
-class ProvisionCheckConfigItem(_ProvisionRead):
+class ProvisionCheckConfigItem(PassthroughModel):
     ok: bool
     details: str
 
 
-class ProvisionCheckConfigResponse(_ProvisionRead):
+class ProvisionCheckConfigResponse(PassthroughModel):
     # ``provision_check_config`` always seeds both blocks before probing.
     logging_service: ProvisionCheckConfigItem
     cdn_service: ProvisionCheckConfigItem
 
 
-class NgwafWorkspace(_ProvisionRead):
+class NgwafWorkspace(PassthroughModel):
     id: str | None = None
     name: str | None = None
 
 
-class NgwafWorkspacesResponse(_ProvisionRead):
+class NgwafWorkspacesResponse(PassthroughModel):
     workspaces: list[NgwafWorkspace] | None = None
     note: str | None = None
     error: str | None = None
@@ -340,11 +336,11 @@ class NgwafWorkspacesResponse(_ProvisionRead):
     debug_raw: str | None = Field(default=None, alias="_debug_raw")
 
 
-class NgwafWorkspaceCreateRequest(_ProvisionRead):
+class NgwafWorkspaceCreateRequest(PassthroughModel):
     ngwaf_workspace_id: str | None = None
 
 
-class NgwafWorkspaceSetResponse(_ProvisionRead):
+class NgwafWorkspaceSetResponse(PassthroughModel):
     ok: bool | None = None
     ngwaf_workspace_id: str | None = None
 
@@ -356,7 +352,7 @@ class TerraformPreviewResponse(RootModel[dict[str, str]]):
     pass
 
 
-class RumVersionsResponse(_ProvisionRead):
+class RumVersionsResponse(PassthroughModel):
     """Response for ``GET /api/services/{service_id}/rum/versions`` —
     available Faro Web SDK releases plus the operator's pinned/latest
     state. Only returned on a successful registry lookup; a registry

@@ -27,10 +27,9 @@
 // client refetch, never a leak/crash (identical risk class to origin/insights).
 
 import {
-  parseSsrJson,
+  fetchSsrRangePost,
   resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
-  ssrUpstreamGet,
 } from './upstream'
 
 // Default first-paint section set — mirrors SECURITY_SECTIONS in
@@ -81,32 +80,15 @@ export async function fetchSecurityServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
 ): Promise<SecuritySsrSeed | null> {
-  const { rangeToken, anchor } = resolveSecurityDefaultKey(now)
-
-  if (!serviceId) return null
-
-  const data = parseSsrJson(
-    await ssrUpstreamGet({
-      path: '/api/security/aggregates',
-      logPrefix: 'ssr/security',
-      method: 'POST',
-      injectAdminToken: true,
-      timeoutMs: 8000,
-      // Mirror SecurityBody's client request body EXACTLY. range_token + anchor
-      // drive the scan window (the keyed path ignores start_time/end_time, so
-      // they are omitted).
-      body: {
-        filters: {},
-        bucket_seconds: SECURITY_SSR_DEFAULTS.bucketSeconds,
-        sections: SECURITY_SSR_SECTIONS,
-        range_token: rangeToken,
-        anchor,
-      },
-      extraHeaders: { 'x-service-id': serviceId },
-    }),
-    'ssr/security',
-  )
-
-  if (data == null) return null
-  return { data, rangeToken, anchor }
+  return fetchSsrRangePost({
+    serviceId,
+    path: '/api/security/aggregates',
+    logPrefix: 'ssr/security',
+    now,
+    timeoutMs: 8000,
+    body: {
+      bucket_seconds: SECURITY_SSR_DEFAULTS.bucketSeconds,
+      sections: SECURITY_SSR_SECTIONS,
+    },
+  })
 }

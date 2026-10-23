@@ -116,9 +116,11 @@ class ExportManager:
                     raise TypeError("export serializer must return bytes")
                 output.extend(encoded)
                 output.extend(b"\n")
-                job.rows_written += 1
-                job.bytes_written = len(output)
-                if job.bytes_written > self._max_bytes:
+                with self._lock:
+                    job.rows_written += 1
+                    job.bytes_written = len(output)
+                    bytes_written = job.bytes_written
+                if bytes_written > self._max_bytes:
                     raise ValueError("export byte limit exceeded")
             with self._lock:
                 if job.cancel_event.is_set() or job.state is not ExportState.RUNNING:

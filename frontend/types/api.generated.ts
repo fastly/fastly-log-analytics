@@ -17879,10 +17879,9 @@ export interface components {
          * SavedViewRecord
          * @description Wire-safe read shape for ``GET /api/views/{service_id}`` rows.
          *
-         *     Distinct from the strict ``SavedView`` request body: all-Optional +
-         *     ``extra="allow"`` so a partial row (or a future column) can never 500
-         *     the read path; ``response_model_exclude_unset`` keeps the emitted key
-         *     set byte-identical to the producer's.
+         *     Distinct from the strict ``SavedView`` request body: ``id`` is guaranteed
+         *     non-null on persisted rows; ``extra="allow"`` + ``response_model_exclude_unset``
+         *     is inherited from ``SavedView`` (``WireSafeModel``).
          */
         SavedViewRecord: {
             /** Id */

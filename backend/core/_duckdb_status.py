@@ -118,6 +118,29 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
             for k in list(_ducklake_stats_cache.keys()):
                 if k[0] == source_key:
                     _ducklake_stats_cache.pop(k, None)
+    with _db_main._data_stats_cache_lock:
+        if source_key is None:
+            _db_main._data_stats_cache.clear()
+        else:
+            _db_main._data_stats_cache.pop(source_key, None)
+
+
+def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
+    """Read (count, min_ts, max_ts) across live local buffer parquet files."""
+    from backend.core import iceberg as _ice
+    from backend.utils.sql_validator import escape_sql_literal as _esl
+
+    buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
+    if not buf_paths:
+        return (0, None, None)
+    paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
+    row = con.execute(
+        "SELECT count(*), min(timestamp), max(timestamp) "
+        f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
+    ).fetchone()
+    if not row:
+        return (0, None, None)
+    return ((row[0] or 0), row[1], row[2])
 
 
 def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
@@ -171,24 +194,13 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
     except Exception as e:
         logger.debug("[sync-status] direct lake stats unavailable: %s", e)
     try:
-        from backend.core import iceberg as _ice
-        from backend.utils.sql_validator import escape_sql_literal as _esl
-
-        buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
-        if buf_paths:
-            paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
-            row = con.execute(
-                "SELECT count(*), min(timestamp), max(timestamp) "
-                f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
-            ).fetchone()
-            if row:
-                b_cnt = row[0] or 0
-                if b_cnt > 0:
-                    counts.append(b_cnt)
-                if row[1] is not None:
-                    mins.append(row[1])
-                if row[2] is not None:
-                    maxs.append(row[2])
+        b_cnt, b_min, b_max = _query_buffer_stats(con, src)
+        if b_cnt > 0:
+            counts.append(b_cnt)
+        if b_min is not None:
+            mins.append(b_min)
+        if b_max is not None:
+            maxs.append(b_max)
     except Exception as e:
         logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
 
@@ -350,22 +362,7 @@ def get_sync_status(
                     with _db_main._data_stats_cache_lock:
                         _db_main._data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
 
-                from backend.core import iceberg as _ice
-
-                buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
-                if buf_paths:
-                    from backend.utils.sql_validator import escape_sql_literal as _esl
-
-                    paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
-                    b_row = con.execute(
-                        "SELECT count(*), min(timestamp), max(timestamp) "
-                        f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
-                    ).fetchone()
-                    b_count = (b_row[0] or 0) if b_row else 0
-                    b_min = b_row[1] if b_row else None
-                    b_max = b_row[2] if b_row else None
-                else:
-                    b_count, b_min, b_max = 0, None, None
+                b_count, b_min, b_max = _query_buffer_stats(con, src)
 
                 mins = [m for m in (d_min, b_min) if m is not None]
                 maxs = [m for m in (d_max, b_max) if m is not None]

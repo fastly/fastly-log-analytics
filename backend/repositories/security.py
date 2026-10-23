@@ -625,18 +625,9 @@ def get_top_bots(
     ):
         _key_payload = _json.dumps(
             {
-                "s": start_time,
-                "e": end_time,
-                "f": {
-                    k: (
-                        getattr(v, "mode", v.get("mode") if isinstance(v, dict) else "include"),
-                        sorted(
-                            str(x)
-                            for x in (getattr(v, "values", None) or (v.get("values") if isinstance(v, dict) else []))
-                        ),
-                    )
-                    for k, v in sorted((filters or {}).items())
-                },
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(filters),
                 "n": n,
             },
             separators=(",", ":"),

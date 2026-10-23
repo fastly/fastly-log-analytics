@@ -62,6 +62,13 @@ class CustomFieldUpdate(BaseModel):
     show_in_logs: bool | None = None
     filterable: bool | None = None
 
+    @field_validator("bytes_estimate")
+    @classmethod
+    def _bytes_in_range(cls, v: int | None) -> int | None:
+        if v is not None and not (1 <= v <= 1024):
+            raise ValueError("bytes_estimate must be 1–1024")
+        return v
+
 
 class CustomFieldResponse(BaseResponse):
     field: CustomField

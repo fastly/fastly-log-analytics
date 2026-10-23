@@ -27,6 +27,29 @@ router = APIRouter(
 )
 
 
+def _resolve_fastly_token(token_override: str | None) -> str:
+    """Resolve Fastly API token from override, configs/*.json, or FASTLY_API_KEY env."""
+    from backend.utils.router_utils import make_error, stored_fastly_token
+
+    token = token_override
+    if not token:
+        for cfg in list_configs():
+            key = stored_fastly_token(cfg)
+            if key:
+                token = key
+                break
+    if not token:
+        env_token = os.environ.get("FASTLY_API_KEY")
+        if env_token and env_token.strip():
+            token = env_token.strip()
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("missing_api_token", "Fastly API Token is required"),
+        )
+    return token
+
+
 @router.post("/deploy-frontend", response_model=SharingDeployResponse)
 def deploy_frontend(payload: SharingDeployRequest):
     """Deploy a remote frontend service.
@@ -38,31 +61,9 @@ def deploy_frontend(payload: SharingDeployRequest):
 
     Raises 400 if token is missing.
     """
-    from backend.utils.router_utils import stored_fastly_token
+    from backend.utils.router_utils import mutate_service_config, raise_internal
 
-    token = payload.token_override
-
-    # 1. Try to load from configs/*.json if not overridden
-    if not token:
-        for cfg in list_configs():
-            key = stored_fastly_token(cfg)
-            if key:
-                token = key
-                break
-
-    from backend.utils.router_utils import make_error, mutate_service_config, raise_internal
-
-    # 2. Try to fallback to env if still not found
-    if not token:
-        env_token = os.environ.get("FASTLY_API_KEY")
-        if env_token and env_token.strip():
-            token = env_token.strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("missing_api_token", "Fastly API Token is required"),
-        )
+    token = _resolve_fastly_token(payload.token_override)
 
     try:
         res = deploy_remote_frontend(
@@ -110,31 +111,9 @@ def teardown_frontend(payload: SharingTeardownRequest):
     Resolves Fastly API token, deletes the remote frontend on Fastly, and
     clears remote_frontend configuration on the logging service.
     """
-    from backend.utils.router_utils import stored_fastly_token
+    from backend.utils.router_utils import load_service_config, mutate_service_config, raise_internal
 
-    token = payload.token_override
-
-    # 1. Try to load from configs/*.json if not overridden
-    if not token:
-        for cfg in list_configs():
-            key = stored_fastly_token(cfg)
-            if key:
-                token = key
-                break
-
-    from backend.utils.router_utils import load_service_config, make_error, mutate_service_config, raise_internal
-
-    # 2. Try to fallback to env if still not found
-    if not token:
-        env_token = os.environ.get("FASTLY_API_KEY")
-        if env_token and env_token.strip():
-            token = env_token.strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("missing_api_token", "Fastly API Token is required"),
-        )
+    token = _resolve_fastly_token(payload.token_override)
 
     try:
         cfg = load_service_config(payload.service_id)

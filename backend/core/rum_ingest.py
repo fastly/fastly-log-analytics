@@ -78,9 +78,11 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         return 0, 0
 
     # Default retention matches the regular log retention
-    delete_after_days = int(rum_cfg.get("delete_after", True))
-    if delete_after_days is True:
-        delete_after_days = int(cfg.get("log_retention_days", 90))
+    raw_delete_after = rum_cfg.get("delete_after", True)
+    if isinstance(raw_delete_after, bool) or raw_delete_after is None:
+        delete_after_days = int(cfg.get("log_retention_days", 90)) if raw_delete_after is not False else 0
+    else:
+        delete_after_days = int(raw_delete_after)
 
     src = get_source_for_service(service_id)
     if not src or not src.get("bucket"):
@@ -310,6 +312,7 @@ def ingest_rum_logs(
         CLIENT_VITALS_ARROW_SCHEMA,
     )
     from backend.core.ingest import (
+        _RECONCILE_LEDGER_EPOCH,
         _capture_corrupt_container,
         _corrupt_gzip_error,
         _delete_objects_robust_with_failures,
@@ -583,8 +586,21 @@ def ingest_rum_logs(
 
         # Reclaim stranded already-ingested objects (Gap 2)
         if raw_delete_after and stranded_already:
+            try:
+                deletable = metadata_db.get_reclaimable_strand_filenames(
+                    service_id, set(stranded_already), _RECONCILE_LEDGER_EPOCH
+                )
+            except Exception as classify_err:
+                logger.warning(
+                    "RUM sync: could not classify reclaimable strands for %s (%s) — skipping reclaim this run",
+                    service_id,
+                    classify_err,
+                )
+                deletable = set()
             stranded_keys = [
-                f.removeprefix(f"s3://{bucket}/") for f in stranded_already if f.startswith(f"s3://{bucket}/")
+                f.removeprefix(f"s3://{bucket}/")
+                for f in stranded_already
+                if f in deletable and f.startswith(f"s3://{bucket}/")
             ]
             if stranded_keys:
                 try:

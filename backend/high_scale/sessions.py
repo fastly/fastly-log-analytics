@@ -17,7 +17,6 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
 )
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import safe_iso
 
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _memo.cache)
@@ -236,11 +235,7 @@ def _window(start_time: str | None, end_time: str | None, default: timedelta) ->
     return _parse_ts(start_time) or (end_dt - default), end_dt
 
 
-def _iso(value: Any) -> str | None:
-    if isinstance(value, datetime):
-        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
-        return stamp.isoformat().replace("+00:00", "Z")
-    return safe_iso(value)
+from backend.high_scale._common import format_iso_utc as _iso
 
 
 def _asn_label_map(service_id: str, asns: list[int]) -> dict[int, str]:

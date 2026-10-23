@@ -7,6 +7,7 @@ from typing import Any
 
 from backend import config as svcconfig
 from backend.core import duckdb as _db
+from backend.utils.dir_size import walk_dir_stats as _walk_dir_stats
 
 # Cache dirs hold thousands of small parquet files; recursively stat'ing
 # them on every /api/bootstrap, /api/services, and admin tile render was a
@@ -34,34 +35,6 @@ _DIR_STATS_TTL_SEC = 300.0
 _dir_stats_cache: dict[str, tuple[float, int, int]] = {}
 _dir_stats_lock = threading.Lock()
 _dir_stats_refresh_in_flight: set[str] = set()
-
-
-def _walk_dir_stats(path: str) -> tuple[int, int]:
-    """Synchronous os.scandir walk. Returns (total_size_bytes, file_count).
-    Symlinks are skipped (preserves the prior os.walk behavior)."""
-    if not os.path.exists(path):
-        return (0, 0)
-    total_size = 0
-    file_count = 0
-    stack = [path]
-    while stack:
-        d = stack.pop()
-        try:
-            with os.scandir(d) as it:
-                for entry_de in it:
-                    try:
-                        if entry_de.is_symlink():
-                            continue
-                        if entry_de.is_dir(follow_symlinks=False):
-                            stack.append(entry_de.path)
-                        elif entry_de.is_file(follow_symlinks=False):
-                            total_size += entry_de.stat(follow_symlinks=False).st_size
-                            file_count += 1
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return (total_size, file_count)
 
 
 def _refresh_dir_stats_background(path: str) -> None:

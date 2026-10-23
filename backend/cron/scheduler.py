@@ -29,41 +29,7 @@ logger = logging.getLogger("backend.scheduler")
 # ── Helpers / shared state ────────────────────────────────────────────────────
 
 
-def dev_mode_no_crons() -> bool:
-    """Kill switch for local-dev runs: never schedule or execute cron work.
-
-    Set ``FLA_DEV_NO_CRONS=1`` in the environment to:
-     - skip registering every APScheduler job at startup EXCEPT a small
-       allowlist of LOCAL-ONLY jobs (``local_compact``, ``rollup_compact``,
-       ``rollup_heal``) that only rewrite the local parquet cache and never
-       touch the shared FOS bucket or send anything outbound — see
-       :meth:`Scheduler._register_dev_local_safe_jobs`
-     - skip ``Scheduler.reload()`` re-registration
-     - short-circuit ingest-class job entry points
-       (``_run_service_cron``, ``_run_full_sweep``, ``_run_gap_heal``)
-       so even an HTTP-triggered manual sync with ``force=True`` bails
-
-    The allowlist exists because the blanket switch otherwise also kills
-    local_compact, which keeps dashboard scans fast and is provably
-    FOS-free (``optimize``/``commit``/``expire`` write FOS and stay gated).
-
-    HTTP API calls are NOT affected — the user can still trigger
-    ``/api/admin/rebuild-local-view`` to refresh the local Iceberg
-    view from cloud (metadata-only sync, no raw-file ingestion).
-
-    Why this exists: local dev runs against the same FOS bucket as
-    prod, so any unintended ingestion races the prod cron. Per the
-    ``dev-no-crons`` operating note, dev is meant to be a pure
-    reader. ``provisioning.cron_*.enabled = false`` alone wasn't
-    enough — the gap_heal cron triggered ``_run_full_sweep``
-    unconditionally, the manual ``/admin/ingest-logs`` endpoint
-    passed ``force=True``, and several jobs (local_compact,
-    insights_prewarmer, metadata_cleanup) registered with no
-    config gate at all. One env var beats N per-task disable flags
-    and CAN'T be silently undone by an admin clicking "Save" in
-    the cron settings modal.
-    """
-    return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
+from backend.cron.decorators import dev_mode_no_crons  # noqa: F401
 
 
 def partial_hour_merge_enabled() -> bool:

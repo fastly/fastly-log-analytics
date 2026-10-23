@@ -64,12 +64,12 @@ class _InProcessPublisher:
         the cron, etc.). Returns immediately; queue inserts happen on the
         asyncio loop.
         """
-        loop = self._loop
-        if loop is None:
-            return
         with self._lock:
             self._replay[service_id].append(payload)
             queues = list(self._subscribers.get(service_id, ()))
+        loop = self._loop
+        if loop is None:
+            return
         for q in queues:
             try:
                 loop.call_soon_threadsafe(self._enqueue, q, payload)

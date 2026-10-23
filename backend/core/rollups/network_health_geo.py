@@ -36,6 +36,7 @@ import logging
 
 from ._common import (
     NETWORK_GEO_BUNDLE_FILENAME,
+    backfill_missing_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
@@ -121,5 +122,19 @@ def build_network_geo_bundles(service_id: str, source: dict, hours: list[str]) -
         label="network_geo",
         eligibility=eligibility,
         build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_network_geo_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build network_geo.parquet for every closed hour
+    that has all_fields.parquet but no network_geo.parquet yet.
+    """
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=NETWORK_GEO_BUNDLE_FILENAME,
+        label="network_geo",
+        builder=build_network_geo_bundles,
         logger=logger,
     )

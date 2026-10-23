@@ -3739,35 +3739,21 @@ class QueryRunner:
         ]
         return {"rows": out_rows, "_approx": True}
 
-    def try_security_req_size_from_rollup(
+    def _try_security_bucket_rollup(
         self,
         start_time: str | None,
         end_time: str | None,
         *,
         has_filters: bool,
+        bundle_filename: str,
+        log_tag: str,
     ) -> list[dict] | None:
-        """Serve /api/security/aggregates' ``req_size`` panel from per-hour +
-        per-day security_req_size parquets (req_header_bytes histogram buckets).
-
-        Same eligibility posture as :meth:`try_network_speed_from_rollup`
-        (unfiltered, >= 48 h, <= 366 d, >= 50 % closed-hour coverage, day-prefer
-        + hour-fallback walk). Math is EXACT across hours — ``count`` SUMs and
-        the bucket order is by MIN(min_val), the same lower-bound ordering the
-        live ``REQ_HEADER_SIZE_DIST`` (``ORDER BY min_val``) produces. No
-        ``_approx`` flag.
-
-        Returns ``[{"bucket": str, "count": int}, ...]`` ordered by min_val
-        ascending (matching the live SQL's row shape after the caller drops
-        min_val), or ``None`` on any eligibility miss / read error.
-        """
-        from backend.core.rollups._common import SECURITY_REQ_SIZE_BUNDLE_FILENAME
-
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
         if win is None:
             return None
         st, et = win
 
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_REQ_SIZE_BUNDLE_FILENAME)
+        rollup_paths = self._collect_rollup_paths(st, et, bundle_filename)
         if rollup_paths is None:
             return None
 
@@ -3783,11 +3769,31 @@ class QueryRunner:
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:
-            _logger.debug("[security_req_size_rollup] read failed, falling back: %s", e)
+            _logger.debug("[%s] read failed, falling back: %s", log_tag, e)
             return None
         if not rows:
             return None
         return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
+
+    def try_security_req_size_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[dict] | None:
+        """Serve /api/security/aggregates' ``req_size`` panel from per-hour +
+        per-day security_req_size parquets (req_header_bytes histogram buckets).
+        """
+        from backend.core.rollups._common import SECURITY_REQ_SIZE_BUNDLE_FILENAME
+
+        return self._try_security_bucket_rollup(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            bundle_filename=SECURITY_REQ_SIZE_BUNDLE_FILENAME,
+            log_tag="security_req_size_rollup",
+        )
 
     def try_security_conn_reuse_from_rollup(
         self,
@@ -3798,43 +3804,16 @@ class QueryRunner:
     ) -> list[dict] | None:
         """Serve /api/security/aggregates' ``conn_reuse`` panel from per-hour +
         per-day security_conn_reuse parquets (conn_requests reuse buckets).
-
-        Same eligibility + EXACT-count posture as
-        :meth:`try_security_req_size_from_rollup`. Bucket order is by
-        MIN(min_val) ascending, matching the live ``CONN_REUSE_DIST``
-        (``ORDER BY min_val``). No ``_approx`` flag.
-
-        Returns ``[{"bucket": str, "count": int}, ...]`` ordered by min_val
-        ascending, or ``None`` on any eligibility miss / read error.
         """
         from backend.core.rollups._common import SECURITY_CONN_REUSE_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
-            return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
-        sql = (
-            f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"GROUP BY bucket "
-            f"ORDER BY mv"
+        return self._try_security_bucket_rollup(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            bundle_filename=SECURITY_CONN_REUSE_BUNDLE_FILENAME,
+            log_tag="security_conn_reuse_rollup",
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
-            return None
-        if not rows:
-            return None
-        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
 
     # security_conn_reuse.parquet bucket labels → the dashboard conn_requests
     # histogram's label space. Bucket EDGES line up exactly (1 / 2–5 / 6–20 /

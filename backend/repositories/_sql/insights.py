@@ -220,24 +220,30 @@ NEW_CITY_TRAFFIC = """
 
 # ── 9. User-Agent Monoculture ─────────────────────────────────────────────────
 
-UA_MONOCULTURE = """
+
+def _build_monoculture_sql(col: str, share_floor: str, where_clause: str = "") -> str:
+    where_part = f" WHERE {where_clause}" if where_clause else ""
+    return f"""
         WITH totals AS (
             SELECT
                 COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
                 COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
-            FROM {table_name}
+            FROM {{table_name}}
         ),
         grp AS (
-            SELECT "ua",
+            SELECT "{col}",
                 COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
                 COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-            FROM {table_name} GROUP BY "ua"
+            FROM {{table_name}}{where_part} GROUP BY "{col}"
         )
-        SELECT g."ua", g.w_cnt, g.b_cnt, t.b_total, t.w_total
+        SELECT g."{col}", g.w_cnt, g.b_cnt, t.b_total, t.w_total
         FROM grp g, totals t
-        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.25 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
+        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= {share_floor} AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
         ORDER BY g.w_cnt DESC LIMIT 10
     """
+
+
+UA_MONOCULTURE = _build_monoculture_sql("ua", "0.25")
 
 # ── 10. New Probe URLs ────────────────────────────────────────────────────────
 # Uses NEW_PROBE_REGEX (above). f-string-baked into the template at module
@@ -293,24 +299,7 @@ PROXY_SURGE = """
 
 # ── 13. ASN Concentration ─────────────────────────────────────────────────────
 
-ASN_CONCENTRATION = """
-        WITH totals AS (
-            SELECT
-                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
-                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
-            FROM {table_name}
-        ),
-        grp AS (
-            SELECT "asn",
-                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-            FROM {table_name} WHERE "asn" IS NOT NULL GROUP BY "asn"
-        )
-        SELECT g."asn", g.w_cnt, g.b_cnt, t.b_total, t.w_total
-        FROM grp g, totals t
-        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
-        ORDER BY g.w_cnt DESC LIMIT 10
-    """
+ASN_CONCENTRATION = _build_monoculture_sql("asn", "0.20", '"asn" IS NOT NULL')
 
 # ── 14. ASN/Metro Performance Regressions ─────────────────────────────────────
 
@@ -740,6 +729,7 @@ _BOT_UA_TOKENS = [
 ]
 REPEATED_BOT_UA_REGEX = "|".join(re.escape(t) for t in _BOT_UA_TOKENS)
 
+
 # Timestamps are 1-SECOND granularity (verified: 0/1105 rows carry a sub-second
 # component), so we work in integer seconds. The CV is Sheppard-corrected
 # (rounding to whole seconds adds ≈ 1/12 s² of variance) and gated only above a
@@ -747,101 +737,54 @@ REPEATED_BOT_UA_REGEX = "|".join(re.escape(t) for t in _BOT_UA_TOKENS)
 # the verdict. ``MODE()`` MUST be aliased (bare ``mode`` is reserved). med/q1/q3
 # are computed for the deferred Bowley confirmation term (plan §2) but not yet
 # surfaced. Exactly ONE ``?`` (the window start) — keep {bot_ua_regex} ?-free.
-REPEATED_PATTERNS = """
+def _build_repeated_patterns_sql(
+    *,
+    key_col: str,
+    key_select: str,
+    key_where: str,
+    div_select: str,
+    div_col: str,
+    div_alias: str,
+) -> str:
+    return f"""
     WITH kept AS (
-        SELECT "ip" AS ip, epoch("timestamp")::BIGINT AS sec, {ua_col} AS ua
-        FROM {table_name}
+        SELECT {key_select} AS {key_col}, epoch("timestamp")::BIGINT AS sec, {div_select} AS {div_col}
+        FROM {{table_name}}
         WHERE "timestamp" >= CAST(? AS TIMESTAMPTZ)
-          AND "ip" IS NOT NULL AND "ip" <> ''
-          AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
-    ),
-    meta AS (  -- pre-filter candidates on event count and rps gate before window-function sort
-        SELECT ip, COUNT(DISTINCT ua) AS distinct_ua, COUNT(*) AS n_events,
-               (MAX(sec) - MIN(sec)) AS span_s
-        FROM kept GROUP BY ip
-        HAVING COUNT(*) >= 13
-           AND (COUNT(*) * 1.0 / NULLIF(MAX(sec) - MIN(sec), 0)) < 2.0
-    ),
-    secs AS (  -- distinct active seconds (collapses same-second parallel bursts)
-        SELECT k.ip, k.sec FROM kept k JOIN meta d USING(ip) GROUP BY k.ip, k.sec
-    ),
-    gaps AS (
-        SELECT ip, sec - LAG(sec) OVER (PARTITION BY ip ORDER BY sec) AS gap FROM secs
-    ),
-    g AS (SELECT ip, gap FROM gaps WHERE gap IS NOT NULL),
-    agg AS (
-        SELECT ip, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
-               STDDEV_SAMP(gap) AS sd_gap, MODE(gap) AS mode_gap
-        FROM g GROUP BY ip          -- NOTE: alias MODE() as mode_gap; bare `mode` is reserved
-        HAVING COUNT(*) >= 12
-    ),
-    modal AS (
-        SELECT g.ip, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
-        FROM g JOIN agg a USING(ip) GROUP BY g.ip
-    )
-    SELECT a.ip, a.n_gaps, d.n_events,
-           ROUND(a.mean_gap, 2)  AS avg_interval,
-           ROUND(a.sd_gap, 2)    AS stddev_interval,
-           ROUND(sqrt(GREATEST(a.var_gap - 1.0/12.0, 0)) / NULLIF(a.mean_gap, 0), 3) AS cv_corr,
-           ROUND(m.modal_frac, 3) AS modal_frac,
-           d.distinct_ua, d.span_s, a.mode_gap
-    FROM agg a JOIN modal m USING(ip) JOIN meta d USING(ip)
-    WHERE a.n_gaps >= 12
-      AND (d.n_events * 1.0 / NULLIF(d.span_s, 0)) < 2.0          -- rps gate (no UA hard-gate, D4)
-      AND (
-            (a.mean_gap >= 5  AND sqrt(GREATEST(a.var_gap - 1.0/12.0,0))/NULLIF(a.mean_gap,0) < 0.3
-                              AND m.modal_frac >= 0.6)               -- slow path: CV + modal
-         OR (a.mean_gap >= 1  AND a.mean_gap < 5 AND m.modal_frac >= 0.85)   -- fast path: modal only
-          )
-    ORDER BY m.modal_frac DESC, a.n_gaps DESC
-    LIMIT 15
-"""
-
-# ── 30b. Scripted Traffic Patterns by TLS Fingerprint (repeated_patterns_fp) ──
-# Complementary variant of REPEATED_PATTERNS keyed on the TLS fingerprint
-# (JA3/JA4) instead of client IP. Catches IP-rotating scripts that keep the
-# same TLS stack. Diversity signal flips: distinct IPs per fingerprint (the IP
-# variant counts distinct UAs per IP). Same statistical algorithm, gates, and
-# scoring. Exactly ONE ``?`` (the window start).
-REPEATED_PATTERNS_FP = """
-    WITH kept AS (
-        SELECT COALESCE("{fp_col}", '') AS entity, epoch("timestamp")::BIGINT AS sec, "ip" AS ip
-        FROM {table_name}
-        WHERE "timestamp" >= CAST(? AS TIMESTAMPTZ)
-          AND "{fp_col}" IS NOT NULL AND "{fp_col}" != ''
-          AND ({ua_col} IS NULL OR NOT regexp_matches({ua_col}, '{bot_ua_regex}', 'i'))
+          AND {key_where}
+          AND ({{ua_col}} IS NULL OR NOT regexp_matches({{ua_col}}, '{{bot_ua_regex}}', 'i'))
     ),
     meta AS (
-        SELECT entity, COUNT(DISTINCT ip) AS distinct_ip, COUNT(*) AS n_events,
+        SELECT {key_col}, COUNT(DISTINCT {div_col}) AS {div_alias}, COUNT(*) AS n_events,
                (MAX(sec) - MIN(sec)) AS span_s
-        FROM kept GROUP BY entity
+        FROM kept GROUP BY {key_col}
         HAVING COUNT(*) >= 13
            AND (COUNT(*) * 1.0 / NULLIF(MAX(sec) - MIN(sec), 0)) < 2.0
     ),
     secs AS (
-        SELECT k.entity, k.sec FROM kept k JOIN meta d USING(entity) GROUP BY k.entity, k.sec
+        SELECT k.{key_col}, k.sec FROM kept k JOIN meta d USING({key_col}) GROUP BY k.{key_col}, k.sec
     ),
     gaps AS (
-        SELECT entity, sec - LAG(sec) OVER (PARTITION BY entity ORDER BY sec) AS gap FROM secs
+        SELECT {key_col}, sec - LAG(sec) OVER (PARTITION BY {key_col} ORDER BY sec) AS gap FROM secs
     ),
-    g AS (SELECT entity, gap FROM gaps WHERE gap IS NOT NULL),
+    g AS (SELECT {key_col}, gap FROM gaps WHERE gap IS NOT NULL),
     agg AS (
-        SELECT entity, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
+        SELECT {key_col}, COUNT(*) AS n_gaps, AVG(gap) AS mean_gap, VAR_SAMP(gap) AS var_gap,
                STDDEV_SAMP(gap) AS sd_gap, MODE(gap) AS mode_gap
-        FROM g GROUP BY entity
+        FROM g GROUP BY {key_col}
         HAVING COUNT(*) >= 12
     ),
     modal AS (
-        SELECT g.entity, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
-        FROM g JOIN agg a USING(entity) GROUP BY g.entity
+        SELECT g.{key_col}, AVG(CASE WHEN abs(g.gap - a.mode_gap) <= 1 THEN 1.0 ELSE 0.0 END) AS modal_frac
+        FROM g JOIN agg a USING({key_col}) GROUP BY g.{key_col}
     )
-    SELECT a.entity, a.n_gaps, d.n_events,
+    SELECT a.{key_col}, a.n_gaps, d.n_events,
            ROUND(a.mean_gap, 2)  AS avg_interval,
            ROUND(a.sd_gap, 2)    AS stddev_interval,
            ROUND(sqrt(GREATEST(a.var_gap - 1.0/12.0, 0)) / NULLIF(a.mean_gap, 0), 3) AS cv_corr,
            ROUND(m.modal_frac, 3) AS modal_frac,
-           d.distinct_ip, d.span_s, a.mode_gap
-    FROM agg a JOIN modal m USING(entity) JOIN meta d USING(entity)
+           d.{div_alias}, d.span_s, a.mode_gap
+    FROM agg a JOIN modal m USING({key_col}) JOIN meta d USING({key_col})
     WHERE a.n_gaps >= 12
       AND (d.n_events * 1.0 / NULLIF(d.span_s, 0)) < 2.0
       AND (
@@ -852,6 +795,31 @@ REPEATED_PATTERNS_FP = """
     ORDER BY m.modal_frac DESC, a.n_gaps DESC
     LIMIT 15
 """
+
+
+REPEATED_PATTERNS = _build_repeated_patterns_sql(
+    key_col="ip",
+    key_select='"ip"',
+    key_where='"ip" IS NOT NULL AND "ip" <> \'\'',
+    div_select="{ua_col}",
+    div_col="ua",
+    div_alias="distinct_ua",
+)
+
+# ── 30b. Scripted Traffic Patterns by TLS Fingerprint (repeated_patterns_fp) ──
+# Complementary variant of REPEATED_PATTERNS keyed on the TLS fingerprint
+# (JA3/JA4) instead of client IP. Catches IP-rotating scripts that keep the
+# same TLS stack. Diversity signal flips: distinct IPs per fingerprint (the IP
+# variant counts distinct UAs per IP). Same statistical algorithm, gates, and
+# scoring. Exactly ONE ``?`` (the window start).
+REPEATED_PATTERNS_FP = _build_repeated_patterns_sql(
+    key_col="entity",
+    key_select="COALESCE(\"{fp_col}\", '')",
+    key_where='"{fp_col}" IS NOT NULL AND "{fp_col}" != \'\'',
+    div_select='"ip"',
+    div_col="ip",
+    div_alias="distinct_ip",
+)
 
 
 # ── 31. Low-and-Slow Scans (low_and_slow) ─────────────────────────────────────
@@ -1051,24 +1019,11 @@ CONTENT_DISCOVERY = """
 # window traffic vs baseline — scraper/embed/hotlink campaigns or a spoofed
 # referer flood. Mirrors UA_MONOCULTURE with a 20% share floor. Row:
 # [referer, w_cnt, b_cnt, b_total, w_total]. 4 ``?`` (all window start).
-REFERER_MONOCULTURE = """
-        WITH totals AS (
-            SELECT
-                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
-                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
-            FROM {table_name}
-        ),
-        grp AS (
-            SELECT "referer",
-                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-            FROM {table_name} WHERE "referer" IS NOT NULL AND "referer" != '' GROUP BY "referer"
-        )
-        SELECT g."referer", g.w_cnt, g.b_cnt, t.b_total, t.w_total
-        FROM grp g, totals t
-        WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
-        ORDER BY g.w_cnt DESC LIMIT 10
-    """
+REFERER_MONOCULTURE = _build_monoculture_sql(
+    "referer",
+    "0.20",
+    '"referer" IS NOT NULL AND "referer" != \'\'',
+)
 
 # ── 36. HTTP Method Drift (method_drift) ──────────────────────────────────────
 # Track B: a write/verb method (anything but GET/HEAD/OPTIONS) surging to an

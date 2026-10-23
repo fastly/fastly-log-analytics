@@ -36,7 +36,8 @@ function renderWithQueryClient(ui: React.ReactElement) {
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
 // Mock custom hooks
-vi.mock('@/hooks/useBootstrap', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useBootstrap: vi.fn(),
 }))
 

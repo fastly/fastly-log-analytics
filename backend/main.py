@@ -1417,7 +1417,9 @@ def health_check(
                     # stale_minutes) and re-check against that. Only reached
                     # once the naive check already looks stale, so the
                     # common healthy path pays zero extra query cost.
-                    effective_minutes = metadata_db.adaptive_stale_minutes(con, default_minutes=stale_minutes)
+                    effective_minutes = metadata_db.adaptive_stale_minutes(
+                        con, default_minutes=stale_minutes, service_id=sid if has_service_id else None
+                    )
                     effective_cutoff = cutoff
                     if effective_minutes > stale_minutes:
                         effective_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=effective_minutes))

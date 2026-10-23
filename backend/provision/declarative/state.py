@@ -296,50 +296,12 @@ class FeatureState:
 
         # Auto-inject mandatory Scoring custom fields
         if scoring_enabled:
-            mandatory_score_fields = [
-                ("edge_score", "Edge Score", "req.http.x-edge-score:score"),
-                ("edge_score_l1", "Edge Score (Layer 1)", "req.http.x-edge-score:l1"),
-                ("edge_score_l2", "Edge Score (Layer 2)", "req.http.x-edge-score:l2"),
-                ("edge_cookie_compliance", "Cookie Compliance", "req.http.x-edge-score:compliance"),
-                ("edge_score_reason", "Score Reason", "req.http.x-edge-score:reason"),
-                ("edge_sid", "Session ID", "req.http.x-edge-score:sid"),
-                ("edge_score_rtt_us", "Scorer Round-Trip (µs)", "req.http.x-edge-score:rtt"),
-                ("edge_score_exec_us", "Scorer Exec (µs)", "req.http.x-edge-score:exec"),
-                ("edge_matrix_version", "Matrix Version", "req.http.x-edge-score:matrix"),
-            ]
+            from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
 
             existing_names = {f.get("name") for f in injected_fields}
-            for field_name, label, vcl_expr in mandatory_score_fields:
-                if field_name not in existing_names:
-                    injected_fields.append(
-                        {
-                            "name": field_name,
-                            "label": label,
-                            "description": "Auto-injected by scoring feature.",
-                            "vcl_log_expression": vcl_expr,
-                            "collection_stage": "deliver",
-                            "duckdb_type": "VARCHAR"
-                            if (
-                                "compliance" in field_name
-                                or "reason" in field_name
-                                or "version" in field_name
-                                or "sid" in field_name
-                            )
-                            else "INTEGER",
-                            "value_type": "string"
-                            if (
-                                "compliance" in field_name
-                                or "reason" in field_name
-                                or "version" in field_name
-                                or "sid" in field_name
-                            )
-                            else "numeric",
-                            "bytes_estimate": 96
-                            if "sid" in field_name
-                            else (60 if "reason" in field_name or "version" in field_name else 10),
-                            "enabled": True,
-                        }
-                    )
+            for field in _SCORING_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
 
         # Auto-inject mandatory CMCD custom fields
         if cmcd_enabled:

@@ -35,18 +35,6 @@ export const metadata: Metadata = {
 // real per-request work to do.
 export const dynamic = "force-dynamic";
 
-function generateScriptHash(serviceId: string | null): string {
-  if (!serviceId) return "";
-  const input = `${serviceId}-rum-v1`;
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    const char = input.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16).substring(0, 8);
-}
-
 export default async function RootLayout({
   children,
 }: Readonly<{

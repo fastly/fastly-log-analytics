@@ -89,8 +89,10 @@ import re
 from fastapi import Response
 
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
+from backend.utils.cache_registry import CacheRegistry
 
 _FARO_BUNDLE_CACHE: dict[str, bytes] = {}
+CacheRegistry.register("rum._FARO_BUNDLE_CACHE", _FARO_BUNDLE_CACHE)
 
 _UA_RE = re.compile(r"(Chrome|Firefox|Safari|Edge|OPR)")
 _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)")

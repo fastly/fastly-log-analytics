@@ -48,9 +48,15 @@ MATRIX_PATH="$SCORER_DIR/matrix.json"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --service-id) SERVICE_ID="$2"; shift 2 ;;
-    --token)      TOKEN="$2"; shift 2 ;;
-    --matrix)     MATRIX_PATH="$2"; shift 2 ;;
+    --service-id)
+      [ $# -ge 2 ] || { echo "error: --service-id requires an argument" >&2; exit 2; }
+      SERVICE_ID="$2"; shift 2 ;;
+    --token)
+      [ $# -ge 2 ] || { echo "error: --token requires an argument" >&2; exit 2; }
+      TOKEN="$2"; shift 2 ;;
+    --matrix)
+      [ $# -ge 2 ] || { echo "error: --matrix requires an argument" >&2; exit 2; }
+      MATRIX_PATH="$2"; shift 2 ;;
     -h|--help)
       grep -E '^# ' "$0" | sed 's/^# //'
       exit 0

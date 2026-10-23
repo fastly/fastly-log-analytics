@@ -370,23 +370,28 @@ describe('useBootstrap — recovery after a deploy', () => {
   // The poll must stop once healthy, or every client permanently hammers
   // /api/bootstrap — which is the fan-out the storm guard exists to prevent.
   it('does not keep polling once the request succeeds', async () => {
-    let calls = 0
-    server.use(
-      http.get(`${API_BASE}/api/bootstrap`, () => {
-        calls += 1
-        return HttpResponse.json({
-          services: [{ service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' }],
-          active_service_id: 'svc-1',
-        })
-      }),
-    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let calls = 0
+      server.use(
+        http.get(`${API_BASE}/api/bootstrap`, () => {
+          calls += 1
+          return HttpResponse.json({
+            services: [{ service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' }],
+            active_service_id: 'svc-1',
+          })
+        }),
+      )
 
-    const { useBootstrap } = await import('@/hooks/useBootstrap')
-    const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      const { useBootstrap } = await import('@/hooks/useBootstrap')
+      const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
-    const afterFirstSuccess = calls
-    await new Promise(r => setTimeout(r, 8000))
-    expect(calls).toBe(afterFirstSuccess)
+      const afterFirstSuccess = calls
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(calls).toBe(afterFirstSuccess)
+    } finally {
+      vi.useRealTimers()
+    }
   }, 30000)
 })

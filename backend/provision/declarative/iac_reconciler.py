@@ -33,6 +33,7 @@ from backend.provision.session_scoring_orchestrator import (
     _deploy_wasm_package,
     _remove_scoring_custom_fields,
     _write_matrix_to_kv,
+    scorer_vcl_fingerprint,
 )
 from backend.provision.session_scoring_setup import (
     MATRIX_STORE_NAME_TEMPLATE,
@@ -324,8 +325,15 @@ def reconcile_infrastructure(
                 status_cb=status_cb,
             )
 
+            # Ensure the readiness probe uses the newly provisioned/resolved domain
+            resolved_domain = scoring_meta.get("scoring_domain") or (
+                desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
+            )
+            if resolved_domain:
+                desired.compute_scorer.domains = [resolved_domain]
+
             # The scoring block to persist, with the populated IDs & metadata
-            new_scoring = {
+            new_scoring: dict[str, Any] = {
                 "enabled": True,
                 "scoring_service_id": scoring_service_id,
                 "scoring_service_name": scoring_meta.get("scoring_service_name", ""),
@@ -337,10 +345,14 @@ def reconcile_infrastructure(
                 "aes_key_hex": scoring_meta.get("aes_key_hex", "") or cfg.get("scoring", {}).get("aes_key_hex", ""),
                 "deployed_package_sha": package_meta["sha"],
                 "deployed_package_files_hash": package_meta["files_hash"],
+                "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
             }
 
             def _set_scoring(disk_cfg: dict) -> None:
-                disk_cfg["scoring"] = copy.deepcopy(new_scoring)
+                existing_scoring = disk_cfg.get("scoring")
+                base_scoring = copy.deepcopy(existing_scoring) if isinstance(existing_scoring, dict) else {}
+                base_scoring.update(copy.deepcopy(new_scoring))
+                disk_cfg["scoring"] = base_scoring
 
             apply_phase3 = _set_scoring
 

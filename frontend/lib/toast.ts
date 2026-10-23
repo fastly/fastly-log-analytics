@@ -50,23 +50,12 @@ function ensureContainer(): HTMLDivElement | null {
   return el
 }
 
-export function showToast(message: string, kind: ToastKind = 'info', opts: ToastOptions = {}): void {
-  if (typeof document === 'undefined') return
-  // Dedupe rapid repeats — the API middleware may fire on multiple parallel
-  // 403s for the same action; a single toast per second is enough.
-  const now = Date.now()
-  const last = recentMessages.get(message) || 0
-  if (now - last < RECENT_DEDUP_MS) return
-  recentMessages.set(message, now)
-  // Trim stale dedup entries opportunistically.
-  if (recentMessages.size > 32) {
-    for (const [k, t] of recentMessages) {
-      if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
-    }
-  }
-
+function createToastNode(
+  kind: ToastKind,
+  extraCss: string[] = [],
+): { root: HTMLDivElement; node: HTMLDivElement; dismiss: () => boolean } | null {
   const root = ensureContainer()
-  if (!root) return
+  if (!root) return null
   const palette = PALETTE[kind]
   const node = document.createElement('div')
   node.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status')
@@ -83,16 +72,13 @@ export function showToast(message: string, kind: ToastKind = 'info', opts: Toast
     'transition:opacity .18s ease,transform .18s ease',
     'opacity:0',
     'transform:translateY(-4px)',
+    ...extraCss,
   ].join(';')
-  node.textContent = message
-  root.appendChild(node)
-  // Trigger transition.
-  requestAnimationFrame(() => {
-    node.style.opacity = '1'
-    node.style.transform = 'translateY(0)'
-  })
-  const duration = opts.durationMs ?? (kind === 'error' ? 5500 : 3500)
-  const remove = () => {
+
+  let dismissed = false
+  const dismiss = (): boolean => {
+    if (dismissed) return false
+    dismissed = true
     node.style.opacity = '0'
     node.style.transform = 'translateY(-4px)'
     setTimeout(() => {
@@ -102,9 +88,39 @@ export function showToast(message: string, kind: ToastKind = 'info', opts: Toast
         stackContainer = null
       }
     }, 200)
+    return true
   }
-  setTimeout(remove, duration)
-  node.addEventListener('click', remove)
+
+  return { root, node, dismiss }
+}
+
+export function showToast(message: string, kind: ToastKind = 'info', opts: ToastOptions = {}): void {
+  if (typeof document === 'undefined') return
+  // Dedupe rapid repeats — the API middleware may fire on multiple parallel
+  // 403s for the same action; a single toast per second is enough.
+  const now = Date.now()
+  const last = recentMessages.get(message) || 0
+  if (now - last < RECENT_DEDUP_MS) return
+  recentMessages.set(message, now)
+  // Trim stale dedup entries opportunistically.
+  if (recentMessages.size > 32) {
+    for (const [k, t] of recentMessages) {
+      if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
+    }
+  }
+
+  const created = createToastNode(kind)
+  if (!created) return
+  const { root, node, dismiss } = created
+  node.textContent = message
+  root.appendChild(node)
+  requestAnimationFrame(() => {
+    node.style.opacity = '1'
+    node.style.transform = 'translateY(0)'
+  })
+  const duration = opts.durationMs ?? (kind === 'error' ? 5500 : 3500)
+  setTimeout(dismiss, duration)
+  node.addEventListener('click', dismiss)
 }
 
 /** Convenience shorthand for the read-only analyst case. */
@@ -144,29 +160,11 @@ interface ToastActionOptions {
  */
 export function showToastWithAction(message: string, opts: ToastActionOptions): void {
   if (typeof document === 'undefined') return
-  const root = ensureContainer()
-  if (!root) return
   const kind: ToastKind = opts.kind ?? 'info'
+  const created = createToastNode(kind, ['display:flex', 'align-items:center', 'gap:12px'])
+  if (!created) return
+  const { root, node, dismiss } = created
   const palette = PALETTE[kind]
-  const node = document.createElement('div')
-  node.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status')
-  node.setAttribute('aria-live', kind === 'error' || kind === 'warn' ? 'assertive' : 'polite')
-  node.style.cssText = [
-    `background:${palette.bg}`,
-    `color:${palette.fg}`,
-    `border:1px solid ${palette.border}`,
-    'padding:10px 14px',
-    'border-radius:8px',
-    'font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
-    'box-shadow:0 8px 24px rgba(0,0,0,.18)',
-    'pointer-events:auto',
-    'transition:opacity .18s ease,transform .18s ease',
-    'opacity:0',
-    'transform:translateY(-4px)',
-    'display:flex',
-    'align-items:center',
-    'gap:12px',
-  ].join(';')
 
   const label = document.createElement('span')
   label.textContent = message
@@ -195,29 +193,10 @@ export function showToastWithAction(message: string, opts: ToastActionOptions): 
     node.style.transform = 'translateY(0)'
   })
 
-  let dismissed = false
-  const dismiss = () => {
-    if (dismissed) return
-    dismissed = true
-    node.style.opacity = '0'
-    node.style.transform = 'translateY(-4px)'
-    setTimeout(() => {
-      if (node.parentNode) node.parentNode.removeChild(node)
-      if (root.childElementCount === 0 && stackContainer) {
-        stackContainer.remove()
-        stackContainer = null
-      }
-    }, 200)
-  }
-
   button.addEventListener('click', (e) => {
     e.stopPropagation()
-    if (dismissed) return
-    try {
-      opts.onAction()
-    } finally {
-      dismiss()
-    }
+    if (!dismiss()) return
+    opts.onAction()
   })
 
   const duration = opts.durationMs ?? 5500

@@ -447,7 +447,7 @@ export function useWizardState(
     window.location.reload();
   };
 
-  const STEPS = getStepsForMode(mode, config);
+  const STEPS = getStepsForMode(mode, config, step);
 
   useWizardEffects({
     open,

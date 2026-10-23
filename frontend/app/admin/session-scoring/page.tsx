@@ -105,6 +105,32 @@ function SessionScoringPageContent() {
   const baseAnalyticsOpts = scoringAnalyticsCompositeOptions(effectiveServiceId, sinceHours)
   const baseConfigOpts = scoringConfigCompositeOptions(effectiveServiceId)
 
+  const analyticsSeededAt = React.useRef(0)
+  const configSeededAt = React.useRef(0)
+
+  const seedAnalyticsSubQueries = React.useCallback(
+    (d: NonNullable<typeof analyticsComposite.data>) => {
+      if (d.health) qc.setQueryData(['scoring-health', effectiveServiceId, sinceHours], d.health)
+      if (d.top_flagged) qc.setQueryData(['scoring-top-flagged', effectiveServiceId, sinceHours], d.top_flagged)
+      if (d.score_distribution) qc.setQueryData(['scoring-score-dist', effectiveServiceId, sinceHours], d.score_distribution)
+      if (d.latency_timeseries) qc.setQueryData(['scoring-latency-timeseries', effectiveServiceId, sinceHours], d.latency_timeseries)
+      if (d.compliance_breakdown) qc.setQueryData(['scoring-compliance', effectiveServiceId, sinceHours], d.compliance_breakdown)
+      if (d.evaluation_per_reason) qc.setQueryData(['scoring-evaluation-per-reason', effectiveServiceId], d.evaluation_per_reason)
+      if (d.evaluation) qc.setQueryData(['scoring-evaluation', effectiveServiceId], d.evaluation)
+    },
+    [qc, effectiveServiceId, sinceHours],
+  )
+
+  const seedConfigSubQueries = React.useCallback(
+    (d: NonNullable<typeof configComposite.data>) => {
+      if (d.status) qc.setQueryData(['scoring-status', effectiveServiceId], d.status)
+      if (d.threshold) qc.setQueryData(['scoring-threshold-committed', effectiveServiceId], d.threshold)
+      if (d.exclude_regex) qc.setQueryData(['scoring-exclude-regex', effectiveServiceId], d.exclude_regex)
+      if (d.enforce_status_code) qc.setQueryData(['scoring-enforce-status-code', effectiveServiceId], d.enforce_status_code)
+    },
+    [qc, effectiveServiceId],
+  )
+
   // ── Composite queries: collapse 10+ individual requests into 2 ──
   // Seed individual component cache keys synchronously inside queryFn BEFORE
   // returning so that when isLoading flips false and child cards mount, their
@@ -115,13 +141,8 @@ function SessionScoringPageContent() {
     queryFn: async (ctx) => {
       const d = await baseAnalyticsOpts.queryFn!(ctx)
       if (d) {
-        if (d.health) qc.setQueryData(['scoring-health', effectiveServiceId, sinceHours], d.health)
-        if (d.top_flagged) qc.setQueryData(['scoring-top-flagged', effectiveServiceId, sinceHours], d.top_flagged)
-        if (d.score_distribution) qc.setQueryData(['scoring-score-dist', effectiveServiceId, sinceHours], d.score_distribution)
-        if (d.latency_timeseries) qc.setQueryData(['scoring-latency-timeseries', effectiveServiceId, sinceHours], d.latency_timeseries)
-        if (d.compliance_breakdown) qc.setQueryData(['scoring-compliance', effectiveServiceId, sinceHours], d.compliance_breakdown)
-        if (d.evaluation_per_reason) qc.setQueryData(['scoring-evaluation-per-reason', effectiveServiceId], d.evaluation_per_reason)
-        if (d.evaluation) qc.setQueryData(['scoring-evaluation', effectiveServiceId], d.evaluation)
+        seedAnalyticsSubQueries(d)
+        analyticsSeededAt.current = Date.now() + 1
       }
       return d
     },
@@ -133,10 +154,8 @@ function SessionScoringPageContent() {
     queryFn: async (ctx) => {
       const d = await baseConfigOpts.queryFn!(ctx)
       if (d) {
-        if (d.status) qc.setQueryData(['scoring-status', effectiveServiceId], d.status)
-        if (d.threshold) qc.setQueryData(['scoring-threshold-committed', effectiveServiceId], d.threshold)
-        if (d.exclude_regex) qc.setQueryData(['scoring-exclude-regex', effectiveServiceId], d.exclude_regex)
-        if (d.enforce_status_code) qc.setQueryData(['scoring-enforce-status-code', effectiveServiceId], d.enforce_status_code)
+        seedConfigSubQueries(d)
+        configSeededAt.current = Date.now() + 1
       }
       return d
     },
@@ -145,33 +164,19 @@ function SessionScoringPageContent() {
 
   // Also keep effect-based seeding in case the composite was pre-warmed in cache
   // by AdminPrefetchLinks before mount.
-  const analyticsSeededAt = React.useRef(0)
-  const configSeededAt = React.useRef(0)
-
   React.useEffect(() => {
     if (analyticsComposite.data && analyticsComposite.dataUpdatedAt > analyticsSeededAt.current) {
       analyticsSeededAt.current = analyticsComposite.dataUpdatedAt
-      const d = analyticsComposite.data
-      if (d.health) qc.setQueryData(['scoring-health', effectiveServiceId, sinceHours], d.health)
-      if (d.top_flagged) qc.setQueryData(['scoring-top-flagged', effectiveServiceId, sinceHours], d.top_flagged)
-      if (d.score_distribution) qc.setQueryData(['scoring-score-dist', effectiveServiceId, sinceHours], d.score_distribution)
-      if (d.latency_timeseries) qc.setQueryData(['scoring-latency-timeseries', effectiveServiceId, sinceHours], d.latency_timeseries)
-      if (d.compliance_breakdown) qc.setQueryData(['scoring-compliance', effectiveServiceId, sinceHours], d.compliance_breakdown)
-      if (d.evaluation_per_reason) qc.setQueryData(['scoring-evaluation-per-reason', effectiveServiceId], d.evaluation_per_reason)
-      if (d.evaluation) qc.setQueryData(['scoring-evaluation', effectiveServiceId], d.evaluation)
+      seedAnalyticsSubQueries(analyticsComposite.data)
     }
-  }, [analyticsComposite.data, analyticsComposite.dataUpdatedAt, effectiveServiceId, sinceHours, qc])
+  }, [analyticsComposite.data, analyticsComposite.dataUpdatedAt, seedAnalyticsSubQueries])
 
   React.useEffect(() => {
     if (configComposite.data && configComposite.dataUpdatedAt > configSeededAt.current) {
       configSeededAt.current = configComposite.dataUpdatedAt
-      const d = configComposite.data
-      if (d.status) qc.setQueryData(['scoring-status', effectiveServiceId], d.status)
-      if (d.threshold) qc.setQueryData(['scoring-threshold-committed', effectiveServiceId], d.threshold)
-      if (d.exclude_regex) qc.setQueryData(['scoring-exclude-regex', effectiveServiceId], d.exclude_regex)
-      if (d.enforce_status_code) qc.setQueryData(['scoring-enforce-status-code', effectiveServiceId], d.enforce_status_code)
+      seedConfigSubQueries(configComposite.data)
     }
-  }, [configComposite.data, configComposite.dataUpdatedAt, effectiveServiceId, qc])
+  }, [configComposite.data, configComposite.dataUpdatedAt, seedConfigSubQueries])
 
   const statusLoading = !effectiveServiceId ? servicesLoading : configComposite.isLoading
   const overviewLoading = !effectiveServiceId ? servicesLoading : analyticsComposite.isLoading

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import filter_spec_attr
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.telemetry import get_queries, get_tracked_calls
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from backend.repositories._base import QueryRunner
 
 _CLIENT_TOKEN_COUNTER = itertools.count(1)
+_MEMO_COUNTER = itertools.count(1)
 
 
 def client_cache_token(client: Any) -> int:
@@ -167,6 +169,7 @@ class ResponseMemo:
     def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
         self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
         self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+        CacheRegistry.register(f"response_memo.telemetry.{next(_MEMO_COUNTER)}", self._telemetry_cache)
         self.prewarmer = prewarmer
 
     def get(self, key: str) -> dict | None:

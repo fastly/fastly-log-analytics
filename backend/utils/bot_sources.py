@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import bisect
 import functools
 import hashlib
 import ipaddress
@@ -18,6 +17,7 @@ from typing import Any
 
 from backend.utils.date_utils import iso_z_now
 from backend.utils.http import http_get_text
+from backend.utils.ip_ranges import collapse_network_objects, ip_int_in_intervals, parse_ip_int_version
 
 logger = logging.getLogger(__name__)
 
@@ -687,19 +687,7 @@ def _compile_feed_intervals(
     feeds: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]],
 ) -> dict[str, tuple[list[int], list[int], list[int], list[int]]]:
     """Collapse each feed's networks into sorted disjoint integer interval arrays for O(log M) bisect matching."""
-    intervals: dict[str, tuple[list[int], list[int], list[int], list[int]]] = {}
-    for feed_id, net_objs in feeds.items():
-        v4_nets = [n for n in net_objs if isinstance(n, ipaddress.IPv4Network)]
-        v6_nets = [n for n in net_objs if isinstance(n, ipaddress.IPv6Network)]
-        v4_collapsed = list(ipaddress.collapse_addresses(v4_nets)) if v4_nets else []
-        v6_collapsed = list(ipaddress.collapse_addresses(v6_nets)) if v6_nets else []
-        intervals[feed_id] = (
-            [int(n.network_address) for n in v4_collapsed],
-            [int(n.broadcast_address) for n in v4_collapsed],
-            [int(n.network_address) for n in v6_collapsed],
-            [int(n.broadcast_address) for n in v6_collapsed],
-        )
-    return intervals
+    return {feed_id: collapse_network_objects(net_objs) for feed_id, net_objs in feeds.items()}
 
 
 def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
@@ -790,18 +778,13 @@ def enrich_bot_metadata(df: Any) -> None:
                 return ip_feed_cache[ip_str]
             matched_feed: str | None = None
             try:
-                ip_obj = ipaddress.ip_address(ip_str)
-                ip_int = int(ip_obj)
-                is_v4 = ip_obj.version == 4
-                for feed_id, (v4_starts, v4_ends, v6_starts, v6_ends) in feed_intervals.items():
-                    starts = v4_starts if is_v4 else v6_starts
-                    ends = v4_ends if is_v4 else v6_ends
-                    if not starts:
-                        continue
-                    idx = bisect.bisect_right(starts, ip_int) - 1
-                    if idx >= 0 and ip_int <= ends[idx]:
-                        matched_feed = feed_id
-                        break
+                parsed = parse_ip_int_version(ip_str)
+                if parsed is not None:
+                    ip_int, version = parsed
+                    for feed_id, intervals in feed_intervals.items():
+                        if ip_int_in_intervals(ip_int, version, intervals):
+                            matched_feed = feed_id
+                            break
             except Exception:
                 logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
             ip_feed_cache[ip_str] = matched_feed

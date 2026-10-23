@@ -72,12 +72,12 @@ def test_invalid_token_falls_back_to_supplied_bounds(captured) -> None:
 
 
 def _ctx(source: dict, session: object | None, bounds: TimeBounds) -> RequestContext:
-    return RequestContext(
+    from tests.conftest import make_test_request_context
+
+    return make_test_request_context(
         service_id=SERVICE_ID,
         source=source,
-        _con_override=None,
-        telemetry=typing.cast(typing.Any, SimpleNamespace()),
-        analyst_session=session,
+        session=session,
         read_only=True,
         time_bounds=bounds,
     )

@@ -21,6 +21,43 @@ import { useMapResize } from '@/components/Map/useMapResize'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
 import { formatCount } from '@/lib/format'
+
+function buildPhysicsFeatures(data: ImpossibleDistanceData): GeoJSON.FeatureCollection {
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [data.client_lon, data.client_lat] },
+        properties: { type: 'client', title: 'Client' }
+      },
+      {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [data.pop_lon, data.pop_lat] },
+        properties: { type: 'pop', title: `POP: ${data.pop}` }
+      },
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [data.client_lon, data.client_lat],
+            [data.pop_lon, data.pop_lat]
+          ]
+        },
+        properties: { type: 'path' }
+      }
+    ]
+  }
+}
+
+function fitPhysicsBounds(map: maplibregl.Map, data: ImpossibleDistanceData): void {
+  const bounds = new maplibregl.LngLatBounds()
+  bounds.extend([data.client_lon, data.client_lat])
+  bounds.extend([data.pop_lon, data.pop_lat])
+  map.fitBounds(bounds, { padding: 50, maxZoom: 5, duration: 0 })
+}
+
 function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: boolean }) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
@@ -59,33 +96,9 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
 
         addCountryBaseLayer(map.current, { isDark })
 
-        const features: GeoJSON.Feature[] = [
-          {
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [data.client_lon, data.client_lat] },
-            properties: { type: 'client', title: 'Client' }
-          },
-          {
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [data.pop_lon, data.pop_lat] },
-            properties: { type: 'pop', title: `POP: ${data.pop}` }
-          },
-          {
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: [
-                [data.client_lon, data.client_lat],
-                [data.pop_lon, data.pop_lat]
-              ]
-            },
-            properties: { type: 'path' }
-          }
-        ]
-
         map.current.addSource('points', {
           type: 'geojson',
-          data: { type: 'FeatureCollection', features }
+          data: buildPhysicsFeatures(data)
         })
 
         map.current.addLayer({
@@ -119,10 +132,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
           }
         })
 
-        const bounds = new maplibregl.LngLatBounds()
-        bounds.extend([data.client_lon, data.client_lat])
-        bounds.extend([data.pop_lon, data.pop_lat])
-        map.current.fitBounds(bounds, { padding: 50, maxZoom: 5, duration: 0 })
+        fitPhysicsBounds(map.current, data)
       })
       } catch (e) {
         map.current = null
@@ -138,37 +148,8 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
 
         const source = map.current.getSource('points') as maplibregl.GeoJSONSource
         if (source) {
-          source.setData({
-            type: 'FeatureCollection',
-            features: [
-              {
-                type: 'Feature',
-                geometry: { type: 'Point', coordinates: [data.client_lon, data.client_lat] },
-                properties: { type: 'client', title: 'Client' }
-              },
-              {
-                type: 'Feature',
-                geometry: { type: 'Point', coordinates: [data.pop_lon, data.pop_lat] },
-                properties: { type: 'pop', title: `POP: ${data.pop}` }
-              },
-              {
-                type: 'Feature',
-                geometry: {
-                  type: 'LineString',
-                  coordinates: [
-                    [data.client_lon, data.client_lat],
-                    [data.pop_lon, data.pop_lat]
-                  ]
-                },
-                properties: { type: 'path' }
-              }
-            ]
-          })
-
-          const bounds = new maplibregl.LngLatBounds()
-          bounds.extend([data.client_lon, data.client_lat])
-          bounds.extend([data.pop_lon, data.pop_lat])
-          map.current.fitBounds(bounds, { padding: 50, maxZoom: 5, duration: 0 })
+          source.setData(buildPhysicsFeatures(data))
+          fitPhysicsBounds(map.current, data)
         }
       }
     }
@@ -182,10 +163,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
       if (map.current) {
         map.current.resize()
         if (data && map.current.isStyleLoaded()) {
-          const bounds = new maplibregl.LngLatBounds()
-          bounds.extend([data.client_lon, data.client_lat])
-          bounds.extend([data.pop_lon, data.pop_lat])
-          map.current.fitBounds(bounds, { padding: 50, maxZoom: 5, duration: 0 })
+          fitPhysicsBounds(map.current, data)
         }
       }
     }, 150)

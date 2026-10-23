@@ -24,11 +24,7 @@ from pydantic import BaseModel
 from backend.models._base import PassthroughModel
 
 
-class _QueryRow(PassthroughModel):
-    """Base for registry row payloads — passes undeclared keys through."""
-
-
-class QueryAttribution(_QueryRow):
+class QueryAttribution(PassthroughModel):
     """``attribution`` block from ``_attribution_payload``."""
 
     kind: str | None = None
@@ -43,7 +39,7 @@ class QueryAttribution(_QueryRow):
     pool_slot: str | None = None
 
 
-class ActiveQueryRow(_QueryRow):
+class ActiveQueryRow(PassthroughModel):
     """One in-flight query (``_row_for_active``). ``sql`` is only populated
     when the caller asked for ``full_sql``; ``started_at_utc`` is epoch
     seconds (``time.time()``)."""
@@ -61,7 +57,7 @@ class ActiveQueryRow(_QueryRow):
     cancelled_at: float | None = None
 
 
-class CompletedQueryRow(_QueryRow):
+class CompletedQueryRow(PassthroughModel):
     """One finished query (``_row_for_completed``); also the exact layout
     the persisted ``/slow-queries`` rows are re-shaped into."""
 

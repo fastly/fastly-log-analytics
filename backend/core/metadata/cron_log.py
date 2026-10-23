@@ -932,6 +932,7 @@ def adaptive_stale_minutes(
     con: Any,
     *,
     default_minutes: int,
+    service_id: str | None = None,
     min_samples: int = 10,
     percentile: float = 0.95,
     safety_multiplier: float = 2.0,
@@ -958,14 +959,29 @@ def adaptive_stale_minutes(
     never make the probe LESS reliable than the fixed check it widens.
     """
     try:
-        rows = con.execute(
-            # 'sync' (pre-v3 name) kept so pre-upgrade history still feeds the
-            # percentile until enough log_discovery samples accumulate.
-            "SELECT started_at FROM cron_runs "
-            "WHERE task IN ('sync', 'log_discovery') AND status = 'success' "
-            "AND (files_downloaded > 0 OR rows_ingested > 0) "
-            "ORDER BY started_at"
-        ).fetchall()
+        sid = service_id or getattr(con, "_service_id", None)
+        rows = None
+        if sid:
+            try:
+                rows = con.execute(
+                    # 'sync' (pre-v3 name) kept so pre-upgrade history still feeds the
+                    # percentile until enough log_discovery samples accumulate.
+                    "SELECT started_at FROM cron_runs "
+                    "WHERE (service_id = ? OR service_id IS NULL) "
+                    "AND task IN ('sync', 'log_discovery') AND status = 'success' "
+                    "AND (files_downloaded > 0 OR rows_ingested > 0) "
+                    "ORDER BY started_at",
+                    (sid,),
+                ).fetchall()
+            except Exception:
+                rows = None
+        if rows is None:
+            rows = con.execute(
+                "SELECT started_at FROM cron_runs "
+                "WHERE task IN ('sync', 'log_discovery') AND status = 'success' "
+                "AND (files_downloaded > 0 OR rows_ingested > 0) "
+                "ORDER BY started_at"
+            ).fetchall()
         timestamps = [t for t in (parse_iso_utc(r["started_at"]) for r in rows) if t is not None]
         if len(timestamps) < min_samples + 1:
             return default_minutes
@@ -1056,7 +1072,8 @@ def reap_stale_jobs(service_id: str) -> None:
 
     # Find all running jobs that have expired
     stale_jobs = con.execute(
-        "SELECT id, job_name FROM job_runs WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) < ?",
+        "SELECT id, job_name, heartbeat_at, lease_ttl_s FROM job_runs "
+        "WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) < ?",
         (service_id, now),
     ).fetchall()
 
@@ -1066,6 +1083,7 @@ def reap_stale_jobs(service_id: str) -> None:
     for row in stale_jobs:
         job_id = row["id"]
         job_name = row["job_name"]
+        exp_iso = iso_z(datetime.fromtimestamp(float(row["heartbeat_at"]) + int(row["lease_ttl_s"]), tz=UTC))
 
         con.execute(
             "UPDATE job_runs SET status = 'reaped', detail = 'reaped due to lease expiry' WHERE id = ?", (job_id,)
@@ -1076,9 +1094,8 @@ def reap_stale_jobs(service_id: str) -> None:
         con.execute(
             "UPDATE cron_runs SET status = 'error', error_message = 'Reaped due to lease expiry' "
             "WHERE service_id = ? AND task = ? AND status = 'running' "
-            "AND started_at <= (SELECT strftime('%Y-%m-%dT%H:%M:%SZ', heartbeat_at + lease_ttl_s, 'unixepoch') "
-            "                   FROM job_runs WHERE id = ?)",
-            (service_id, job_name, job_id),
+            "AND started_at <= ?",
+            (service_id, job_name, exp_iso),
         )
 
     con.commit()

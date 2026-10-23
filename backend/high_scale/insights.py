@@ -38,7 +38,7 @@ from backend.repositories.insights import definitions as _definitions  # noqa: F
 from backend.repositories.insights.registry import InsightDefinition, registry
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import parse_iso_utc, safe_iso
+from backend.utils.date_utils import parse_iso_utc
 
 _MAX_WORKERS = 12
 _FIELD_SAMPLE_ROWS = 1000
@@ -437,8 +437,4 @@ def cache_collapse_detail_endpoint(
     )
 
 
-def _iso(value: Any) -> str:
-    if isinstance(value, datetime):
-        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
-        return stamp.isoformat().replace("+00:00", "Z")
-    return safe_iso(value) or ""
+from backend.high_scale._common import format_iso_utc_or_empty as _iso

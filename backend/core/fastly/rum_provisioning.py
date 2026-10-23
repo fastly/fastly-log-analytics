@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import re
 
+from backend.core.fastly.utils import render_vcl_sigv4_signing_block
+
 # Phase 1 snippet name constants — must match what the orchestrator expects.
 RUM_RECV_NAME = "RUM - Recv"
 RUM_DELIVER_SET_COOKIE_NAME = "RUM - Set cookies"
@@ -236,92 +238,15 @@ def _generate_sigv4_sign_vcl(faro_version: str | None = None) -> str:
     this whole body into an f-string) keeps the faro_version=None output
     byte-for-byte identical to before this parameter existed.
     """
-    body = """# FOS SigV4 signing
-if (req.http.X-FOS-Request == "1" && !req.backend.is_shield) {
-    declare local var.fosAccessKey STRING;
-    declare local var.fosSecretKey STRING;
-    declare local var.fosBucket STRING;
-    declare local var.fosRegion STRING;
-    declare local var.fosHost STRING;
-    declare local var.canonicalHeaders STRING;
-    declare local var.signedHeaders STRING;
-    declare local var.canonicalRequest STRING;
-    declare local var.canonicalQuery STRING;
-    declare local var.stringToSign STRING;
-    declare local var.dateStamp STRING;
-    declare local var.signature STRING;
-    declare local var.scope STRING;
-
-    set var.fosAccessKey = table.lookup(fos_credentials, "access_key", "missing");
-    set var.fosSecretKey = table.lookup(fos_credentials, "secret_key", "missing");
-    set var.fosBucket = table.lookup(fos_credentials, "bucket", "missing");
-    set var.fosRegion = table.lookup(fos_credentials, "region", "missing");
-    set var.fosHost = var.fosRegion ".object.fastlystorage.app";
-
-    set bereq.http.x-amz-content-sha256 = digest.hash_sha256("");
-    set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M00Z"}, now);
-    set bereq.http.host = var.fosHost;
-
-    # If the user-facing path is /js/rum.js, point to the actual FOS object path
-    if (bereq.url.path == "/js/rum.js") {
-        set bereq.url = "/rum/rum-tracker.js";
-    }
-
-    # Prepend bucket if not already present
-    if (regsub(bereq.url.path, "^/([^/]+)/.*$", "\\1") != var.fosBucket) {
-        set bereq.url = "/" var.fosBucket bereq.url;
-    }
-
-    # Remove auth params and sort query string
-    set bereq.url = querystring.filter(bereq.url, "key");
-    set var.canonicalQuery = querystring.sort(bereq.url.qs);
-
-    # Normalize path for signing
-    set bereq.url = regsuball(urlencode(urldecode(bereq.url.path)), {"%2F"}, "/") + if(bereq.url.qs != "", "?" + bereq.url.qs, "");
-
-    set var.dateStamp = strftime({"%Y%m%d"}, now);
-
-    set var.canonicalHeaders = ""
-        "host:" bereq.http.host LF
-        "x-amz-content-sha256:" bereq.http.x-amz-content-sha256 LF
-        "x-amz-date:" bereq.http.x-amz-date LF
-    ;
-    set var.signedHeaders = "host;x-amz-content-sha256;x-amz-date";
-    set var.canonicalRequest = ""
-        req.method LF
-        bereq.url.path LF
-        var.canonicalQuery LF
-        var.canonicalHeaders LF
-        var.signedHeaders LF
-        digest.hash_sha256("")
-    ;
-
-    set var.scope = var.dateStamp "/" var.fosRegion "/s3/aws4_request";
-
-    set var.stringToSign = ""
-        "AWS4-HMAC-SHA256" LF
-        bereq.http.x-amz-date LF
-        var.scope LF
-        regsub(digest.hash_sha256(var.canonicalRequest),"^0x", "")
-    ;
-
-    set var.signature = digest.awsv4_hmac(
-        var.fosSecretKey,
-        var.dateStamp,
-        var.fosRegion,
-        "s3",
-        var.stringToSign
-    );
-
-    set bereq.http.Authorization = "AWS4-HMAC-SHA256 "
-        "Credential=" var.fosAccessKey "/" var.scope ", "
-        "SignedHeaders=" var.signedHeaders ", "
-        "Signature=" + regsub(var.signature,"^0x", "")
-    ;
-    unset bereq.http.Accept;
-    unset bereq.http.Accept-Language;
-    unset bereq.http.User-Agent;
-}"""
+    body = render_vcl_sigv4_signing_block(
+        condition='req.http.X-FOS-Request == "1" && !req.backend.is_shield',
+        pre_bucket_lines=(
+            "# If the user-facing path is /js/rum.js, point to the actual FOS object path",
+            'if (bereq.url.path == "/js/rum.js") {',
+            '    set bereq.url = "/rum/rum-tracker.js";',
+            "}",
+        ),
+    )
 
     if faro_version is None:
         return body

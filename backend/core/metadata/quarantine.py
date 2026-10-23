@@ -145,9 +145,9 @@ def get_quarantined_file_by_id(service_id: str, quarantine_id: int) -> dict | No
                valid_rows, corrupt_rows, file_size_bytes, corrupt_samples,
                quarantined_at, reason_counts
         FROM quarantined_files
-        WHERE id = ?
+        WHERE id = ? AND service_id = ?
         """,
-        (quarantine_id,),
+        (quarantine_id, service_id),
     ).fetchone()
     if not row:
         return None

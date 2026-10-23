@@ -523,12 +523,7 @@ class UsageLoggingUpdateBody(BaseModel):
 # Field lists derive from the producers, not from any frontend consumer.
 
 
-class _AdminMaintRead(PassthroughModel):
-    """Base for the maintenance read responses — passes undeclared keys
-    through instead of stripping them."""
-
-
-class UsageLoggingConfigResponse(_AdminMaintRead):
+class UsageLoggingConfigResponse(PassthroughModel):
     """Merged global usage-logging config (``_USAGE_LOGGING_DEFAULTS`` +
     stored overrides). GET and PATCH both return this shape. The two
     day-count fields are ``int | float`` because the defaults are ints but
@@ -545,7 +540,7 @@ class UsageLoggingConfigResponse(_AdminMaintRead):
     track_duckdb_httpfs: bool | None = None
 
 
-class OptimizeNowResponse(_AdminMaintRead):
+class OptimizeNowResponse(PassthroughModel):
     """``optimize_table`` result — success carries the rewrite counters,
     the error branches carry ``error`` (+ ``files_rewritten: 0``)."""
 
@@ -556,7 +551,7 @@ class OptimizeNowResponse(_AdminMaintRead):
     error: str | None = None
 
 
-class ExpireSnapshotsResponse(_AdminMaintRead):
+class ExpireSnapshotsResponse(PassthroughModel):
     """Outcome and counters from ``POST /admin/expire-snapshots/{service_id}``."""
 
     status: str | None = None
@@ -568,7 +563,7 @@ class ExpireSnapshotsResponse(_AdminMaintRead):
     error: str | None = None
 
 
-class SyncStartResponse(_AdminMaintRead):
+class SyncStartResponse(PassthroughModel):
     """Outcome and run ID from ``POST /admin/sync/{service_id}``."""
 
     ok: bool = True
@@ -576,7 +571,7 @@ class SyncStartResponse(_AdminMaintRead):
     run_id: int | str | None = None
 
 
-class BackfillBundleRollupsResponse(_AdminMaintRead):
+class BackfillBundleRollupsResponse(PassthroughModel):
     """Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."""
 
     slow_urls: int | None = None
@@ -610,7 +605,7 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     rum: int | None = None
 
 
-class ConsolidateRollupsResponse(_AdminMaintRead):
+class ConsolidateRollupsResponse(PassthroughModel):
     """Result from POST /admin/consolidate-rollups."""
 
     service_id: str | None = None
@@ -624,7 +619,7 @@ class ConsolidateRollupsResponse(_AdminMaintRead):
     duration_s: float | None = None
 
 
-class RollupCompactResponse(_AdminMaintRead):
+class RollupCompactResponse(PassthroughModel):
     """Result from POST /admin/rollups/compact/{service_id}."""
 
     status: str | None = None
@@ -638,7 +633,7 @@ class RollupCompactResponse(_AdminMaintRead):
     errors: list[str] | None = None
 
 
-class RollupHealResponse(_AdminMaintRead):
+class RollupHealResponse(PassthroughModel):
     """Result from POST /admin/rollup-heal/{service_id}."""
 
     status: str | None = None
@@ -654,7 +649,7 @@ class RollupHealResponse(_AdminMaintRead):
     error_message: str | None = None
 
 
-class RollupStatusResponse(_AdminMaintRead):
+class RollupStatusResponse(PassthroughModel):
     """Rollup status from GET /admin/rollups/status."""
 
     service_id: str | None = None
@@ -664,7 +659,7 @@ class RollupStatusResponse(_AdminMaintRead):
     earliest_day_bundle: str | None = None
 
 
-class LocalCompactNowResponse(_AdminMaintRead):
+class LocalCompactNowResponse(PassthroughModel):
     """``compact_local_partitions`` result dict."""
 
     partitions_scanned: int | None = None
@@ -682,7 +677,7 @@ class LocalCompactNowResponse(_AdminMaintRead):
     dry_run: bool | None = None
 
 
-class PartialHourMergeResponse(_AdminMaintRead):
+class PartialHourMergeResponse(PassthroughModel):
     """``merge_partial_hour`` result dict from ``POST /admin/partial-hour-merge``."""
 
     service_id: str | None = None
@@ -694,7 +689,7 @@ class PartialHourMergeResponse(_AdminMaintRead):
     error: str | None = None
 
 
-class PartialHourStatusResponse(_AdminMaintRead):
+class PartialHourStatusResponse(PassthroughModel):
     """Partial-hour rollup status from ``GET /admin/partial-hour-status``."""
 
     service_id: str | None = None
@@ -705,7 +700,7 @@ class PartialHourStatusResponse(_AdminMaintRead):
     total_rows: int | None = None
 
 
-class MetadataRetentionValues(_AdminMaintRead):
+class MetadataRetentionValues(PassthroughModel):
     """Resolved retention days (defaults merged with per-service cfg)."""
 
     usage_log_days: int | None = None
@@ -713,11 +708,11 @@ class MetadataRetentionValues(_AdminMaintRead):
     cron_runs_days: int | None = None
 
 
-class MetadataRetentionResponse(_AdminMaintRead):
+class MetadataRetentionResponse(PassthroughModel):
     retention: MetadataRetentionValues | None = None
 
 
-class MetadataTableStat(_AdminMaintRead):
+class MetadataTableStat(PassthroughModel):
     """Per-table row count + estimated bytes (``None`` when SQLite lacks
     the ``dbstat`` vtable)."""
 
@@ -725,7 +720,7 @@ class MetadataTableStat(_AdminMaintRead):
     bytes: int | None = None
 
 
-class MetadataStorageResponse(_AdminMaintRead):
+class MetadataStorageResponse(PassthroughModel):
     """``GET /admin/metadata-storage`` — feeds the Metadata Storage card."""
 
     tables: dict[str, MetadataTableStat] | None = None
@@ -741,11 +736,11 @@ class MetadataRetentionUpdate(PassthroughModel):
     cron_runs_days: int | str | None = None
 
 
-class QuarantineDeleteResponse(_AdminMaintRead):
+class QuarantineDeleteResponse(PassthroughModel):
     purged: int
 
 
-class DebugSettingsResponse(_AdminMaintRead):
+class DebugSettingsResponse(PassthroughModel):
     query_debug_visibility: str
     api_call_debug_visibility: str
 

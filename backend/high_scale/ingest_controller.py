@@ -804,7 +804,7 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
 
         pconn = pg_connection.get_pg_readonly_connection()
         try:
-            placeholders = ",".join("?" for _ in waf_req_ids)
+            placeholders = ",".join("%s" for _ in waf_req_ids)
             cur = pconn.execute(
                 f"SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE waf_req_id IN ({placeholders})",
                 list(waf_req_ids),

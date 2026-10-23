@@ -20,6 +20,7 @@ import { SSEModal } from '@/components/SSEModal'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { formatLocalDateTime } from '@/lib/date'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface StatusPanelProps {
   serviceId: string
@@ -48,7 +49,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   const enabled = !!data?.enabled
   const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
   const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
-  const [copiedPragmaMsg, setCopiedPragmaMsg] = React.useState(false)
+  const { copied: copiedPragmaMsg, copy: copyPragmaMsg } = useCopyToClipboard(2000)
 
   if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
     setPragmaModalOpen(false)
@@ -57,14 +58,8 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
 
   const handleCopyPragmaMessage = React.useCallback(async () => {
-    try {
-      await navigator.clipboard?.writeText(accountTeamMessage)
-      setCopiedPragmaMsg(true)
-      setTimeout(() => setCopiedPragmaMsg(false), 2000)
-    } catch {
-      // Clipboard API unavailable in some non-HTTPS/test contexts; ignore.
-    }
-  }, [accountTeamMessage])
+    await copyPragmaMsg(accountTeamMessage)
+  }, [accountTeamMessage, copyPragmaMsg])
 
   // After an enable / disable / redeploy SSE stream closes, the scoring config
   // and analytics have all changed (or the stores were just created), so the

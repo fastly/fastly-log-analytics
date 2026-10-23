@@ -551,3 +551,47 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
         assert len(rows) == 2, f"Expected 2 rows in compacted parquet, found {len(rows)}"
     finally:
         con.close()
+
+
+def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
+    """RUM aggregate recompute self-heals the cold-start lake-detach race (Trap #35)."""
+    import duckdb
+
+    recompute_calls = {"n": 0}
+
+    def flaky_recompute(con, service_id, hours=None):
+        recompute_calls["n"] += 1
+        if recompute_calls["n"] == 1:
+            raise duckdb.CatalogException(
+                'Catalog Error: Table with name "lake.logs_svc__client_vitals" '
+                'does not exist because schema "lake" does not exist.'
+            )
+        return None
+
+    def _retry_double(con, source, fn, *args, table_name="logs", **kwargs):
+        try:
+            return fn(con, *args, **kwargs)
+        except Exception:
+            return fn(con, *args, **kwargs)
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1004)
+    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **k: None)
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer", lambda src, table_name: {"files_committed": 1, "rows_committed": 5}
+    )
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
+    monkeypatch.setattr("backend.core.ingest._mark_ledger_published", lambda sid, rum=False: None)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", flaky_recompute)
+    monkeypatch.setattr("backend.core.iceberg.execute_with_stale_view_retry", _retry_double)
+
+    rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
+
+    assert recompute_calls["n"] == 2, "recompute must retry once after the stale-lake self-heal"

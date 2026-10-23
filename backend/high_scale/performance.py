@@ -58,8 +58,9 @@ _TTL_EDGES = (
 
 
 def _ttl_bucket_expr(column: str) -> str:
-    arms = ", ".join(f"{column} <= {edge}, '{label}'" for edge, label in _TTL_EDGES)
-    return f"multiIf({arms}, '>1y')"
+    from backend.high_scale._common import _bucket_case
+
+    return _bucket_case(column, _TTL_EDGES, ">1y")
 
 
 # Raw request_facts expressions. Event fields live as strings in custom_fields, in

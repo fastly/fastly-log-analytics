@@ -192,6 +192,23 @@ function registerErrorListeners(page, browser, contextName) {
 
 const EMPTY_STATE_MARKERS = ["No data available", "No data in this time range yet", "No data in this range"];
 
+async function attachGceFallbackAuth(context, certificateAdmin, logInjected = false) {
+  if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
+    const activeAdminToken = process.env.FLA_ACTIVE_ADMIN_TOKEN || "";
+    const cookies = [
+      { name: 'analyst_session_id', value: 'test-session-playwright-e2e-verification-secret', domain: '127.0.0.1', path: '/' },
+    ];
+    if (activeAdminToken) {
+      cookies.unshift({ name: 'fla.activeAdminToken', value: activeAdminToken, domain: '127.0.0.1', path: '/' });
+    }
+    await context.addCookies(cookies);
+    await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
+    if (logInjected) {
+      console.log(`[Playwright Auth Bypass] Injected activeAdminToken and analyst_session_id cookies! 🍪`);
+    }
+  }
+}
+
 // Generic "is this page reading real data" gate for pages without a bespoke
 // stage. Passes only when an identifying panel title renders AND at least one
 // Plotly chart holds finite measurements (hasPopulatedRumChart is the shared
@@ -204,13 +221,7 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   console.log(`[${name} 24h] Checking ${pageUrl} ...`);
 
   const context = await browser.newContext(adminTlsOptions);
-  if (!adminTlsOptions.clientCertificates && expectedArch === "standard" && expectedEnv === "gce") {
-    await context.addCookies([
-      { name: 'fla.activeAdminToken', value: 'RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0', domain: '127.0.0.1', path: '/' },
-      { name: 'analyst_session_id', value: 'test-session-playwright-e2e-verification-secret', domain: '127.0.0.1', path: '/' },
-    ]);
-    await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
-  }
+  await attachGceFallbackAuth(context, Boolean(adminTlsOptions.clientCertificates));
   await logPoolAtStart(context, name);
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
@@ -373,26 +384,7 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
 
     // Create a completely isolated incognito browser context for Stage 1 to prevent domain/port caching conflicts
     const dashboardContext = await browser.newContext(adminTlsOptions);
-    if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
-      await dashboardContext.addCookies([
-        {
-          name: 'fla.activeAdminToken',
-          value: 'RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0',
-          domain: '127.0.0.1',
-          path: '/',
-        },
-        {
-          name: 'analyst_session_id',
-          value: 'test-session-playwright-e2e-verification-secret',
-          domain: '127.0.0.1',
-          path: '/',
-        }
-      ]);
-      await dashboardContext.setExtraHTTPHeaders({
-        'X-Forwarded-For': '127.0.0.1'
-      });
-      console.log(`[Playwright Auth Bypass] Injected activeAdminToken and analyst_session_id cookies! 🍪`);
-    }
+    await attachGceFallbackAuth(dashboardContext, certificateAdmin, true);
     const page = await dashboardContext.newPage();
     registerErrorListeners(page, browser, 'Dashboard');
 
@@ -642,25 +634,7 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
 
     // Create a completely clean, isolated incognito browser context for Stage 2 to prevent any cookie or storage conflicts
     const rumContext = await browser.newContext(adminTlsOptions);
-    if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
-      await rumContext.addCookies([
-        {
-          name: 'fla.activeAdminToken',
-          value: 'RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0',
-          domain: '127.0.0.1',
-          path: '/',
-        },
-        {
-          name: 'analyst_session_id',
-          value: 'test-session-playwright-e2e-verification-secret',
-          domain: '127.0.0.1',
-          path: '/',
-        }
-      ]);
-      await rumContext.setExtraHTTPHeaders({
-        'X-Forwarded-For': '127.0.0.1'
-      });
-    }
+    await attachGceFallbackAuth(rumContext, certificateAdmin);
     const rumPage = await rumContext.newPage();
     registerErrorListeners(rumPage, browser, 'RUM');
 
@@ -864,25 +838,7 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
 
     // Create a completely clean, isolated incognito browser context for Stage 3
     const networkContext = await browser.newContext(adminTlsOptions);
-    if (expectedArch === "standard" && expectedEnv === "gce") {
-      await networkContext.addCookies([
-        {
-          name: 'fla.activeAdminToken',
-          value: 'RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0',
-          domain: '127.0.0.1',
-          path: '/',
-        },
-        {
-          name: 'analyst_session_id',
-          value: 'test-session-playwright-e2e-verification-secret',
-          domain: '127.0.0.1',
-          path: '/',
-        }
-      ]);
-      await networkContext.setExtraHTTPHeaders({
-        'X-Forwarded-For': '127.0.0.1'
-      });
-    }
+    await attachGceFallbackAuth(networkContext, certificateAdmin);
     const networkPage = await networkContext.newPage();
     registerErrorListeners(networkPage, browser, 'Network');
 

@@ -100,20 +100,36 @@ def _refresh_dir_size_background(path: str) -> None:
             _dir_size_refresh_in_flight.discard(path)
 
 
-def _scan_dir_size(path: str) -> int:
-    total = 0
+def walk_dir_stats(path: str) -> tuple[int, int]:
+    """Synchronous os.scandir walk. Returns (total_size_bytes, file_count).
+    Symlinks are skipped (preserves the prior os.walk behavior)."""
     if not os.path.exists(path):
-        return 0
-    try:
-        with os.scandir(path) as it:
-            for entry in it:
-                if entry.is_file():
-                    total += entry.stat().st_size
-                elif entry.is_dir():
-                    total += _scan_dir_size(entry.path)
-    except Exception:
-        logger.debug("_scan_dir_size: step failed (ignored)", exc_info=True)
-    return total
+        return (0, 0)
+    total_size = 0
+    file_count = 0
+    stack = [path]
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for entry_de in it:
+                    try:
+                        if entry_de.is_symlink():
+                            continue
+                        if entry_de.is_dir(follow_symlinks=False):
+                            stack.append(entry_de.path)
+                        elif entry_de.is_file(follow_symlinks=False):
+                            total_size += entry_de.stat(follow_symlinks=False).st_size
+                            file_count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return (total_size, file_count)
+
+
+def _scan_dir_size(path: str) -> int:
+    return walk_dir_stats(path)[0]
 
 
 # R-1: drain the per-path size cache between tests so a previous test's

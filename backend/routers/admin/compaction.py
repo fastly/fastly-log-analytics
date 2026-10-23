@@ -182,7 +182,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     except Exception as rum_backfill_err:
         logging.getLogger(__name__).warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
 
-    return {**counts, "rum": n_rum}
+    return {"time_series": n_ts, "sessions": n_sess, **counts, "rum": n_rum}
 
 
 @router.post(

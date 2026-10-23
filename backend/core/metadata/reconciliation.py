@@ -88,6 +88,32 @@ def _retention_timestamp_expr(ts_col: str) -> str:
     return f"CAST({ts_col} AS TIMESTAMPTZ)"
 
 
+_STATS_SOURCE_NAME_TABLES = frozenset({"ingested_files", "audit_logs", "ingest_in_flight"})
+_STATS_SERVICE_ID_TABLES = frozenset(
+    {"cron_runs", "alerts", "views", "local_compacted_files", "slow_queries", "quarantined_files"}
+)
+
+
+def _stats_table_count_query(sql_table: str, service_id: str) -> tuple[str, tuple[Any, ...]]:
+    """Return a tenant-scoped row-count query and params for ``sql_table``."""
+    if sql_table == "ingested_files":
+        return (
+            f"SELECT count(*) FROM {sql_table} WHERE (source_name = ? OR source_name = 'fos' OR source_name = '')",
+            (service_id,),
+        )
+    if sql_table in _STATS_SOURCE_NAME_TABLES:
+        return (
+            f"SELECT count(*) FROM {sql_table} WHERE (source_name = ? OR source_name = '')",
+            (service_id,),
+        )
+    if sql_table in _STATS_SERVICE_ID_TABLES:
+        return (
+            f"SELECT count(*) FROM {sql_table} WHERE (service_id = ? OR service_id = '' OR service_id IS NULL)",
+            (service_id,),
+        )
+    return f"SELECT count(*) FROM {sql_table}", ()
+
+
 def _table_uses_postgres(table: str) -> bool:
     """Return whether retention SQL should use the native Postgres dialect."""
     return True
@@ -160,7 +186,8 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                 out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
                 continue
             try:
-                rows = con.execute(f"SELECT count(*) FROM {sql_table}").fetchone()[0]
+                count_sql, count_params = _stats_table_count_query(sql_table, service_id)
+                rows = con.execute(count_sql, count_params).fetchone()[0]
             except Exception:
                 continue
             try:

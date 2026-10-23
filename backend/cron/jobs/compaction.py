@@ -20,8 +20,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 import time
 
 from backend.cron.decorators import cron_task
@@ -187,25 +185,20 @@ def _run_rollup_hour_heal(
 
     # ENOSPC safety check (< 50MB free disk space)
     from backend.core.rollups._common import _hour_bundled_root
+    from backend.cron.jobs._common import has_sufficient_disk_space
 
     hour_root = _hour_bundled_root(src)
-    check_dir = hour_root if os.path.isdir(hour_root) else "."
-    try:
-        free_bytes = shutil.disk_usage(check_dir).free
-        if free_bytes < 50 * 1024 * 1024:
-            msg = f"Disk space critically low (< 50MB free: {free_bytes / (1024 * 1024):.1f}MB)"
-            logger.warning("⚠️  [rollup-heal] %s: %s", service_id, msg)
-            record_skip_row(
-                src,
-                "rollup_hour_heal",
-                "Skipped due to low disk space",
-                status="warning",
-                error_message=msg,
-                run_id=run_id,
-            )
-            return {"status": "warning", "service_id": service_id, "summary": msg}
-    except Exception as e:
-        logger.warning("[rollup-heal] %s: failed to check disk space: %s", service_id, e)
+    ok_disk, msg = has_sufficient_disk_space(hour_root, "rollup-heal", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src,
+            "rollup_hour_heal",
+            "Skipped due to low disk space",
+            status="warning",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
 
     _display = _display_label(src, service_id)
     outcome: dict = {}

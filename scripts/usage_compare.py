@@ -55,23 +55,26 @@ def run_comparison():
 
         # 1. Local Data (usage_log)
         con = metadata_db.get_con(sid)
-        cur = con.execute(
-            """
-            SELECT
-                operation_class,
-                count(*) as count,
-                sum(coalesce(bytes, 0)) as total_bytes
-            FROM usage_log
-            WHERE service_id = ?
-              AND timestamp::timestamptz >= ?::timestamptz
-              AND timestamp::timestamptz <= ?::timestamptz
-            GROUP BY 1
-        """,
-            (sid, start_str, end_str),
-        )
-        local_usage = {
-            row[0]: {"operation_class": row[0], "count": row[1], "total_bytes": row[2]} for row in cur.fetchall()
-        }
+        try:
+            cur = con.execute(
+                """
+                SELECT
+                    operation_class,
+                    count(*) as count,
+                    sum(coalesce(bytes, 0)) as total_bytes
+                FROM usage_log
+                WHERE service_id = ?
+                  AND timestamp::timestamptz >= ?::timestamptz
+                  AND timestamp::timestamptz <= ?::timestamptz
+                GROUP BY 1
+            """,
+                (sid, start_str, end_str),
+            )
+            local_usage = {
+                row[0]: {"operation_class": row[0], "count": row[1], "total_bytes": row[2]} for row in cur.fetchall()
+            }
+        finally:
+            con.close()
 
         # 2. Fastly Stats
         # FOS ops (account-wide via /stats/aggregate)

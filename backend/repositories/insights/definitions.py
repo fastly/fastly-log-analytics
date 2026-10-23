@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from backend.core.share_db.validation import mask_ip
@@ -259,32 +258,8 @@ def new_probe_urls_processor(row: tuple, definition: InsightDefinition, context:
     }
 
 
-NEW_PROBES = [
-    "admin",
-    ".env",
-    ".git",
-    "wp-",
-    "phpmyadmin",
-    "config",
-    "backup",
-    "shell",
-    "passwd",
-    "xmlrpc",
-    "actuator",
-    "console",
-    "cgi-bin",
-    ".php",
-    ".asp",
-    "../../",
-    "swagger",
-    "api-docs",
-    "graphql",
-    "debug",
-]
-# Plain alternation — no inline ``(?i)`` flag because the literal ``?``
-# breaks the repository's ``sql.count("?")`` placeholder-counting heuristic.
-# Case-insensitivity is supplied via the third ``regexp_matches`` arg below.
-NEW_PROBE_REGEX = "|".join(re.escape(p) for p in NEW_PROBES)
+NEW_PROBES = SQL.NEW_PROBES
+NEW_PROBE_REGEX = SQL.NEW_PROBE_REGEX
 
 registry.register(
     InsightDefinition(
@@ -976,14 +951,17 @@ registry.register(
 # ── 30. Scripted Traffic Patterns ─────────────────────────────────────────────
 
 
-def repeated_patterns_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, n_gaps, n_events, avg_interval, stddev_interval, cv_corr,
-    #              modal_frac, distinct_ua, span_s, mode_gap]
-    # M3: IP-keyed (label + meta.filters.ip + investigate_url) — mask at the
-    # source when the analyst policy sets mask_ips. See connection_abuse.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+def _process_repeated_patterns(
+    row: tuple,
+    *,
+    key_field: str,
+    diversity_key: str,
+    mask_key: bool,
+    context: dict,
+) -> dict:
+    entity = row[0]
+    if mask_key and context.get("mask_ips") and entity:
+        entity = mask_ip(entity)
 
     n_gaps = int(row[1] or 0)
     n_events = int(row[2] or 0)
@@ -991,7 +969,7 @@ def repeated_patterns_processor(row: tuple, definition: InsightDefinition, conte
     stddev = float(row[4] or 0)
     cv = float(row[5] or 0)
     modal_frac = float(row[6] or 0)
-    distinct_ua = int(row[7] or 0)
+    diversity_val = int(row[7] or 0)
     span_s = int(row[8] or 0)
     mode_gap = int(row[9]) if row[9] is not None else None
     rps = round(n_events / span_s, 4) if span_s else 0.0
@@ -1013,7 +991,7 @@ def repeated_patterns_processor(row: tuple, definition: InsightDefinition, conte
         severity = "info"
 
     return {
-        "label": ip or "(unknown)",
+        "label": entity or "(unknown)",
         "current_val": mean_interval,
         "baseline_val": stddev,
         "baseline_label": "jitter (σ)",
@@ -1029,13 +1007,23 @@ def repeated_patterns_processor(row: tuple, definition: InsightDefinition, conte
             "n_events": n_events,
             "span_s": span_s,
             "rps": rps,
-            # Informational only — NOT a gate (D4). High distinct_ua + low CV is
-            # a UA-rotating scraper (*more* suspicious), not a reason to suppress.
-            "distinct_ua": distinct_ua,
-            "filters": {"ip": ip},
+            diversity_key: diversity_val,
+            "filters": {key_field: entity},
         },
         "severity": severity,
     }
+
+
+def repeated_patterns_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, n_gaps, n_events, avg_interval, stddev_interval, cv_corr,
+    #              modal_frac, distinct_ua, span_s, mode_gap]
+    return _process_repeated_patterns(
+        row,
+        key_field="ip",
+        diversity_key="distinct_ua",
+        mask_key=True,
+        context=context,
+    )
 
 
 def repeated_patterns_severity(items: list[dict]) -> str:
@@ -1070,50 +1058,14 @@ registry.register(
 def repeated_patterns_fp_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [entity, n_gaps, n_events, avg_interval, stddev_interval,
     #              cv_corr, modal_frac, distinct_ip, span_s, mode_gap]
-    entity = row[0]
-    n_gaps = int(row[1] or 0)
-    n_events = int(row[2] or 0)
-    mean_interval = float(row[3] or 0)
-    stddev = float(row[4] or 0)
-    cv = float(row[5] or 0)
-    modal_frac = float(row[6] or 0)
-    distinct_ip = int(row[7] or 0)
-    span_s = int(row[8] or 0)
-    mode_gap = int(row[9]) if row[9] is not None else None
-    rps = round(n_events / span_s, 4) if span_s else 0.0
-
-    score = round(100 * (0.625 * (1 - min(cv, 1.0)) + 0.375 * modal_frac))
-
-    if score >= 90 and n_events >= 30:
-        severity = "critical"
-    elif score >= 70:
-        severity = "warning"
-    else:
-        severity = "info"
-
     fp_col = context.get("fp_col", "ja4")
-    return {
-        "label": entity or "(unknown)",
-        "current_val": mean_interval,
-        "baseline_val": stddev,
-        "baseline_label": "jitter (σ)",
-        "unit": "s interval",
-        "meta": {
-            "score": score,
-            "cv": cv,
-            "modal_frac": modal_frac,
-            "mean_interval_s": mean_interval,
-            "stddev_s": stddev,
-            "mode_gap_s": mode_gap,
-            "n_gaps": n_gaps,
-            "n_events": n_events,
-            "span_s": span_s,
-            "rps": rps,
-            "distinct_ip": distinct_ip,
-            "filters": {fp_col: entity},
-        },
-        "severity": severity,
-    }
+    return _process_repeated_patterns(
+        row,
+        key_field=fp_col,
+        diversity_key="distinct_ip",
+        mask_key=False,
+        context=context,
+    )
 
 
 registry.register(

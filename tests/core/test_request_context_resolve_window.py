@@ -9,6 +9,7 @@ from backend import config as svcconfig
 from backend.core.request_context import RequestContext
 from backend.utils.remote_access import TimeBounds
 from backend.utils.time_window import resolve_window
+from tests.conftest import make_test_request_context
 
 
 def _dt(iso: str) -> datetime:
@@ -16,11 +17,10 @@ def _dt(iso: str) -> datetime:
 
 
 def _ctx(time_bounds: TimeBounds | None, analyst: object | None) -> RequestContext:
-    return RequestContext(
+    return make_test_request_context(
         service_id="svc",
-        source={"name": "svc"},
-        telemetry=None,  # type: ignore[arg-type]
-        analyst_session=analyst,
+        source={"name": "svc", "service_id": "svc"},
+        session=analyst,
         time_bounds=time_bounds,
     )
 

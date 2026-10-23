@@ -21,7 +21,6 @@ def skip_view_update(request):
             yield mock
 
 
-from backend.core.request_context import RequestContext
 from backend.main import app
 from backend.routers import rum as rum_router
 from backend.utils.date_utils import iso_z
@@ -825,9 +824,11 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
     analyst_req = _fake_request(analyst_sess)
     import typing
 
+    from tests.conftest import make_test_request_context
+
     analyst_time_bounds = get_analyst_time_bounds(typing.cast(typing.Any, analyst_req))
 
-    analyst_ctx = RequestContext(
+    analyst_ctx = make_test_request_context(
         service_id=service_id,
         source={
             "name": "test_service",
@@ -839,14 +840,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
             "secret_access_key": "mock",
             "region": "mock",
         },
-        _con_override=None,
-        telemetry=typing.cast(
-            typing.Any,
-            SimpleNamespace(
-                start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
-            ),
-        ),
-        analyst_session=analyst_sess,
+        session=analyst_sess,
         read_only=True,
         time_bounds=analyst_time_bounds,
     )
@@ -867,7 +861,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
 
     # Negative control: admin (no analyst_session) with the same
     # far-in-the-past start_time is NOT clamped — sees the old beacon.
-    admin_ctx = RequestContext(
+    admin_ctx = make_test_request_context(
         service_id=service_id,
         source={
             "name": "test_service",
@@ -879,14 +873,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
             "secret_access_key": "mock",
             "region": "mock",
         },
-        _con_override=None,
-        telemetry=typing.cast(
-            typing.Any,
-            SimpleNamespace(
-                start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
-            ),
-        ),
-        analyst_session=None,
+        session=None,
         read_only=True,
         time_bounds=TimeBounds(None, None),
     )

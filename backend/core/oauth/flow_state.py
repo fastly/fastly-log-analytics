@@ -28,15 +28,11 @@ Wire format (after AES-GCM + Base64URL)::
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
 from typing import Final
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from backend.core.oauth import registry
+from backend.core.session_token import seal_aes_gcm, unseal_aes_gcm
 
 NONCE_BYTES: Final[int] = 12
 GCM_TAG_BYTES: Final[int] = 16
@@ -64,23 +60,9 @@ def _key() -> bytes:
     return hashlib.sha256(secret.encode("utf-8")).digest()
 
 
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
-
-
 def seal_flow_state(payload: dict) -> str:
     """Seal the flow-state dict into the opaque cookie value."""
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    import os
-
-    nonce = os.urandom(NONCE_BYTES)
-    ct = AESGCM(_key()).encrypt(nonce, raw, _AAD)
-    return _b64url_encode(nonce + ct)
+    return seal_aes_gcm(_key(), payload, _AAD)
 
 
 def open_flow_state(token: str) -> dict:
@@ -89,21 +71,7 @@ def open_flow_state(token: str) -> dict:
     this process no longer holds)."""
     if not token:
         raise FlowStateError("missing flow-state cookie")
-    try:
-        raw = _b64url_decode(token)
-    except Exception as e:  # malformed base64
-        raise FlowStateError(f"base64url decode failed: {e}") from e
-    if len(raw) < NONCE_BYTES + GCM_TAG_BYTES:
-        raise FlowStateError(f"token too short: {len(raw)} bytes")
-    nonce, ct = raw[:NONCE_BYTES], raw[NONCE_BYTES:]
-    try:
-        pt = AESGCM(_key()).decrypt(nonce, ct, _AAD)
-    except InvalidTag as e:
-        raise FlowStateError("AEAD verification failed") from e
-    try:
-        data = json.loads(pt)
-    except (ValueError, TypeError) as e:
-        raise FlowStateError(f"payload decode failed: {e}") from e
+    data = unseal_aes_gcm(_key(), token, _AAD, FlowStateError)
     if not isinstance(data, dict):
         raise FlowStateError("payload is not an object")
     return data

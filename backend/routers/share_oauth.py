@@ -32,13 +32,10 @@ from backend.core.oauth import registry as oauth_registry
 from backend.core.oauth.client import OIDCError
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.analyst_session import (
-    ANALYST_PENDING_SESSION_COOKIE as PENDING_COOKIE_NAME,
-)
-from backend.utils.analyst_session import (
-    ANALYST_SESSION_COOKIE as COOKIE_NAME,
-)
-from backend.utils.analyst_session import (
     safe_audit_email as _safe_audit_email,
+)
+from backend.utils.analyst_session import (
+    set_analyst_session_cookies,
 )
 from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
@@ -367,26 +364,21 @@ def oauth_callback(
 
     dest = "/share-login/acknowledge" if tos_pending else _safe_return(fs.get("return"))
     resp = RedirectResponse(url=dest, status_code=302)
-    target_cookie = PENDING_COOKIE_NAME if tos_pending else COOKIE_NAME
-    other_cookie = COOKIE_NAME if tos_pending else PENDING_COOKIE_NAME
-    resp.set_cookie(
-        key=target_cookie,
-        value=session.session_id,
-        httponly=True,
+    # SameSite=Lax (NOT Strict, unlike the passcode path): the landing after
+    # this 302 is a top-level navigation whose chain was INITIATED cross-site
+    # by the IdP, so a Strict cookie would be withheld on that first request
+    # and the dashboard/acknowledge page would see no session and bounce back
+    # to /share-login. Lax is sent on top-level GET navigations, which is
+    # exactly this case, and still blocks cross-site subresource/POST (CSRF).
+    # On the TOS path, /api/share/acknowledge re-issues the full cookie from a
+    # same-site context, so the session cookie only relies on Lax for the
+    # single IdP-return hop.
+    set_analyst_session_cookies(
+        resp,
+        session.session_id,
+        tos_pending=tos_pending,
         secure=request.url.scheme == "https",
-        # SameSite=Lax (NOT Strict, unlike the passcode path): the landing after
-        # this 302 is a top-level navigation whose chain was INITIATED cross-site
-        # by the IdP, so a Strict cookie would be withheld on that first request
-        # and the dashboard/acknowledge page would see no session and bounce back
-        # to /share-login. Lax is sent on top-level GET navigations, which is
-        # exactly this case, and still blocks cross-site subresource/POST (CSRF).
-        # On the TOS path, /api/share/acknowledge re-issues the full cookie from a
-        # same-site context, so the session cookie only relies on Lax for the
-        # single IdP-return hop.
         samesite="lax",
-        max_age=24 * 60 * 60,
-        path="/",
     )
-    resp.delete_cookie(other_cookie, path="/")
     resp.delete_cookie(flow_state.COOKIE_NAME, path=flow_state.COOKIE_PATH)
     return resp

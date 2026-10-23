@@ -201,19 +201,47 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
   }
 }
 
+const _bucketFormatters = new Map<string, Intl.DateTimeFormat>()
+
+function _getBucketFormatter(tz: string): Intl.DateTimeFormat {
+  let fmt = _bucketFormatters.get(tz)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    })
+    _bucketFormatters.set(tz, fmt)
+  }
+  return fmt
+}
+
 /** Map-bucket label ("Jun 15, 3:30:45 PM") in ``tz``; naive ISO strings are read as UTC, unparseable input is returned as-is. */
 export function formatBucket(iso: string, tz: string): string {
   if (!iso) return ''
-  const utc = /[Z+\-]\d*$/.test(iso) ? iso : iso + 'Z'
+  const utc = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : iso + 'Z'
   const d = new Date(utc)
   if (isNaN(d.getTime())) return iso
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-  }).format(d)
+  return _getBucketFormatter(tz).format(d)
+}
+
+/**
+ * Parse a status-cache extent string to epoch millis. Handles full ISO
+ * timestamps and the date-only ("YYYY-MM-DD") shorthand the status cache
+ * can emit: for date-only values the `earliest` edge is treated as
+ * start-of-day and the `latest` edge as end-of-day (UTC), mirroring the
+ * snap parsing in FilterBar. Returns null for missing/invalid input.
+ */
+export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  const iso =
+    value.length === 10
+      ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
+      : value
+  const t = Date.parse(iso)
+  return Number.isNaN(t) ? null : t
 }

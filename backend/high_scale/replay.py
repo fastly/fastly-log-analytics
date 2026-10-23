@@ -36,6 +36,37 @@ class ProjectionReplayResult:
     rows_published: int
 
 
+def _manifest_domain(manifest: ArchiveManifest) -> str:
+    domain = getattr(manifest, "domain", None)
+    if domain:
+        return str(domain)
+    source = getattr(manifest, "source", None)
+    if source is not None and getattr(source, "domain", None):
+        return str(source.domain)
+    return "request"
+
+
+def _manifest_service_id(manifest: ArchiveManifest) -> str:
+    service_id = getattr(manifest, "service_id", None)
+    if service_id:
+        return str(service_id)
+    source = getattr(manifest, "source", None)
+    if source is not None and getattr(source, "service_id", None):
+        return str(source.service_id)
+    return ""
+
+
+def _manifest_primary_object_key(manifest: ArchiveManifest) -> str:
+    source = getattr(manifest, "source", None)
+    if source is not None and getattr(source, "object_key", None):
+        return str(source.object_key)
+    sources = getattr(manifest, "sources", None) or ()
+    if sources:
+        first = sources[0]
+        return str(getattr(first, "object_key", None) or getattr(first, "key", ""))
+    return ""
+
+
 def replay_manifest(
     manifest: ArchiveManifest,
     archive: ArchivePublication,
@@ -56,10 +87,11 @@ def replay_manifest(
     that are no longer actually there.
     """
     rows = _read_manifest_rows(manifest, archive)
+    manifest_domain = _manifest_domain(manifest)
     serving_rows = tuple(
         row
         for row in rows
-        if row.get("_record_kind", "event") == "event" and row_matches_serving_domain(manifest.source.domain, row)
+        if row.get("_record_kind", "event") == "event" and row_matches_serving_domain(manifest_domain, row)
     )
     resolved_batch_id = batch_id or f"replay:{manifest.manifest_id}"
     if not serving_rows:
@@ -85,7 +117,7 @@ def replay_origin_projections(
     *,
     rebuild_id: str,
 ) -> ProjectionReplayResult:
-    if manifest.source.domain != "request":
+    if _manifest_domain(manifest) != "request":
         raise ValueError("Origin projections can only be rebuilt from request manifests")
     rows = _read_manifest_rows(manifest, archive)
     serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
@@ -122,7 +154,7 @@ def replay_performance_projections(
     and are deliberately not republished: re-adding them would double-count. ASN
     rows never existed before the integer-ASN fix, so they are safe to backfill.
     """
-    if manifest.source.domain != "request":
+    if _manifest_domain(manifest) != "request":
         raise ValueError("Performance projections can only be rebuilt from request manifests")
     rows = _read_manifest_rows(manifest, archive)
     serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
@@ -159,7 +191,7 @@ def replay_cmcd_projections(
     rebuild_id: str,
 ) -> ProjectionReplayResult:
     """Rebuild one request manifest's ``cmcd_projection_facts`` rows from the archive."""
-    if manifest.source.domain != "request":
+    if _manifest_domain(manifest) != "request":
         raise ValueError("CMCD projections can only be rebuilt from request manifests")
     rows = _read_manifest_rows(manifest, archive)
     serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
@@ -211,8 +243,8 @@ def _batch_from_rows(
 
     return HighScaleBatch(
         batch_id=batch_id,
-        service_id=manifest.source.service_id,
-        domain=domain or manifest.source.domain,
+        service_id=_manifest_service_id(manifest),
+        domain=domain or _manifest_domain(manifest),
         generation=str(manifest.archive_epoch),
         rows=rows,
     )

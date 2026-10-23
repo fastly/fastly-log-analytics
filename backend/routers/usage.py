@@ -124,35 +124,12 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cfg.get("log_retention_days", 90))
             try:
-                from backend.core.field_registry import BY_CODE, REGISTRY, Group
+                from backend.core.field_registry import estimate_log_line_bytes
 
                 lf_cfg = cfg.get("log_fields") or prov.get("log_fields", {})
                 if not lf_cfg:
                     lf_cfg = {"groups": ["A", "B", "C", "D"], "field_overrides": {}}
-
-                enabled_groups: set[str] = set(lf_cfg.get("groups", []))
-                _GROUP_DEPS = {"E": "D", "G": "F"}
-                changed = True
-                while changed:
-                    changed = False
-                    for grp, required in _GROUP_DEPS.items():
-                        if grp in enabled_groups and required not in enabled_groups:
-                            enabled_groups.add(required)
-                            changed = True
-
-                enabled_codes: set[str] = {f.code for f in REGISTRY if f.group is Group.CORE}
-                for f in REGISTRY:
-                    if f.group is not Group.CORE and f.group.value in enabled_groups:
-                        enabled_codes.add(f.code)
-                for fid, on in lf_cfg.get("field_overrides", {}).items():
-                    if on:
-                        enabled_codes.add(fid)
-                    else:
-                        enabled_codes.discard(fid)
-
-                field_bytes = sum(BY_CODE[c].typical_bytes for c in enabled_codes if c in BY_CODE)
-                structural = 2 + len(enabled_codes) * 5
-                result["estimated_bytes_per_line"] = structural + field_bytes
+                result["estimated_bytes_per_line"] = estimate_log_line_bytes(lf_cfg)
             except Exception:
                 logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
             try:

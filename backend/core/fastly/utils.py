@@ -51,110 +51,169 @@ def int_range(mini, maxi):
     return checker
 
 
+def render_vcl_sigv4_signing_block(
+    *,
+    condition: str,
+    outer_indent: str = "",
+    pre_bucket_lines: tuple[str, ...] = (),
+    unset_client_ip: bool = False,
+    header_comment: str = "# FOS SigV4 signing",
+    detailed_comments: bool = False,
+) -> str:
+    """Render an AWS SigV4 signing VCL ``if (...) { ... }`` block for Fastly Object Storage."""
+    body_indent = outer_indent + "    "
+    extra_pre_bucket = ""
+    if pre_bucket_lines:
+        extra_pre_bucket = "\n\n" + "\n".join(f"{body_indent}{line}" if line else "" for line in pre_bucket_lines)
+    client_ip_line = f"\n{body_indent}unset bereq.http.Fastly-Client-IP;" if unset_client_ip else ""
+    date_comment_lines = (
+        [
+            f"{body_indent}# Round x-amz-date down to the minute (finding 006). The SigV4",
+            f"{body_indent}# signature is computed over this header — making it per-request",
+            f"{body_indent}# invalidates Fastly's per-(URL, method) collapsed-forwarding /",
+            f"{body_indent}# request coalescing: every concurrent request gets its own unique",
+            f"{body_indent}# signed Authorization, so they all forward to FOS in parallel",
+            f"{body_indent}# instead of riding on a single in-flight fetch. Pinning the seconds",
+            f"{body_indent}# to ``00`` collapses all requests within a minute to the SAME",
+            f"{body_indent}# signature, restoring coalescing and capping the per-minute origin",
+            f"{body_indent}# spend regardless of incoming RPS. Still well inside AWS SigV4's",
+            f"{body_indent}# 15-minute validity window. (Audit limited VCL arithmetic — no %",
+            f"{body_indent}# or / operator — so per-minute granularity via strftime format",
+            f"{body_indent}# is the cleanest expression of the rounding.)",
+        ]
+        if detailed_comments
+        else []
+    )
+    bucket_comment = (
+        "# Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)"
+        if detailed_comments
+        else "# Prepend bucket if not already present"
+    )
+    bucket_inner_indent = "     " if detailed_comments else "    "
+    qs_lines = (
+        [
+            f"{body_indent}# Keep query parameters for S3 API calls (ListObjectsV2, etc)",
+            f"{body_indent}# BUT remove our auth 'key' parameter so it doesn't leak to FOS or mess with signing",
+            f'{body_indent}set bereq.url = querystring.filter(bereq.url, "key");',
+            "",
+            f"{body_indent}# Sort for canonical request",
+            f"{body_indent}set var.canonicalQuery = querystring.sort(bereq.url.qs);",
+        ]
+        if detailed_comments
+        else [
+            f"{body_indent}# Remove auth params and sort query string",
+            f'{body_indent}set bereq.url = querystring.filter(bereq.url, "key");',
+            f"{body_indent}set var.canonicalQuery = querystring.sort(bereq.url.qs);",
+        ]
+    )
+    norm_comment = (
+        "# Normalize path for signing (S3 expects encoded path)"
+        if detailed_comments
+        else "# Normalize path for signing"
+    )
+    lines = [
+        f"{outer_indent}{header_comment}",
+        f"{outer_indent}if ({condition}) {{",
+        f"{body_indent}declare local var.fosAccessKey STRING;",
+        f"{body_indent}declare local var.fosSecretKey STRING;",
+        f"{body_indent}declare local var.fosBucket STRING;",
+        f"{body_indent}declare local var.fosRegion STRING;",
+        f"{body_indent}declare local var.fosHost STRING;",
+        f"{body_indent}declare local var.canonicalHeaders STRING;",
+        f"{body_indent}declare local var.signedHeaders STRING;",
+        f"{body_indent}declare local var.canonicalRequest STRING;",
+        f"{body_indent}declare local var.canonicalQuery STRING;",
+        f"{body_indent}declare local var.stringToSign STRING;",
+        f"{body_indent}declare local var.dateStamp STRING;",
+        f"{body_indent}declare local var.signature STRING;",
+        f"{body_indent}declare local var.scope STRING;",
+        "",
+        f'{body_indent}set var.fosAccessKey = table.lookup(fos_credentials, "access_key", "missing");',
+        f'{body_indent}set var.fosSecretKey = table.lookup(fos_credentials, "secret_key", "missing");',
+        f'{body_indent}set var.fosBucket = table.lookup(fos_credentials, "bucket", "missing");',
+        f'{body_indent}set var.fosRegion = table.lookup(fos_credentials, "region", "missing");',
+        f'{body_indent}set var.fosHost = var.fosRegion ".object.fastlystorage.app";',
+        "",
+        f'{body_indent}set bereq.http.x-amz-content-sha256 = digest.hash_sha256("");',
+        *date_comment_lines,
+        f'{body_indent}set bereq.http.x-amz-date = strftime({{"%Y%m%dT%H%M00Z"}}, now);',
+        f"{body_indent}set bereq.http.host = var.fosHost;{extra_pre_bucket}",
+        "",
+        f"{body_indent}{bucket_comment}",
+        f'{body_indent}if (regsub(bereq.url.path, "^/([^/]+)/.*$", "\\1") != var.fosBucket) {{',
+        f'{body_indent}{bucket_inner_indent}set bereq.url = "/" var.fosBucket bereq.url;',
+        f"{body_indent}}}",
+        "",
+        *qs_lines,
+        "",
+        f"{body_indent}{norm_comment}",
+        f'{body_indent}set bereq.url = regsuball(urlencode(urldecode(bereq.url.path)), {{"%2F"}}, "/") + if(bereq.url.qs != "", "?" + bereq.url.qs, "");',
+        "",
+        f'{body_indent}set var.dateStamp = strftime({{"%Y%m%d"}}, now);',
+        "",
+        f'{body_indent}set var.canonicalHeaders = ""',
+        f'{body_indent}    "host:" bereq.http.host LF',
+        f'{body_indent}    "x-amz-content-sha256:" bereq.http.x-amz-content-sha256 LF',
+        f'{body_indent}    "x-amz-date:" bereq.http.x-amz-date LF',
+        f"{body_indent};",
+        f'{body_indent}set var.signedHeaders = "host;x-amz-content-sha256;x-amz-date";',
+        f'{body_indent}set var.canonicalRequest = ""',
+        f"{body_indent}    req.method LF",
+        f"{body_indent}    bereq.url.path LF",
+        f"{body_indent}    var.canonicalQuery LF",
+        f"{body_indent}    var.canonicalHeaders LF",
+        f"{body_indent}    var.signedHeaders LF",
+        f'{body_indent}    digest.hash_sha256("")',
+        f"{body_indent};",
+        "",
+        f'{body_indent}set var.scope = var.dateStamp "/" var.fosRegion "/s3/aws4_request";',
+        "",
+        f'{body_indent}set var.stringToSign = ""',
+        f'{body_indent}    "AWS4-HMAC-SHA256" LF',
+        f"{body_indent}    bereq.http.x-amz-date LF",
+        f"{body_indent}    var.scope LF",
+        f'{body_indent}    regsub(digest.hash_sha256(var.canonicalRequest),"^0x", "")',
+        f"{body_indent};",
+        "",
+        f"{body_indent}set var.signature = digest.awsv4_hmac(",
+        f"{body_indent}    var.fosSecretKey,",
+        f"{body_indent}    var.dateStamp,",
+        f"{body_indent}    var.fosRegion,",
+        f'{body_indent}    "s3",',
+        f"{body_indent}    var.stringToSign",
+        f"{body_indent});",
+        "",
+        f'{body_indent}set bereq.http.Authorization = "AWS4-HMAC-SHA256 "',
+        f'{body_indent}    "Credential=" var.fosAccessKey "/" var.scope ", "',
+        f'{body_indent}    "SignedHeaders=" var.signedHeaders ", "',
+        f'{body_indent}    "Signature=" + regsub(var.signature,"^0x", "")',
+        f"{body_indent};",
+        f"{body_indent}unset bereq.http.Accept;",
+        f"{body_indent}unset bereq.http.Accept-Language;",
+        f"{body_indent}unset bereq.http.User-Agent;{client_ip_line}",
+        f"{outer_indent}}}",
+    ]
+    return "\n".join(lines)
+
+
 def load_vcl(rate_limiting: bool = True) -> str:
-    vcl = """#RATELIMIT_BEGIN
+    sigv4_block = render_vcl_sigv4_signing_block(
+        condition='(req.method == "GET" || req.method == "HEAD") && !req.backend.is_shield',
+        outer_indent="    ",
+        unset_client_ip=True,
+        header_comment="# Fastly Object Storage signing https://www.fastly.com/documentation/guides/integrations/non-fastly-services/amazon-s3/",
+        detailed_comments=True,
+    )
+    vcl = (
+        """#RATELIMIT_BEGIN
 ratecounter auth_fail_rc {}
 penaltybox auth_fail_pb {}
 #RATELIMIT_END
 
 sub miss_pass {
-    # Fastly Object Storage signing https://www.fastly.com/documentation/guides/integrations/non-fastly-services/amazon-s3/
-    if ((req.method == "GET" || req.method == "HEAD") && !req.backend.is_shield) {
-        declare local var.fosAccessKey STRING;
-        declare local var.fosSecretKey STRING;
-        declare local var.fosBucket STRING;
-        declare local var.fosRegion STRING;
-        declare local var.fosHost STRING;
-        declare local var.canonicalHeaders STRING;
-        declare local var.signedHeaders STRING;
-        declare local var.canonicalRequest STRING;
-        declare local var.canonicalQuery STRING;
-        declare local var.stringToSign STRING;
-        declare local var.dateStamp STRING;
-        declare local var.signature STRING;
-        declare local var.scope STRING;
-
-        set var.fosAccessKey = table.lookup(fos_credentials, "access_key", "missing");
-        set var.fosSecretKey = table.lookup(fos_credentials, "secret_key", "missing");
-        set var.fosBucket = table.lookup(fos_credentials, "bucket", "missing");
-        set var.fosRegion = table.lookup(fos_credentials, "region", "missing");
-        set var.fosHost = var.fosRegion ".object.fastlystorage.app";
-
-        set bereq.http.x-amz-content-sha256 = digest.hash_sha256("");
-        # Round x-amz-date down to the minute (finding 006). The SigV4
-        # signature is computed over this header — making it per-request
-        # invalidates Fastly's per-(URL, method) collapsed-forwarding /
-        # request coalescing: every concurrent request gets its own unique
-        # signed Authorization, so they all forward to FOS in parallel
-        # instead of riding on a single in-flight fetch. Pinning the seconds
-        # to ``00`` collapses all requests within a minute to the SAME
-        # signature, restoring coalescing and capping the per-minute origin
-        # spend regardless of incoming RPS. Still well inside AWS SigV4's
-        # 15-minute validity window. (Audit limited VCL arithmetic — no %
-        # or / operator — so per-minute granularity via strftime format
-        # is the cleanest expression of the rounding.)
-        set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M00Z"}, now);
-        set bereq.http.host = var.fosHost;
-
-        # Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)
-        if (regsub(bereq.url.path, "^/([^/]+)/.*$", "\\1") != var.fosBucket) {
-             set bereq.url = "/" var.fosBucket bereq.url;
-        }
-
-        # Keep query parameters for S3 API calls (ListObjectsV2, etc)
-        # BUT remove our auth 'key' parameter so it doesn't leak to FOS or mess with signing
-        set bereq.url = querystring.filter(bereq.url, "key");
-
-        # Sort for canonical request
-        set var.canonicalQuery = querystring.sort(bereq.url.qs);
-
-        # Normalize path for signing (S3 expects encoded path)
-        set bereq.url = regsuball(urlencode(urldecode(bereq.url.path)), {"%2F"}, "/") + if(bereq.url.qs != "", "?" + bereq.url.qs, "");
-
-        set var.dateStamp = strftime({"%Y%m%d"}, now);
-
-        set var.canonicalHeaders = ""
-            "host:" bereq.http.host LF
-            "x-amz-content-sha256:" bereq.http.x-amz-content-sha256 LF
-            "x-amz-date:" bereq.http.x-amz-date LF
-        ;
-        set var.signedHeaders = "host;x-amz-content-sha256;x-amz-date";
-        set var.canonicalRequest = ""
-            req.method LF
-            bereq.url.path LF
-            var.canonicalQuery LF
-            var.canonicalHeaders LF
-            var.signedHeaders LF
-            digest.hash_sha256("")
-        ;
-
-        set var.scope = var.dateStamp "/" var.fosRegion "/s3/aws4_request";
-
-        set var.stringToSign = ""
-            "AWS4-HMAC-SHA256" LF
-            bereq.http.x-amz-date LF
-            var.scope LF
-            regsub(digest.hash_sha256(var.canonicalRequest),"^0x", "")
-        ;
-
-        set var.signature = digest.awsv4_hmac(
-            var.fosSecretKey,
-            var.dateStamp,
-            var.fosRegion,
-            "s3",
-            var.stringToSign
-        );
-
-        set bereq.http.Authorization = "AWS4-HMAC-SHA256 "
-            "Credential=" var.fosAccessKey "/" var.scope ", "
-            "SignedHeaders=" var.signedHeaders ", "
-            "Signature=" + regsub(var.signature,"^0x", "")
-        ;
-        unset bereq.http.Accept;
-        unset bereq.http.Accept-Language;
-        unset bereq.http.User-Agent;
-        unset bereq.http.Fastly-Client-IP;
-    }
+"""
+        + sigv4_block
+        + """
 }
 
 sub vcl_recv {
@@ -333,6 +392,7 @@ sub vcl_deliver {
 sub vcl_log {
 #FASTLY log
 }"""
+    )
     if not rate_limiting:
         vcl = re.sub(r"\s*#RATELIMIT_BEGIN.*?#RATELIMIT_END", "", vcl, flags=re.DOTALL)
     # Substitute the fallback-secret placeholder with a fresh random

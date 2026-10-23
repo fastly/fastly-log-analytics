@@ -24,12 +24,14 @@ from backend.repositories._base import (
 from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import parse_window, safe_iso
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
 _IO_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
+CacheRegistry.register("value._IO_STATS_CACHE", _IO_STATS_CACHE)
 
 _IO_TRANSFORM_FIELD = "imgopto"
 _IO_RESP_BYTES_FIELD = "imgopto_resp_body_bytes"

@@ -106,7 +106,7 @@ def _cassette_recorded_at(path) -> float | None:
 
     try:
         with open(path, encoding="utf-8") as f:
-            head = f.read(2048)
+            head = f.read()
     except OSError:
         return None
     m = re.search(r"^recorded_at:\s*['\"]?([0-9T:\-+.Z]+)['\"]?$", head, re.MULTILINE)
@@ -637,22 +637,6 @@ def override_request_context(*, source, con=None, _con_override=None, session=No
     return _override
 
 
-class FakeTelemetry:
-    """Lightweight RequestTelemetry stub for unit tests that build RequestContext directly."""
-
-    def __init__(self, request_method: str = "POST", request_path: str = "/test") -> None:
-        self.request_method = request_method
-        self.request_path = request_path
-        self.calls: list[dict] = []
-        self.cache_state: str = "MISS"
-
-    def set_cache_state(self, state: str) -> None:
-        self.cache_state = state
-
-    def finalize_log(self, **_kwargs) -> dict:
-        return {"calls": list(self.calls), "cache": self.cache_state}
-
-
 def make_test_request_context(
     con=None,
     *,
@@ -662,6 +646,7 @@ def make_test_request_context(
     read_only: bool = True,
     path: str = "/test",
     time_bounds=None,
+    holder=None,
 ):
     """Construct a RequestContext for direct repository/router handler unit tests."""
     from backend.core.request_context import RequestContext
@@ -672,6 +657,7 @@ def make_test_request_context(
         service_id=resolved_source.get("service_id", service_id),
         source=resolved_source,
         _con_override=con,
+        _holder=holder,
         telemetry=RequestTelemetry(request_method="POST", request_path=path),
         analyst_session=session,
         read_only=read_only,
@@ -687,7 +673,6 @@ def client(in_memory_duckdb, test_service_source):
     from backend.deps import get_service_id, get_source
     from backend.main import app
 
-    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: test_service_source
     # ``get_service_id`` resolves from query/header/active-config. Under the

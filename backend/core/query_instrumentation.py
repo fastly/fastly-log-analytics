@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 import time
-import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -354,30 +353,7 @@ class _InstrumentedRecordReader:
             logger.debug("__del__: self._complete failed (ignored)", exc_info=True)
 
 
-def _safe_weakref(obj: Any) -> Callable[[], Any] | None:
-    """Return a no-arg callable that dereferences to ``obj`` (or ``None``
-    once ``obj`` is gone).
-
-    Tries ``weakref.ref(obj)`` first — preferred so we never prevent the
-    pool from freeing a connection on error. DuckDB connections support
-    weakref; sqlite3 connections do not. For non-weakref-able objects we
-    fall back to a strong-reference closure: the closure (and the strong
-    ref) are collected when the caller drops its own reference. This
-    matches the same shape as ``backend.core.query_registry._safe_weakref``
-    so the instrumentation path doesn't silently no-op on sqlite3 cursors.
-    """
-    try:
-        return weakref.ref(obj)
-    except TypeError:
-        try:
-            ref = obj  # closure captures a strong reference
-
-            def _strong_ref() -> Any:
-                return ref
-
-            return _strong_ref
-        except Exception:
-            return None
+from backend.core.query_registry import _safe_weakref
 
 
 def _parse_memory_mb(value: Any) -> float | None:

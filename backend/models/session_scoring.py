@@ -118,12 +118,7 @@ class ScoringLabelUpdate(BaseModel):
 # ``+00:00`` to ``Z`` on UTC-configured hosts — a silent wire change.
 
 
-class _ScoringRead(PassthroughModel):
-    """Base for the scoring read responses — passes the telemetry envelope
-    (and any undeclared key) through instead of stripping it."""
-
-
-class ScoringTopFlaggedRow(_ScoringRead):
+class ScoringTopFlaggedRow(PassthroughModel):
     # The TOP_FLAGGED SQL always selects these three (edge_score is filtered
     # non-null); the rest depend on masking and which log fields are enabled.
     timestamp: str
@@ -140,34 +135,34 @@ class ScoringTopFlaggedRow(_ScoringRead):
     country: str | None = None
 
 
-class ScoringTopFlaggedResponse(_ScoringRead):
+class ScoringTopFlaggedResponse(PassthroughModel):
     rows: list[ScoringTopFlaggedRow] = []
     since_hours: int | None = None
 
 
-class ScoringDistributionRow(_ScoringRead):
+class ScoringDistributionRow(PassthroughModel):
     hour: str
     bucket: str
     count: int
 
 
-class ScoringScoreDistributionResponse(_ScoringRead):
+class ScoringScoreDistributionResponse(PassthroughModel):
     rows: list[ScoringDistributionRow] = []
     since_hours: int | None = None
 
 
-class ScoringComplianceRow(_ScoringRead):
+class ScoringComplianceRow(PassthroughModel):
     hour: str
     compliance: str
     count: int
 
 
-class ScoringComplianceBreakdownResponse(_ScoringRead):
+class ScoringComplianceBreakdownResponse(PassthroughModel):
     rows: list[ScoringComplianceRow] = []
     since_hours: int | None = None
 
 
-class ScoringLatencyRow(_ScoringRead):
+class ScoringLatencyRow(PassthroughModel):
     hour: str | None = None
     scored_count: int | None = None
     fail_open_count: int | None = None
@@ -180,19 +175,19 @@ class ScoringLatencyRow(_ScoringRead):
     exec_p95_us: int | None = None
 
 
-class ScoringLatencyTimeseriesResponse(_ScoringRead):
+class ScoringLatencyTimeseriesResponse(PassthroughModel):
     rows: list[ScoringLatencyRow] = []
     since_hours: int | None = None
     has_latency: bool = False
     granularity: str | None = None
 
 
-class ScoringReasonCount(_ScoringRead):
+class ScoringReasonCount(PassthroughModel):
     reason: str | None = None
     count: int | None = None
 
 
-class ScoringLatencySnapshot(_ScoringRead):
+class ScoringLatencySnapshot(PassthroughModel):
     available: bool = False
     rtt_p50_us: int | None = None
     rtt_p95_us: int | None = None
@@ -202,7 +197,7 @@ class ScoringLatencySnapshot(_ScoringRead):
     exec_p95_us: int | None = None
 
 
-class ScoringMatrixStaleness(_ScoringRead):
+class ScoringMatrixStaleness(PassthroughModel):
     l2_evaluated: int | None = None
     l2_high_count: int | None = None
     l2_high_pct: float | None = None
@@ -210,7 +205,7 @@ class ScoringMatrixStaleness(_ScoringRead):
     threshold_pct: float | None = None
 
 
-class ScoringHealthResponse(_ScoringRead):
+class ScoringHealthResponse(PassthroughModel):
     since_hours: int | None = None
     total_edge_rows: int | None = None
     scored_rows: int | None = None
@@ -235,7 +230,7 @@ class ScoringHealthResponse(_ScoringRead):
     l2_enforce: dict | None = None
 
 
-class ScoringEvaluationResponse(_ScoringRead):
+class ScoringEvaluationResponse(PassthroughModel):
     has_min_samples: bool | None = None
     min_per_class: int | None = None
     n_good: int | None = None
@@ -252,7 +247,7 @@ class ScoringEvaluationResponse(_ScoringRead):
     default_min_auc: float | None = None
 
 
-class ScoringCurvePoint(_ScoringRead):
+class ScoringCurvePoint(PassthroughModel):
     threshold: int | None = None
     # ROC points carry fpr/tpr; PR points carry precision/recall.
     fpr: float | None = None
@@ -261,7 +256,7 @@ class ScoringCurvePoint(_ScoringRead):
     recall: float | None = None
 
 
-class ScoringCurvesResponse(_ScoringRead):
+class ScoringCurvesResponse(PassthroughModel):
     has_min_samples: bool | None = None
     min_per_class: int | None = None
     n_good: int | None = None
@@ -274,7 +269,7 @@ class ScoringCurvesResponse(_ScoringRead):
     pr: list[ScoringCurvePoint] | None = None
 
 
-class ScoringThresholdBucket(_ScoringRead):
+class ScoringThresholdBucket(PassthroughModel):
     # ``flagged`` carries total+good+bad+unlabeled; ``passed`` omits total.
     total: int | None = None
     good: int | None = None
@@ -282,7 +277,7 @@ class ScoringThresholdBucket(_ScoringRead):
     unlabeled: int | None = None
 
 
-class ScoringThresholdPreviewResponse(_ScoringRead):
+class ScoringThresholdPreviewResponse(PassthroughModel):
     threshold: int | None = None
     since_hours: int | None = None
     total_scored_sessions: int | None = None
@@ -292,7 +287,7 @@ class ScoringThresholdPreviewResponse(_ScoringRead):
     recall: float | None = None
 
 
-class ScoringAnalyticsResponse(_ScoringRead):
+class ScoringAnalyticsResponse(PassthroughModel):
     """Composite of the analyst-safe sub-reads (plus the two admin-only
     evaluation blocks, present only on the admin path)."""
 
@@ -308,7 +303,7 @@ class ScoringAnalyticsResponse(_ScoringRead):
     evaluation_per_reason: dict | None = None
 
 
-class ScoringLabelRow(_ScoringRead, WireSafeModel):
+class ScoringLabelRow(WireSafeModel):
     # Fields ordered to match labels._row_to_dict so the serialized key order
     # is byte-identical. All Optional: the analyst path projects out the PII /
     # attribution fields (notes/flagged_by/sample_*), and response_model_exclude_unset
@@ -331,14 +326,14 @@ class ScoringLabelRow(_ScoringRead, WireSafeModel):
     updated_at: str | None = None
 
 
-class ScoringLabelCounts(_ScoringRead, WireSafeModel):
+class ScoringLabelCounts(WireSafeModel):
     # labels.counts_by_label always seeds all three keys (0 when unlabeled).
     good: int
     bad: int
     neutral: int
 
 
-class ScoringLabelsListResponse(_ScoringRead, WireSafeModel):
+class ScoringLabelsListResponse(WireSafeModel):
     labels: list[ScoringLabelRow]
     counts: ScoringLabelCounts
 
@@ -349,7 +344,7 @@ ScoringLabelsResponse = ScoringLabelsListResponse
 # ── Response models for the admin endpoints (session_scoring_admin.py) ───────
 #
 # Same wire-safety contract as the analyst-safe reads above: every model
-# extends ``_ScoringRead`` (extra="allow") so the ``_cached`` telemetry
+# extends ``PassthroughModel`` (extra="allow") so the ``_cached`` telemetry
 # envelope and any future producer key pass through verbatim, every route
 # applies ``response_model_exclude_unset=True`` so per-branch shapes (e.g.
 # the validate endpoint's success-vs-failure keys) don't sprout ``null``s,
@@ -358,14 +353,14 @@ ScoringLabelsResponse = ScoringLabelsListResponse
 # Field lists are derived from the PRODUCERS, not the frontend consumers.
 
 
-class ScoringRetrainRejected(_ScoringRead):
+class ScoringRetrainRejected(PassthroughModel):
     too_few_events: int | None = None
     too_fast: int | None = None
     kept: int | None = None
     routes_seen: int | None = None
 
 
-class ScoringAucAgainstLabels(_ScoringRead):
+class ScoringAucAgainstLabels(PassthroughModel):
     auc: float | None = None
     passed: bool | None = None
     threshold: float | None = None
@@ -373,7 +368,7 @@ class ScoringAucAgainstLabels(_ScoringRead):
     n_bad: int | None = None
 
 
-class ScoringRetrainResponse(_ScoringRead):
+class ScoringRetrainResponse(PassthroughModel):
     ok: bool | None = None
     matrix_version: str | None = None
     since_days: int | None = None
@@ -390,7 +385,7 @@ class ScoringRetrainResponse(_ScoringRead):
     deploy_hint: str | None = None
 
 
-class ScoringSessionEvent(_ScoringRead):
+class ScoringSessionEvent(PassthroughModel):
     # Shape from repositories/session_scoring.fetch_session_events. ``ip``
     # stays declared — the analyst masking middleware's key-name pass runs
     # after serialization; ``ua``/``url`` stay visible (analyst triage
@@ -405,27 +400,27 @@ class ScoringSessionEvent(_ScoringRead):
     edge_score_reason: str | None = None
 
 
-class ScoringSessionEventsResponse(_ScoringRead):
+class ScoringSessionEventsResponse(PassthroughModel):
     sid: str | None = None
     since_days: int | None = None
     event_count: int | None = None
     events: list[ScoringSessionEvent] = []
 
 
-class ScoringEnforceThresholdResponse(_ScoringRead):
+class ScoringEnforceThresholdResponse(PassthroughModel):
     threshold: int | None
     enforced: bool
     key: str
 
 
-class ScoringEnforceThresholdPutResponse(_ScoringRead):
+class ScoringEnforceThresholdPutResponse(PassthroughModel):
     ok: bool | None = None
     threshold: int | None = None
     enforced: bool | None = None
     message: str | None = None
 
 
-class ScoringL2EnforceState(_ScoringRead):
+class ScoringL2EnforceState(PassthroughModel):
     """Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
     also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
     there for wire-compat; this standalone GET carries the real schema)."""
@@ -444,21 +439,21 @@ class ScoringL2EnforceState(_ScoringRead):
     readiness_days: float
 
 
-class ScoringL2EnforcePutResponse(_ScoringRead):
+class ScoringL2EnforcePutResponse(PassthroughModel):
     ok: bool | None = None
     enabled: bool | None = None
     l2_enabled_at: int | None = None
     message: str | None = None
 
 
-class ScoringExcludeRegexState(_ScoringRead):
+class ScoringExcludeRegexState(PassthroughModel):
     current: str
     is_default: bool
     default: str
     effective: str
 
 
-class ScoringExcludeRegexPutResponse(_ScoringRead):
+class ScoringExcludeRegexPutResponse(PassthroughModel):
     ok: bool | None = None
     # ``**result`` spread from update_recv_exclusion_regex.
     effective_regex: str | None = None
@@ -468,7 +463,7 @@ class ScoringExcludeRegexPutResponse(_ScoringRead):
     message: str | None = None
 
 
-class ScoringExcludeRegexValidateResponse(_ScoringRead):
+class ScoringExcludeRegexValidateResponse(PassthroughModel):
     # Success branch: {ok, lint_warnings}; failure: {ok, error, reason}.
     # exclude_unset keeps each branch's key set unchanged.
     ok: bool | None = None
@@ -477,7 +472,7 @@ class ScoringExcludeRegexValidateResponse(_ScoringRead):
     reason: str | None = None
 
 
-class ScoringEnforceStatusCodeState(_ScoringRead):
+class ScoringEnforceStatusCodeState(PassthroughModel):
     current: int | None
     default: int
     effective: int
@@ -486,7 +481,7 @@ class ScoringEnforceStatusCodeState(_ScoringRead):
     is_default: bool
 
 
-class ScoringEnforceStatusCodePutResponse(_ScoringRead):
+class ScoringEnforceStatusCodePutResponse(PassthroughModel):
     ok: bool | None = None
     # ``**result`` spread from update_enforce_status_code.
     effective_status_code: int | None = None
@@ -495,19 +490,19 @@ class ScoringEnforceStatusCodePutResponse(_ScoringRead):
     message: str | None = None
 
 
-class ScoringMatrixVersion(_ScoringRead):
+class ScoringMatrixVersion(PassthroughModel):
     version: str | None = None
     key: str | None = None
     size_bytes: int | None = None
     last_modified: str | None = None
 
 
-class ScoringMatrixVersionsResponse(_ScoringRead):
+class ScoringMatrixVersionsResponse(PassthroughModel):
     versions: list[ScoringMatrixVersion] = []
     current_version: str | None = None
 
 
-class ScoringMatrixRestoreResponse(_ScoringRead):
+class ScoringMatrixRestoreResponse(PassthroughModel):
     ok: bool | None = None
     restored_version: str | None = None
     restored_at: str | None = None
@@ -515,14 +510,14 @@ class ScoringMatrixRestoreResponse(_ScoringRead):
     deploy_hint: str | None = None
 
 
-class ScoringRotateKeyResponse(_ScoringRead):
+class ScoringRotateKeyResponse(PassthroughModel):
     ok: bool | None = None
     rotated_at: str | None = None
     previous_key_grace: bool | None = None
     message: str | None = None
 
 
-class ScoringAuditRow(_ScoringRead):
+class ScoringAuditRow(PassthroughModel):
     # SELECT id, timestamp, action, actor, details FROM scoring_audit.
     # ``details`` is JSON-parsed to a dict, but stays the raw string when
     # parsing fails — hence Any, not dict.
@@ -533,12 +528,12 @@ class ScoringAuditRow(_ScoringRead):
     details: Any = None
 
 
-class ScoringAuditListResponse(_ScoringRead):
+class ScoringAuditListResponse(PassthroughModel):
     audit: list[ScoringAuditRow] = []
     limit: int | None = None
 
 
-class ScoringThresholdState(_ScoringRead):
+class ScoringThresholdState(PassthroughModel):
     """GET and PUT /scoring/threshold both return this exact shape."""
 
     threshold: int | None
@@ -546,7 +541,7 @@ class ScoringThresholdState(_ScoringRead):
     enforced: bool
 
 
-class ScoringPerReasonBucket(_ScoringRead):
+class ScoringPerReasonBucket(PassthroughModel):
     reason: str | None = None
     n_good: int | None = None
     n_bad: int | None = None
@@ -559,7 +554,7 @@ class ScoringPerReasonBucket(_ScoringRead):
     threshold: float | None = None
 
 
-class ScoringPerReasonResponse(_ScoringRead):
+class ScoringPerReasonResponse(PassthroughModel):
     buckets: list[ScoringPerReasonBucket] = []
     min_per_class: int | None = None
     known_reasons: list[str] | None = None
@@ -568,7 +563,7 @@ class ScoringPerReasonResponse(_ScoringRead):
     n_bad: int | None = None
 
 
-class ScoringDashboardResponse(_ScoringRead):
+class ScoringDashboardResponse(PassthroughModel):
     """Composite of the per-endpoint producers — each sub-block is the
     byte-identical dict its standalone endpoint returns, so each nests the
     same model that endpoint declares. ``status`` stays a free dict: it's
@@ -591,7 +586,7 @@ class ScoringDashboardResponse(_ScoringRead):
     enforce_status_code: ScoringEnforceStatusCodeState | None = None
 
 
-class ScoringStatusResponse(_ScoringRead):
+class ScoringStatusResponse(PassthroughModel):
     """``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
     live-version and drift keys. Config-derived keys beyond these ride as extras."""
 
@@ -609,7 +604,7 @@ class ScoringStatusResponse(_ScoringRead):
     preflight_pragmas_ready: bool | None = None
 
 
-class ScoringConfigCompositeResponse(_ScoringRead):
+class ScoringConfigCompositeResponse(PassthroughModel):
     """``GET /scoring/config``: the four token-free config reads in one body."""
 
     status: ScoringStatusResponse | None = None
@@ -618,6 +613,6 @@ class ScoringConfigCompositeResponse(_ScoringRead):
     enforce_status_code: ScoringEnforceStatusCodeState | None = None
 
 
-class ScoringLabelDeleteResponse(_ScoringRead):
+class ScoringLabelDeleteResponse(PassthroughModel):
     status: str | None = None
     id: str | None = None

@@ -627,15 +627,9 @@ def _run_log_discovery_cron(
         # Filename metadata cannot stand in for MAX(timestamp); publishing before
         # this refresh leaves connected browsers one ingest behind indefinitely.
         # No additional scan is needed and header polls remain cached-only.
-        try:
-            from backend.sync_status_publisher import publisher as _sync_status_publisher
-            from backend.sync_status_snapshot import compute_sync_status_cached
+        from backend.cron.jobs._common import publish_sync_status_safe
 
-            _snapshot = compute_sync_status_cached(service_id)
-            if _snapshot is not None:
-                _sync_status_publisher.publish(service_id, _snapshot)
-        except Exception:
-            logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
+        publish_sync_status_safe(service_id, "scheduler")
 
         if run_id is not None:
             _log_and_add_progress(

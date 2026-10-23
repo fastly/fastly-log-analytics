@@ -546,7 +546,7 @@ def _ducklake_write_connection(source: dict):
                     con.execute("ROLLBACK")
                 except Exception:
                     logger.debug("_ducklake_write_connection: con.execute failed (ignored)", exc_info=True)
-                _ducklake_detach(con, service_id=service_id)
+            _ducklake_detach(con, service_id=service_id)
             try:
                 con.close()
             except Exception:

@@ -1699,7 +1699,7 @@ def _archive_from_row(
         transform_version=str(_row_value(row, "transform_version", 14)),
     )
     resolved_sources = None
-    sources_json_val = _row_value_optional(row, "sources_json", 24)
+    sources_json_val = _row_value_optional(row, "sources_json", 22)
     raw_deadline = _row_value(row, "deletion_authorization_deadline", 18)
     fallback_deadline = datetime.fromisoformat(raw_deadline) if isinstance(raw_deadline, str) else raw_deadline
     if sources_json_val:

@@ -294,8 +294,8 @@ def reset_service_logs(
             ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE ? AND file_name NOT LIKE ?",
-            ("client_vitals%", "client_errors%"),
+            "DELETE FROM local_compacted_files WHERE (service_id = ? OR service_id = '' OR service_id IS NULL) AND file_name NOT LIKE ? AND file_name NOT LIKE ?",
+            (service_id, "client_vitals%", "client_errors%"),
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
         con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
@@ -544,7 +544,8 @@ def reset_service_rum(
             "DELETE FROM committed_buffers WHERE buffer_filename LIKE 'client_vitals%' OR buffer_filename LIKE 'client_errors%'"
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%'"
+            "DELETE FROM local_compacted_files WHERE (service_id = ? OR service_id = '' OR service_id IS NULL) AND (file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%')",
+            (service_id,),
         )
         con.execute(
             "DELETE FROM ingest_ledger WHERE service_id = ? AND (object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)",

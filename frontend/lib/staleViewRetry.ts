@@ -45,27 +45,14 @@ export function isStaleDashboardViewError(err: unknown): err is StaleDashboardVi
   )
 }
 
+import { parseExtentMs } from '@/lib/date'
+
+export { parseExtentMs }
+
 /** Queried time window for an aggregates request (ISO strings). */
 export interface AggregatesWindow {
   startTime?: string | null
   endTime?: string | null
-}
-
-/**
- * Parse a status-cache extent string to epoch millis. Handles full ISO
- * timestamps and the date-only ("YYYY-MM-DD") shorthand the status cache
- * can emit: for date-only values the `earliest` edge is treated as
- * start-of-day and the `latest` edge as end-of-day (UTC), mirroring the
- * snap parsing in FilterBar. Returns null for missing/invalid input.
- */
-function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
-  if (typeof value !== 'string' || value.length === 0) return null
-  const iso =
-    value.length === 10
-      ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
-      : value
-  const t = Date.parse(iso)
-  return Number.isNaN(t) ? null : t
 }
 
 /**

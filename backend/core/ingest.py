@@ -1701,22 +1701,16 @@ def _celery_ingest_scope(kind: str, service_id: str):
     return _scope()
 
 
-def discover_prefix(
+def _discover_prefix_common(
     service_id: str,
-    prefix_subpath: str | None = None,
-    start_time: str | None = None,
-    run_id: int | None = None,
-    originating_task: str = "log_discovery",
+    *,
+    list_kwargs: dict[str, Any],
+    prefix_subpath: str | None,
+    dispatch_fn: Callable[[str, list[str]], object],
+    originating_task: str,
+    run_id: int | None,
+    log_label: str = "",
 ) -> int:
-    """LIST one FOS prefix (or a start_time-bounded range), insert unseen keys
-    into ``ingest_ledger`` as ``discovered``, and dispatch the new keys in
-    ``LEDGER_CONVERT_BATCH_SIZE``-sized ``convert_batch_files`` batches (one
-    DuckLake catalog commit each). Returns the number of newly discovered files.
-
-    The ledger insert is committed BEFORE any dispatch so a worker's claim
-    UPDATE can never race an uncommitted row (claim matches 0 rows → the file
-    would strand in 'discovered' with its message already consumed).
-    """
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
@@ -1728,12 +1722,9 @@ def discover_prefix(
     if src is None:
         return 0
 
-    list_kwargs: dict = {"start_time": start_time}
-    if prefix_subpath is not None:
-        list_kwargs["prefix_subpath"] = prefix_subpath
     fos_result = _drain_generator(list_fos_files(src, **list_kwargs))
     if not fos_result:
-        logger.warning("[ledger] %s: FOS LIST returned nothing (prefix=%s)", service_id, prefix_subpath)
+        logger.warning("[ledger] %s: %sFOS LIST returned nothing (prefix=%s)", service_id, log_label, prefix_subpath)
         return 0
     new_files = fos_result.get("new_files") or []
     if not new_files:
@@ -1767,16 +1758,46 @@ def discover_prefix(
 
     batches = 0
     for i in range(0, len(newly_discovered), LEDGER_CONVERT_BATCH_SIZE):
-        convert_batch_files.delay(service_id, newly_discovered[i : i + LEDGER_CONVERT_BATCH_SIZE])
+        dispatch_fn(service_id, newly_discovered[i : i + LEDGER_CONVERT_BATCH_SIZE])
         batches += 1
     if newly_discovered:
         logger.info(
-            "[ledger] %s: discovered %d new file(s), dispatched %d convert batch(es)",
+            "[ledger] %s: discovered %d new %sfile(s), dispatched %d convert batch(es)",
             service_id,
             len(newly_discovered),
+            log_label,
             batches,
         )
     return len(newly_discovered)
+
+
+def discover_prefix(
+    service_id: str,
+    prefix_subpath: str | None = None,
+    start_time: str | None = None,
+    run_id: int | None = None,
+    originating_task: str = "log_discovery",
+) -> int:
+    """LIST one FOS prefix (or a start_time-bounded range), insert unseen keys
+    into ``ingest_ledger`` as ``discovered``, and dispatch the new keys in
+    ``LEDGER_CONVERT_BATCH_SIZE``-sized ``convert_batch_files`` batches (one
+    DuckLake catalog commit each). Returns the number of newly discovered files.
+
+    The ledger insert is committed BEFORE any dispatch so a worker's claim
+    UPDATE can never race an uncommitted row (claim matches 0 rows → the file
+    would strand in 'discovered' with its message already consumed).
+    """
+    list_kwargs: dict[str, Any] = {"start_time": start_time}
+    if prefix_subpath is not None:
+        list_kwargs["prefix_subpath"] = prefix_subpath
+    return _discover_prefix_common(
+        service_id,
+        list_kwargs=list_kwargs,
+        prefix_subpath=prefix_subpath,
+        dispatch_fn=convert_batch_files.delay,
+        originating_task=originating_task,
+        run_id=run_id,
+    )
 
 
 def _ledger_record_failure(
@@ -1860,6 +1881,33 @@ def _ledger_mark_committed(con, service_id: str, object_key: str, expected_gener
     return "committed" if cur.rowcount else "stale"
 
 
+def _is_permanent_s3_missing(fos: Any, bucket: str, object_key: str) -> bool:
+    """Return True if head_object confirms the object is permanently missing (404/NoSuchKey)."""
+    try:
+        fos.head_object(Bucket=bucket, Key=object_key)
+    except Exception as head_err:
+        err = str(head_err)
+        return "404" in err or "Not Found" in err or "NoSuchKey" in err
+    return False
+
+
+def _ledger_mark_dead_letter_missing(
+    con_meta: Any, service_id: str, object_key: str, lease_generation: int | None
+) -> int:
+    """Mark a claimed ledger row as dead_letter when the object is missing from FOS."""
+    cur = con_meta.cursor()
+    cur.execute(
+        "UPDATE ingest_ledger SET status='dead_letter', "
+        "last_error='object missing from FOS (already ingested+deleted, or expired)', "
+        "error_kind='object_missing', next_attempt_at=NULL "
+        "WHERE service_id=? AND object_key=? AND status='claimed' "
+        "AND lease_generation=?",
+        (service_id, object_key, lease_generation),
+    )
+    con_meta.commit()
+    return int(cur.rowcount or 0)
+
+
 def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
     """Claim one ledger row, download the file, and insert its rows into the
     per-service DuckLake table. Returns the terminal ledger status.
@@ -1927,23 +1975,12 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                 # resurrected for a raw file the old pipeline already ingested
                 # and deleted) from a transient download failure (retryable).
                 # Without this, every dead key burns LEDGER_MAX_ATTEMPTS GETs.
-                try:
-                    fos.head_object(Bucket=bucket, Key=object_key)
-                except Exception as head_err:
-                    if "404" in str(head_err) or "Not Found" in str(head_err) or "NoSuchKey" in str(head_err):
-                        cur.execute(
-                            "UPDATE ingest_ledger SET status='dead_letter', "
-                            "last_error='object missing from FOS (already ingested+deleted, or expired)', "
-                            "error_kind='object_missing', next_attempt_at=NULL "
-                            "WHERE service_id=? AND object_key=? AND status='claimed' "
-                            "AND lease_generation=?",
-                            (service_id, object_key, lease_generation),
-                        )
-                        con_meta.commit()
-                        logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
-                        _mark_object_failed(outcome)
-                        _record_ledger_object_outcome(service_id, object_key, outcome)
-                        return "dead_letter"
+                if _is_permanent_s3_missing(fos, bucket, object_key):
+                    _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, lease_generation)
+                    logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
+                    _mark_object_failed(outcome)
+                    _record_ledger_object_outcome(service_id, object_key, outcome)
+                    return "dead_letter"
                 raise RuntimeError("download failed (object still exists — transient)")
 
             # Acquire the per-service write lock only now — for the DuckLake
@@ -2208,23 +2245,10 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                     files.append((local_file, s3_path, object_key))
                     continue
                 active.remove(object_key)
-                gone = False
-                try:
-                    fos.head_object(Bucket=bucket, Key=object_key)
-                except Exception as head_err:
-                    err = str(head_err)
-                    gone = "404" in err or "Not Found" in err or "NoSuchKey" in err
-                if gone:
-                    cur.execute(
-                        "UPDATE ingest_ledger SET status='dead_letter', "
-                        "last_error='object missing from FOS (already ingested+deleted, or expired)', "
-                        "error_kind='object_missing', next_attempt_at=NULL "
-                        "WHERE service_id=? AND object_key=? AND status='claimed' "
-                        "AND lease_generation=?",
-                        (service_id, object_key, claimed_generations[object_key]),
-                    )
-                    con_meta.commit()
-                    if cur.rowcount:
+                if _is_permanent_s3_missing(fos, bucket, object_key):
+                    if _ledger_mark_dead_letter_missing(
+                        con_meta, service_id, object_key, claimed_generations[object_key]
+                    ):
                         summary["dead_letter"] += 1
                         outcome = _new_object_outcome()
                         _mark_object_failed(outcome)
@@ -2767,62 +2791,15 @@ def discover_rum_prefix(
     root) — a caller must never accidentally fall through to scanning the
     regular-log tree.
     """
-    from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.metadata.base import get_con
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        return 0
-    src = get_source_for_service(service_id)
-    if src is None:
-        return 0
-
-    list_kwargs: dict = {"start_time": start_time, "prefix_subpath": prefix_subpath or "raw/rum/"}
-    fos_result = _drain_generator(list_fos_files(src, **list_kwargs))
-    if not fos_result:
-        logger.warning("[ledger] %s: RUM FOS LIST returned nothing (prefix=%s)", service_id, prefix_subpath)
-        return 0
-    new_files = fos_result.get("new_files") or []
-    if not new_files:
-        return 0
-
-    bucket = src.get("bucket", "")
-    s3_prefix = f"s3://{bucket}/"
-
-    con = get_con(service_id)
-    cur = con.cursor()
-    newly_discovered: list[str] = []
-    for f_path in new_files:
-        f_size = fos_result.get("file_sizes", {}).get(f_path, 0)
-        object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
-        cur.execute(
-            "INSERT INTO ingest_ledger "
-            "(service_id, object_key, size_bytes, status, discovered_at, originating_task, originating_run_id) "
-            "VALUES (?, ?, ?, 'discovered', ?, ?, ?) ON CONFLICT DO NOTHING",
-            (
-                service_id,
-                object_key,
-                f_size,
-                time.time(),
-                originating_task if run_id is not None else None,
-                run_id,
-            ),
-        )
-        if cur.rowcount > 0:
-            newly_discovered.append(object_key)
-    con.commit()
-
-    for i in range(0, len(newly_discovered), LEDGER_CONVERT_BATCH_SIZE):
-        convert_batch_rum_files.delay(service_id, newly_discovered[i : i + LEDGER_CONVERT_BATCH_SIZE])
-    if newly_discovered:
-        logger.info(
-            "[ledger] %s: discovered %d new RUM file(s), dispatched %d convert_batch_rum_files batch(es)",
-            service_id,
-            len(newly_discovered),
-            math.ceil(len(newly_discovered) / LEDGER_CONVERT_BATCH_SIZE),
-        )
-    return len(newly_discovered)
+    return _discover_prefix_common(
+        service_id,
+        list_kwargs={"start_time": start_time, "prefix_subpath": prefix_subpath or "raw/rum/"},
+        prefix_subpath=prefix_subpath,
+        dispatch_fn=convert_batch_rum_files.delay,
+        originating_task=originating_task,
+        run_id=run_id,
+        log_label="RUM ",
+    )
 
 
 def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[dict]] | None:
@@ -3122,6 +3099,50 @@ def _quarantine_rum_corrupt_lines(
     }
 
 
+def _write_rum_arrow_table_batch(
+    duckdb_con: Any,
+    table_name: str,
+    rows: list[dict],
+    sources: list[str],
+    source_files_sql: str,
+    schema: Any,
+) -> None:
+    """Stage Arrow rows into DuckDB and upsert into ``lake.{table_name}``."""
+    if not rows:
+        return
+    import pyarrow as pa
+
+    arrow_tbl = pa.Table.from_pylist(rows, schema=schema)
+    arrow_tbl = arrow_tbl.append_column("_source_file", pa.array(sources, type=pa.string()))
+    duckdb_con.register("_rum_stage", arrow_tbl)
+    try:
+        table_exists = bool(
+            duckdb_con.execute(
+                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+        )
+        if not table_exists:
+            duckdb_con.execute(f"CREATE TABLE lake.{table_name} AS SELECT * FROM _rum_stage")
+        else:
+            existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table_name}").fetchall()}
+            if "_source_file" not in existing_cols:
+                duckdb_con.execute(f'ALTER TABLE lake.{table_name} ADD COLUMN "_source_file" VARCHAR')
+            duckdb_con.execute("BEGIN TRANSACTION")
+            try:
+                duckdb_con.execute(f"DELETE FROM lake.{table_name} WHERE _source_file IN ({source_files_sql})")
+                duckdb_con.execute(f"INSERT INTO lake.{table_name} BY NAME SELECT * FROM _rum_stage")
+                duckdb_con.execute("COMMIT")
+            except Exception:
+                try:
+                    duckdb_con.execute("ROLLBACK")
+                except Exception:
+                    logger.debug("_write_rum_arrow_table_batch: duckdb_con.execute failed (ignored)", exc_info=True)
+                raise
+    finally:
+        duckdb_con.unregister("_rum_stage")
+
+
 def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
     """RUM counterpart of ``convert_object``: claim one ``raw/rum/`` ledger
     row, parse the beacon file, and insert its rows into BOTH per-service
@@ -3140,7 +3161,6 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
     which is a no-op for the table that already succeeded (same source
     file, same rows) and completes the table that didn't.
     """
-    import pyarrow as pa
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
@@ -3206,21 +3226,10 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
             if not local_file:
                 # Same dead-vs-transient split as convert_object: distinguish
                 # "object is gone" (terminal) from a transient download blip.
-                try:
-                    fos.head_object(Bucket=bucket, Key=object_key)
-                except Exception as head_err:
-                    if "404" in str(head_err) or "Not Found" in str(head_err) or "NoSuchKey" in str(head_err):
-                        cur.execute(
-                            "UPDATE ingest_ledger SET status='dead_letter', "
-                            "last_error='object missing from FOS (already ingested+deleted, or expired)', "
-                            "error_kind='object_missing', next_attempt_at=NULL "
-                            "WHERE service_id=? AND object_key=? AND status='claimed' "
-                            "AND lease_generation=?",
-                            (service_id, object_key, lease_generation),
-                        )
-                        con_meta.commit()
-                        logger.info("[ledger] %s: RUM %s gone from FOS — dead_letter", service_id, object_key)
-                        return "dead_letter"
+                if _is_permanent_s3_missing(fos, bucket, object_key):
+                    _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, lease_generation)
+                    logger.info("[ledger] %s: RUM %s gone from FOS — dead_letter", service_id, object_key)
+                    return "dead_letter"
                 raise RuntimeError("download failed (object still exists — transient)")
 
             vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
@@ -3243,49 +3252,6 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
                     outcome["malformed_records"] = len(corrupt_lines)
                     outcome["quarantine_capture_failures"] = len(corrupt_lines)
 
-            def _write_table(table_name: str, rows: list[dict], schema) -> None:
-                if not rows:
-                    # Nothing to delete a duplicate of on retry either — a
-                    # deterministic re-parse of the same bytes always
-                    # produces the same (possibly empty) row set.
-                    return
-                arrow_tbl = pa.Table.from_pylist(rows, schema=schema)
-                duckdb_con.register("_rum_stage", arrow_tbl)
-                try:
-                    table_exists = bool(
-                        duckdb_con.execute(
-                            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-                            (table_name,),
-                        ).fetchone()
-                    )
-                    if not table_exists:
-                        duckdb_con.execute(
-                            f"CREATE TABLE lake.{table_name} AS "
-                            f"SELECT *, '{safe_source_file}' AS _source_file FROM _rum_stage"
-                        )
-                    else:
-                        existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table_name}").fetchall()}
-                        if "_source_file" not in existing_cols:
-                            duckdb_con.execute(f'ALTER TABLE lake.{table_name} ADD COLUMN "_source_file" VARCHAR')
-                        duckdb_con.execute("BEGIN TRANSACTION")
-                        try:
-                            duckdb_con.execute(
-                                f"DELETE FROM lake.{table_name} WHERE _source_file = '{safe_source_file}'"
-                            )
-                            duckdb_con.execute(
-                                f"INSERT INTO lake.{table_name} BY NAME "
-                                f"SELECT *, '{safe_source_file}' AS _source_file FROM _rum_stage"
-                            )
-                            duckdb_con.execute("COMMIT")
-                        except Exception:
-                            try:
-                                duckdb_con.execute("ROLLBACK")
-                            except Exception:
-                                logger.debug("_write_table: duckdb_con.execute failed (ignored)", exc_info=True)
-                            raise
-                finally:
-                    duckdb_con.unregister("_rum_stage")
-
             # Acquire the per-service write lock only now — for the DuckLake
             # attach + writes below, never across the FOS download + Python
             # beacon parse above (neither touches catalog state).
@@ -3294,8 +3260,23 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
             if not _ducklake_attach(duckdb_con, src, read_only=False):
                 raise RuntimeError("DuckLake read-write attach failed")
 
-            _write_table(vitals_table, vitals_rows, CLIENT_VITALS_ARROW_SCHEMA)
-            _write_table(errors_table, errors_rows, CLIENT_ERRORS_ARROW_SCHEMA)
+            single_source_sql = f"'{safe_source_file}'"
+            _write_rum_arrow_table_batch(
+                duckdb_con,
+                vitals_table,
+                vitals_rows,
+                [s3_path] * len(vitals_rows),
+                single_source_sql,
+                CLIENT_VITALS_ARROW_SCHEMA,
+            )
+            _write_rum_arrow_table_batch(
+                duckdb_con,
+                errors_table,
+                errors_rows,
+                [s3_path] * len(errors_rows),
+                single_source_sql,
+                CLIENT_ERRORS_ARROW_SCHEMA,
+            )
 
             # Mirror convert_object's ingested_files bookkeeping so existing
             # readers (Usage Log, admin ingested-files list) keep working.
@@ -3365,7 +3346,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     per file, unlike regular-log discovery's ``LEDGER_CONVERT_BATCH_SIZE``
     chunking, was the actual cause.
     """
-    import pyarrow as pa
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
@@ -3431,24 +3411,14 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                     files.append((local_file, s3_path, object_key))
                     continue
                 active.remove(object_key)
-                gone = False
-                try:
-                    fos.head_object(Bucket=bucket, Key=object_key)
-                except Exception as head_err:
-                    err = str(head_err)
-                    gone = "404" in err or "Not Found" in err or "NoSuchKey" in err
-                if gone:
-                    cur.execute(
-                        "UPDATE ingest_ledger SET status='dead_letter', "
-                        "last_error='object missing from FOS (already ingested+deleted, or expired)', "
-                        "error_kind='object_missing', next_attempt_at=NULL "
-                        "WHERE service_id=? AND object_key=? AND status='claimed' "
-                        "AND lease_generation=?",
-                        (service_id, object_key, claimed_generations[object_key]),
-                    )
-                    con_meta.commit()
-                    if cur.rowcount:
+                if _is_permanent_s3_missing(fos, bucket, object_key):
+                    if _ledger_mark_dead_letter_missing(
+                        con_meta, service_id, object_key, claimed_generations[object_key]
+                    ):
                         summary["dead_letter"] += 1
+                        outcome = _new_object_outcome()
+                        _mark_object_failed(outcome)
+                        batch_outcomes[object_key] = outcome
                     logger.info("[ledger] %s: RUM %s gone from FOS — dead_letter", service_id, object_key)
                 else:
                     _ledger_record_failure(
@@ -3459,8 +3429,12 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                         claimed_generations[object_key],
                     )
                     summary["failed"] += 1
+                    outcome = _new_object_outcome()
+                    _mark_object_failed(outcome)
+                    batch_outcomes[object_key] = outcome
 
             if not files:
+                _record_ledger_batch_outcomes(service_id, batch_outcomes)
                 return summary
 
             all_vitals: list[dict] = []
@@ -3507,41 +3481,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
 
             source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
 
-            def _write_table_batch(table_name: str, rows: list[dict], sources: list[str], schema) -> None:
-                if not rows:
-                    return
-                arrow_tbl = pa.Table.from_pylist(rows, schema=schema)
-                arrow_tbl = arrow_tbl.append_column("_source_file", pa.array(sources, type=pa.string()))
-                duckdb_con.register("_rum_stage", arrow_tbl)
-                try:
-                    table_exists = bool(
-                        duckdb_con.execute(
-                            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-                            (table_name,),
-                        ).fetchone()
-                    )
-                    if not table_exists:
-                        duckdb_con.execute(f"CREATE TABLE lake.{table_name} AS SELECT * FROM _rum_stage")
-                    else:
-                        existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table_name}").fetchall()}
-                        if "_source_file" not in existing_cols:
-                            duckdb_con.execute(f'ALTER TABLE lake.{table_name} ADD COLUMN "_source_file" VARCHAR')
-                        duckdb_con.execute("BEGIN TRANSACTION")
-                        try:
-                            duckdb_con.execute(
-                                f"DELETE FROM lake.{table_name} WHERE _source_file IN ({source_files_sql})"
-                            )
-                            duckdb_con.execute(f"INSERT INTO lake.{table_name} BY NAME SELECT * FROM _rum_stage")
-                            duckdb_con.execute("COMMIT")
-                        except Exception:
-                            try:
-                                duckdb_con.execute("ROLLBACK")
-                            except Exception:
-                                logger.debug("_write_table_batch: duckdb_con.execute failed (ignored)", exc_info=True)
-                            raise
-                finally:
-                    duckdb_con.unregister("_rum_stage")
-
             # Acquire the per-service write lock only now — for the DuckLake
             # attach + writes below, never across the FOS download + Python
             # beacon parse above (neither touches catalog state). Holding it
@@ -3552,8 +3491,12 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             if not _ducklake_attach(duckdb_con, src, read_only=False):
                 raise RuntimeError("DuckLake read-write attach failed")
 
-            _write_table_batch(vitals_table, all_vitals, vitals_sources, CLIENT_VITALS_ARROW_SCHEMA)
-            _write_table_batch(errors_table, all_errors, errors_sources, CLIENT_ERRORS_ARROW_SCHEMA)
+            _write_rum_arrow_table_batch(
+                duckdb_con, vitals_table, all_vitals, vitals_sources, source_files_sql, CLIENT_VITALS_ARROW_SCHEMA
+            )
+            _write_rum_arrow_table_batch(
+                duckdb_con, errors_table, all_errors, errors_sources, source_files_sql, CLIENT_ERRORS_ARROW_SCHEMA
+            )
 
             try:
                 metadata_db.insert_ingested_files(

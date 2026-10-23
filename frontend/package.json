@@ -10,6 +10,7 @@
     "build": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs');\" && npm run gen:types && next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js",
     "test": "vitest run",
     "test:watch": "vitest",

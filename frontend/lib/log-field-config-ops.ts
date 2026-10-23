@@ -5,26 +5,34 @@ export type LogFieldsCatalogLike =
   | null
   | undefined;
 
-export function resolveEnabledGroupsWithDeps(
-  groups: string[] | undefined,
+export function applyGroupDependencies<T extends string | null>(
+  groups: Set<T>,
   catalog: LogFieldsCatalogLike,
-): Set<string | null> {
-  const enabledGroups = new Set<string | null>([null, ...(groups || [])]);
+): void {
   const catalogGroups = catalog?.groups || [];
   let changed = true;
   while (changed) {
     changed = false;
     catalogGroups.forEach((g) => {
       if (
-        enabledGroups.has(g.id) &&
+        g.id != null &&
+        groups.has(g.id as T) &&
         g.requires &&
-        !enabledGroups.has(g.requires)
+        !groups.has(g.requires as T)
       ) {
-        enabledGroups.add(g.requires);
+        groups.add(g.requires as T);
         changed = true;
       }
     });
   }
+}
+
+export function resolveEnabledGroupsWithDeps(
+  groups: string[] | undefined,
+  catalog: LogFieldsCatalogLike,
+): Set<string | null> {
+  const enabledGroups = new Set<string | null>([null, ...(groups || [])]);
+  applyGroupDependencies(enabledGroups, catalog);
   return enabledGroups;
 }
 
@@ -37,21 +45,7 @@ export function toggleLogFieldGroup(
   const nextGroups = new Set<string>(prev.groups || []);
   if (checked) {
     nextGroups.add(groupId);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      catalog?.groups?.forEach((g) => {
-        if (
-          g.id != null &&
-          nextGroups.has(g.id) &&
-          g.requires &&
-          !nextGroups.has(g.requires)
-        ) {
-          nextGroups.add(g.requires);
-          changed = true;
-        }
-      });
-    }
+    applyGroupDependencies(nextGroups, catalog);
   } else {
     nextGroups.delete(groupId);
   }
@@ -139,22 +133,7 @@ export function toggleLogFieldPreset(
     });
   } else {
     presetGroups.forEach((g) => nextGroups.add(g));
-
-    let changed = true;
-    while (changed) {
-      changed = false;
-      catalog?.groups?.forEach((cg) => {
-        if (
-          cg.id != null &&
-          nextGroups.has(cg.id) &&
-          cg.requires &&
-          !nextGroups.has(cg.requires)
-        ) {
-          nextGroups.add(cg.requires);
-          changed = true;
-        }
-      });
-    }
+    applyGroupDependencies(nextGroups, catalog);
   }
 
   return { ...prev, groups: Array.from(nextGroups) };

@@ -1756,12 +1756,8 @@ def scoring_dashboard(
 
     def _produce() -> dict:
         # --- /scoring/status (no DuckDB) ---
-        cfg = svcconfig.load_config(service_id) or {}
-        scoring = cfg.get("scoring") or {}
-        if not scoring.get("enabled"):
-            status_block: dict = {"enabled": False}
-        else:
-            status_block = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
+        cfg = svcconfig.load_config(service_id)
+        status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
 
         # Build the dashboard in a single payload by delegating to the
         # existing per-endpoint producers. Each handles its own _query_logs

@@ -11,7 +11,6 @@ from backend.high_scale._projection_utils import range_value
 from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
-from backend.utils.date_utils import safe_iso
 
 # Columns present on BOTH rum fact tables; a filter on anything else cannot apply to every beacon kind.
 _FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
@@ -62,11 +61,7 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
     return clauses, params
 
 
-def _iso(value: Any) -> str:
-    if isinstance(value, datetime):
-        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
-        return stamp.isoformat().replace("+00:00", "Z")
-    return safe_iso(value) or ""
+from backend.high_scale._common import format_iso_utc_or_empty as _iso
 
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:

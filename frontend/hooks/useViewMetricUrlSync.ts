@@ -75,6 +75,27 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
         const pills = isLegacy ? parsed : parsed?.filters
         const extras = isLegacy ? null : parsed?._view_extras
 
+        // Read latest toggle state after any async fetch (falling back to
+        // hook-subscribed state when useFilterStore is mocked in unit tests).
+        const liveState =
+          typeof useFilterStore.getState === 'function' ? useFilterStore.getState() : null
+        const liveEdgeOnly = liveState ? liveState.edgeOnly : currentEdgeOnly
+        const liveCompareMode = liveState ? liveState.compareMode : currentCompareMode
+
+        // Edge-only toggle — flip if it differs from current.
+        if (extras?.edgeOnly != null && extras.edgeOnly !== liveEdgeOnly) {
+          toggleEdgeOnly()
+        }
+
+        // Compare-mode toggle + range MUST run BEFORE setRelativeRange / setRange
+        // because toggleCompareMode() snaps startTime/endTime and clears relativeRange.
+        if (extras?.compareMode != null && extras.compareMode !== liveCompareMode) {
+          toggleCompareMode()
+        }
+        if (extras?.compareStartTime && extras?.compareEndTime) {
+          setCompareRange(extras.compareStartTime, extras.compareEndTime)
+        }
+
         // Range — prefer relativeRange when extras carry one (rolling window
         // re-derived from now), else fall back to the saved absolute range.
         if (view.start_time && view.end_time) {
@@ -85,19 +106,6 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
           } else {
             setRange(view.start_time, view.end_time)
           }
-        }
-
-        // Edge-only toggle — flip if it differs from current.
-        if (extras?.edgeOnly != null && extras.edgeOnly !== currentEdgeOnly) {
-          toggleEdgeOnly()
-        }
-
-        // Compare-mode toggle + range. Flip if needed; then overwrite range.
-        if (extras?.compareMode != null && extras.compareMode !== currentCompareMode) {
-          toggleCompareMode()
-        }
-        if (extras?.compareStartTime && extras?.compareEndTime) {
-          setCompareRange(extras.compareStartTime, extras.compareEndTime)
         }
 
         clearFilters()

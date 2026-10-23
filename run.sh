@@ -38,6 +38,9 @@ BACKEND_PORT_EXPLICIT=false; [ -n "${BACKEND_PORT:-}" ] && BACKEND_PORT_EXPLICIT
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 BACKEND_PORT=${BACKEND_PORT:-8000}
 LOCAL_REFRESH_MAX_AGE_HOURS=${LOCAL_REFRESH_MAX_AGE_HOURS:-24}
+: "${METADATA_DSN:=postgresql://fla:fla_local_dev@127.0.0.1:5432/fla_metadata}"
+: "${DUCKLAKE_CATALOG:=postgres:dbname=fla_ducklake host=127.0.0.1 port=5432 user=fla password=fla_local_dev}"
+export METADATA_DSN DUCKLAKE_CATALOG
 
 while [ $# -gt 0 ]; do
     case "$1" in

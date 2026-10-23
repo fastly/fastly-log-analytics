@@ -1301,6 +1301,10 @@ def shutdown_all() -> None:
                     logger.debug("shutdown_all: con.close failed (ignored)", exc_info=True)
 
 
+close_all_pools = shutdown_all
+close_all_service_pools = close_all_pools
+
+
 def get_pool_status() -> dict[str, Any]:
     """Return status and connection metrics across all active and retired pools."""
     with _pools_lock:

@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 
 from backend.cron.decorators import cron_task
 from backend.cron.lifecycle import cron_run
+from backend.cron.scheduler import _display_label
 
 logger = logging.getLogger("backend.scheduler")
-
-
-def _display_label(src: dict, service_id: str) -> str:
-    return src.get("name") or service_id
 
 
 def _call_with_lookback(fn, *args, lookback_days: int = 30):
@@ -52,26 +47,21 @@ def _run_rollup_compact_daily(
 
     # ENOSPC safety check (< 50MB free disk space)
     from backend.core.rollups._common import _day_bundled_root
+    from backend.cron.jobs._common import has_sufficient_disk_space
 
     day_root = _day_bundled_root(src)
-    check_dir = day_root if os.path.isdir(day_root) else "."
-    try:
-        free_bytes = shutil.disk_usage(check_dir).free
-        if free_bytes < 50 * 1024 * 1024:
-            msg = f"Disk space critically low (< 50MB free: {free_bytes / (1024 * 1024):.1f}MB)"
-            logger.warning("⚠️  [rollup-compact] %s: %s", service_id, msg)
-            log_cron_run(
-                src,
-                "rollup_compact_daily",
-                0.0,
-                "warning",
-                summary="Skipped due to low disk space",
-                error_message=msg,
-                run_id=run_id,
-            )
-            return {"status": "warning", "service_id": service_id, "summary": msg}
-    except Exception as e:
-        logger.warning("[rollup-compact] %s: failed to check disk space: %s", service_id, e)
+    ok_disk, msg = has_sufficient_disk_space(day_root, "rollup-compact", service_id)
+    if not ok_disk:
+        log_cron_run(
+            src,
+            "rollup_compact_daily",
+            0.0,
+            "warning",
+            summary="Skipped due to low disk space",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
 
     _display = _display_label(src, service_id)
     outcome: dict = {}

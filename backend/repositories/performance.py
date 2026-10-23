@@ -9,13 +9,11 @@ from collections.abc import Callable
 
 import duckdb
 
-from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
     _safe_table,
-    percentile_ms_expr,
 )
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
@@ -292,22 +290,12 @@ def _compute_performance_aggregates(
         timer.mark("perf:temp_skipped", _time.perf_counter())
 
     # ── Pass 2: live SQL for the missed sections, against the narrowed temp. ──
+    from backend.repositories._sql import performance as SQL
+
     try:
         if "top_urls" in live_sections and temp_table:
             _t = _time.perf_counter()
-            url_q = f"""
-                SELECT url,
-                       count(*) AS reqs,
-                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
-                FROM {temp_table}
-                WHERE url IS NOT NULL AND elapsed IS NOT NULL
-                GROUP BY url
-                HAVING count(*) > 5
-                ORDER BY {sort_idx} DESC LIMIT 20
-            """
+            url_q = SQL.TOP_URLS.format(temp_table=temp_table, sort_idx=sort_idx)
             url_res = runner.execute(url_q).fetchall()
             results["top_urls"] = [
                 {"url": r[0], "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]} for r in url_res
@@ -316,54 +304,14 @@ def _compute_performance_aggregates(
 
         if "top_asns" in live_sections and temp_table:
             _t = _time.perf_counter()
-            asn_q = f"""
-                SELECT asn,
-                       count(*) AS reqs,
-                       AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
-                       {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
-                FROM {temp_table}
-                WHERE asn IS NOT NULL AND elapsed IS NOT NULL
-                GROUP BY asn
-                HAVING count(*) > 10
-                ORDER BY {sort_idx} DESC LIMIT 20
-            """
+            asn_q = SQL.TOP_ASNS.format(temp_table=temp_table, sort_idx=sort_idx)
             asn_res = runner.execute(asn_q).fetchall()
             results["top_asns"] = _resolve_asns(asn_res)
             timer.mark("top_asns_query", _t)
 
         if "ttl_dist" in live_sections and temp_table:
             _t = _time.perf_counter()
-            ttl_q = f"""
-                SELECT
-                    CASE
-                        WHEN ttl <= 0 THEN '0s'
-                        WHEN ttl <= 10 THEN '<10s'
-                        WHEN ttl <= 30 THEN '<30s'
-                        WHEN ttl <= 60 THEN '<1m'
-                        WHEN ttl <= 300 THEN '<5m'
-                        WHEN ttl <= 600 THEN '<10m'
-                        WHEN ttl <= 1800 THEN '<30m'
-                        WHEN ttl <= 3600 THEN '<1h'
-                        WHEN ttl <= 10800 THEN '<3h'
-                        WHEN ttl <= 21600 THEN '<6h'
-                        WHEN ttl <= 43200 THEN '<12h'
-                        WHEN ttl <= 86400 THEN '<1d'
-                        WHEN ttl <= 259200 THEN '<3d'
-                        WHEN ttl <= 604800 THEN '<1w'
-                        WHEN ttl <= 1209600 THEN '<2w'
-                        WHEN ttl <= 2592000 THEN '<30d'
-                        WHEN ttl <= 7776000 THEN '<90d'
-                        WHEN ttl <= 31536000 THEN '<1y'
-                        ELSE '>1y'
-                    END as bucket,
-                    count(*) as count,
-                    min(ttl) as min_ttl
-                FROM {temp_table}
-                WHERE ttl IS NOT NULL
-                GROUP BY 1 ORDER BY min_ttl
-            """
+            ttl_q = SQL.TTL_DIST.format(temp_table=temp_table)
             ttl_res = runner.execute(ttl_q).fetchall()
             results["ttl_dist"] = [{"bucket": r[0], "count": r[1]} for r in ttl_res]
             timer.mark("ttl_dist_query", _t)
@@ -373,8 +321,6 @@ def _compute_performance_aggregates(
             # When top_urls/top_asns/ttl_dist were served from rollups, temp_table
             # is None and we query the base logs relation directly with partition_pruning.
             _t = _time.perf_counter()
-            ottfb_expr = coalesce("CAST(ottfb AS DOUBLE) / 1000.0", "0") if "ottfb" in actual_cols else "0"
-            ottlb_expr = coalesce("CAST(ottlb AS DOUBLE) / 1000.0", "0") if "ottlb" in actual_cols else "0"
             if temp_table:
                 source_rel = temp_table
                 comp_where = "WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL"
@@ -388,43 +334,12 @@ def _compute_performance_aggregates(
                 )
                 q_params = params
 
-            combined_q = f"""
-                WITH components AS (
-                    SELECT
-                        cache::VARCHAR AS cache,
-                        CAST(ttfb AS DOUBLE) * 1000.0 AS origin_ms,
-                        (CAST(elapsed AS DOUBLE) / 1000.0 - CAST(ttfb AS DOUBLE) * 1000.0) AS edge_ms,
-                        {ottfb_expr} AS origin_wait,
-                        GREATEST(0.0, {ottlb_expr} - {ottfb_expr}) AS origin_download,
-                        GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - {ottfb_expr}) AS edge_processing,
-                        GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({ottlb_expr}, CAST(ttfb AS DOUBLE) * 1000.0)) AS client_download
-                    FROM {source_rel}
-                    {comp_where}
-                )
-                SELECT
-                    's'::VARCHAR AS row_type,
-                    origin_ms,
-                    edge_ms,
-                    cache,
-                    NULL::DOUBLE AS w_edge_processing,
-                    NULL::DOUBLE AS w_origin_wait,
-                    NULL::DOUBLE AS w_origin_download,
-                    NULL::DOUBLE AS w_client_download
-                FROM components
-                WHERE edge_ms >= 0
-                USING SAMPLE 300
-                UNION ALL
-                SELECT
-                    'w'::VARCHAR,
-                    NULL::DOUBLE,
-                    NULL::DOUBLE,
-                    NULL::VARCHAR,
-                    AVG(edge_processing),
-                    AVG(origin_wait),
-                    AVG(origin_download),
-                    AVG(client_download)
-                FROM components
-            """
+            combined_q = SQL.build_scatter_waterfall_sql(
+                source_rel=source_rel,
+                comp_where=comp_where,
+                has_ottfb="ottfb" in actual_cols,
+                has_ottlb="ottlb" in actual_cols,
+            )
             combined_rows = runner.execute(combined_q, q_params).fetchall()
 
             scatter: list[dict] = []

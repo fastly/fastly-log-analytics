@@ -24,20 +24,13 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
-import { PERIOD_LABELS, REGION_LABELS, SHIELD_LABELS } from "../types";
+import {
+  PERIOD_LABELS,
+  REGION_LABELS,
+  RETENTION_OPTIONS,
+  SHIELD_LABELS,
+} from "@/lib/service-config-constants";
 import { RumVersionPicker } from "../RumVersionPicker";
-
-const RETENTION_OPTIONS = [
-  { value: "1", label: "1 day" },
-  { value: "3", label: "3 days" },
-  { value: "7", label: "7 days" },
-  { value: "14", label: "14 days" },
-  { value: "30", label: "30 days" },
-  { value: "90", label: "90 days" },
-  { value: "180", label: "180 days" },
-  { value: "365", label: "365 days" },
-  { value: "0", label: "Forever" },
-];
 
 export function StorageStep({ s }: { s: WizardState }) {
   const { config, setConfig, domainStatus, domainMessage, checkDomain } = s;
@@ -226,6 +219,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                         EU Central (Frankfurt)
                       </SelectItem>
                       <SelectItem value="eu-south-1">EU South (Milan)</SelectItem>
+                      <SelectItem value="eu-west-1">EU West (Paris)</SelectItem>
                       <SelectItem value="uk-east-1">UK East (London)</SelectItem>
                       <SelectItem value="jp-central-1">
                         JP Central (Tokyo)
@@ -372,6 +366,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                   <SelectItem value="chi-il-us">CHI (Chicago)</SelectItem>
                   <SelectItem value="frankfurt-de">FRA (Frankfurt)</SelectItem>
                   <SelectItem value="mxp-milan-it">MXP (Milan)</SelectItem>
+                  <SelectItem value="mxp-paris-fr">MXP (Paris)</SelectItem>
                   <SelectItem value="london-uk">LHR (London)</SelectItem>
                   <SelectItem value="nrt-tokyo-jp">NRT (Tokyo)</SelectItem>
                   <SelectItem value="sydney-au">SYD (Sydney)</SelectItem>

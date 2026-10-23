@@ -219,9 +219,14 @@ function DataTableImpl<TData, TValue>({
     return data
   }, [data])
 
+  const prevInitialVisibilityJson = React.useRef(JSON.stringify(initialVisibility))
   React.useEffect(() => {
-    if (Object.keys(initialVisibility).length > 0) {
-      setColumnVisibility(initialVisibility)
+    const nextJson = JSON.stringify(initialVisibility)
+    if (nextJson !== prevInitialVisibilityJson.current) {
+      prevInitialVisibilityJson.current = nextJson
+      if (Object.keys(initialVisibility).length > 0) {
+        setColumnVisibility(initialVisibility)
+      }
     }
   }, [initialVisibility])
 

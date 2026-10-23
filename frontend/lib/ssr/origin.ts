@@ -39,10 +39,9 @@
 // window; start_time/end_time are omitted (the keyed path ignores them).
 
 import {
-  parseSsrJson,
+  fetchSsrRangePost,
   resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
-  ssrUpstreamGet,
 } from './upstream'
 
 // Default first-paint section set — mirrors ORIGIN_SECTIONS in
@@ -103,49 +102,21 @@ export async function fetchOriginServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
 ): Promise<OriginSsrSeed | null> {
-  const { rangeToken, anchor } = resolveOriginDefaultKey(now)
-
-  // Without a service id the backend 400s — bail so the page builds the client
-  // key path and fetches once it has a service.
-  if (!serviceId) return null
-
-  const data = parseSsrJson(
-    await ssrUpstreamGet({
-      path: '/api/origin/aggregates',
-      logPrefix: 'ssr/origin',
-      method: 'POST',
-      // Admin SSH-tunnel branch: when ADMIN_SHARED_SECRET is set the backend's
-      // admin-token gate 401s a loopback request without X-Admin-Token. The
-      // transport injects it ONLY on the loopback-admin branch — never on the
-      // Caddy/analyst branch — so the analyst path is unaffected and no admin
-      // secret can reach an analyst-classified request.
-      injectAdminToken: true,
-      // Mirror OriginReportContent's client request body EXACTLY. range_token +
-      // anchor drive the scan window (the keyed path ignores start_time/
-      // end_time, so they are omitted).
-      body: {
-        // start_time/end_time omitted — the keyed path resolves the window from
-        // range_token + anchor and ignores FE-supplied absolute bounds.
-        filters: {},
-        bucket_minutes: ORIGIN_SSR_DEFAULTS.bucketMinutes,
-        split_by_leg: false,
-        timeseries_metric: ORIGIN_SSR_DEFAULTS.metric,
-        timeseries_percentile: ORIGIN_SSR_DEFAULTS.percentile,
-        slow_urls_limit: ORIGIN_SSR_DEFAULTS.slowUrlsLimit,
-        slow_urls_min_requests: ORIGIN_SSR_DEFAULTS.slowUrlsMinRequests,
-        pop_latency_limit: ORIGIN_SSR_DEFAULTS.popLatencyLimit,
-        ip_health_limit: ORIGIN_SSR_DEFAULTS.ipHealthLimit,
-        sections: ORIGIN_SSR_SECTIONS,
-        range_token: rangeToken,
-        anchor,
-      },
-      // Mirror the client openapi-fetch middleware, which stamps x-service-id
-      // (lib/api.ts). build_request_context reads x-service-id (backend/deps.py).
-      extraHeaders: { 'x-service-id': serviceId },
-    }),
-    'ssr/origin',
-  )
-
-  if (data == null) return null
-  return { data, rangeToken, anchor }
+  return fetchSsrRangePost({
+    serviceId,
+    path: '/api/origin/aggregates',
+    logPrefix: 'ssr/origin',
+    now,
+    body: {
+      bucket_minutes: ORIGIN_SSR_DEFAULTS.bucketMinutes,
+      split_by_leg: false,
+      timeseries_metric: ORIGIN_SSR_DEFAULTS.metric,
+      timeseries_percentile: ORIGIN_SSR_DEFAULTS.percentile,
+      slow_urls_limit: ORIGIN_SSR_DEFAULTS.slowUrlsLimit,
+      slow_urls_min_requests: ORIGIN_SSR_DEFAULTS.slowUrlsMinRequests,
+      pop_latency_limit: ORIGIN_SSR_DEFAULTS.popLatencyLimit,
+      ip_health_limit: ORIGIN_SSR_DEFAULTS.ipHealthLimit,
+      sections: ORIGIN_SSR_SECTIONS,
+    },
+  })
 }

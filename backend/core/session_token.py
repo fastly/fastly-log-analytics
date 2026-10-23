@@ -101,6 +101,33 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode((s + pad).encode("ascii"))
 
 
+def seal_aes_gcm(key: bytes, payload: object, aad: bytes) -> str:
+    """JSON-serialize and seal ``payload`` with AES-256-GCM + ``aad`` into a base64url token."""
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    nonce = os.urandom(NONCE_BYTES)
+    ciphertext = AESGCM(key).encrypt(nonce, raw, aad)
+    return _b64url_encode(nonce + ciphertext)
+
+
+def unseal_aes_gcm(key: bytes, token: str, aad: bytes, error_cls: type[Exception]) -> object:
+    """Inverse of :func:`seal_aes_gcm`, raising ``error_cls`` on any decode or AEAD error."""
+    try:
+        raw = _b64url_decode(token)
+    except Exception as e:
+        raise error_cls(f"base64url decode failed: {e}") from e
+    if len(raw) < NONCE_BYTES + GCM_TAG_BYTES:
+        raise error_cls(f"token too short: {len(raw)} bytes")
+    nonce, ciphertext = raw[:NONCE_BYTES], raw[NONCE_BYTES:]
+    try:
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
+    except InvalidTag as e:
+        raise error_cls("AEAD verification failed") from e
+    try:
+        return json.loads(plaintext)
+    except (ValueError, TypeError) as e:
+        raise error_cls(f"payload decode failed: {e}") from e
+
+
 def seal_session_token(
     ip: str,
     ja4: str | None,
@@ -110,10 +137,7 @@ def seal_session_token(
     service_id: str,
 ) -> str:
     """Seal a session identity tuple into an opaque token bound to ``service_id``."""
-    payload = json.dumps([ip, ja4, session_start, session_end], separators=(",", ":")).encode("utf-8")
-    nonce = os.urandom(NONCE_BYTES)
-    ciphertext = _aead().encrypt(nonce, payload, service_id.encode("utf-8"))
-    return _b64url_encode(nonce + ciphertext)
+    return seal_aes_gcm(_resolve_key(), [ip, ja4, session_start, session_end], service_id.encode("utf-8"))
 
 
 def open_session_token(token: str, *, service_id: str) -> tuple[str, str | None, str, str]:
@@ -123,19 +147,8 @@ def open_session_token(token: str, *, service_id: str) -> tuple[str, str | None,
     blob, AEAD tag mismatch from tampering, wrong service AAD, or a key this
     process no longer holds).
     """
-    try:
-        raw = _b64url_decode(token)
-    except Exception as e:  # malformed base64
-        raise SessionTokenError(f"base64url decode failed: {e}") from e
-    if len(raw) < NONCE_BYTES + GCM_TAG_BYTES:
-        raise SessionTokenError(f"token too short: {len(raw)} bytes")
-    nonce, ciphertext = raw[:NONCE_BYTES], raw[NONCE_BYTES:]
-    try:
-        plaintext = _aead().decrypt(nonce, ciphertext, service_id.encode("utf-8"))
-    except InvalidTag as e:
-        raise SessionTokenError("AEAD verification failed") from e
-    try:
-        ip, ja4, start, end = json.loads(plaintext)
-    except (ValueError, TypeError) as e:
-        raise SessionTokenError(f"payload decode failed: {e}") from e
-    return ip, ja4, start, end
+    decoded = unseal_aes_gcm(_resolve_key(), token, service_id.encode("utf-8"), SessionTokenError)
+    if not isinstance(decoded, list) or len(decoded) != 4:
+        raise SessionTokenError("payload decode failed: expected 4 elements")
+    ip, ja4, start, end = decoded
+    return str(ip), (str(ja4) if ja4 is not None else None), str(start), str(end)

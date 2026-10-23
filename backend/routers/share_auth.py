@@ -24,6 +24,7 @@ from backend.utils.analyst_session import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
     safe_audit_email,
+    set_analyst_session_cookies,
 )
 from backend.utils.remote_access import client_ip
 from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
@@ -146,18 +147,13 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
     # via /api/share/acknowledge (which also rotates the session id).
     # Previously the full cookie was issued unconditionally — pending/full
     # was a fiction and a session-fixation gap across the TOS boundary.
-    target_cookie = PENDING_COOKIE_NAME if tos_pending else COOKIE_NAME
-    other_cookie = COOKIE_NAME if tos_pending else PENDING_COOKIE_NAME
-    response.set_cookie(
-        key=target_cookie,
-        value=session.session_id,
-        httponly=True,
+    set_analyst_session_cookies(
+        response,
+        session.session_id,
+        tos_pending=tos_pending,
         secure=request.url.scheme == "https",
         samesite="strict",
-        max_age=24 * 60 * 60,
-        path="/",
     )
-    response.delete_cookie(other_cookie, path="/")
 
     return ShareLoginResponse(
         ok=True,

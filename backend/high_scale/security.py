@@ -83,9 +83,7 @@ _IS_IPV6 = "lower(custom_fields['is_ipv6']) IN ('1', 'true', 't', 'yes')"
 _IS_BOT = "lower(custom_fields['is_bot']) IN ('1', 'true', 't', 'yes')"
 
 
-def _bucket_case(column: str, buckets: tuple[tuple[int, str], ...], last: str) -> str:
-    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in buckets)
-    return f"multiIf({arms}, '{last}')"
+from backend.high_scale._common import _bucket_case
 
 
 def _pop_coord(index: int, default: float) -> str:
@@ -299,7 +297,7 @@ def _verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: 
 # NGWAF bot rows. An unfiltered request reads the per-minute ``ngwaf_bot`` projection;
 # a filtered one reads the ``ngwaf_bot*`` keys persisted on request_facts at ingest.
 _NGWAF_PROJECTION_WHERE = (
-    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request_aggregate')} AND dimension='ngwaf_bot' "
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('security_dimensions')} AND dimension='ngwaf_bot' "
     "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)}"
 )
 

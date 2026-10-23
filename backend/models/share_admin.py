@@ -123,11 +123,7 @@ class SettingsPayload(BaseModel):
 # key sets. Field lists derive from the producers (TunnelManager, share_db).
 
 
-class _ShareAdminRead(PassthroughModel):
-    """Base for share-admin responses — passes undeclared keys through."""
-
-
-class ShareBannerResponse(_ShareAdminRead, WireSafeModel):
+class ShareBannerResponse(WireSafeModel):
     sharing_active: bool | None = None
     public_url: str | None = None
 
@@ -135,7 +131,7 @@ class ShareBannerResponse(_ShareAdminRead, WireSafeModel):
 ShareStatusBannerResponse = ShareBannerResponse
 
 
-class InviteRecord(_ShareAdminRead):
+class InviteRecord(PassthroughModel):
     """One remote-invite row (``SELECT *`` + derived fields). The stored
     passcode hash rides through ``extra`` untouched — intentionally NOT
     declared here so the OpenAPI surface doesn't advertise it; the schema
@@ -165,7 +161,7 @@ class InviteRecord(_ShareAdminRead):
     service_ids: list[str] | None = None
 
 
-class ShareServiceEntry(_ShareAdminRead):
+class ShareServiceEntry(PassthroughModel):
     service_id: str | None = None
     name: str | None = None
     remote_frontend_deployed: bool | None = None
@@ -173,7 +169,7 @@ class ShareServiceEntry(_ShareAdminRead):
     remote_service_id: str | None = None
 
 
-class ShareSessionRecord(_ShareAdminRead):
+class ShareSessionRecord(PassthroughModel):
     """One live analyst session: ``AnalystSession.to_dict()`` (a dataclass
     ``asdict``, so every key is always present)."""
 
@@ -197,7 +193,7 @@ class ShareSessionRecord(_ShareAdminRead):
     oauth_provider: str | None
 
 
-class ShareAuditLogRow(_ShareAdminRead):
+class ShareAuditLogRow(PassthroughModel):
     """One ``remote_share_audit_logs`` row (``SELECT *``)."""
 
     id: int
@@ -208,32 +204,32 @@ class ShareAuditLogRow(_ShareAdminRead):
     details: str
 
 
-class ShareRateLimitFailure(_ShareAdminRead):
+class ShareRateLimitFailure(PassthroughModel):
     ip: str
     count: int
     window_s: int
 
 
-class ShareRateLimitLockout(_ShareAdminRead):
+class ShareRateLimitLockout(PassthroughModel):
     ip: str
     remaining_s: int
 
 
-class ShareRateLimits(_ShareAdminRead):
+class ShareRateLimits(PassthroughModel):
     """``LoginRateLimiter.snapshot()``."""
 
     failures: list[ShareRateLimitFailure]
     lockouts: list[ShareRateLimitLockout]
 
 
-class ShareTunnelUptimeEntry(_ShareAdminRead):
+class ShareTunnelUptimeEntry(PassthroughModel):
     started_at: str
     ended_at: str
     duration_s: int
     reason: str
 
 
-class ShareTelemetry(_ShareAdminRead):
+class ShareTelemetry(PassthroughModel):
     """``TunnelManager.get_telemetry()``."""
 
     heartbeat_unauth_count: int
@@ -241,7 +237,7 @@ class ShareTelemetry(_ShareAdminRead):
     tunnel_uptime_history: list[ShareTunnelUptimeEntry]
 
 
-class ShareStatusResponse(_ShareAdminRead):
+class ShareStatusResponse(PassthroughModel):
     """``build_share_status()``."""
 
     sharing_active: bool | None = None
@@ -259,7 +255,7 @@ class ShareStatusResponse(_ShareAdminRead):
     telemetry: ShareTelemetry | None = None
 
 
-class ShareLiveResponse(_ShareAdminRead):
+class ShareLiveResponse(PassthroughModel):
     """``build_share_live_payload()`` — the lean 10-s poll subset."""
 
     sharing_active: bool | None = None
@@ -269,54 +265,54 @@ class ShareLiveResponse(_ShareAdminRead):
     telemetry: ShareTelemetry | None = None
 
 
-class ShareAuditLogsResponse(_ShareAdminRead):
+class ShareAuditLogsResponse(PassthroughModel):
     audit_logs: list[ShareAuditLogRow] | None = None
 
 
-class ShareStartResponse(_ShareAdminRead):
+class ShareStartResponse(PassthroughModel):
     public_url: str | None = None
 
 
-class SharePanicResponse(_ShareAdminRead):
+class SharePanicResponse(PassthroughModel):
     sessions_booted: int | None = None
 
 
-class InviteMutationAck(_ShareAdminRead):
+class InviteMutationAck(PassthroughModel):
     """``{ok: true}`` acks that also report booted session count."""
 
     ok: bool | None = None
     booted_sessions: int | None = None
 
 
-class ClaimTokenResponse(_ShareAdminRead):
+class ClaimTokenResponse(PassthroughModel):
     token: str | None = None
 
 
-class BackupImportResponse(_ShareAdminRead):
+class BackupImportResponse(PassthroughModel):
     inserted: int | None = None
     skipped: int | None = None
     merged: int | None = None
 
 
-class GdprEraseResponse(_ShareAdminRead):
+class GdprEraseResponse(PassthroughModel):
     deleted_invites: int | None = None
     redacted_log_rows: int | None = None
     retained_recent_rows: int | None = None
 
 
-class ShareSettingsResponse(_ShareAdminRead):
+class ShareSettingsResponse(PassthroughModel):
     max_concurrent_analyst_sessions: int | None = None
 
 
-class WordphraseResponse(_ShareAdminRead):
+class WordphraseResponse(PassthroughModel):
     passcode: str | None = None
 
 
-class ShareInvitesResponse(_ShareAdminRead):
+class ShareInvitesResponse(PassthroughModel):
     invites: list[InviteRecord] | None = None
 
 
-class PasscodeRegenerateResponse(_ShareAdminRead):
+class PasscodeRegenerateResponse(PassthroughModel):
     ok: bool | None = None
     invite_id: str | None = None
     passcode: str | None = None
@@ -329,7 +325,7 @@ class ShareTosPayload(BaseModel):
     text: str
 
 
-class ShareTosResponse(_ShareAdminRead):
+class ShareTosResponse(PassthroughModel):
     ok: bool | None = None
     version: str | None = None
     text: str | None = None

@@ -58,7 +58,27 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 
-const CLEAN_ROUTES = ['/origin', '/performance', '/security', '/query', '/insights', '/sessions', '/network', '/control-room', '/fastly-value', '/streaming']
+const CLEAN_ROUTES = [
+  '/origin',
+  '/performance',
+  '/security',
+  '/query',
+  '/insights',
+  '/sessions',
+  '/network',
+  '/control-room',
+  '/fastly-value',
+  '/streaming',
+  '/admin',
+  '/admin/queries',
+  '/admin/session-scoring',
+  '/admin/share',
+  '/admin/trends',
+  '/admin/usage-log',
+  '/alerts',
+  '/logs',
+  '/usage',
+]
 
 // `next dev` compiles each route on first request. On the heaviest route
 // (/charts fetches the ~1.4MB plotly.js-cartesian chunk) that cold compile

@@ -12,16 +12,17 @@ import {
 } from '@/components/ui/select'
 
 const PRESETS = [
-  { value: 1, label: 'Last 1h' },
-  { value: 6, label: 'Last 6h' },
-  { value: 24, label: 'Last 24h' },
-  { value: 72, label: 'Last 3d' },
-  { value: 168, label: 'Last 7d' },
+  { value: 1, label: 'Last 1h', shortLabel: '1h' },
+  { value: 6, label: 'Last 6h', shortLabel: '6h' },
+  { value: 24, label: 'Last 24h', shortLabel: '24h' },
+  { value: 72, label: 'Last 3d', shortLabel: '3d' },
+  { value: 168, label: 'Last 7d', shortLabel: '7d' },
 ] as const
 
 interface SinceHoursPickerProps {
   value: number
   onChange: (sinceHours: number) => void
+  compact?: boolean
 }
 
 /**
@@ -33,17 +34,17 @@ interface SinceHoursPickerProps {
  * health endpoints already enforce `le=168` — going wider needs a
  * separate "deep history" endpoint that paginates the DuckDB scan.
  */
-export function SinceHoursPicker({ value, onChange }: SinceHoursPickerProps) {
+export function SinceHoursPicker({ value, onChange, compact = false }: SinceHoursPickerProps) {
   return (
-    <Select value={String(value)} onValueChange={(v) => onChange(Number(v) || 24)}>
-      <SelectTrigger className="h-8 w-[120px] text-xs">
-        <Clock className="h-3.5 w-3.5 mr-1 text-muted-foreground" />
+    <Select value={String(value)} onValueChange={(v) => v && onChange(Number(v) || 24)}>
+      <SelectTrigger className={compact ? 'h-7 text-xs w-20' : 'h-8 w-[120px] text-xs'}>
+        {!compact && <Clock className="h-3.5 w-3.5 mr-1 text-muted-foreground" />}
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
         {PRESETS.map((p) => (
           <SelectItem key={p.value} value={String(p.value)} className="text-xs">
-            {p.label}
+            {compact ? p.shortLabel : p.label}
           </SelectItem>
         ))}
       </SelectContent>

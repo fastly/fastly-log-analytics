@@ -111,21 +111,26 @@ describe('useDashboardBundle', () => {
   })
 
   it('does not automatically refetch the live relative range', async () => {
-    let hits = 0
-    server.use(
-      http.post(`${API_BASE}/api/dashboard/bundle`, () => {
-        hits++
-        return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
-      }),
-    )
-    const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
-    renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
-      wrapper: wrapperFor(qc),
-    })
-    await waitFor(() => expect(hits).toBe(1))
-    await new Promise(resolve => setTimeout(resolve, 5_100))
-    expect(hits).toBe(1)
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let hits = 0
+      server.use(
+        http.post(`${API_BASE}/api/dashboard/bundle`, () => {
+          hits++
+          return HttpResponse.json({ aggregates: { data: {} }, top_bots: [] })
+        }),
+      )
+      const qc = makeClient()
+      const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+      renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
+        wrapper: wrapperFor(qc),
+      })
+      await waitFor(() => expect(hits).toBe(1))
+      await vi.advanceTimersByTimeAsync(5_100)
+      expect(hits).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does NOT fan out into separate aggregates/top-bots cache entries', async () => {

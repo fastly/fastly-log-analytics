@@ -17,6 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { PERIOD_LABELS } from '@/lib/service-config-constants'
 import { CmcdConfigSection } from '@/components/CmcdConfigSection'
 import type { components } from '@/types/api.generated'
 
@@ -258,14 +259,7 @@ export function StandardFieldsStep({
           <Select value={period} onValueChange={(v) => v && setPeriod(v)}>
             <SelectTrigger id="period" className="h-9">
               <SelectValue>
-                {period === '1' ? '1 second' :
-                 period === '5' ? '5 seconds' :
-                 period === '10' ? '10 seconds' :
-                 period === '20' ? '20 seconds' :
-                 period === '30' ? '30 seconds' :
-                 period === '60' ? '1 minute' :
-                 period === '120' ? '2 minutes' :
-                 period === '300' ? '5 minutes' : period}
+                {PERIOD_LABELS[period] ?? period}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>

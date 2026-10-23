@@ -1,8 +1,7 @@
 import {
-  parseSsrJson,
+  fetchSsrRangePost,
   resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
-  ssrUpstreamGet,
 } from './upstream'
 
 export type AssetsSsrSeed = SsrRangeSeed
@@ -16,31 +15,11 @@ export async function fetchAssetsServerSide(
   now: Date = new Date(),
   logExtents?: unknown,
 ): Promise<AssetsSsrSeed | null> {
-  const { rangeToken, anchor } = resolveAssetsDefaultKey(now, logExtents)
-
-  if (!serviceId) return null
-
-  const data = parseSsrJson(
-    await ssrUpstreamGet({
-      path: '/api/assets/aggregates',
-      logPrefix: 'ssr/assets',
-      method: 'POST',
-      injectAdminToken: true,
-      body: {
-        filters: {},
-        range_token: rangeToken,
-        anchor: anchor,
-      },
-      extraHeaders: { 'x-service-id': serviceId },
-    }),
-    'ssr/assets',
-  )
-
-  if (!data) return null
-
-  return {
-    data,
-    rangeToken,
-    anchor,
-  }
+  return fetchSsrRangePost({
+    serviceId,
+    path: '/api/assets/aggregates',
+    logPrefix: 'ssr/assets',
+    now,
+    logExtents,
+  })
 }

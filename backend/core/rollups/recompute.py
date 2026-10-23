@@ -48,6 +48,7 @@ from .hour_bundles import bundle_hours, bundle_hours_ip_spread
 # module at call time, so each name here is also the test patch point).
 from .network_health_geo import build_network_geo_bundles  # noqa: F401
 from .network_health_heatmap import build_network_heatmap_bundles  # noqa: F401
+from .network_quality import build_network_quality_bundles  # noqa: F401
 from .network_rtt import build_network_rtt_bundles  # noqa: F401
 from .network_speed import build_network_speed_bundles  # noqa: F401
 from .network_summary import build_network_summary_bundles  # noqa: F401
@@ -58,6 +59,7 @@ from .origin_summary import build_origin_summary_bundles  # noqa: F401
 from .overview import build_overview_bundles  # noqa: F401
 from .perf_dims import build_perf_dims_bundles  # noqa: F401
 from .perf_latency import build_perf_latency_bundles  # noqa: F401
+from .pop_health import build_pop_health_bundles  # noqa: F401
 from .security_dims import build_security_dims_bundles  # noqa: F401
 from .security_proxies import build_security_proxies_bundles  # noqa: F401
 from .sessions import build_session_bundles  # noqa: F401

@@ -138,13 +138,13 @@ def save_alert(service_id: str, alert) -> dict:
 def toggle_alert(service_id: str, alert_id: str, enabled: bool) -> dict:
     con = get_con(service_id)
     cur = con.execute(
-        "SELECT service_id FROM alerts WHERE id = ?",
-        (alert_id,),
+        "SELECT service_id FROM alerts WHERE id = ? AND service_id = ?",
+        (alert_id, service_id),
     )
     row = cur.fetchone()
     con.execute(
-        "UPDATE alerts SET enabled = ? WHERE id = ?",
-        (1 if enabled else 0, alert_id),
+        "UPDATE alerts SET enabled = ? WHERE id = ? AND service_id = ?",
+        (1 if enabled else 0, alert_id, service_id),
     )
     con.commit()
     return {"id": alert_id, "status": "success", "service_id": row["service_id"] if row else None}
@@ -152,9 +152,9 @@ def toggle_alert(service_id: str, alert_id: str, enabled: bool) -> dict:
 
 def delete_alert(service_id: str, alert_id: str) -> dict:
     con = get_con(service_id)
-    cur = con.execute("SELECT service_id FROM alerts WHERE id = ?", (alert_id,))
+    cur = con.execute("SELECT service_id FROM alerts WHERE id = ? AND service_id = ?", (alert_id, service_id))
     row = cur.fetchone()
-    con.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+    con.execute("DELETE FROM alerts WHERE id = ? AND service_id = ?", (alert_id, service_id))
     con.commit()
     return {"status": "success", "service_id": row["service_id"] if row else None}
 
@@ -163,12 +163,12 @@ def update_alert_last_triggered(service_id: str, alert_id: str, triggered_ts: st
     con = get_con(service_id)
     if triggered_ts:
         con.execute(
-            "UPDATE alerts SET last_triggered_at = ? WHERE id = ?",
-            (triggered_ts, alert_id),
+            "UPDATE alerts SET last_triggered_at = ? WHERE id = ? AND service_id = ?",
+            (triggered_ts, alert_id, service_id),
         )
     else:
         con.execute(
-            "UPDATE alerts SET last_triggered_at = datetime('now') WHERE id = ?",
-            (alert_id,),
+            "UPDATE alerts SET last_triggered_at = datetime('now') WHERE id = ? AND service_id = ?",
+            (alert_id, service_id),
         )
     con.commit()

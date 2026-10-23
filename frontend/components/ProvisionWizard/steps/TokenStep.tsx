@@ -1,10 +1,9 @@
 "use client";
 
 import React from "react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AlertCircle, Loader2, Lock } from "lucide-react";
+import { AlertCircle, Lock } from "lucide-react";
 import type { WizardState } from "../useWizardState";
 
 // Read the machine-readable error code the services query attaches (see
@@ -83,17 +82,6 @@ export function TokenStep({ s }: { s: WizardState }) {
             )}
           </div>
         )}
-        <Button
-          className="w-full"
-          size="lg"
-          onClick={s.handleTokenSubmit}
-          disabled={!s.token || s.isLoadingServices}
-        >
-          {s.isLoadingServices && (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          )}
-          Fetch Services
-        </Button>
       </div>
     </div>
   );
