@@ -13,6 +13,7 @@ from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 @pytest.fixture
 def observation_request(in_memory_duckdb, test_service_source, tmp_path, monkeypatch) -> dict:
+    test_service_source["_cache_dir_override"] = str(tmp_path / "request-cache")
     source_dir = tmp_path / "bot-sources"
     source_dir.mkdir()
     (source_dir / "well-known-bots.json").write_text(

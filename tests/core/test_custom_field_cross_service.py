@@ -11,17 +11,12 @@ respective halves. This file pins the third invariant: two configured
 services with overlapping (or distinct) custom fields stay isolated at
 the storage + view + API layers.
 
-OBSERVED-vs-spec: the spec referenced ``GET /api/services/{id}/log-fields``
-as the surface that reveals ``svc_a_field``. That route's
-``LogFieldsResponse`` model only exposes ``groups``/``field_overrides``/
-``field_limits`` and strips ``custom_fields`` from the wire — the route
-that actually surfaces custom-field membership cross-service is
-``GET /custom-fields``. We pin both endpoints below.
+Both ``GET /api/services/{id}/log-fields`` and ``GET /custom-fields``
+expose custom-field membership. They must agree within a service without
+revealing another service's fields.
 """
 
 from __future__ import annotations
-
-import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -110,12 +105,11 @@ def test_custom_field_in_service_a_not_visible_in_service_b(app):
         assert "svc_a_field" in names_a
         assert "svc_a_field" not in names_b, f"leak into B: {names_b}"
 
-        # /log-fields strips custom_fields from the wire — pin both.
         r_a_lf = c.get(f"/api/services/{svc_a}/log-fields")
         r_b_lf = c.get(f"/api/services/{svc_b}/log-fields")
         assert r_a_lf.status_code == 200 and r_b_lf.status_code == 200
-        assert "svc_a_field" not in json.dumps(r_a_lf.json()["log_fields"])
-        assert "svc_a_field" not in json.dumps(r_b_lf.json()["log_fields"])
+        assert {f["name"] for f in r_a_lf.json()["log_fields"]["custom_fields"]} == names_a
+        assert {f["name"] for f in r_b_lf.json()["log_fields"]["custom_fields"]} == names_b
 
     # Schema layer — derive Arrow schema per service from persisted config.
     cfg_a = svcconfig.load_config(svc_a)

@@ -699,7 +699,7 @@
   '''
   
       
-      SELECT COUNT(*) FROM (SELECT (req_count >= 1000) AS flagged FROM sessions_agg) sub
+      SELECT COUNT(*) FROM (SELECT *, (req_count >= 1000) AS flagged FROM sessions_agg) sub
       
   
   '''
