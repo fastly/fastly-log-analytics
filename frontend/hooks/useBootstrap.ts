@@ -4,7 +4,6 @@ import { unwrapClient } from '@/lib/api-client'
 import { queryKeys, seedBootstrapDependentCaches } from '@/lib/query-keys'
 
 export { seedBootstrapDependentCaches }
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
@@ -51,7 +50,6 @@ export function useBootstrapSyncEffects(
         pop_geo?: Parameters<ReturnType<typeof usePopGeoStore.getState>['setMap']>[0]
         pops?: Record<string, [number | null, number | null]>
         settings?: {
-          admin_token?: string | null
           is_remote_analyst?: boolean
         }
         debug_state?: {
@@ -88,27 +86,9 @@ export function useBootstrapSyncEffects(
       usePopGeoStore.getState().setLocations(locations)
     }
 
-    // Phase Q + RSC race fix: the SSR HydrationBoundary pre-populates
-    // the bootstrap cache, which means useBootstrap's queryFn does NOT
-    // run on the first client mount (the cache hit short-circuits it).
-    // That left the setToken(...) call inside queryFn unreachable on
-    // every SSR-hydrated load, so the Zustand store stayed empty and
-    // every admin API call that fired before the next bootstrap
-    // refetch 401'd with admin_token_required (see ServicesTable +
-    // OperationsOverview cards on /admin).
-    //
-    // Mirror the token write here as well so it ALWAYS lands as soon
-    // as query.data is available, regardless of whether the data came
-    // from the network or from the SSR-hydrated cache. The queryFn
-    // copy stays as the first-render fast path for the no-SSR
-    // (pure-CSR) case.
-    const adminToken = data?.settings?.admin_token
-    useAdminTokenStore.getState().setToken(
-      typeof adminToken === 'string' && adminToken ? adminToken : null,
-    )
-    // Same SSR-hydrated-cache reasoning as the token above: the queryFn copy
-    // is skipped when the cache is pre-seeded, so mirror the role flag here
-    // too. See sessionRoleStore.
+    // When the SSR HydrationBoundary pre-populates the bootstrap cache,
+    // useBootstrap's queryFn is skipped on the first client mount, so mirror
+    // the role flag here too. See sessionRoleStore.
     useSessionRoleStore.getState().setIsRemoteAnalyst(
       data?.settings?.is_remote_analyst === true,
     )
@@ -197,36 +177,12 @@ export function useBootstrap() {
     queryKey: queryKeys.bootstrap(),
     queryFn: async () => {
       const data = await unwrapClient(client.GET("/api/bootstrap"))
-      // Phase Q: capture the shared-secret admin token (null when
-      // ADMIN_SHARED_SECRET is unset on the backend, or when bootstrap
-      // is hit on the analyst branch) so the fetch interceptor in
-      // lib/api.ts can inject X-Admin-Token on subsequent admin calls.
-      const adminToken = data?.settings?.admin_token
-      const nextToken = typeof adminToken === 'string' && adminToken ? adminToken : null
-      const prevToken = useAdminTokenStore.getState().token
-      useAdminTokenStore.getState().setToken(nextToken)
       // Mirror the caller's role so lib/api.ts's 401 handler can tell an
       // admin (must NOT be bounced to the analyst /share-login) from a remote
       // analyst whose session died (should be). See sessionRoleStore.
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
-      // Restart-warmup recovery. When the SSR bootstrap fetch failed (backend
-      // still booting → the helper returns null), no token is seeded at render
-      // time, so the admin cards/tables fire their first queries with no
-      // X-Admin-Token → 401 admin_token_required — and React Query does NOT
-      // retry a 4xx, so they'd sit errored until the next poll / refocus or a
-      // manual reload. This queryFn is the client-side bootstrap fetch that
-      // runs on exactly that SSR-miss path; once it lands the token
-      // (empty → present), refetch the queries that errored so /admin
-      // self-heals. Guarded on the transition so the happy path (token seeded
-      // synchronously by <HydrateAdminToken>, so this queryFn is short-
-      // circuited by the cache) never triggers it; the predicate scopes it to
-      // errored queries, not a blanket refetch. The bootstrap query itself is
-      // pending→success here, so it isn't matched (no self-invalidation loop).
-      if (nextToken && !prevToken) {
-        queryClient.invalidateQueries({ predicate: (q) => q.state.status === 'error' })
-      }
       // Seed dependent caches INSIDE the queryFn so subscribers that
       // gate on `bootstrap === 'pending' → fire own fetch` find data
       // already in their target cache by the time React Query unblocks

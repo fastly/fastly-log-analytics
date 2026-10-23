@@ -119,7 +119,6 @@ def test_app_default_is_unchanged_and_mtls_wires_both_containers():
         doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"].endswith("-public-gateway")
     )
     assert "request_header -X-Admin-Gateway-Token" in public["data"]["Caddyfile"]
-    assert "request_header -X-Admin-Token" in public["data"]["Caddyfile"]
     assert "-X-Remote-Analyst" not in public["data"]["Caddyfile"]
 
 

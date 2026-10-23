@@ -9,7 +9,6 @@ import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
 import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
-import { HydrateAdminToken } from "@/components/HydrateAdminToken";
 import { StoreHydrator } from "@/components/StoreHydrator";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
 import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
@@ -153,14 +152,6 @@ export default async function RootLayout({
               tripped state also halts the WebVitals POSTs that flooded RUM. */}
           <ReloadLoopGuard>
           <QueryProvider dehydratedState={dehydratedState}>
-            {/* One-shot store hydrator — renders before any sibling so
-                the admin-token Zustand store is populated synchronously
-                during render, BEFORE ServicesTable / OperationsOverview
-                etc. mount their useQuery callbacks. Without this the
-                SSR-pre-hydrated bootstrap cache short-circuits the
-                queryFn that would otherwise call setToken, leaving the
-                store empty on the very first render. */}
-            <HydrateAdminToken token={typeof bootstrap?.settings?.admin_token === 'string' ? bootstrap.settings.admin_token : null} />
             {/* Rehydrate the persisted Zustand stores (service / timezone /
                 debug) AFTER mount. They use persist({ skipHydration:true })
                 so the first client render matches the server's default

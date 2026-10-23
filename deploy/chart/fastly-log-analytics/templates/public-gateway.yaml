@@ -15,7 +15,6 @@ data:
           wrap json
           fields {
             request>headers>X-Admin-Gateway-Token delete
-            request>headers>X-Admin-Token delete
           }
         }
       }
@@ -23,7 +22,6 @@ data:
     :8080 {
       route {
         request_header -X-Admin-Gateway-Token
-        request_header -X-Admin-Token
         request_header X-Proxied-By-Caddy true
         @api path /api/* /js/* /rum-beacon
         reverse_proxy @api {{ include "fastly-log-analytics.fullname" . }}-backend:8000 {

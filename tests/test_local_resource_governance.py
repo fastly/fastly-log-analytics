@@ -279,7 +279,6 @@ def test_local_public_https_adapts_separately_from_http_admin(tmp_path, required
     assert '"X-Proxied-By-Caddy": ["true"]' in public_json
     assert '"X-Forwarded-For": ["{http.request.remote.host}"]' in public_json
     assert '"delete": ["X-Admin-Gateway-Token"]' in public_json
-    assert '"delete": ["X-Admin-Token"]' in public_json
     assert "X-Remote-Analyst" not in public_json
     assert '"status_code": 503' in public_json
     assert f'\\"{required}\\" != \\"1\\"' in public_json

@@ -40,7 +40,6 @@ export async function fetchSsrRangePost(options: {
       path: options.path,
       logPrefix: options.logPrefix,
       method: 'POST',
-      injectAdminToken: true,
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       body: {
         filters: {},

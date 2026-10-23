@@ -100,14 +100,6 @@ def test_legacy_loopback_behavior_remains_when_gateway_unconfigured(monkeypatch)
     assert is_request_remote(_request("203.0.113.1"))
 
 
-def test_authenticated_gateway_replaces_legacy_browser_admin_token(gateway_client, monkeypatch):
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "legacy-browser-token")
-    response = gateway_client.get("/api/admin/probe", headers={HEADER: SECRET})
-    assert response.status_code == 200
-    assert response.json() == {"is_remote": False}
-    assert SECRET not in response.text
-
-
 def test_gateway_scrubs_credentials_and_retains_authenticated_request_state(gateway_client):
     response = gateway_client.get("/api/admin/recheck", headers={HEADER: SECRET})
     assert response.status_code == 200

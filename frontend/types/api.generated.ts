@@ -7600,8 +7600,6 @@ export interface components {
             analyst_name?: string | null;
             /** Mask Ips */
             mask_ips?: boolean | null;
-            /** Admin Token */
-            admin_token?: string | null;
             /** Web Vitals Enabled */
             web_vitals_enabled?: boolean | null;
         } & {

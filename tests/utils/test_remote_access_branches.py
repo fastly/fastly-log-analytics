@@ -1311,21 +1311,6 @@ def test_is_request_remote_no_client_peer_fails_closed():
 # ── Additional defensive-branch coverage ─────────────────────────────────
 
 
-def test_admin_shared_secret_reads_env_each_call(monkeypatch):
-    """Re-reads env each call so tests can flip values without reload."""
-    from backend.utils.remote_access import _admin_shared_secret
-
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "secret-1")
-    assert _admin_shared_secret() == "secret-1"
-
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "  secret-2  ")
-    # Trimmed on every call.
-    assert _admin_shared_secret() == "secret-2"
-
-    monkeypatch.delenv("ADMIN_SHARED_SECRET", raising=False)
-    assert _admin_shared_secret() == ""
-
-
 def test_is_private_or_loopback_invalid_string_falls_through_to_stub_check():
     """ValueError from ipaddress.ip_address() falls through to the
     hostname-stub check at line 287 — pinned because the stub list

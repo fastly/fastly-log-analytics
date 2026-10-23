@@ -6,8 +6,6 @@ export interface BuildStreamRequestOptions {
   /** Path (with any query string) appended to `getApiBase()`. */
   path: string
   serviceId?: string | null
-  /** `ADMIN_SHARED_SECRET` token; raw fetch bypasses the openapi-fetch middleware that normally injects it. Omit to read the admin-token store. */
-  adminToken?: string | null
   method?: 'GET' | 'POST'
   body?: BodyInit
   /** Merged last, so callers can override any default header. */
@@ -23,7 +21,6 @@ export interface BuildStreamRequestOptions {
 export function buildStreamRequest({
   path,
   serviceId,
-  adminToken,
   method,
   body,
   extraHeaders,
@@ -35,7 +32,7 @@ export function buildStreamRequest({
     ...(body !== undefined ? { body } : {}),
     headers: {
       Accept: 'text/event-stream',
-      ...buildAdminHeaders({ serviceId, adminToken }),
+      ...buildAdminHeaders({ serviceId }),
       ...extraHeaders,
     },
     ...(cache ? { cache } : {}),

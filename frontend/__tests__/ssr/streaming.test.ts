@@ -55,7 +55,6 @@ describe('Streaming SSR fixture contract', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     vi.stubEnv('API_PROXY_URL', `http://127.0.0.1:${port}`)
-    vi.stubEnv('ADMIN_SHARED_SECRET', 'test-admin-secret')
     const queryClient = new QueryClient()
     try {
       const now = new Date('2026-10-23T12:00:37Z')
@@ -74,7 +73,6 @@ describe('Streaming SSR fixture contract', () => {
       expect(capturedHeaders.cookie).toBe('fla_streaming_fixture=test-fixture')
       expect(capturedHeaders['x-service-id']).toBe('svc-streaming-test')
       expect(capturedHeaders['x-remote-analyst']).toBe(analyst ? '1' : undefined)
-      expect(capturedHeaders['x-admin-token']).toBe(analyst ? undefined : 'test-admin-secret')
 
       const anchor = quantizeAnchor(now.toISOString(), now)
       const { rangeKey } = resolveRangeWire({

@@ -3,8 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // insights.ts is the FIRST POST caller of the shared ./_transport helper.
 // These tests pin (1) the security contract — the Caddy-marker trust gate must
 // behave IDENTICALLY for POST as for the GET callers (refuse no-marker +
-// non-loopback Host; analyst-clamp on the marker branch; admin token only on
-// the loopback branch) — and (2) the key-match contract: the windowHours/
+// non-loopback Host; analyst-clamp on the marker branch) — and (2) the key-match contract: the windowHours/
 // baselineHours the helper resolves equal what the client's useInsightsDefaults
 // computes from the same earliest_log_at, so the SSR seed key byte-matches the
 // client first-paint key. A mismatch would double-fetch (worse than no SSR).
@@ -25,7 +24,6 @@ afterEach(() => {
   mockCookies.mockReset()
   mockHeaders.mockReset()
   delete process.env.API_PROXY_URL
-  delete process.env.ADMIN_SHARED_SECRET
 })
 
 function headerGetter(entries: Record<string, string>) {
@@ -96,7 +94,7 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
     }
   })
 
-  it('admin SSH-tunnel (loopback Host, no marker): POSTs default body as admin with X-Admin-Token + service id', async () => {
+  it('admin SSH-tunnel (loopback Host, no marker): POSTs default body as admin with service id', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     let capturedMethod = ''
@@ -116,7 +114,6 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
@@ -138,16 +135,15 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
         filters: {},
       })
 
-      // Admin trust path: no analyst header, admin token present, service id passed.
+      // Admin trust path: no analyst header, service id passed.
       expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-admin-token']).toBe('sekret')
       expect(captured['x-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 
-  it('analyst (Caddy marker): POSTs as remote-analyst, NO admin token', async () => {
+  it('analyst (Caddy marker): POSTs as remote-analyst', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     let capturedMethod = ''
@@ -165,7 +161,6 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(
       headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
     )
@@ -175,9 +170,8 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
       expect(out).not.toBeNull()
       expect(out!.data).toEqual({ insights: [1] })
       expect(capturedMethod).toBe('POST')
-      // Analyst trust path: remote-analyst stamped, admin token NEVER on this branch.
+      // Analyst trust path: remote-analyst stamped.
       expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['x-admin-token']).toBeUndefined()
       expect(captured['host']).toBe('fastly-log-analytics.global.ssl.fastly.net')
       expect(captured['x-service-id']).toBe('svc-1')
     } finally {

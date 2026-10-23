@@ -117,9 +117,7 @@ export async function runExportTerraform(args: ExportTerraformArgs) {
   try {
     // Raw fetch (not typed `client`): this endpoint streams a binary
     // zip; openapi-fetch's JSON deserialization would corrupt it.
-    // ``adminFetch`` is the same primitive plus X-Admin-Token header
-    // injection, so the shared-secret admin gate doesn't 401 this
-    // download path when active.
+    // ``adminFetch`` stamps the standard client-context headers.
     const response = await adminFetch("/api/provision/terraform/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

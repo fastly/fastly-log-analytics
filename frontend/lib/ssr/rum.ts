@@ -18,7 +18,7 @@ export async function fetchRumStatusServerSide(
   const path = `/api/services/${encodeURIComponent(serviceId)}/rum/status`
 
   return parseSsrJson<RumStatusResponse>(
-    await ssrUpstreamGet({ path, logPrefix: 'ssr/rum-status', injectAdminToken: true }),
+    await ssrUpstreamGet({ path, logPrefix: 'ssr/rum-status' }),
     'ssr/rum-status',
   )
 }

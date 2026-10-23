@@ -22,7 +22,6 @@ afterEach(() => {
   mockCookies.mockReset()
   mockHeaders.mockReset()
   delete process.env.API_PROXY_URL
-  delete process.env.ADMIN_SHARED_SECRET
 })
 
 function headerGetter(entries: Record<string, string>) {
@@ -62,7 +61,7 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
     }
   })
 
-  it('admin SSH-tunnel (loopback Host, no marker): forwards as admin with X-Admin-Token + service id', async () => {
+  it('admin SSH-tunnel (loopback Host, no marker): forwards as admin with service id', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     const server = http.createServer((req, res) => {
@@ -74,21 +73,19 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const { fetchCronRunsServerSide } = await import('@/lib/ssr/logs')
       const out = await fetchCronRunsServerSide('svc-1')
       expect(out).toEqual({ rows: [1, 2, 3] })
       expect(captured['x-remote-analyst']).toBeUndefined() // admin path
-      expect(captured['x-admin-token']).toBe('sekret')
       expect(captured['x-fastly-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 
-  it('analyst (Caddy marker): forwards as remote-analyst, no admin token', async () => {
+  it('analyst (Caddy marker): forwards as remote-analyst', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     const server = http.createServer((req, res) => {
@@ -100,7 +97,6 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(
       headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
     )
@@ -109,7 +105,6 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
       const out = await fetchCronRunsServerSide('svc-1')
       expect(out).toEqual({ rows: [1, 2, 3] })
       expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['x-admin-token']).toBeUndefined() // never on the analyst branch
       expect(captured['x-fastly-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -158,14 +153,12 @@ describe('fetchUsageLogServerSide (usage-log SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const { fetchUsageLogServerSide } = await import('@/lib/ssr/usage_log')
       const out = await fetchUsageLogServerSide(args)
       expect(out).toEqual({ rows: [1] })
       expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-admin-token']).toBe('sekret')
       expect(capturedUrl).toContain('/api/admin/usage-log?')
       expect(capturedUrl).toContain('service_id=svc-1')
     } finally {

@@ -39,9 +39,7 @@ from backend.utils.dir_size import (
 # files, but a service with 100k+ small cache files turned that one
 # request into minutes, and since /api/bootstrap and /api/services both
 # call in on every restart, it single-handedly made /admin
-# unreachable (a slow first response there also races the admin-token
-# hydration described in HydrateAdminToken, surfacing as a spurious
-# "Couldn't load services" 401 on top of the raw slowness).
+# unreachable.
 _DIR_STATS_TTL_SEC = 300.0
 _dir_stats_cache: dict[str, tuple[float, int, int]] = _shared_dir_stats_cache
 _dir_stats_lock = _shared_dir_size_lock

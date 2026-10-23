@@ -55849,17 +55849,6 @@
             ],
             "title": "Mask Ips"
           },
-          "admin_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Admin Token"
-          },
           "web_vitals_enabled": {
             "anyOf": [
               {

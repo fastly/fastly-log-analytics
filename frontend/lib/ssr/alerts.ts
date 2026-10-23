@@ -4,8 +4,7 @@
 //
 // Trust topology + Caddy-drift defense live in ./_transport.ts. /alerts
 // is admin-only on the wire (proxy.ts 307s analysts before the page
-// renders) so injectAdminToken is on — the loopback admin branch needs
-// the ADMIN_SHARED_SECRET header when the backend gate is configured.
+// renders).
 
 import type { components } from '@/types/api.generated'
 
@@ -27,7 +26,7 @@ export async function fetchAlertsServerSide(
   // null-on-any-failure (see app/alerts/page.tsx) is provided by the shared
   // parseSsrJson tail — non-2xx and malformed 2xx bodies degrade to client fetch.
   return parseSsrJson<AlertListResponse>(
-    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts', injectAdminToken: true }),
+    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts' }),
     'ssr/alerts',
   )
 }

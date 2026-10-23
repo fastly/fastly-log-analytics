@@ -31,14 +31,6 @@ vi.mock('@/stores/serviceStore', () => {
   )
   return { useServiceStore }
 })
-vi.mock('@/stores/adminTokenStore', () => {
-  const state = { token: null as string | null }
-  const useAdminTokenStore = Object.assign(
-    vi.fn(() => state),
-    { getState: () => state },
-  )
-  return { useAdminTokenStore }
-})
 vi.mock('@/stores/debugStore', () => {
   const state = { enabled: false, apiCallsEnabled: false }
   const useDebugStore = Object.assign(

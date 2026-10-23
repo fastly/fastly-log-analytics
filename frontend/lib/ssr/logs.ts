@@ -35,7 +35,6 @@ export async function fetchCronRunsServerSide(
     await ssrUpstreamGet({
       path: '/api/cron-runs?page=1&per_page=500',
       logPrefix: 'ssr/logs',
-      injectAdminToken: true,
       extraHeaders: { 'X-Fastly-Service-Id': serviceId },
     }),
     'ssr/logs',
@@ -51,7 +50,6 @@ export async function fetchCronScheduleServerSide(
     await ssrUpstreamGet({
       path: '/api/cron-schedule',
       logPrefix: 'ssr/logs-schedule',
-      injectAdminToken: true,
       extraHeaders: { 'X-Fastly-Service-Id': serviceId },
     }),
     'ssr/logs-schedule',

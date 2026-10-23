@@ -317,7 +317,6 @@ class BootstrapSettings(WireSafeModel):
     analyst_email: str | None = None
     analyst_name: str | None = None
     mask_ips: bool | None = None
-    admin_token: str | None = None
     web_vitals_enabled: bool | None = None
 
 

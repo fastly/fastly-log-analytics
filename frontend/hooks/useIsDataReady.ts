@@ -94,14 +94,13 @@ export function useBootstrapPending(): boolean {
  * getQueryData read), this is for gating side-effects that must START the
  * moment bootstrap settles even when nothing else re-renders the caller.
  *
- * Why it exists: bootstrap's queryFn seeds BOTH the active service id
- * (serviceStore) and the admin token (adminTokenStore). An `optionalService`
+ * Why it exists: bootstrap's queryFn seeds the active service id
+ * (serviceStore). An `optionalService`
  * SSE stream that connects before bootstrap resolves opens on the pre-bootstrap
- * serviceId / null admin token, then aborts + reconnects once bootstrap settles
- * those — a throwaway upstream the reverse proxy logs as "aborting with
+ * serviceId, then aborts + reconnects once bootstrap settles
+ * that — a throwaway upstream the reverse proxy logs as "aborting with
  * incomplete response / reading: context canceled" on every admin load. Gating
- * such a stream's `enabled` on this flag makes it connect ONCE, already scoped
- * and authed. On a fresh install (no service) bootstrap still resolves, so the
+ * such a stream's `enabled` on this flag makes it connect ONCE, already scoped. On a fresh install (no service) bootstrap still resolves, so the
  * global slices stream normally.
  *
  * useSyncExternalStore (not getQueryData) so the caller re-renders even when it

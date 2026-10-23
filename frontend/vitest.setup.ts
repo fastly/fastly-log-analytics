@@ -38,7 +38,7 @@ if (typeof window !== 'undefined') {
 
 // jsdom can't perform real navigation, so any code path that calls
 // location.assign/replace/reload or assigns location.href (e.g. lib/api.ts's
-// admin_token_invalid redirect, app/error.tsx's reload) makes jsdom emit a
+// /share-login redirect, app/error.tsx's reload) makes jsdom emit a
 // "Not implemented: navigation to another Document" error via its
 // virtualConsole — noise in tests that only assert the surrounding behavior.
 // jsdom's Location methods are non-configurable, so we replace window.location

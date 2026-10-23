@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api", tags=["bootstrap"], responses=DEFAULT_ERROR_RE
 #
 # ONLY the loopback admin path is cached. Analyst / anonymous (remote)
 # callers are never cached: their payload is per-session (scoped services,
-# email/name, and never the admin_token) AND they skip every contended
+# email/name) AND they skip every contended
 # admin-only section, so they're already cheap and must not share an
 # admin-shaped body. Keyed by active service_id — the loopback admin is a
 # single identity.
@@ -72,32 +72,11 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
     """Minimal response served while the per-service background warm-up
     (``backend.main._background_startup``) is still draining.
 
-    Only fields that genuinely depend on that warm-up (the real ``services``
-    list, per-service ``schema``/``settings``, anything sourced from
-    Iceberg/DuckDB) are withheld here — they stay `[]`/`None` until
-    ``startup_complete`` flips, exactly as before.
-
-    ``admin_token`` is the one exception: it's a static ``os.getenv()`` read
-    (see ``remote_access._admin_shared_secret``) with zero dependency on
-    per-service warm-up, so withholding it during the ~15-20 min this VM's
-    startup loop takes to drain (several services × per-service init) forced
-    every admin-branch request to run without ``X-Admin-Token`` and 401 for
-    the whole window. Freeing it here does not touch the analyst/admin
-    boundary: same ``analyst_session is None and not is_remote`` gate the
-    fully-warm path uses below (``_bootstrap_sync``) — and at this point in
-    the request lifecycle ``analyst_session`` is always ``None`` whenever
-    ``is_remote`` is ``False`` (neither ``RemoteAccessMiddleware`` nor
-    ``_bootstrap_sync``'s cookie validation ever populate it on the loopback
-    branch), so checking ``is_remote`` alone is equivalent to the full gate.
+    Fields that depend on that warm-up (the real ``services`` list, per-service
+    ``schema``/``settings``, anything sourced from Iceberg/DuckDB) are withheld
+    here — they stay `[]`/`None` until ``startup_complete`` flips.
     """
     from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
-
-    is_remote = getattr(request.state, "is_remote", False)
-    admin_token: str | None = None
-    if not is_remote:
-        from backend.utils.remote_access import _admin_shared_secret
-
-        admin_token = _admin_shared_secret() or None
 
     return BootstrapResponse.with_telemetry(
         active_service_id=None,
@@ -107,7 +86,6 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
             "is_remote_analyst": False,
             "needs_login": False,
             "web_vitals_enabled": _web_vitals_enabled(),
-            "admin_token": admin_token,
         },
     )
 
@@ -764,21 +742,6 @@ def _bootstrap_sync(
     else:
         access_level = "read_write"
 
-    # Admin shared-secret pickup: when ADMIN_SHARED_SECRET is configured the
-    # middleware refuses admin endpoints whose X-Admin-Token doesn't match.
-    # Expose the secret in the bootstrap response so the SPA can inject it
-    # on every subsequent admin request. Gated to the admin branch
-    # (analyst_session is None AND request is loopback) so a Fastly-fronted
-    # analyst can't read the token even if they reach /api/bootstrap. With
-    # the env unset (default) the field is None and the frontend interceptor
-    # no-ops.
-    admin_token: str | None = None
-    # 003: Only provide token to actual local connections, not unauthenticated remote ones.
-    if analyst_session is None and not getattr(request.state, "is_remote", False):
-        from backend.utils.remote_access import _admin_shared_secret
-
-        admin_token = _admin_shared_secret() or None
-
     from backend.core.web_vitals_store import collection_enabled as _web_vitals_collection_enabled
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
@@ -812,7 +775,6 @@ def _bootstrap_sync(
             # filter lock (RemoteAccessMiddleware) is the real guarantee; this
             # is the UX signal. False for admins / non-masking analysts.
             "mask_ips": mask_ips_for(analyst_session),
-            "admin_token": admin_token,
             # Mirror the WEB_VITALS_COLLECT env flag so WebVitalsReporter
             # only POSTs when collection is enabled (default off).
             "web_vitals_enabled": _web_vitals_collection_enabled(),

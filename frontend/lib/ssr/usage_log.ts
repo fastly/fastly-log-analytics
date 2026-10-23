@@ -34,7 +34,6 @@ export async function fetchUsageLogServerSide(args: UsageLogSsrArgs): Promise<un
     await ssrUpstreamGet({
       path: `/api/admin/usage-log?${query.toString()}`,
       logPrefix: 'ssr/usage_log',
-      injectAdminToken: true,
     }),
     'ssr/usage_log',
   )

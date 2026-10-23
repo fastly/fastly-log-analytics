@@ -4,8 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // load, sharing one (rangeToken, anchor) pair. These tests pin (1) the
 // security contract — the Caddy-marker trust gate must behave IDENTICALLY as
 // the other POST SSR callers (refuse no-marker + non-loopback Host;
-// analyst-clamp on the marker branch; admin token only on the loopback
-// branch) — and (2) the key-match contract: the (rangeToken, anchor) this
+// analyst-clamp on the marker branch) — and (2) the key-match contract: the (rangeToken, anchor) this
 // helper resolves equals what PerformanceClient computes on first paint for
 // the key, so the SSR seed byte-matches. A mismatch would double-fetch
 // (worse than no SSR).
@@ -26,7 +25,6 @@ afterEach(() => {
   mockCookies.mockReset()
   mockHeaders.mockReset()
   delete process.env.API_PROXY_URL
-  delete process.env.ADMIN_SHARED_SECRET
 })
 
 function headerGetter(entries: Record<string, string>) {
@@ -93,7 +91,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
     }
   })
 
-  it('admin SSH-tunnel: POSTs unified aggregates as admin with X-Admin-Token + service id', async () => {
+  it('admin SSH-tunnel: POSTs unified aggregates as admin with service id', async () => {
     const http = await import('node:http')
     const capturedBodies: string[] = []
     const capturedHeaders: Array<Record<string, string | string[] | undefined>> = []
@@ -111,7 +109,6 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const {
@@ -137,7 +134,6 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
 
       for (const h of capturedHeaders) {
         expect(h['x-remote-analyst']).toBeUndefined()
-        expect(h['x-admin-token']).toBe('sekret')
         expect(h['x-service-id']).toBe('svc-1')
       }
     } finally {
@@ -154,7 +150,6 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {

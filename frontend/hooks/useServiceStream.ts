@@ -2,7 +2,6 @@
 
 import { useCallback, useSyncExternalStore } from 'react'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { buildStreamRequest } from '@/lib/streamRequest'
 import { useEventStream, type EventStreamRequest, type SSEConnectionState } from '@/hooks/useEventStream'
 
@@ -48,8 +47,8 @@ interface UseServiceStreamOpts {
    *  Callers should gate ``enabled`` on ``useBootstrapSettled()`` (see
    *  useAdminEventStream): an optionalService stream connects before a
    *  service is chosen, so without it the stream opens on the pre-bootstrap
-   *  serviceId / null admin token and aborts + reconnects once bootstrap
-   *  seeds them — the per-load "context canceled" the reverse proxy warns
+   *  serviceId and aborts + reconnects once bootstrap
+   *  seeds it — the per-load "context canceled" the reverse proxy warns
    *  about. The hydration gate below covers the persisted-store restore but
    *  not the bootstrap-fetch settle. */
   optionalService?: boolean
@@ -119,7 +118,6 @@ export function useServiceStream(
   opts: UseServiceStreamOpts = {},
 ): { state: SSEConnectionState } {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const adminToken = useAdminTokenStore(s => s.token)
   const storeHydrated = useServiceStoreHydrated()
   const { cache, requireService = true, optionalService = false } = opts
   // optionalService: connect even when no service is selected (so the bundle's
@@ -148,7 +146,7 @@ export function useServiceStream(
   // Build the request lazily — the adapter owns url/header construction, the
   // primitive owns the fetch/read/reconnect loop.
   const request: EventStreamRequest | null = effectiveEnabled
-    ? buildStreamRequest({ path, serviceId, adminToken, cache })
+    ? buildStreamRequest({ path, serviceId, cache })
     : null
 
   return useEventStream(effectiveEnabled, request, onEvent)

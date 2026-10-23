@@ -316,7 +316,7 @@ def tls_request(
             connection.sendall(
                 (
                     f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
-                    "Connection: close\r\nX-Admin-Gateway-Token: forged\r\nX-Admin-Token: forged\r\n"
+                    "Connection: close\r\nX-Admin-Gateway-Token: forged\r\n"
                     "X-Remote-Analyst: true\r\nX-Proxied-By-Caddy: true\r\n\r\n"
                 ).encode()
             )
@@ -416,7 +416,6 @@ def test_mtls_overwrites_credentials_and_removes_analyst_markers(pki, gateway, p
     echoed = json.loads(response.split(b"\r\n\r\n", 1)[1])
     headers = {name.lower(): value for name, value in echoed["headers"].items()}
     assert hmac.compare_digest(headers["x-admin-gateway-token"], gateway[1]["ADMIN_GATEWAY_SECRET"])
-    assert "x-admin-token" not in headers
     assert "x-remote-analyst" not in headers
     assert "x-proxied-by-caddy" not in headers
     assert echoed["path"] == path

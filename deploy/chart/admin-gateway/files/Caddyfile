@@ -17,7 +17,6 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
-				request>headers>X-Admin-Token delete
 			}
 		}
 	}
@@ -51,7 +50,6 @@ https://:{$ADMIN_GATEWAY_PORT:8443} {
 	handle @admin_host {
 		# These edits precede BOTH upstreams, including SSR page requests.
 		route {
-			request_header -X-Admin-Token
 			request_header -X-Remote-Analyst
 			request_header -X-Proxied-By-Caddy
 			request_header -Fastly-Client-IP

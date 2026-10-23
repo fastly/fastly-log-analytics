@@ -117,7 +117,7 @@ async function removeOwned(admin, origin, intents, ids, fd, cleanup) {
 
 function scopedBootstrap(body, serviceId, maskIps) {
   requireThat(body?.settings?.is_remote_analyst === true && body.settings.access_level === 'read_only'
-    && body.settings.mask_ips === maskIps && body.settings.admin_token == null
+    && body.settings.mask_ips === maskIps
     && body.active_service_id === serviceId && Array.isArray(body.services) && body.services.length === 1
     && body.services[0].service_id === serviceId, 'analyst_bootstrap_scope_failed');
 }

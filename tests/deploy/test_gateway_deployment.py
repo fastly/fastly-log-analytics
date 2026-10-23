@@ -58,7 +58,7 @@ def test_virtualserver_patch_strips_credentials_but_preserves_analyst_marker():
                             "requestHeaders": {
                                 "set": [
                                     {"name": "X-Remote-Analyst", "value": "true"},
-                                    {"name": "x-admin-token", "value": "obsolete"},
+                                    {"name": "x-admin-gateway-token", "value": "obsolete"},
                                 ]
                             },
                             "responseHeaders": {"hide": ["Server"]},
@@ -73,7 +73,6 @@ def test_virtualserver_patch_strips_credentials_but_preserves_analyst_marker():
         proxy = route["action"]["proxy"]
         headers = {entry["name"].lower(): entry["value"] for entry in proxy["requestHeaders"]["set"]}
         assert headers["x-admin-gateway-token"] == ""
-        assert headers["x-admin-token"] == ""
         assert headers["x-proxied-by-caddy"] == "true"
     frontend = patch["spec"]["routes"][1]["action"]["proxy"]
     assert {"name": "X-Remote-Analyst", "value": "true"} in frontend["requestHeaders"]["set"]

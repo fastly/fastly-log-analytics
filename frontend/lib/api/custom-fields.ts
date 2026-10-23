@@ -59,9 +59,7 @@ export const customFieldsApi = {
   exportCustomFields: async (service_id: string) => {
     // Raw fetch (not typed `client`): this endpoint returns a CSV body;
     // openapi-fetch's middleware would try to JSON-parse and corrupt
-    // it. ``adminFetch`` is the same primitive plus X-Admin-Token
-    // header injection, so the shared-secret admin gate doesn't 401
-    // this download when active.
+    // it. ``adminFetch`` stamps the standard client-context headers.
     const response = await adminFetch(`${getApiBase()}/api/services/${service_id}/custom-fields/export`, {
       headers: { 'x-service-id': service_id }
     });

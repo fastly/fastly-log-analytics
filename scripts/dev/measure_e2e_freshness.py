@@ -22,8 +22,8 @@ Reports:
 
 Configure each target with FLA_FRESHNESS_<ENV>_SERVICE_ID,
 FLA_FRESHNESS_<ENV>_BACKEND_URL, and FLA_FRESHNESS_<ENV>_CDN_DOMAIN, where
-<ENV> is LOCAL_STD, REMOTE_STD, or REMOTE_HS. Direct TLS origins or admin authentication
-come from scripts.lib.admin_tls, REMOTE_ADMIN_TOKEN, ADMIN_SHARED_SECRET, or ADMIN_TOKEN.
+<ENV> is LOCAL_STD, REMOTE_STD, or REMOTE_HS. Direct TLS origins and admin authentication
+come from scripts.lib.admin_tls.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from typing import Any
 # Direct path invocation and python -m share the same explicit repo root.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
+from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.environments import parse_iso_utc  # noqa: E402
 
 ENVIRONMENTS = {
@@ -120,15 +120,6 @@ def load_environment_config(env_key: str, environ: dict[str, str] | None = None)
             raise ValueError(f"{prefix}{key.upper()} must be an absolute HTTP(S) URL")
     settings["name"] = ENVIRONMENTS[env_key]
     return settings
-
-
-def admin_token_from_environment(environ: dict[str, str] | None = None) -> str:
-    env = os.environ if environ is None else environ
-    for key in ("REMOTE_ADMIN_TOKEN", "ADMIN_SHARED_SECRET", "ADMIN_TOKEN"):
-        token = env.get(key, "").strip()
-        if token:
-            return token
-    raise ValueError("Set REMOTE_ADMIN_TOKEN, ADMIN_SHARED_SECRET, or ADMIN_TOKEN for admin API access")
 
 
 def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any]:
@@ -470,7 +461,6 @@ def probe_analytics_pages(
 
 def measure_active_traffic_benchmark(
     targets: list[str],
-    admin_token: str,
     duration_s: float = 30.0,
     rps: float = 10.0,
     sample_interval_s: float = 2.0,
@@ -488,8 +478,6 @@ def measure_active_traffic_benchmark(
             be_url = env_info["backend_url"]
             cdn = env_info["cdn_domain"]
             auth_headers = {"x-fastly-service-id": sid}
-            if not is_admin_url(be_url) and admin_token:
-                auth_headers["x-admin-token"] = admin_token
 
             svc_status, svc_data = http_get(f"{be_url}/api/services?service_id={urllib.parse.quote(sid)}", auth_headers)
             if svc_status != 200:
@@ -761,7 +749,6 @@ def print_burst_scorecard(results: list[dict[str, Any]]) -> None:
 def measure_environment(
     env_key: str,
     env_info: dict[str, str],
-    admin_token: str,
     num_requests: int = 10,
     num_rum: int = 5,
     max_wait_s: float = 60.0,
@@ -771,8 +758,6 @@ def measure_environment(
     be_url = env_info["backend_url"]
     cdn = env_info["cdn_domain"]
     auth_headers = {"x-fastly-service-id": sid}
-    if not is_admin_url(be_url) and admin_token:
-        auth_headers["x-admin-token"] = admin_token
 
     print(f"\n{'=' * 78}", flush=True)
     print(f"  TARGET: {name}", flush=True)
@@ -1094,13 +1079,6 @@ def main():
     else:
         targets = [args.env]
 
-    try:
-        admin_token = "" if all(admin_origin(target) for target in targets) else admin_token_from_environment()
-    except ValueError as exc:
-        if args.burst:
-            parser.error(str(exc))
-        admin_token = ""
-
     if args.burst:
         print(f"\n{'#' * 80}", flush=True)
         print("# FASTLY LOG ANALYTICS — SINGLE-BURST VISIBILITY DELAY BENCHMARK", flush=True)
@@ -1114,7 +1092,6 @@ def main():
                 res = measure_environment(
                     tgt,
                     env_info,
-                    admin_token,
                     num_requests=args.requests,
                     num_rum=args.rum_beacons,
                     max_wait_s=args.timeout,
@@ -1127,7 +1104,6 @@ def main():
     else:
         results = measure_active_traffic_benchmark(
             targets=targets,
-            admin_token=admin_token,
             duration_s=args.duration,
             rps=args.rps,
             sample_interval_s=args.interval,

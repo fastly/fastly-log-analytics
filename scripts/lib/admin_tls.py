@@ -155,8 +155,8 @@ def admin_urlopen(request_or_url: Request | str, timeout: float = 5.0):
     if config is None:
         return urlopen(request_or_url, timeout=timeout)
     request = request_or_url if isinstance(request_or_url, Request) else Request(request_or_url)
-    if any(name.lower() in {"x-admin-gateway-token", "x-admin-token"} for name, _ in request.header_items()):
-        raise ValueError("Admin client mTLS must not send server gateway or bootstrap credentials")
+    if any(name.lower() == "x-admin-gateway-token" for name, _ in request.header_items()):
+        raise ValueError("Admin client mTLS must not send server gateway credentials")
     opener = build_opener(HTTPSHandler(context=_context(config)), _SameOriginRedirect(origin))
     return opener.open(request, timeout=timeout)
 
@@ -167,8 +167,8 @@ def admin_request_context(request: Request) -> ssl.SSLContext:
     config = next((item for item in _settings().values() if item["origin"] == origin), None)
     if config is None:
         raise ValueError("No exact-origin administrator TLS identity configured")
-    if any(name.lower() in {"x-admin-gateway-token", "x-admin-token"} for name, _ in request.header_items()):
-        raise ValueError("Admin client mTLS must not send server gateway or bootstrap credentials")
+    if any(name.lower() == "x-admin-gateway-token" for name, _ in request.header_items()):
+        raise ValueError("Admin client mTLS must not send server gateway credentials")
     return _context(config)
 
 

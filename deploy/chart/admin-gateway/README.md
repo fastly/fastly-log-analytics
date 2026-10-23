@@ -13,8 +13,8 @@ Helm values or log. Do not enable shell tracing while handling it.
 `ADMIN_GATEWAY_REQUIRED=1` makes unauthenticated app traffic analyst traffic
 even on loopback; cheap health probes remain available. Set that flag only on
 deployments configured for mTLS. Include the exact gateway hostname in
-`LOCAL_HOSTS`, never `*`. The public ingress must strip `X-Admin-Gateway-Token`
-and `X-Admin-Token`, preserving the legitimate `X-Remote-Analyst` marker.
+`LOCAL_HOSTS`, never `*`. The public ingress must strip `X-Admin-Gateway-Token`,
+preserving the legitimate `X-Remote-Analyst` marker.
 
 This is optional. The experimental application chart is **not** the current
 Elevation application chart. Installing the companion does not take ownership
@@ -397,8 +397,8 @@ After reviewing the dry run, omit `--dry-run` **only through your approved
 canonical deployment harness**. The adapter:
 
 1. Applies only the gateway Secret.
-2. Converts direct `pass` routes to equivalent `proxy` routes, setting empty
-   `X-Admin-Gateway-Token`/`X-Admin-Token` upstream headers (NGINX suppresses
+2. Converts direct `pass` routes to equivalent `proxy` routes, setting an empty
+   `X-Admin-Gateway-Token` upstream header (NGINX suppresses
    empty header values), and sets `X-Proxied-By-Caddy=true`. Other headers,
    including the analyst marker, are preserved.
 3. Installs/upgrades only the companion release.

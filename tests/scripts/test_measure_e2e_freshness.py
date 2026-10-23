@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import pytest
 
 from scripts.dev.measure_e2e_freshness import (
-    admin_token_from_environment,
     compute_lag_statistics,
     configured_polling,
     cron_completion_time,
@@ -53,15 +52,6 @@ def test_load_environment_config_rejects_missing_and_invalid_urls():
                 "FLA_FRESHNESS_LOCAL_STD_CDN_DOMAIN": "https://cdn.example.test",
             },
         )
-
-
-def test_admin_token_uses_environment_only_and_rejects_missing_token():
-    assert admin_token_from_environment({"ADMIN_SHARED_SECRET": "test-token"}) == "test-token"
-    assert admin_token_from_environment({"REMOTE_ADMIN_TOKEN": "remote-token", "ADMIN_TOKEN": "fallback"}) == (
-        "remote-token"
-    )
-    with pytest.raises(ValueError, match="Set REMOTE_ADMIN_TOKEN"):
-        admin_token_from_environment({})
 
 
 @pytest.mark.parametrize(

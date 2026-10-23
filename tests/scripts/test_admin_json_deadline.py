@@ -59,7 +59,6 @@ def test_deadline_transport_preserves_request_and_refuses_redirects(monkeypatch:
     [
         ("https://other.example.com/api/test", {}),
         ("https://example.com/api/test", {"X-Admin-Gateway-Token": "do-not-send"}),
-        ("https://example.com/api/test", {"X-Admin-Token": "do-not-send"}),
     ],
 )
 def test_deadline_transport_rejects_untrusted_identity_use_before_tls(

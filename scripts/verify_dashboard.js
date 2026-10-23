@@ -195,17 +195,13 @@ const EMPTY_STATE_MARKERS = ["No data available", "No data in this time range ye
 
 async function attachGceFallbackAuth(context, certificateAdmin, logInjected = false) {
   if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
-    const activeAdminToken = process.env.FLA_ACTIVE_ADMIN_TOKEN || "";
     const cookies = [
       { name: 'analyst_session_id', value: 'test-session-playwright-e2e-verification-secret', domain: '127.0.0.1', path: '/' },
     ];
-    if (activeAdminToken) {
-      cookies.unshift({ name: 'fla.activeAdminToken', value: activeAdminToken, domain: '127.0.0.1', path: '/' });
-    }
     await context.addCookies(cookies);
     await context.setExtraHTTPHeaders({ 'X-Forwarded-For': '127.0.0.1' });
     if (logInjected) {
-      console.log(`[Playwright Auth Bypass] Injected activeAdminToken and analyst_session_id cookies! 🍪`);
+      console.log(`[Playwright Auth Bypass] Injected analyst_session_id cookie! 🍪`);
     }
   }
 }

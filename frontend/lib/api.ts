@@ -1,7 +1,6 @@
 import createClient from "openapi-fetch";
 import type { paths } from "@/types/api.generated";
 import type { StripIndex, WireParity } from "@/types/api";
-import { useAdminTokenStore } from "@/stores/adminTokenStore";
 import { useDebugStore } from "@/stores/debugStore";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useSessionRoleStore } from "@/stores/sessionRoleStore";
@@ -24,9 +23,6 @@ export function getApiBase() {
     // additions that all assume same-origin requests:
     //   - proxy.ts emits a `connect-src 'self'` CSP that blocks cross-
     //     origin fetches (per-request nonce commit).
-    //   - The admin-token gate (ADMIN_SHARED_SECRET) returns 401 on
-    //     direct-to-backend requests; only Caddy-fronted paths carry
-    //     the token-bearing context the SPA needs.
     //   - CORS preflight on the cross-origin path needs an OPTIONS-
     //     exemption carve-out in the auth middleware PLUS CORSMiddleware
     //     to attach ACAO; either layer regressing puts us back here.
@@ -48,7 +44,7 @@ export { buildAdminHeaders } from "@/lib/adminHeaders";
 
 /**
  * Shared client-context header stamper used by both `adminFetch` and the
- * `openapi-fetch` request middleware so `X-Page-Load-ID`, `X-Admin-Token`,
+ * `openapi-fetch` request middleware so `X-Page-Load-ID`,
  * `x-service-id`, and `x-debug-responses` are injected in a single place.
  */
 export function stampClientContextHeaders(headers: Headers): string | null {
@@ -56,12 +52,6 @@ export function stampClientContextHeaders(headers: Headers): string | null {
   if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
     headers.set("X-Page-Load-ID", currentPageLoadId);
   }
-  try {
-    const token = useAdminTokenStore.getState().token;
-    if (token && !headers.has("X-Admin-Token")) {
-      headers.set("X-Admin-Token", token);
-    }
-  } catch { /* SSR pre-hydration — fall through without the header */ }
   try {
     const debug = useDebugStore.getState();
     if ((debug.enabled || debug.apiCallsEnabled) && !headers.has("x-debug-responses")) {
@@ -84,11 +74,6 @@ export function stampClientContextHeaders(headers: Headers): string | null {
 // Plain ``fetch`` wrapper for the handful of callers that don't go
 // through the openapi-fetch client (typically because the response
 // type isn't in the OpenAPI spec or the caller wants raw Response).
-// Injects ``X-Admin-Token`` from the same Zustand store the openapi-
-// fetch middleware reads from, so callers like OperationsOverview
-// and admin/queries that hand-roll their fetch don't have to
-// duplicate the header-injection logic and don't 401 on the admin
-// branch when the shared-secret gate is on.
 //
 // Same semantics as ``fetch``: returns Response, the caller is
 // responsible for ``.json()`` / status checks.
@@ -230,15 +215,6 @@ const SESSION_DEAD_403_ERRORS = new Set([
   "unauthenticated",
 ]);
 
-// Phase Q: 401s carrying these codes are the admin shared-secret gate
-// rejecting the request — not an analyst session dying. Skip the
-// /share-login redirect (admin doesn't use that flow) and clear the
-// cached token so useBootstrap's next refetch picks up a fresh one.
-const ADMIN_TOKEN_401_ERRORS = new Set([
-  "admin_token_required",
-  "admin_token_invalid",
-]);
-
 // E-3 (audit): when the analyst session is dead, kick the user back to
 // /share-login with a return param so they land back on the page they
 // were on after re-auth. Without this, every session-expired 401 just
@@ -344,15 +320,7 @@ client.use({
         (error as { detail?: { error?: string }; error?: string })?.detail?.error ??
         (error as { error?: string })?.error;
       if (response.status === 401) {
-        // Admin shared-secret 401s are NOT a dead analyst session — clear
-        // the stale token so the next bootstrap refetch reseeds it, then
-        // leave the error to surface as a normal toast instead of
-        // bouncing the admin to /share-login (which they don't use).
-        if (typeof errorCode === "string" && ADMIN_TOKEN_401_ERRORS.has(errorCode)) {
-          try { useAdminTokenStore.getState().setToken(null); } catch { /* SSR */ }
-        } else {
-          redirectToShareLoginIfSessionDead();
-        }
+        redirectToShareLoginIfSessionDead();
       } else if (response.status === 403) {
         if (typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode)) {
           redirectToShareLoginIfSessionDead();

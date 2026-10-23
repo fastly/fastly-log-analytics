@@ -4,8 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // of the shared ./_transport helper. These tests pin (1) the security
 // contract — the Caddy-marker trust gate must behave IDENTICALLY for this
 // POST as for the GET callers (refuse no-marker + non-loopback Host;
-// analyst-clamp on the marker branch; admin token only on the loopback
-// branch) — and (2) the key-match contract: the (rangeToken, anchor) this
+// analyst-clamp on the marker branch) — and (2) the key-match contract: the (rangeToken, anchor) this
 // helper resolves equals what SecurityClient computes on first paint, so the
 // SSR seed key byte-matches the client first-paint key. A mismatch would
 // double-fetch (worse than no SSR).
@@ -26,7 +25,6 @@ afterEach(() => {
   mockCookies.mockReset()
   mockHeaders.mockReset()
   delete process.env.API_PROXY_URL
-  delete process.env.ADMIN_SHARED_SECRET
 })
 
 function headerGetter(entries: Record<string, string>) {
@@ -121,7 +119,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
     }
   })
 
-  it('admin SSH-tunnel (loopback Host, no marker): POSTs default keyed body as admin with X-Admin-Token + service id', async () => {
+  it('admin SSH-tunnel (loopback Host, no marker): POSTs default keyed body as admin with service id', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     let capturedMethod = ''
@@ -141,7 +139,6 @@ describe('fetchSecurityServerSide (security SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const { fetchSecurityServerSide, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS } = await import(
@@ -169,14 +166,13 @@ describe('fetchSecurityServerSide (security SSR)', () => {
       expect(body.end_time).toBeUndefined()
 
       expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-admin-token']).toBe('sekret')
       expect(captured['x-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 
-  it('analyst (Caddy marker): POSTs as remote-analyst, NO admin token', async () => {
+  it('analyst (Caddy marker): POSTs as remote-analyst', async () => {
     const http = await import('node:http')
     let captured: Record<string, string | string[] | undefined> = {}
     let capturedMethod = ''
@@ -194,7 +190,6 @@ describe('fetchSecurityServerSide (security SSR)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    process.env.ADMIN_SHARED_SECRET = 'sekret'
     mockHeaders.mockReturnValue(
       headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
     )
@@ -204,7 +199,6 @@ describe('fetchSecurityServerSide (security SSR)', () => {
       expect(out).not.toBeNull()
       expect(capturedMethod).toBe('POST')
       expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['x-admin-token']).toBeUndefined()
       expect(captured['x-service-id']).toBe('svc-1')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))

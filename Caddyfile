@@ -34,7 +34,6 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
-				request>headers>X-Admin-Token delete
 			}
 		}
 	}
@@ -105,7 +104,6 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
-				request>headers>X-Admin-Token delete
 			}
 		}
 		level INFO
@@ -113,10 +111,9 @@
 }
 
 :80 {
-	# Public ingress must never accept either admin credential from a client.
+	# Public ingress must never accept the admin gateway credential from a client.
 	# Keep X-Remote-Analyst intact: it is the legitimate analyst marker.
 	request_header -X-Admin-Gateway-Token
-	request_header -X-Admin-Token
 	import compressible_encode
 	request_body {
 		max_size 25MB
@@ -411,7 +408,6 @@ https://localhost:8443, https://127.0.0.1:8443 {
 	bind 127.0.0.1 ::1
 	# Legacy SSH-only entry stays until the replacement is live-verified.
 	request_header -X-Admin-Gateway-Token
-	request_header -X-Admin-Token
 
 	tls internal
 

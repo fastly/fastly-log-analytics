@@ -66,7 +66,7 @@ def test_configured_origin_uses_scoped_opener(configured, monkeypatch):
         redirect.redirect_request(Request(configured["origin"]), None, 302, "", {}, "https://edge.example.com")
 
 
-@pytest.mark.parametrize("header", ["X-Admin-Token", "X-Admin-Gateway-Token"])
+@pytest.mark.parametrize("header", ["X-Admin-Gateway-Token"])
 def test_certificate_transport_rejects_server_token_headers(configured, header):
     with pytest.raises(ValueError, match="must not send"):
         admin_tls.admin_urlopen(Request(configured["origin"], headers={header: "forged"}))

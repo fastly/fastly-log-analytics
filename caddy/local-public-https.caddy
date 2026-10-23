@@ -14,7 +14,6 @@ https://:443 {
 	handle @public_host {
 		route {
 			request_header -X-Admin-Gateway-Token
-			request_header -X-Admin-Token
 			request_header X-Proxied-By-Caddy "true"
 			request_header X-Forwarded-For {http.request.remote.host}
 

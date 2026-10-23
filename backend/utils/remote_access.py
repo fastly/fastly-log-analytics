@@ -296,47 +296,6 @@ _LOCAL_HOST_ALLOWLIST = {
 
 import os
 
-# ── Shared-secret admin gate (opt-in, defense-in-depth) ─────────────────────
-#
-# When ``ADMIN_SHARED_SECRET`` is set in the backend environment, admin-branch
-# requests must carry it in the ``X-Admin-Token`` header. Bootstrap and health
-# are exempt so the SPA can fetch the token + the loopback healthcheck stays
-# unauthenticated. With the env var unset (the default) the gate is a no-op,
-# so deploying this change without provisioning the secret can't lock anyone
-# out of the admin tunnel.
-#
-# The trust boundary for the admin branch is loopback (Caddy on the same VM,
-# or an SSH-tunneled localhost connection). The shared secret is the second
-# factor: if the loopback boundary is ever bypassed (caddyfile mistake,
-# direct uvicorn port exposure, container-network misconfig), the gate still
-# refuses admin endpoints without the token.
-ADMIN_TOKEN_HEADER = "X-Admin-Token"
-_ADMIN_TOKEN_EXEMPT_PATHS = {
-    "/api/health",
-    "/api/bootstrap",
-    # Telemetry endpoints sent via ``navigator.sendBeacon``, which
-    # physically cannot carry custom request headers (the Beacon spec
-    # restricts the API to a request body + content type). The admin-
-    # branch caller (WebVitalsReporter / reportUxEvent) would otherwise
-    # 401-loop on every page load. Analyst traffic passes via
-    # ``_ANALYST_ALLOWED_WRITE_PREFIXES``; this exemption relaxes the
-    # second-factor gate on the admin loopback branch.
-    "/api/web-vitals",
-    "/api/ux-events",
-    # Public RUM assets and beacon endpoints
-    "/js/rum.js",
-    "/js/faro-sdk.js",
-}
-
-
-def _admin_shared_secret() -> str:
-    """Return the configured admin shared secret, or empty string.
-
-    Re-reads env on every call so tests can flip the env var via
-    ``monkeypatch.setenv`` / ``delenv`` without forcing a module reload."""
-    return (os.getenv("ADMIN_SHARED_SECRET") or "").strip()
-
-
 # Admins can extend the local host allowlist via comma-separated hostnames in env:
 # e.g., LOCAL_HOSTS=backend,frontend,my-custom-service
 _env_hosts = os.getenv("LOCAL_HOSTS") or os.getenv("LOCAL_HOST_ALLOWLIST") or os.getenv("ALLOWED_HOSTS")
@@ -1190,31 +1149,6 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # set X-Frame-Options / Permissions-Policy / a minimal CSP on
             # admin responses. Analyst branch headers are largely overridden
             # by Caddy's security_headers snippet (Caddyfile §38).
-            #
-            # Shared-secret defense-in-depth: when ADMIN_SHARED_SECRET is
-            # configured, refuse admin endpoints whose X-Admin-Token doesn't
-            # match. Exempt /api/bootstrap (the SPA fetches the token from
-            # there) and /api/health (loopback container healthcheck).
-            # All browser requests are same-origin via Caddy after the
-            # api.ts shortcut removal, so no CORS preflight ever lands
-            # here — every OPTIONS that does is a deliberate caller and
-            # must still carry the token.
-            secret = _admin_shared_secret()
-            if secret and not gateway_authenticated and path not in _ADMIN_TOKEN_EXEMPT_PATHS:
-                supplied = request.headers.get(ADMIN_TOKEN_HEADER, "")
-                # Constant-time compare so the token length / prefix doesn't
-                # leak through CPU-cache timing on a short-circuit mismatch.
-                import hmac
-
-                if not supplied or not hmac.compare_digest(supplied, secret):
-                    return JSONResponse(
-                        status_code=401,
-                        content={
-                            "detail": {
-                                "error": "admin_token_invalid" if supplied else "admin_token_required",
-                            }
-                        },
-                    )
             _t0 = time.perf_counter()
             response = await call_next(request)
             _dur_ms = (time.perf_counter() - _t0) * 1000.0

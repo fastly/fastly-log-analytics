@@ -12,9 +12,8 @@
 // Trust topology + Caddy-marker fail-closed defense live in ./_transport.ts
 // (shared with alerts/logs/usage_log/tos/bootstrap). /api/admin/* is in the
 // analyst-blocked prefix list, so without the Caddy marker the shared helper
-// refuses; the analyst branch is sent X-Remote-Analyst:1 with NO admin token
-// and gets 401/403 → null → client fetch. injectAdminToken attaches the
-// shared secret only on the loopback admin branch.
+// refuses; the analyst branch is sent X-Remote-Analyst:1 and gets 401/403 →
+// null → client fetch.
 //
 // Failure path: returns null on timeout / non-2xx / malformed body so the
 // client useQuery takes over unchanged — never a broken render.
@@ -26,7 +25,6 @@ export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | nul
     await ssrUpstreamGet({
       path: '/api/admin/metric-history/batch?since=1h',
       logPrefix: 'ssr/admin-trends',
-      injectAdminToken: true,
     }),
     'ssr/admin-trends',
   )

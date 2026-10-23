@@ -5,7 +5,6 @@ import { buildStreamRequest } from '@/lib/streamRequest'
 import { buildServiceHref } from '@/lib/navigation'
 import { runEventStream } from '@/hooks/useEventStream'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
 
 export type SSEStatus = 'idle' | 'streaming' | 'done' | 'error'
 
@@ -94,7 +93,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
       const request = buildStreamRequest({
         path: finalUrlPath,
         serviceId,
-        adminToken: useAdminTokenStore.getState().token,
         method: body ? 'POST' : 'GET',
         body: body ? JSON.stringify(body) : undefined,
         cache: 'no-store',

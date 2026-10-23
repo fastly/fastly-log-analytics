@@ -96,7 +96,6 @@ def test_public_gateway_strips_both_admin_credentials_and_keeps_analyst_marker(t
                     request_path,
                     headers={
                         "X-Admin-Gateway-Token": "forged",
-                        "X-Admin-Token": "forged",
                         "X-Remote-Analyst": "true",
                     },
                 )
@@ -104,7 +103,6 @@ def test_public_gateway_strips_both_admin_credentials_and_keeps_analyst_marker(t
                 assert response.status == 200
                 headers = {key.lower(): value for key, value in json.loads(response.read()).items()}
                 assert "x-admin-gateway-token" not in headers
-                assert "x-admin-token" not in headers
                 assert headers["x-remote-analyst"] == "true"
                 assert headers["x-proxied-by-caddy"] == "true"
             finally:

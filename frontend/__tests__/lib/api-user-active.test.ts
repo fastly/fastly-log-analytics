@@ -28,12 +28,7 @@ vi.mock('@/lib/userActivity', () => ({
   ACTIVE_WINDOW_MS: 120_000,
 }))
 
-// Minimal store mocks mirroring api-admin-token.test.ts.
-vi.mock('@/stores/adminTokenStore', () => {
-  const state = { token: null as string | null }
-  const useAdminTokenStore = Object.assign(vi.fn(() => state), { getState: () => state })
-  return { useAdminTokenStore }
-})
+// Minimal store mocks.
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: 'svc-test' }
   const useServiceStore = Object.assign(

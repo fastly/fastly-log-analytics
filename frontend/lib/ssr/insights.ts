@@ -98,13 +98,6 @@ export async function fetchInsightsServerSide(
       path: '/api/insights',
       logPrefix: 'ssr/insights',
       method: 'POST',
-      // Admin SSH-tunnel branch: when ADMIN_SHARED_SECRET is set the backend's
-      // admin-token gate 401s a loopback request without X-Admin-Token, so the
-      // SSR fetch would fall back to a cold client fetch (the v2.0.0 admin-SSR
-      // regression). The transport injects the token ONLY on the loopback-admin
-      // branch — never on the Caddy/analyst branch — so the analyst path is
-      // unaffected and no admin secret can reach an analyst-classified request.
-      injectAdminToken: true,
       // Mirror InsightsBody's client request body EXACTLY (app/insights/page.tsx):
       // parseFloat(windowHours) / parseFloat(baselineHours), empty filters.
       body: {

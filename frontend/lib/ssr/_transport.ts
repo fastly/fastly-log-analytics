@@ -22,9 +22,7 @@
 // one place instead of five.
 //
 // Per-caller variation lives entirely in the response handling: tos.ts
-// special-cases 401 → 'unauthenticated', alerts.ts wants the admin
-// shared-secret injected on the loopback path. Both are expressible as
-// arguments + post-call branching.
+// special-cases 401 → 'unauthenticated'.
 // Required mTLS gateway mode replaces the loopback Host shortcut with an
 // independently verified server-only credential; public traffic stays analyst.
 
@@ -126,17 +124,9 @@ interface SSRGetOpts {
   /** Prefix used in console.warn lines, e.g. ``ssr/bootstrap``. */
   logPrefix: string
   /**
-   * When true, the loopback admin branch (no Caddy marker + loopback Host)
-   * attaches ``X-Admin-Token`` from ``ADMIN_SHARED_SECRET`` so SSR fetches
-   * reach the admin-gated routes the analyst path never sees. Skipped on the
-   * Caddy-proxied branch because the backend reads admin-token only from
-   * loopback peers.
-   */
-  injectAdminToken?: boolean
-  /**
    * Extra request headers merged into the upstream call (e.g.
    * ``X-Fastly-Service-Id`` for the per-service cron-runs fetch). Critical
-   * trust headers (Host / X-Remote-Analyst / X-Admin-Token) are applied
+   * trust headers (Host / X-Remote-Analyst / X-Admin-Gateway-Token) are applied
    * after these and win on conflict.
    */
   extraHeaders?: Record<string, string>
@@ -167,7 +157,6 @@ interface SSRGetOpts {
 export async function ssrUpstreamGet({
   path,
   logPrefix,
-  injectAdminToken = false,
   extraHeaders,
   method = 'GET',
   body,
@@ -208,7 +197,7 @@ export async function ssrUpstreamGet({
 
     // Caller-supplied non-trust headers first; the trust headers below win.
     if (extraHeaders) {
-      const trustHeaders = new Set(['host', 'x-remote-analyst', 'x-admin-token', 'x-admin-gateway-token'])
+      const trustHeaders = new Set(['host', 'x-remote-analyst', 'x-admin-gateway-token'])
       for (const [key, value] of Object.entries(extraHeaders)) {
         if (!trustHeaders.has(key.toLowerCase())) upstreamHeaders[key] = value
       }
@@ -228,20 +217,9 @@ export async function ssrUpstreamGet({
       if (inboundHost) upstreamHeaders.Host = inboundHost
     }
 
-    // Admin shared-secret pickup on the loopback admin branch only.
-    // The Caddy-proxied branch is by definition analyst-classified and
-    // the backend reads X-Admin-Token only on the admin classification.
-    if (injectAdminToken && !proxiedByCaddy && !gatewayAuthenticated) {
-      const adminToken = (process.env.ADMIN_SHARED_SECRET || '').trim()
-      if (adminToken) {
-        upstreamHeaders['X-Admin-Token'] = adminToken
-      }
-    }
-
-    // Debug-query visibility is admin-only, same branch as X-Admin-Token
-    // above (independent of whether this particular caller injects the
-    // admin token) — never sent on the Caddy-proxied/analyst branch, which
-    // the backend would strip anyway (RemoteAccessMiddleware).
+    // Debug-query visibility is admin-only — never sent on the
+    // Caddy-proxied/analyst branch, which the backend would strip anyway
+    // (RemoteAccessMiddleware).
     if (debugResponsesRequested && !proxiedByCaddy) {
       upstreamHeaders['x-debug-responses'] = '1'
     }

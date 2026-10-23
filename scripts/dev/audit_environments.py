@@ -27,9 +27,6 @@ import argparse
 import ipaddress
 import json
 import os
-import shlex
-import shutil
-import subprocess
 import sys
 import time
 import urllib.error
@@ -78,7 +75,6 @@ class EnvironmentConfig:
     frontend_url: str
     service_id: str
     is_high_scale: bool = False
-    admin_token: str | None = None
 
 
 def load_dotenv_manually() -> None:
@@ -115,61 +111,6 @@ def refresh_environment_origins() -> None:
 
 
 refresh_environment_origins()
-
-
-def auto_resolve_remote_admin_token() -> str | None:
-    """Attempts to resolve the remote admin token from env, or dynamically via the configured command."""
-    load_dotenv_manually()
-    for env_var in ("REMOTE_ADMIN_TOKEN", "ADMIN_SHARED_SECRET", "ADMIN_TOKEN"):
-        val = os.getenv(env_var)
-        if val:
-            return val
-
-    # Try discovering token from local SSH tunnel to remote-standard backend
-    result = probe("http://127.0.0.1:8001/api/bootstrap", timeout=3, headers={"User-Agent": "audit_environments"})
-    if result.status == 200 and not result.failed:
-        try:
-            tok = json.loads(result.body.decode("utf-8")).get("settings", {}).get("admin_token")
-        except (ValueError, AttributeError):
-            tok = None
-        if tok:
-            return str(tok)
-
-    # Try resolving via configured shell command
-    resolve_cmd = os.getenv("REMOTE_ADMIN_TOKEN_RESOLVE_CMD")
-    if not resolve_cmd:
-        # Build standard fallback command if gcloud is present
-        if shutil.which("gcloud"):
-            gce_project = os.getenv("GCE_PROJECT", "")
-            gce_zone = os.getenv("GCE_ZONE", "")
-            gce_vm_name = os.getenv("GCE_VM_NAME", "")
-            if gce_project and gce_zone and gce_vm_name:
-                resolve_cmd = (
-                    f"gcloud compute ssh {gce_vm_name} --project={gce_project} --zone={gce_zone} "
-                    '--command "docker exec app-backend-1 env | grep ADMIN_SHARED_SECRET"'
-                )
-
-    if resolve_cmd:
-        try:
-            # Run the configured command via argv list without shell=True
-            out = (
-                subprocess.check_output(
-                    shlex.split(resolve_cmd),
-                    shell=False,
-                    stderr=subprocess.DEVNULL,
-                    timeout=8,
-                )
-                .decode()
-                .strip()
-            )
-            if "=" in out:
-                return out.split("=", 1)[1].strip()
-            elif out and "=" not in out:
-                # If command directly outputs the token
-                return out
-        except Exception:
-            pass
-    return None
 
 
 @dataclass
@@ -322,8 +263,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     )
 
     req_headers: dict[str, str] = {}
-    if env.admin_token and not is_admin_url(env.backend_url):
-        req_headers["X-Admin-Token"] = env.admin_token
 
     # 1. Ping /api/health first — every other probe depends on the backend
     # being alive, and there is no reason to fire five more requests at one
@@ -529,7 +468,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             res.warnings.append(f"DuckDB pool saturated: {res.pool_saturated_rejects} rejected queries (lifetime)")
 
     elif hs_status == 401:
-        res.errors.append("Authentication required for /api/admin/health-snapshot (pass --admin-token)")
+        res.errors.append("Authentication required for /api/admin/health-snapshot")
 
     # Ingest state determination (uses the bootstrap + cron-runs results fetched above)
     last_disc_summary = ""
@@ -688,7 +627,6 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
 
 def run_audit(
     target_names: list[str] | None = None,
-    admin_token: str | None = None,
     timeout: float = 5.0,
 ) -> list[AuditResult]:
     # Resolve targets
@@ -707,15 +645,6 @@ def run_audit(
 
     if os.getenv("IGNORE_LOCAL_STD") == "1":
         envs_to_check = [e for e in envs_to_check if e.name != "local-standard"]
-
-    # Configure tokens
-    needs_remote_token = any(
-        env.name == "remote-standard" and not is_admin_url(env.backend_url) for env in envs_to_check
-    )
-    remote_token = admin_token or (auto_resolve_remote_admin_token() if needs_remote_token else None)
-    for env in envs_to_check:
-        if env.name == "remote-standard" and remote_token:
-            env.admin_token = remote_token
 
     results: list[AuditResult] = []
     with ThreadPoolExecutor(max_workers=min(len(envs_to_check), 4)) as executor:
@@ -768,12 +697,6 @@ def main() -> int:
         default=5.0,
         help="Polling interval in seconds for watch mode (default: 5.0)",
     )
-    parser.add_argument(
-        "--admin-token",
-        type=str,
-        default=None,
-        help="Admin token for authenticated endpoints (defaults to auto-detection from env/gcloud)",
-    )
     add_common_args(
         parser,
         timeout_default=10.0,
@@ -787,7 +710,7 @@ def main() -> int:
     validate_admin_tls_config()
 
     if not args.watch:
-        results = run_audit(target_names=args.env, admin_token=args.admin_token, timeout=args.timeout)
+        results = run_audit(target_names=args.env, timeout=args.timeout)
         if args.json:
             print(json.dumps([asdict(r) for r in results], indent=2))
         else:
@@ -806,7 +729,7 @@ def main() -> int:
                 print(f"\n{GREEN}Completed watch duration of {args.duration:.1f} minute(s). Exiting.{RESET}")
                 break
 
-            last_results = run_audit(target_names=args.env, admin_token=args.admin_token, timeout=args.timeout)
+            last_results = run_audit(target_names=args.env, timeout=args.timeout)
             if args.json:
                 print(json.dumps([asdict(r) for r in last_results]))
             else:

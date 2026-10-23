@@ -106,7 +106,7 @@ def public_routes_patch(virtualserver: dict) -> dict:
             )
         proxy = action["proxy"]
         headers = proxy.setdefault("requestHeaders", {})
-        overrides = {"X-Admin-Gateway-Token": "", "X-Admin-Token": "", "X-Proxied-By-Caddy": "true"}
+        overrides = {"X-Admin-Gateway-Token": "", "X-Proxied-By-Caddy": "true"}
         keep = [
             entry
             for entry in headers.get("set", [])

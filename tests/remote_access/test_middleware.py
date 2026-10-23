@@ -358,91 +358,6 @@ def test_local_admin_writes_pass_through(client):
     assert r.status_code == 200
 
 
-# ── Admin shared-secret gate (opt-in via ADMIN_SHARED_SECRET) ───────────────
-
-
-def test_admin_shared_secret_off_by_default(client, monkeypatch):
-    """No env var set → admin endpoints reachable without any token. Pinned
-    so a future operator who hasn't provisioned the secret can't be locked
-    out of the admin tunnel."""
-    monkeypatch.delenv("ADMIN_SHARED_SECRET", raising=False)
-    r = client.get("/api/dashboard")
-    assert r.status_code == 200
-
-
-def test_admin_shared_secret_rejects_missing_token(client, monkeypatch):
-    """Env var set → admin request without X-Admin-Token → 401 with the
-    machine code ``admin_token_required``."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-    r = client.get("/api/dashboard")
-    assert r.status_code == 401
-    assert r.json()["detail"]["error"] == "admin_token_required"
-
-
-def test_admin_shared_secret_rejects_wrong_token(client, monkeypatch):
-    """Env var set → wrong X-Admin-Token → 401 with ``admin_token_invalid``."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-    r = client.get("/api/dashboard", headers={"X-Admin-Token": "nope"})
-    assert r.status_code == 401
-    assert r.json()["detail"]["error"] == "admin_token_invalid"
-
-
-def test_admin_shared_secret_accepts_correct_token(client, monkeypatch):
-    """Matching X-Admin-Token → request flows through."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-    r = client.get("/api/dashboard", headers={"X-Admin-Token": "s3cret-value"})
-    assert r.status_code == 200
-
-
-def test_admin_shared_secret_health_exempt(client, monkeypatch):
-    """``/api/health`` is exempt so the loopback container healthcheck never
-    needs the token. Mounted ad-hoc here since the test app doesn't carry
-    the real /api/health endpoint."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-
-    @client.app.get("/api/health")
-    def _health():
-        return {"ok": True}
-
-    r = client.get("/api/health")
-    assert r.status_code == 200
-
-
-def test_admin_shared_secret_bootstrap_exempt(client, monkeypatch):
-    """``/api/bootstrap`` is exempt — the SPA must be able to fetch the
-    response (which carries the admin_token) without already having it."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-
-    @client.app.get("/api/bootstrap")
-    def _bootstrap():
-        return {"ok": True}
-
-    r = client.get("/api/bootstrap")
-    assert r.status_code == 200
-
-
-def test_admin_shared_secret_does_not_apply_to_analyst_branch(client, monkeypatch):
-    """The shared-secret gate only sits on the admin (loopback) branch.
-    Analysts authenticate via their cookie and shouldn't need or carry the
-    admin token."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "s3cret-value")
-    _start_share()
-    invite = _seed_invite(service_ids=["svcA"])
-    _login_analyst(client, invite)
-
-    r = client.get(
-        "/api/dashboard",
-        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
-        params={"service_id": "svcA"},
-    )
-    # Analyst path runs through session validation, not the admin gate, so
-    # the response is whatever the analyst-scope check produces (200 here).
-    # The point of the test is that the analyst is NOT 401'd for missing
-    # X-Admin-Token.
-    assert r.status_code == 200
-    assert "admin_token" not in r.text
-
-
 @pytest.mark.security_regression
 def test_gateway_required_keeps_authenticated_analyst_restrictions(client, monkeypatch):
     monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
@@ -1335,17 +1250,6 @@ def test_dispatch_analyst_post_to_non_allowlisted_path_returns_403(client):
     )
     assert r.status_code == 403
     assert r.json()["error"] == "read_only"
-
-
-@pytest.mark.security_regression
-def test_dispatch_admin_shared_secret_wrong_token_returns_401(client, monkeypatch):
-    """Dispatch composition: a local admin request with the wrong
-    X-Admin-Token gets 401 admin_token_invalid through the full
-    middleware path — not bypassed by any earlier/later gate."""
-    monkeypatch.setenv("ADMIN_SHARED_SECRET", "correct-token-value")
-    r = client.get("/api/dashboard", headers={"X-Admin-Token": "wrong-token"})
-    assert r.status_code == 401
-    assert r.json()["detail"]["error"] == "admin_token_invalid"
 
 
 @pytest.mark.security_regression
