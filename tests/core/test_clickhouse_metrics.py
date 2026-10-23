@@ -45,7 +45,15 @@ def test_exact_lazy_query_instruments_and_statistics(instruments):
         "app.clickhouse_query_duration_ms",
         "app.clickhouse_queries_total",
         "app.clickhouse_bytes_read",
+        "app.clickhouse_admission_wait_ms",
+        "app.clickhouse_network_ms",
+        "app.clickhouse_decode_ms",
     }
+    for name in ("admission_wait_ms", "network_ms", "decode_ms"):
+        phase, phase_options = instruments[f"app.clickhouse_{name}"]
+        assert phase_options["unit"] == "ms"
+        assert phase.record.call_args.args[0] >= 0
+        assert phase.record.call_args.args[1] == {"operation": "execute", "outcome": "success"}
     histogram, options = instruments["app.clickhouse_query_duration_ms"]
     assert options["unit"] == "ms"
     assert histogram.record.call_args.args[0] >= 0
